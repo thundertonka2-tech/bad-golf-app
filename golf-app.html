@@ -257,7 +257,18 @@
     border-bottom: 1px solid var(--border);
   }
   .player-row:last-child { border-bottom: none; padding-bottom: 0; margin-bottom: 8px; }
-  .player-row input[type=text] {
+  /* Name row: First + Last fields side-by-side on one line */
+  .player-row .name-row {
+    display: flex;
+    gap: 8px;
+    flex: 1 1 100%;
+  }
+  .player-row .name-row input[type=text] {
+    flex: 1 1 50%;
+    min-width: 0;
+  }
+  /* Legacy single-name input (still used elsewhere — keep working) */
+  .player-row > input[type=text] {
     flex: 1 1 100%;
     min-width: 0;
   }
@@ -3079,37 +3090,225 @@ async function getCourseSaves() {
 async function getPlayerRoster() {
   const v = await safeGet(KEY_PLAYER_ROSTER, false);
   if (!v) return [];
-  try { return JSON.parse(v); } catch (e) { return []; }
+  try {
+    const roster = JSON.parse(v);
+    // Auto-migrate legacy entries that only have `name` field to also have
+    // structured firstName/lastName. Idempotent — re-running on already-migrated
+    // entries is a no-op. Display code uses these structured fields; internal
+    // identity code still uses combined `name` for backwards compat.
+    let migrated = false;
+    roster.forEach(p => {
+      if (!p) return;
+      if (p.firstName == null || p.lastName == null) {
+        const parts = (p.name || '').trim().split(/\s+/);
+        p.firstName = parts[0] || '';
+        p.lastName = parts.slice(1).join(' ') || '';
+        migrated = true;
+      }
+      // Always derive `name` from firstName+lastName so it stays in sync.
+      const combined = ((p.firstName || '') + ' ' + (p.lastName || '')).trim();
+      if (combined && p.name !== combined) {
+        p.name = combined;
+        migrated = true;
+      }
+    });
+    if (migrated) {
+      // Fire-and-forget save so we don't block reads
+      safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false).catch(() => {});
+    }
+    return roster;
+  } catch (e) { return []; }
+}
+
+// Display helpers — single source of truth for how player names render.
+// Use displayFirst() for compact UI (Score tab steppers, banners, RT pills);
+// use displayFull() for everywhere else (Stats, Settle-up, Money standings,
+// Round summary, Rounds list, modals, etc.).
+function displayFirst(p) {
+  if (!p) return '';
+  if (p.firstName) return p.firstName;
+  // Legacy / no-structured-name fallback: take first token of combined name
+  if (p.name) return p.name.trim().split(/\s+/)[0] || p.name;
+  return '';
+}
+function displayFull(p) {
+  if (!p) return '';
+  if (p.firstName || p.lastName) {
+    return ((p.firstName || '') + ' ' + (p.lastName || '')).trim();
+  }
+  // Legacy fallback
+  return p.name || '';
+}
+// Build a canonical combined-name string for any { firstName, lastName }
+// shaped input (used for new roster entries and saved game players).
+function combineName(firstName, lastName) {
+  const f = (firstName || '').trim();
+  const l = (lastName || '').trim();
+  return (f + ' ' + l).trim();
 }
 
 async function savePlayerRoster(roster) {
   return await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
 }
 
-// Add or update a player in the roster (case-insensitive name match)
-async function upsertPlayerInRoster(name, hcp) {
-  if (!name || !name.trim()) return;
-  const trimmed = name.trim();
+// Add or update a player in the roster. Matches on firstName+lastName
+// (case-insensitive) when both are provided; falls back to combined-name
+// match for legacy single-name input.
+//
+// CRITICAL — never auto-merges entries that differ in lastName presence.
+// "Tyler" (no lastName) and "Tyler O'Connor" stay separate unless an
+// explicit merge is done by the user. This is what we want — otherwise
+// every time someone added "Tyler" we'd accidentally merge into
+// "Tyler O'Connor"'s round history.
+async function upsertPlayerInRoster(firstName, lastName, hcp) {
+  const f = (firstName || '').trim();
+  const l = (lastName || '').trim();
+  if (!f) return; // first name is required
   const roster = await getPlayerRoster();
-  const lower = trimmed.toLowerCase();
-  const idx = roster.findIndex(p => p.name.toLowerCase() === lower);
+  const fLower = f.toLowerCase();
+  const lLower = l.toLowerCase();
+  // Match: same first + same last (both case-insensitive). Empty lastName
+  // only matches another empty lastName.
+  const idx = roster.findIndex(p =>
+    (p.firstName || '').toLowerCase() === fLower &&
+    (p.lastName || '').toLowerCase() === lLower
+  );
   if (idx >= 0) {
-    // Update HCP & last-used timestamp
     roster[idx].hcp = hcp;
     roster[idx].lastUsed = Date.now();
   } else {
-    roster.push({ name: trimmed, hcp: hcp || 0, lastUsed: Date.now() });
+    roster.push({
+      firstName: f,
+      lastName: l,
+      name: combineName(f, l),
+      hcp: hcp || 0,
+      lastUsed: Date.now(),
+      scoreHistory: []
+    });
   }
-  // Sort by most-recently-used
   roster.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
-  // Cap at 50 to keep it manageable
   await savePlayerRoster(roster.slice(0, 50));
 }
 
-async function deletePlayerFromRoster(name) {
+async function deletePlayerFromRoster(firstName, lastName) {
   const roster = await getPlayerRoster();
-  const filtered = roster.filter(p => p.name.toLowerCase() !== name.toLowerCase());
+  const fLower = (firstName || '').toLowerCase();
+  const lLower = (lastName || '').toLowerCase();
+  const filtered = roster.filter(p =>
+    !((p.firstName || '').toLowerCase() === fLower &&
+      (p.lastName || '').toLowerCase() === lLower)
+  );
   await savePlayerRoster(filtered);
+}
+
+// One-time cleanup: applies user-confirmed merges from the May 2026 test data
+// (Tyler/Tyler Oconnor, Kevin/Kevin Wells, Roland/Roland Castillo,
+//  Chris Curry/Chris Cirry) and renames Kylan → Kylan Liedtke.
+// Marks itself complete via localStorage flag so it never runs twice.
+//
+// MERGE BEHAVIOR — when two entries are being combined:
+//   - The canonical entry's firstName/lastName win
+//   - scoreHistory arrays are concatenated, then deduped by gameCode
+//     (preserves all unique rounds across both entries)
+//   - hcp from the entry with the most rounds (best signal of accuracy)
+//   - lastUsed = max of both
+const KEY_ROSTER_CLEANUP_DONE = 'golf:roster-cleanup-2026-05-applied';
+async function applyOneTimeRosterCleanup() {
+  try {
+    if (localStorage.getItem(KEY_ROSTER_CLEANUP_DONE)) return; // already applied
+
+    const roster = await getPlayerRoster();
+    if (!Array.isArray(roster) || roster.length === 0) {
+      // Empty roster — nothing to clean. Mark complete so we don't keep checking.
+      localStorage.setItem(KEY_ROSTER_CLEANUP_DONE, '1');
+      return;
+    }
+
+    // Merge plan: { fromMatchers: [predicates that pick existing roster entries],
+    //               into: { firstName, lastName } }
+    const lc = s => (s || '').toLowerCase();
+    const plan = [
+      {
+        match: p => lc(p.name) === 'kevin' || lc(p.name) === 'kevin wells',
+        into: { firstName: 'Kevin', lastName: 'Wells' }
+      },
+      {
+        match: p => lc(p.name) === 'tyler' || lc(p.name) === 'tyler oconnor' || lc(p.name) === "tyler o'connor",
+        into: { firstName: 'Tyler', lastName: "O'Connor" }
+      },
+      {
+        match: p => lc(p.name) === 'roland' || lc(p.name) === 'roland castillo',
+        into: { firstName: 'Roland', lastName: 'Castillo' }
+      },
+      {
+        match: p => lc(p.name) === 'kylan' || lc(p.name) === 'kylan liedtke',
+        into: { firstName: 'Kylan', lastName: 'Liedtke' }
+      },
+      {
+        match: p => lc(p.name) === 'chris curry' || lc(p.name) === 'chris cirry',
+        into: { firstName: 'Chris', lastName: 'Curry' }
+      }
+    ];
+
+    const newRoster = [];
+    const consumedIdx = new Set();
+
+    plan.forEach(rule => {
+      const matches = [];
+      roster.forEach((p, i) => {
+        if (consumedIdx.has(i)) return;
+        if (rule.match(p)) {
+          matches.push(p);
+          consumedIdx.add(i);
+        }
+      });
+      if (matches.length === 0) return; // none of the inputs exist in this roster
+
+      // Combine scoreHistory from all matches, dedup by gameCode (with date+course fallback)
+      const allHistory = [];
+      matches.forEach(m => (m.scoreHistory || []).forEach(s => allHistory.push(s)));
+      const seen = new Set();
+      const dedupHistory = [];
+      allHistory.forEach(s => {
+        const key = s.gameCode || (s.date + '|' + (s.course || ''));
+        if (seen.has(key)) return;
+        seen.add(key);
+        dedupHistory.push(s);
+      });
+      dedupHistory.sort((a, b) => (b.date || 0) - (a.date || 0));
+
+      // Pick HCP from the match with most rounds (most data = best signal)
+      const sortedByRounds = [...matches].sort((a, b) =>
+        (b.scoreHistory || []).length - (a.scoreHistory || []).length
+      );
+      const hcp = sortedByRounds[0].hcp || 0;
+      const lastUsed = Math.max(...matches.map(m => m.lastUsed || 0));
+
+      newRoster.push({
+        firstName: rule.into.firstName,
+        lastName: rule.into.lastName,
+        name: combineName(rule.into.firstName, rule.into.lastName),
+        hcp,
+        lastUsed: lastUsed || Date.now(),
+        scoreHistory: dedupHistory.slice(0, 50)
+      });
+    });
+
+    // Keep any entries that weren't part of any merge rule (unaffected players).
+    // They still get firstName/lastName migration from getPlayerRoster above.
+    roster.forEach((p, i) => {
+      if (consumedIdx.has(i)) return;
+      newRoster.push(p);
+    });
+
+    newRoster.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+    await savePlayerRoster(newRoster);
+    localStorage.setItem(KEY_ROSTER_CLEANUP_DONE, '1');
+    console.log('Roster cleanup applied. New entry count:', newRoster.length);
+  } catch (e) {
+    console.warn('applyOneTimeRosterCleanup failed:', e);
+    // Don't mark complete on failure — we want to retry on next boot
+  }
 }
 
 // Append a single round's scores to each player's history in the roster.
@@ -3169,10 +3368,55 @@ async function archiveScoresFromRound(g) {
       ? calcDifferential(gross, rating, slope)
       : null;
 
-    const lower = p.name.toLowerCase();
-    let entry = roster.find(r => r.name.toLowerCase() === lower);
+    // Match roster by structured firstName + lastName when the saved player
+    // record has them. Fall back to combined-name match for legacy data.
+    // This is critical — without it, archiving a round played as "Tyler"
+    // after the cleanup merged Tyler→Tyler O'Connor would create a fresh
+    // "Tyler" roster entry and undo the merge.
+    let entry = null;
+    const pFirst = (p.firstName || '').trim();
+    const pLast = (p.lastName || '').trim();
+    if (pFirst) {
+      const pfLower = pFirst.toLowerCase();
+      const plLower = pLast.toLowerCase();
+      // Match by firstName + lastName (both case-insensitive). Empty lastName
+      // only matches roster entry that also has empty lastName.
+      entry = roster.find(r =>
+        (r.firstName || '').toLowerCase() === pfLower &&
+        (r.lastName || '').toLowerCase() === plLower
+      );
+      // If no exact match AND incoming has no lastName, try matching the
+      // first name against a roster entry that DOES have a lastName.
+      // This handles the case where a user types just "Kevin" and the
+      // roster has "Kevin Wells" — we credit Kevin Wells with the round
+      // rather than creating a new "Kevin" duplicate. Only safe when
+      // there's exactly one such match (otherwise ambiguous, so skip).
+      if (!entry && !pLast) {
+        const candidates = roster.filter(r =>
+          (r.firstName || '').toLowerCase() === pfLower &&
+          (r.lastName || '').trim() !== ''
+        );
+        if (candidates.length === 1) entry = candidates[0];
+      }
+    }
+    // Final fallback: legacy combined-name match for very old data
+    if (!entry && p.name) {
+      const lower = p.name.toLowerCase();
+      entry = roster.find(r => (r.name || '').toLowerCase() === lower);
+    }
     if (!entry) {
-      entry = { name: p.name, hcp: 0, lastUsed: Date.now(), scoreHistory: [] };
+      // Create a fresh entry with structured fields. If incoming only had
+      // combined name, split on first space.
+      const newFirst = pFirst || ((p.name || '').trim().split(/\s+/)[0] || '');
+      const newLast = pLast || ((p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
+      entry = {
+        firstName: newFirst,
+        lastName: newLast,
+        name: combineName(newFirst, newLast),
+        hcp: 0,
+        lastUsed: Date.now(),
+        scoreHistory: []
+      };
       roster.push(entry);
     }
     if (!Array.isArray(entry.scoreHistory)) entry.scoreHistory = [];
@@ -3495,7 +3739,14 @@ function setupNewGameForm(prefill) {
   const startCount = (prefill && prefill.players && prefill.players.length) ? prefill.players.length : 4;
   for (let i = 0; i < startCount; i++) {
     const p = prefill && prefill.players ? prefill.players[i] : null;
-    addPlayerRow(p ? p.name : '', p ? p.hcp : 0);
+    if (p) {
+      // Prefer structured fields; fall back to splitting combined name
+      const firstName = p.firstName || ((p.name || '').trim().split(/\s+/)[0] || '');
+      const lastName = p.lastName || ((p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
+      addPlayerRow(firstName, lastName, p.hcp || 0);
+    } else {
+      addPlayerRow();
+    }
   }
 
   // Build junk options — each junk type as its own row with name + description
@@ -3574,7 +3825,27 @@ function setupNewGameForm(prefill) {
   }
 }
 
-function addPlayerRow(name = '', hcp = 0) {
+// Add a player row to the setup form. Supports both legacy single-name calls
+// (addPlayerRow('Tyler', 8)) and structured calls (addPlayerRow('Tyler', "O'Connor", 8)).
+// Calling conventions:
+//   addPlayerRow()                              — blank row
+//   addPlayerRow('Tyler', 8)                    — single name (HCP in second slot)
+//   addPlayerRow('Tyler', "O'Connor", 8)        — first + last + HCP
+function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0) {
+  // Detect legacy 2-arg call: addPlayerRow(name, hcp)
+  let lastName = '';
+  let hcp = 0;
+  if (typeof lastNameOrHcp === 'number') {
+    // 2-arg legacy call. firstName might be a full name; split it.
+    const parts = (firstName || '').trim().split(/\s+/);
+    firstName = parts[0] || '';
+    lastName = parts.slice(1).join(' ') || '';
+    hcp = lastNameOrHcp;
+  } else {
+    lastName = lastNameOrHcp || '';
+    hcp = hcpMaybe || 0;
+  }
+
   const list = $('players-list');
   if (list.children.length >= 12) {
     showToast('Max 12 players');
@@ -3582,8 +3853,13 @@ function addPlayerRow(name = '', hcp = 0) {
   }
   const row = document.createElement('div');
   row.className = 'player-row';
+  // Escape values for the value="" attributes
+  const esc = s => String(s || '').replace(/"/g, '&quot;');
   row.innerHTML = `
-    <input type="text" placeholder="Player name" value="${name || ''}">
+    <div class="name-row">
+      <input type="text" class="first-name" placeholder="First name" value="${esc(firstName)}">
+      <input type="text" class="last-name" placeholder="Last name" value="${esc(lastName)}">
+    </div>
     <div class="hcp-row">
       <label>HCP</label>
       <input type="number" placeholder="0" value="${hcp}" min="0" max="36">
@@ -3598,12 +3874,14 @@ function addPlayerRow(name = '', hcp = 0) {
     renderMatchInstances();
     renderNassauInstances();
   };
-  // Re-render team pickers when the name changes too
-  row.querySelector('input[type=text]').addEventListener('input', () => {
-    renderTeamPickers();
-    renderParticipantPickers();
-    renderMatchInstances();
-    renderNassauInstances();
+  // Re-render team pickers when names change
+  row.querySelectorAll('input[type=text]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      renderTeamPickers();
+      renderParticipantPickers();
+      renderMatchInstances();
+      renderNassauInstances();
+    });
   });
   list.appendChild(row);
   renderTeamPickers();
@@ -3769,10 +4047,21 @@ async function renderRosterList() {
   const search = ($('roster-search').value || '').toLowerCase().trim();
   const roster = await getPlayerRoster();
 
-  // Names already in the setup form (so we can disable / mark)
-  const inSetup = new Set(getCurrentSetupPlayers().map(p => p.name.toLowerCase()));
+  // Match by full first+last name to identify "already in setup"
+  const inSetup = new Set(
+    getCurrentSetupPlayers().map(p =>
+      ((p.firstName || '') + '|' + (p.lastName || '')).toLowerCase()
+    )
+  );
 
-  const filtered = roster.filter(p => !search || p.name.toLowerCase().includes(search));
+  // Search matches against either first name OR last name OR combined name.
+  const filtered = roster.filter(p => {
+    if (!search) return true;
+    const f = (p.firstName || '').toLowerCase();
+    const l = (p.lastName || '').toLowerCase();
+    const n = (p.name || '').toLowerCase();
+    return f.includes(search) || l.includes(search) || n.includes(search);
+  });
   container.innerHTML = '';
 
   if (roster.length === 0) {
@@ -3786,7 +4075,8 @@ async function renderRosterList() {
 
   filtered.forEach(p => {
     const row = document.createElement('div');
-    const already = inSetup.has(p.name.toLowerCase());
+    const key = ((p.firstName || '') + '|' + (p.lastName || '')).toLowerCase();
+    const already = inSetup.has(key);
     row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border);' + (already ? 'opacity:0.5' : '');
     // Calculated handicap from score history (if 3+ rounds)
     const calc = calcHandicapIndex(p.scoreHistory || []);
@@ -3801,9 +4091,11 @@ async function renderRosterList() {
     } else {
       hcpLine = `<div class="small-text" style="font-size:11px">HCP ${p.hcp || 0}</div>`;
     }
+    // Use full name (first + last) for display in roster picker
+    const displayName = displayFull(p);
     row.innerHTML = `
-      <div style="flex:1;font-size:14px">
-        <div style="font-weight:500">${p.name}${already ? ' <span class="small-text">(added)</span>' : ''}</div>
+      <div style="flex:1;font-size:14px;min-width:0">
+        <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(displayName)}${already ? ' <span class="small-text">(added)</span>' : ''}</div>
         ${hcpLine}
       </div>
       <button class="small roster-add-btn" ${already ? 'disabled' : ''}>${already ? '✓' : 'Add'}</button>
@@ -3813,40 +4105,73 @@ async function renderRosterList() {
       if (already) return;
       // Use calculated handicap if available; fall back to stored hcp
       const hcpToUse = calc.index != null ? Math.round(calc.index) : p.hcp;
+      const firstName = p.firstName || (p.name || '').trim().split(/\s+/)[0] || '';
+      const lastName = p.lastName || (p.name || '').trim().split(/\s+/).slice(1).join(' ') || '';
       // Find an empty player row, or create new
       const list = $('players-list');
       const rows = Array.from(list.querySelectorAll('.player-row'));
-      const emptyRow = rows.find(r => !r.querySelector('input[type=text]').value.trim());
+      const emptyRow = rows.find(r => {
+        const fi = r.querySelector('.first-name');
+        if (fi) return !fi.value.trim();
+        const legacy = r.querySelector('input[type=text]');
+        return legacy && !legacy.value.trim();
+      });
       if (emptyRow) {
-        emptyRow.querySelector('input[type=text]').value = p.name;
+        const fi = emptyRow.querySelector('.first-name');
+        const li = emptyRow.querySelector('.last-name');
+        if (fi) {
+          fi.value = firstName;
+          if (li) li.value = lastName;
+        } else {
+          // Legacy single-input row
+          emptyRow.querySelector('input[type=text]').value = combineName(firstName, lastName);
+        }
         emptyRow.querySelector('input[type=number]').value = hcpToUse;
         renderTeamPickers();
         renderParticipantPickers();
+        renderMatchInstances();
+        renderNassauInstances();
       } else {
-        addPlayerRow(p.name, hcpToUse);
+        addPlayerRow(firstName, lastName, hcpToUse);
       }
       if (calc.index != null) {
-        showToast(`${p.name} added with calculated HCP ${calc.index} (${calc.n} rounds)`);
+        showToast(`${displayName} added with calculated HCP ${calc.index} (${calc.n} rounds)`);
       }
       renderRosterList();
     };
     row.querySelector('.roster-del-btn').onclick = async () => {
-      if (!confirm(`Remove ${p.name} from saved players? They'll be re-added next time you use them in a round.`)) return;
-      await deletePlayerFromRoster(p.name);
+      if (!confirm(`Remove ${displayFull(p)} from saved players? They'll be re-added next time you use them in a round.`)) return;
+      await deletePlayerFromRoster(p.firstName || p.name, p.lastName || '');
       await renderRosterList();
     };
     container.appendChild(row);
   });
 }
 
-// Get current player list from setup form (without committing)
+// Get current player list from setup form (without committing).
+// Reads first + last name from the structured inputs. Falls back to a
+// single-input row if encountered (e.g., during transitions where rows
+// were rendered before the migration).
 function getCurrentSetupPlayers() {
   const list = $('players-list');
   if (!list) return [];
   return Array.from(list.querySelectorAll('.player-row')).map((row, i) => {
-    const name = row.querySelector('input[type=text]').value.trim();
-    return { idx: i, name };
-  }).filter(p => p.name); // drop blank rows — they aren't real players
+    const firstInput = row.querySelector('.first-name');
+    const lastInput = row.querySelector('.last-name');
+    let firstName, lastName;
+    if (firstInput) {
+      firstName = firstInput.value.trim();
+      lastName = lastInput ? lastInput.value.trim() : '';
+    } else {
+      // Legacy single-input row: split on first space
+      const text = (row.querySelector('input[type=text]') || {}).value || '';
+      const parts = text.trim().split(/\s+/);
+      firstName = parts[0] || '';
+      lastName = parts.slice(1).join(' ') || '';
+    }
+    const name = combineName(firstName, lastName);
+    return { idx: i, firstName, lastName, name };
+  }).filter(p => p.firstName); // drop blank rows — they aren't real players
 }
 
 // Render the team picker UI for both team-match and team-lowball
@@ -4359,7 +4684,10 @@ function applySavedConfig(config) {
     $('players-list').innerHTML = '';
     state.playerTees = state.playerTees || {};
     config.players.forEach(p => {
-      addPlayerRow(p.name || '', p.rawHcp != null ? p.rawHcp : (p.hcp || 0));
+      // Prefer structured fields; fall back to splitting combined name for legacy configs
+      const firstName = p.firstName || ((p.name || '').trim().split(/\s+/)[0] || '');
+      const lastName = p.lastName || ((p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
+      addPlayerRow(firstName, lastName, p.rawHcp != null ? p.rawHcp : (p.hcp || 0));
       // Restore each player's tee selection by name
       if (p.name && p.teeLabel) {
         state.playerTees[p.name] = p.teeLabel;
@@ -4574,13 +4902,28 @@ function gatherSetup() {
 
   const players = [];
   $('players-list').querySelectorAll('.player-row').forEach((row, i) => {
-    const name = row.querySelector('input[type=text]').value.trim();
+    // Read structured first + last; fall back to legacy single input
+    const firstInput = row.querySelector('.first-name');
+    const lastInput = row.querySelector('.last-name');
+    let firstName, lastName;
+    if (firstInput) {
+      firstName = firstInput.value.trim();
+      lastName = lastInput ? lastInput.value.trim() : '';
+    } else {
+      const text = (row.querySelector('input[type=text]') || {}).value || '';
+      const parts = text.trim().split(/\s+/);
+      firstName = parts[0] || '';
+      lastName = parts.slice(1).join(' ') || '';
+    }
+    const name = combineName(firstName, lastName);
     const hcp = parseInt(row.querySelector('input[type=number]').value) || 0;
-    if (name) {
+    if (firstName) {
       const teeLabel = (state.playerTees && state.playerTees[name]) || (tees.length === 1 ? tees[0].label : null);
       players.push({
         id: 'p' + i + '-' + Date.now() + '-' + Math.random().toString(36).slice(2,6),
-        name,
+        firstName,
+        lastName,
+        name, // legacy combined-name field — kept for backwards compat with internal lookups
         hcp,
         teeLabel: teeLabel || null
       });
@@ -4840,7 +5183,7 @@ function renderScoreEntry() {
     row.className = 'score-entry';
     row.innerHTML = `
       <div>
-        <div class="name">${p.name}</div>
+        <div class="name">${displayFirst(p)}</div>
         <div class="meta">HCP ${p.hcp}${strokes > 0 ? ` · gets ${strokes} stroke${strokes > 1 ? 's' : ''}` : ''}</div>
       </div>
       <div class="score-stepper" style="position:relative">
@@ -4914,7 +5257,7 @@ function renderRunningTotals() {
     pill.className = 'rt-pill ' + (total > 0 ? 'positive' : total < 0 ? 'negative' : 'zero');
     const sign = total > 0 ? '+' : '';
     pill.innerHTML = `
-      <div class="rt-name">${p.name}</div>
+      <div class="rt-name">${displayFirst(p)}</div>
       <div class="rt-money">${sign}$${Math.abs(total)}</div>
     `;
     pill.onclick = () => showRunningTotalBreakdown(p.id);
@@ -4937,7 +5280,7 @@ function showRunningTotalBreakdown(playerId) {
   const list = document.getElementById('rt-breakdown-list');
   const totalEl = document.getElementById('rt-breakdown-total');
 
-  title.textContent = player.name;
+  title.textContent = displayFull(player);
 
   // Build list of game -> $
   list.innerHTML = '';
@@ -5836,7 +6179,7 @@ function calculateSettlements(money, players) {
   players.forEach(p => {
     const amt = Math.round((money[p.id] || 0) * 100) / 100;
     if (Math.abs(amt) >= 0.01) {
-      list.push({ id: p.id, name: p.name, amount: amt });
+      list.push({ id: p.id, name: displayFull(p), amount: amt });
     }
   });
   if (list.length === 0) return [];
@@ -7509,7 +7852,7 @@ function renderBoard() {
     row.className = 'lb-row';
     row.innerHTML = `
       <div class="pos">${i + 1}</div>
-      <div class="name">${p.name}${p.hcp > 0 ? ` <span style="color:var(--text-muted);font-weight:400;font-size:11px">(${p.hcp})</span>` : ''}</div>
+      <div class="name">${displayFull(p)}${p.hcp > 0 ? ` <span style="color:var(--text-muted);font-weight:400;font-size:11px">(${p.hcp})</span>` : ''}</div>
       <div class="score">${t.count > 0 ? `${t.gross} (${t.count}h)` : '—'}</div>
       <div class="money ${cls}">${signed(m)}</div>
     `;
@@ -7542,7 +7885,7 @@ function renderBoard() {
     });
     breakdownHtml += '<th style="text-align:right;padding:6px 4px">Total</th></tr></thead><tbody>';
     sorted.forEach(p => {
-      breakdownHtml += `<tr style="border-top:1px solid var(--border)"><td style="padding:6px 4px;font-weight:500">${p.name}</td>`;
+      breakdownHtml += `<tr style="border-top:1px solid var(--border)"><td style="padding:6px 4px;font-weight:500">${displayFull(p)}</td>`;
       games.forEach(x => {
         const v = x.r.money[p.id] || 0;
         const cls = v > 0.005 ? 'pos' : (v < -0.005 ? 'neg' : 'zero');
@@ -8067,7 +8410,7 @@ function buildRoundSummary(g) {
     // Header row
     html += `<thead><tr style="background:var(--surface-3);border-bottom:1px solid var(--border)">
       <th style="text-align:left;padding:8px 10px;font-weight:600;min-width:110px;position:sticky;left:0;background:var(--surface-3);z-index:1;border-right:1px solid var(--border)">Game</th>
-      ${g.players.map(p => `<th style="text-align:right;padding:8px 12px;font-weight:600;font-size:11px;min-width:80px;white-space:nowrap">${p.name}</th>`).join('')}
+      ${g.players.map(p => `<th style="text-align:right;padding:8px 12px;font-weight:600;font-size:11px;min-width:80px;white-space:nowrap">${displayFull(p)}</th>`).join('')}
     </tr></thead>`;
     // Data rows
     html += `<tbody>`;
@@ -8903,7 +9246,11 @@ async function init() {
 
     // Save players to roster so they can be picked again next time
     for (const p of setup.players) {
-      await upsertPlayerInRoster(p.name, p.rawHcp != null ? p.rawHcp : p.hcp);
+      await upsertPlayerInRoster(
+        p.firstName || p.name,
+        p.lastName || '',
+        p.rawHcp != null ? p.rawHcp : p.hcp
+      );
     }
 
     // Mark tourney as live
@@ -9392,6 +9739,11 @@ async function init() {
   // Restore last
   await tryRestore();
   await renderHome();
+
+  // Apply one-time roster cleanup (May 2026 test data merges).
+  // Runs before the backfill so the backfill operates on cleaned data.
+  // Idempotent via localStorage flag — only ever runs once per device.
+  await applyOneTimeRosterCleanup();
 
   // Fire-and-forget: backfill stats from saved rounds in the background.
   // Idempotent (gameCode-based dedup) so it's safe to run on every boot.
