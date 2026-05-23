@@ -2362,10 +2362,10 @@
     <div class="panel" id="panel-stats">
       <div class="card">
         <h2>📊 Stats</h2>
-        <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
-          <label style="margin:0">Player:</label>
-          <select id="stats-player-select" style="flex:1"></select>
-          <button class="small" id="btn-set-me" title="Mark this player as 'me'">Set as me</button>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <label style="margin:0;flex-shrink:0">Player:</label>
+          <select id="stats-player-select" style="flex:1;min-width:0"></select>
+          <button class="small" id="btn-set-me" title="Mark this player as 'me'" style="flex-shrink:0;white-space:nowrap">Set as me</button>
         </div>
         <p class="help-text" id="stats-empty-hint" style="margin-top:8px;display:none">No rounds stored yet for this player. Finish a round (with course rating &amp; slope set) to start tracking.</p>
       </div>
@@ -3119,7 +3119,7 @@ async function deletePlayerFromRoster(name) {
 // rounds with incomplete 18-hole scoring, are silently skipped.
 async function archiveScoresFromRound(g) {
   if (!g || !g.players || !g.scores) return;
-  const date = g.createdAt || Date.now();
+  const date = g.createdAt || g.updatedAt || Date.now();
 
   // Resolve tee map by label. Backwards compat: if g.tees is empty/missing
   // but g has the old g.rating/g.slope, treat as one tee 'Back'.
@@ -3150,14 +3150,24 @@ async function archiveScoresFromRound(g) {
 
   g.players.forEach(p => {
     const arr = g.scores[p.id] || [];
-    if (arr.filter(s => s != null).length < 18) return; // skip incomplete rounds
-    const gross = arr.reduce((a, b) => a + (b || 0), 0);
+    const holesScored = arr.filter(s => s != null).length;
+    // Skip players who never scored a single hole — no data to record.
+    if (holesScored === 0) return;
+
+    // Only count gross + differential for complete 18-hole rounds (per WHS,
+    // a partial round's gross is meaningless). Incomplete rounds still get
+    // recorded so they count toward "Rounds played" and "Lifetime bets" —
+    // they just don't contribute to handicap math or avg gross.
+    const isComplete = holesScored === 18;
+    const gross = isComplete ? arr.reduce((a, b) => a + (b || 0), 0) : null;
 
     // Use this player's tee — silently skip handicap part if missing
     const tee = p.teeLabel ? teeMap[p.teeLabel] : (Object.values(teeMap)[0]);
     const rating = tee ? tee.rating : null;
     const slope = tee ? tee.slope : null;
-    const differential = (rating != null && slope != null) ? calcDifferential(gross, rating, slope) : null;
+    const differential = (isComplete && rating != null && slope != null)
+      ? calcDifferential(gross, rating, slope)
+      : null;
 
     const lower = p.name.toLowerCase();
     let entry = roster.find(r => r.name.toLowerCase() === lower);
@@ -3167,32 +3177,85 @@ async function archiveScoresFromRound(g) {
     }
     if (!Array.isArray(entry.scoreHistory)) entry.scoreHistory = [];
 
-    // Avoid duplicate entries for the same round (same course + same date)
-    const dup = entry.scoreHistory.find(s => s.date === date && s.course === g.course);
-    if (dup) return;
+    // Dedup by gameCode (stable per round) + fall back to date+course for
+    // older entries that didn't store gameCode. Idempotent: re-running this
+    // for the same round just updates the existing entry rather than dup'ing.
+    let existingIdx = -1;
+    if (g.code) {
+      existingIdx = entry.scoreHistory.findIndex(s => s.gameCode === g.code);
+    }
+    if (existingIdx < 0) {
+      existingIdx = entry.scoreHistory.findIndex(s => s.date === date && s.course === g.course);
+    }
 
-    entry.scoreHistory.push({
+    const record = {
       date,
       course: g.course || '',
       courseId: g.courseId || '',
       gross,
+      holesScored,
+      complete: isComplete,
       teeLabel: p.teeLabel || (tee ? tee.label : null),
       rating,
       slope,
       differential,
       money: moneyTotals[p.id] != null ? moneyTotals[p.id] : null,
       gameCode: g.code || null
-    });
+    };
+
+    if (existingIdx >= 0) {
+      // Update in place — preserves the array's position but refreshes values
+      // (in case money/gross changed since last archive, e.g. round was reopened).
+      const old = entry.scoreHistory[existingIdx];
+      // Only mark as changed if anything actually differs to avoid pointless writes
+      const differs = ['gross','differential','money','holesScored','complete'].some(k => old[k] !== record[k]);
+      if (differs) {
+        entry.scoreHistory[existingIdx] = record;
+        changed = true;
+      }
+    } else {
+      entry.scoreHistory.push(record);
+      changed = true;
+    }
     // Keep most recent 50 rounds per player
     entry.scoreHistory.sort((a, b) => (b.date || 0) - (a.date || 0));
     entry.scoreHistory = entry.scoreHistory.slice(0, 50);
     entry.lastUsed = Date.now();
-    changed = true;
   });
 
   if (changed) {
     roster.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
     await savePlayerRoster(roster);
+  }
+}
+
+// One-time-per-boot backfill: walks every saved round in the recent-games
+// list and pulls each player's stats into their roster history. Idempotent
+// thanks to gameCode-based dedup in archiveScoresFromRound — re-running is
+// safe and updates existing entries rather than duplicating.
+//
+// This catches players whose history is missing because:
+//   - Their rounds finished BEFORE the archive function existed
+//   - Their rounds ended early (< 18 holes) which the old archive silently skipped
+//   - They've used multiple devices and recent-games is the shared source of truth
+async function backfillStatsFromSavedRounds() {
+  try {
+    const recent = await getRecent();
+    if (!Array.isArray(recent) || recent.length === 0) return;
+    // Walk newest → oldest. Cap at 30 rounds backfill so we don't hammer
+    // Supabase on first boot for users with deep history.
+    const toBackfill = recent.slice(0, 30);
+    for (const r of toBackfill) {
+      if (!r || !r.code) continue;
+      try {
+        const g = await loadGame(r.code);
+        if (g) await archiveScoresFromRound(g);
+      } catch (e) {
+        console.warn('backfillStats: round', r.code, 'failed:', e);
+      }
+    }
+  } catch (e) {
+    console.warn('backfillStatsFromSavedRounds failed:', e);
   }
 }
 
@@ -8149,10 +8212,21 @@ async function renderStatsForSelectedPlayer() {
     }
     const teeStr = s.teeLabel ? ` · ${s.teeLabel}` : '';
     const diffStr = s.differential != null ? ` · diff ${s.differential.toFixed(1)}` : '';
+    // For complete rounds show gross; for incomplete show "X/18 holes (no gross)"
+    // since a partial gross is meaningless. Backwards compat: older entries
+    // without holesScored field fall back to gross-or-dash display.
+    let scoreLine;
+    if (s.gross != null) {
+      scoreLine = `gross ${s.gross}${diffStr}`;
+    } else if (s.holesScored != null) {
+      scoreLine = `${s.holesScored}/18 holes (incomplete)`;
+    } else {
+      scoreLine = `gross —${diffStr}`;
+    }
     row.innerHTML = `
       <div style="flex:1;min-width:0">
         <div style="font-weight:500;font-size:14px">${s.course || 'Untitled'}${teeStr}</div>
-        <div class="small-text" style="font-size:11px;color:var(--text-muted)">${dateStr} · gross ${s.gross != null ? s.gross : '—'}${diffStr}</div>
+        <div class="small-text" style="font-size:11px;color:var(--text-muted)">${dateStr} · ${scoreLine}</div>
       </div>
       <div>${moneyChip}</div>
     `;
@@ -9318,6 +9392,20 @@ async function init() {
   // Restore last
   await tryRestore();
   await renderHome();
+
+  // Fire-and-forget: backfill stats from saved rounds in the background.
+  // Idempotent (gameCode-based dedup) so it's safe to run on every boot.
+  // Catches rounds that finished before the archive function existed AND
+  // rounds that ended early (< 18 holes) which the old archive skipped.
+  // Not awaited — startup shouldn't wait for it. Stats tab will re-render
+  // automatically if the user navigates there after backfill completes.
+  backfillStatsFromSavedRounds().then(() => {
+    // If the user is sitting on the Stats tab when backfill finishes, refresh it
+    const statsPanel = document.getElementById('panel-stats');
+    if (statsPanel && statsPanel.classList.contains('active')) {
+      renderStats();
+    }
+  }).catch(e => console.warn('background backfill failed:', e));
 
   // Browser/hardware back-button guard for active rounds.
   // In a single-page app, the back button only does something if we push history
