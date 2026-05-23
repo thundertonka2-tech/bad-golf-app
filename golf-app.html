@@ -3636,6 +3636,19 @@ function netHoleScore(grossScore, playerHcp, holeSi, par, rules) {
   return grossScore - strokesOnHole(playerHcp, holeSi, par, rules);
 }
 
+// Effective handicap for a player given current game rules. Returns 0 when:
+//   - the global "no handicaps" rule is on, OR
+//   - this player has the per-player "plays gross" toggle on
+// Otherwise returns the player's stored HCP. All bet calcs and stroke
+// indicators route HCP lookups through this helper so per-player gross
+// players get 0 strokes everywhere consistently.
+function effectiveHcp(player, rules) {
+  if (!player) return 0;
+  if (rules && rules.noHandicaps) return 0;
+  if (player.playsGross === true) return 0;
+  return player.hcp || 0;
+}
+
 // ============================================================
 // GHIN-STYLE HANDICAP MATH (simplified WHS)
 // ============================================================
@@ -3735,7 +3748,7 @@ function setupNewGameForm(prefill) {
       // Prefer structured fields; fall back to splitting combined name
       const firstName = p.firstName || ((p.name || '').trim().split(/\s+/)[0] || '');
       const lastName = p.lastName || ((p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
-      addPlayerRow(firstName, lastName, p.hcp || 0);
+      addPlayerRow(firstName, lastName, p.hcp || 0, !!p.playsGross);
     } else {
       addPlayerRow();
     }
@@ -3823,7 +3836,7 @@ function setupNewGameForm(prefill) {
 //   addPlayerRow()                              — blank row
 //   addPlayerRow('Tyler', 8)                    — single name (HCP in second slot)
 //   addPlayerRow('Tyler', "O'Connor", 8)        — first + last + HCP
-function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0) {
+function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGross = false) {
   // Detect legacy 2-arg call: addPlayerRow(name, hcp)
   let lastName = '';
   let hcp = 0;
@@ -3847,6 +3860,10 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0) {
   row.className = 'player-row';
   // Escape values for the value="" attributes
   const esc = s => String(s || '').replace(/"/g, '&quot;');
+  // "Plays gross" toggle is OFF by default — most players use their HCP.
+  // When ON, this player gets 0 strokes in all games, even if the global
+  // "No handicaps" rule is off. Useful for mixed groups where some players
+  // want to play straight-up.
   row.innerHTML = `
     <div class="name-row">
       <input type="text" class="first-name" placeholder="First name" value="${esc(firstName)}">
@@ -3854,7 +3871,11 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0) {
     </div>
     <div class="hcp-row">
       <label>HCP</label>
-      <input type="number" placeholder="0" value="${hcp}" min="0" max="36">
+      <input type="number" class="player-hcp" placeholder="0" value="${hcp}" min="0" max="36" ${playsGross ? 'disabled' : ''}>
+      <label class="gross-toggle" title="If checked, this player plays gross (no strokes) regardless of HCP" style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:11px;color:var(--text-muted);white-space:nowrap;margin:0">
+        <input type="checkbox" class="plays-gross" style="width:auto;margin:0" ${playsGross ? 'checked' : ''}>
+        <span>Plays gross</span>
+      </label>
       <button class="remove" title="Remove player">×</button>
     </div>
   `;
@@ -3875,6 +3896,19 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0) {
       renderNassauInstances();
     });
   });
+  // When "Plays gross" is toggled, gray out the HCP input as a visual cue
+  // that it's being ignored. We still keep the value so the user can untick
+  // and get it back without re-typing.
+  const grossCb = row.querySelector('.plays-gross');
+  const hcpInp = row.querySelector('.player-hcp');
+  if (grossCb && hcpInp) {
+    grossCb.addEventListener('change', () => {
+      hcpInp.disabled = grossCb.checked;
+      hcpInp.style.opacity = grossCb.checked ? '0.5' : '';
+    });
+    // Apply initial state for the disabled opacity
+    if (grossCb.checked) hcpInp.style.opacity = '0.5';
+  }
   list.appendChild(row);
   renderTeamPickers();
   renderParticipantPickers();
@@ -4880,7 +4914,7 @@ function applySavedConfig(config) {
       // Prefer structured fields; fall back to splitting combined name for legacy configs
       const firstName = p.firstName || ((p.name || '').trim().split(/\s+/)[0] || '');
       const lastName = p.lastName || ((p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
-      addPlayerRow(firstName, lastName, p.rawHcp != null ? p.rawHcp : (p.hcp || 0));
+      addPlayerRow(firstName, lastName, p.rawHcp != null ? p.rawHcp : (p.hcp || 0), !!p.playsGross);
       // Restore each player's tee selection by name
       if (p.name && p.teeLabel) {
         state.playerTees[p.name] = p.teeLabel;
@@ -5109,7 +5143,15 @@ function gatherSetup() {
       lastName = parts.slice(1).join(' ') || '';
     }
     const name = combineName(firstName, lastName);
-    const hcp = parseInt(row.querySelector('input[type=number]').value) || 0;
+    // Use the .player-hcp class explicitly to avoid picking up other number
+    // inputs we may add later. Falls back to the first type=number input for
+    // back-compat if the class is missing.
+    const hcpEl = row.querySelector('.player-hcp') || row.querySelector('input[type=number]');
+    const hcp = parseInt(hcpEl ? hcpEl.value : '0') || 0;
+    // Per-player "plays gross" toggle — when true, this player gets 0 strokes
+    // in every game regardless of HCP or global handicap rules.
+    const grossEl = row.querySelector('.plays-gross');
+    const playsGross = !!(grossEl && grossEl.checked);
     if (firstName) {
       const teeLabel = (state.playerTees && state.playerTees[name]) || (tees.length === 1 ? tees[0].label : null);
       players.push({
@@ -5118,6 +5160,7 @@ function gatherSetup() {
         lastName,
         name, // legacy combined-name field — kept for backwards compat with internal lookups
         hcp,
+        playsGross,
         teeLabel: teeLabel || null
       });
     }
@@ -5371,13 +5414,13 @@ function renderScoreEntry() {
   container.innerHTML = '';
   g.players.forEach(p => {
     const score = (g.scores[p.id] && g.scores[p.id][h - 1] != null) ? g.scores[p.id][h - 1] : null;
-    const strokes = g.sis ? strokesOnHole(p.hcp, g.sis[h - 1], g.pars[h - 1], g.hcpRules) : 0;
+    const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[h - 1], g.pars[h - 1], g.hcpRules) : 0;
     const row = document.createElement('div');
     row.className = 'score-entry';
     row.innerHTML = `
       <div>
         <div class="name">${displayFirst(p)}</div>
-        <div class="meta">HCP ${p.hcp}${strokes > 0 ? ` · gets ${strokes} stroke${strokes > 1 ? 's' : ''}` : ''}</div>
+        <div class="meta">${p.playsGross ? 'Plays gross' : `HCP ${p.hcp}${strokes > 0 ? ` · gets ${strokes} stroke${strokes > 1 ? 's' : ''}` : ''}`}</div>
       </div>
       <div class="score-stepper" style="position:relative">
         ${strokes > 0 ? `<span class="pop-dot${strokes > 1 ? ' pop-multi' : ''}" title="${strokes} stroke${strokes > 1 ? 's' : ''} on this hole"></span>` : ''}
@@ -5977,12 +6020,12 @@ function renderGameBanners() {
           const t1Scores = t1Players.map(p => {
             const s = (g.scores[p.id] && g.scores[p.id][sh] != null) ? g.scores[p.id][sh] : null;
             if (s === null) return null;
-            return cfg.net && g.sis ? netHoleScore(s, p.hcp, g.sis[sh], g.pars[sh], g.hcpRules) : s;
+            return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[sh], g.pars[sh], g.hcpRules) : s;
           });
           const t2Scores = t2Players.map(p => {
             const s = (g.scores[p.id] && g.scores[p.id][sh] != null) ? g.scores[p.id][sh] : null;
             if (s === null) return null;
-            return cfg.net && g.sis ? netHoleScore(s, p.hcp, g.sis[sh], g.pars[sh], g.hcpRules) : s;
+            return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[sh], g.pars[sh], g.hcpRules) : s;
           });
           if (t1Scores.some(x => x === null) || t2Scores.some(x => x === null)) {
             complete = false;
@@ -6522,7 +6565,7 @@ function calcTotals(g) {
       if (s !== null && s !== undefined) {
         gross += s;
         count++;
-        const ns = g.sis ? netHoleScore(s, p.hcp, g.sis[i], g.pars[i], g.hcpRules) : s;
+        const ns = g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : s;
         net += ns;
         if (i < 9) { front += s; frontCount++; }
         else { back += s; backCount++; }
@@ -6569,7 +6612,7 @@ function calcSkins(g) {
     const si = g.sis[h];
     const scores = participants.map(p => {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
-      const net = raw != null ? netHoleScore(raw, p.hcp, si, par, g.hcpRules) : null;
+      const net = raw != null ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), si, par, g.hcpRules) : null;
       return { pid: p.id, name: p.name, score: raw, netScore: net, hcp: p.hcp };
     });
     const allScored = scores.every(s => s.score !== null);
@@ -6667,8 +6710,8 @@ function pairwiseStandings(g, aId, bId, fromHole, toHole) {
     const bScore = bArr[idx];
     if (aScore == null || bScore == null) continue;
     holesPlayed++;
-    const aNet = netHoleScore(aScore, a.hcp, g.sis[idx], g.pars[idx], g.hcpRules);
-    const bNet = netHoleScore(bScore, b.hcp, g.sis[idx], g.pars[idx], g.hcpRules);
+    const aNet = netHoleScore(aScore, effectiveHcp(a, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
+    const bNet = netHoleScore(bScore, effectiveHcp(b, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
     aStrokes += aNet;
     bStrokes += bNet;
     if (aNet < bNet) aHolesWon++;
@@ -7056,8 +7099,8 @@ function bankerStandingsThrough(g, throughHole) {
       const wager = pBet * mult;
       let bn = bankerScore, pn = s;
       if (cfg.net && g.sis) {
-        bn = netHoleScore(bankerScore, banker.hcp, g.sis[h], g.pars[h], g.hcpRules);
-        pn = netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules);
+        bn = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
+        pn = netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
       }
       if (bn < pn) { money[banker.id] += wager; money[p.id] -= wager; }
       else if (pn < bn) { money[banker.id] -= wager; money[p.id] += wager; }
@@ -7175,8 +7218,8 @@ function calcBanker(g) {
       let bankerNet = bankerScore;
       let playerNet = s;
       if (cfg.net && g.sis) {
-        bankerNet = netHoleScore(bankerScore, banker.hcp, g.sis[h], g.pars[h], g.hcpRules);
-        playerNet = netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules);
+        bankerNet = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
+        playerNet = netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
       }
       let outcome = 'tie';
       if (bankerNet < playerNet) {
@@ -7251,7 +7294,7 @@ function calcVegas(g) {
     function getScore(p, useNet) {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      if (useNet && g.sis) return netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules);
+      if (useNet && g.sis) return netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
       return s;
     }
     const aScores = teamA.map(p => getScore(p, cfg.net));
@@ -7380,7 +7423,7 @@ function calcDynamicVegas(g) {
   function getScore(p, h, useNet) {
     const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
     if (s === null) return null;
-    if (useNet && g.sis) return netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules);
+    if (useNet && g.sis) return netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
     return s;
   }
 
@@ -7542,12 +7585,12 @@ function calcSixes(g) {
       const aScores = teamA.map(p => {
         const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
         if (s === null) return null;
-        return cfg.net && g.sis ? netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules) : s;
+        return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
       });
       const bScores = teamB.map(p => {
         const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
         if (s === null) return null;
-        return cfg.net && g.sis ? netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules) : s;
+        return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
       });
       if (aScores.some(s => s === null) || bScores.some(s => s === null)) { complete = false; break; }
       aScore += Math.min(...aScores);
@@ -7687,8 +7730,8 @@ function calcMatch(g) {
       const aRaw = (g.scores[a.id] && g.scores[a.id][h] != null) ? g.scores[a.id][h] : null;
       const bRaw = (g.scores[b.id] && g.scores[b.id][h] != null) ? g.scores[b.id][h] : null;
       if (aRaw === null || bRaw === null) break;
-      const aSc = (useNet && g.sis) ? netHoleScore(aRaw, a.hcp, g.sis[h], g.pars[h], g.hcpRules) : aRaw;
-      const bSc = (useNet && g.sis) ? netHoleScore(bRaw, b.hcp, g.sis[h], g.pars[h], g.hcpRules) : bRaw;
+      const aSc = (useNet && g.sis) ? netHoleScore(aRaw, effectiveHcp(a, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : aRaw;
+      const bSc = (useNet && g.sis) ? netHoleScore(bRaw, effectiveHcp(b, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : bRaw;
       played++;
       let res = 'halve';
       if (aSc < bSc) { aUp++; res = 'a'; }
@@ -7775,12 +7818,12 @@ function calcTeamMatch(g) {
     const aScores = teamA.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
     });
     const bScores = teamB.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
     });
     if (aScores.some(s => s === null) || bScores.some(s => s === null)) { complete = false; break; }
     played++;
@@ -7844,12 +7887,12 @@ function calcTeamLowball(g) {
     const aScores = teamA.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
     });
     const bScores = teamB.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, p.hcp, g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
     });
     if (aScores.some(s => s === null) || bScores.some(s => s === null)) { complete = false; break; }
     played++;
@@ -8567,7 +8610,7 @@ function renderScorecard(g, totals) {
     let out = 0, inT = 0;
     for (let i = 0; i < 9; i++) {
       const s = arr[i];
-      const strokes = g.sis ? strokesOnHole(p.hcp, g.sis[i], g.pars[i], g.hcpRules) : 0;
+      const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0;
       const dot = strokes > 0 ? `<span class="pop-dot${strokes > 1 ? ' pop-multi' : ''}"></span>` : '';
       if (s != null) {
         out += s;
@@ -8581,7 +8624,7 @@ function renderScorecard(g, totals) {
     html += `<td class="total">${out || '—'}</td>`;
     for (let i = 9; i < 18; i++) {
       const s = arr[i];
-      const strokes = g.sis ? strokesOnHole(p.hcp, g.sis[i], g.pars[i], g.hcpRules) : 0;
+      const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0;
       const dot = strokes > 0 ? `<span class="pop-dot${strokes > 1 ? ' pop-multi' : ''}"></span>` : '';
       if (s != null) {
         inT += s;
@@ -9237,7 +9280,7 @@ function enterEditLiveRoundMode() {
     pars: g.pars,
     sis: g.sis,
     tees: g.tees,
-    players: g.players.map(p => ({ name: p.name, hcp: p.rawHcp != null ? p.rawHcp : p.hcp, teeLabel: p.teeLabel })),
+    players: g.players.map(p => ({ name: p.name, hcp: p.rawHcp != null ? p.rawHcp : p.hcp, teeLabel: p.teeLabel, playsGross: !!p.playsGross })),
     games: g.games,
     hcpRules: g.hcpRules
   });
@@ -9246,7 +9289,7 @@ function enterEditLiveRoundMode() {
     pars: g.pars,
     sis: g.sis,
     tees: g.tees,
-    players: g.players.map(p => ({ id: p.id, name: p.name, hcp: p.rawHcp != null ? p.rawHcp : p.hcp, teeLabel: p.teeLabel })),
+    players: g.players.map(p => ({ id: p.id, name: p.name, hcp: p.rawHcp != null ? p.rawHcp : p.hcp, teeLabel: p.teeLabel, playsGross: !!p.playsGross })),
     games: g.games,
     hcpRules: g.hcpRules
   });
@@ -9703,10 +9746,14 @@ async function init() {
 
     // Strip ephemeral player IDs and rawHcp computed during gatherSetup; keep raw
     // hcp so handicap percentages don't double-apply when reloaded.
+    // Include firstName/lastName + playsGross so the tournament restores accurately.
     const cleanPlayers = setup.players.map(p => ({
+      firstName: p.firstName || '',
+      lastName: p.lastName || '',
       name: p.name,
       hcp: p.rawHcp != null ? p.rawHcp : p.hcp,
-      teeLabel: p.teeLabel || null
+      teeLabel: p.teeLabel || null,
+      playsGross: !!p.playsGross
     }));
 
     // Convert per-game participant ID arrays to NAME arrays for stable storage
