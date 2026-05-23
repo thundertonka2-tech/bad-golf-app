@@ -1960,7 +1960,7 @@
         </div>
         <div class="actions" style="margin-top:8px">
           <button id="btn-save-tourney">Save as tournament</button>
-          <button class="primary" id="btn-start-round" style="flex:2">Start round</button>
+          <button class="primary" id="btn-start-round">Start round</button>
           <button class="primary" id="btn-save-edits" style="flex:2;display:none">💾 Save changes</button>
         </div>
       </div>
@@ -5500,6 +5500,38 @@ function showRunningTotalBreakdown(playerId) {
   modal.classList.add('show');
 }
 
+// Returns true if Wolf is enabled, the current hole has scores entered (so the
+// captain *should* have picked already), but no Wolf choice exists. Used to
+// gate hole advancement and color the Wolf banner.
+//
+// We check against `g.players` (not `participants`) to match the existing
+// banner's captain-rotation logic. If Wolf participants is a subset of players,
+// that's a pre-existing inconsistency between banner and calc — not introduced here.
+function wolfPickMissingOnHole(g, h) {
+  if (!g.games.wolf) return false;
+  if (!g || !g.players || g.players.length < 3) return false;
+  // Only gate if scores have been entered on this hole — captain might be
+  // mid-decision before anyone tees off, and we shouldn't nag them yet.
+  const anyScored = g.players.some(p =>
+    g.scores[p.id] && g.scores[p.id][h - 1] != null
+  );
+  if (!anyScored) return false;
+  const hd = (g.wolfData && g.wolfData.holes && g.wolfData.holes[h]) || {};
+  return !hd.choice;
+}
+
+// Returns an array of hole numbers (1-18) where Wolf is missing a pick despite
+// having scores entered. Used at round-finish time to catch any holes the user
+// may have skipped earlier. Empty array means everything is locked in.
+function wolfHolesMissingPicks(g) {
+  if (!g.games.wolf) return [];
+  const missing = [];
+  for (let h = 1; h <= 18; h++) {
+    if (wolfPickMissingOnHole(g, h)) missing.push(h);
+  }
+  return missing;
+}
+
 function renderGameBanners() {
   const g = state.game;
   const h = state.currentHole;
@@ -5790,9 +5822,25 @@ function renderGameBanners() {
     const captain = g.players[captainIdx];
     const hd = g.wolfData.holes[h] || {};
 
+    // Show a warning state when scores are entered on this hole but no Wolf
+    // choice has been made. The bet math depends on captain's choice so we
+    // can't let this slip through without a visual nag + a confirm dialog
+    // when the user tries to advance to the next hole.
+    const pickMissing = wolfPickMissingOnHole(g, h);
+
     const div = document.createElement('div');
     div.className = 'turn-banner';
-    let body = `<div><strong>Captain:</strong> ${displayFirst(captain)}</div>`;
+    if (pickMissing) {
+      // Override the default banner styling with a warning look.
+      div.style.background = 'rgba(232,144,32,0.12)';
+      div.style.borderColor = 'var(--warn, #d18a1a)';
+      div.style.borderWidth = '2px';
+    }
+    let body = '';
+    if (pickMissing) {
+      body += `<div style="color:var(--warn, #d18a1a);font-weight:700;margin-bottom:4px">⚠️ Captain pick needed</div>`;
+    }
+    body += `<div><strong>Captain:</strong> ${displayFirst(captain)}</div>`;
     if (hd.choice === 'lone') {
       body += `<div class="small-text">Going Lone Wolf (2x)</div>`;
     } else if (hd.choice === 'blind') {
@@ -5800,6 +5848,8 @@ function renderGameBanners() {
     } else if (hd.choice === 'partner' && hd.partnerId) {
       const p = g.players.find(x => x.id === hd.partnerId);
       body += `<div class="small-text">Partner: ${p ? displayFirst(p) : '—'}</div>`;
+    } else if (pickMissing) {
+      body += `<div class="small-text" style="color:var(--warn, #d18a1a)">Scores entered but no choice made. Pick before advancing.</div>`;
     } else {
       body += `<div class="small-text">No pick yet</div>`;
     }
@@ -9753,17 +9803,42 @@ async function init() {
   $('prev-hole').onclick = () => {
     if (state.currentHole > 1) { state.currentHole--; renderScoreEntry(); }
   };
+
+  // Check Wolf pick gate before advancing. Returns true if it's safe to advance
+  // (no Wolf game OR pick exists OR user confirms via dialog), false otherwise.
+  // The dialog lets the user override IF they explicitly choose to, in case
+  // they're going back and forth between holes and don't want to be nagged.
+  function checkWolfPickGate() {
+    const g = state.game;
+    if (!g) return true;
+    const h = state.currentHole;
+    if (!wolfPickMissingOnHole(g, h)) return true;
+    // Find captain for the dialog message
+    const captainIdx = (h - 1) % g.players.length;
+    const captain = g.players[captainIdx];
+    const captainName = captain ? displayFirst(captain) : 'Captain';
+    return confirm(
+      `⚠️ Wolf pick missing for hole ${h}.\n\n` +
+      `${captainName} hasn't picked a partner, gone Lone Wolf, or called Blind.\n\n` +
+      `Without a pick, the bet math for this hole will be wrong.\n\n` +
+      `Advance anyway?`
+    );
+  }
+
   $('next-hole').onclick = () => {
-    if (state.currentHole < 18) { state.currentHole++; renderScoreEntry(); }
+    if (state.currentHole >= 18) return;
+    if (!checkWolfPickGate()) return;
+    state.currentHole++;
+    renderScoreEntry();
   };
 
   // Auto-advance button
   $('auto-advance-btn').onclick = () => {
-    if (state.currentHole < 18) {
-      state.currentHole++;
-      renderScoreEntry();
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
+    if (state.currentHole >= 18) return;
+    if (!checkWolfPickGate()) return;
+    state.currentHole++;
+    renderScoreEntry();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   $('btn-refresh').onclick = async () => {
@@ -9788,6 +9863,17 @@ async function init() {
       $('btn-finish-round').click();
       return;
     }
+    // Wolf gate: scan all 18 holes for missing picks. If any found, warn before
+    // ending the round since those holes' bet math will be wrong.
+    const missingWolf = wolfHolesMissingPicks(g);
+    if (missingWolf.length > 0) {
+      const holeList = missingWolf.join(', ');
+      if (!confirm(
+        `⚠️ Wolf pick missing on hole${missingWolf.length > 1 ? 's' : ''} ${holeList}.\n\n` +
+        `Without a pick, the Wolf bet math for ${missingWolf.length > 1 ? 'those holes' : 'that hole'} will be wrong.\n\n` +
+        `End the round anyway?`
+      )) return;
+    }
     // Find the highest hole that has any scores entered
     let lastHole = 0;
     g.players.forEach(p => {
@@ -9806,6 +9892,18 @@ async function init() {
     if (!g) {
       showToast('No active round to finish');
       return;
+    }
+    // Wolf gate: scan all 18 holes for missing picks before opening summary.
+    // If any are missing, warn so the user can go back and fix them — otherwise
+    // the saved round will have wrong Wolf totals.
+    const missingWolf = wolfHolesMissingPicks(g);
+    if (missingWolf.length > 0) {
+      const holeList = missingWolf.join(', ');
+      if (!confirm(
+        `⚠️ Wolf pick missing on hole${missingWolf.length > 1 ? 's' : ''} ${holeList}.\n\n` +
+        `Without a pick, the Wolf bet math for ${missingWolf.length > 1 ? 'those holes' : 'that hole'} will be wrong.\n\n` +
+        `Finish anyway?`
+      )) return;
     }
     // Open the summary modal — actual archive happens on "Save & return home"
     const dateStr = new Date(g.updatedAt || Date.now()).toLocaleDateString();
