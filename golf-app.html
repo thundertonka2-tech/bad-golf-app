@@ -2614,10 +2614,61 @@
            primarily for clearing test/junk data between testing sessions. -->
       <div class="card" id="stats-danger-zone" style="margin-top:16px;border:1px solid var(--danger,#c14040);background:rgba(193,64,64,0.04)">
         <h3 style="margin-top:0;color:var(--danger,#c14040)">⚠️ Danger zone</h3>
+
+        <!-- 🔒 AUTH-LOCKDOWN BANNER — must be removed once real auth gates
+             the destructive tools. This is a visible reminder, NOT a
+             functional gate. See ROSTER_CLEANUP_ENABLED for the actual
+             gate. -->
+        <div style="padding:8px 10px;margin-bottom:12px;background:rgba(255,193,7,0.18);border:1px solid #b8860b;border-radius:6px;font-size:12px;line-height:1.4">
+          <strong>⚠️ Pre-auth scaffolding.</strong> These tools currently only
+          touch <em>your local device's</em> view and your personal roster — no
+          shared data is destroyed. <strong>Before this app goes to a wider
+          audience we MUST lock these behind real authentication</strong> so
+          users can only reset / delete data they own, and so admin-only
+          operations require an admin role check.
+          <span style="display:block;margin-top:4px;color:var(--text-muted)">
+            Tracked as TODOs inline in <code>resetAllData()</code> and
+            <code>wireDangerZoneDelete()</code>.
+          </span>
+        </div>
+
         <p class="help-text" style="margin-bottom:10px">
-          Wipe all rounds, players, tournaments, and saved courses from this device <em>and</em> from the shared group database. This cannot be undone.
+          Clear your local roster, stats, and view of recent rounds on this
+          device. Shared round records stay intact for other players. Rounds
+          will resync from the server after reload.
         </p>
-        <button id="btn-reset-all-stats" style="background:var(--danger,#c14040);color:#fff;border-color:var(--danger,#c14040);width:100%">Reset all stats &amp; data</button>
+        <button id="btn-reset-all-stats" style="background:var(--danger,#c14040);color:#fff;border-color:var(--danger,#c14040);width:100%">Reset my local stats</button>
+
+        <!-- Delete a single player — gated behind ROSTER_CLEANUP_ENABLED so
+             only testers see it for now. Once real auth is wired up, the
+             gate should be replaced with an ownership check (current user
+             must "own" the roster entry, or be a trusted admin) so end users
+             can't nuke each other's stats from a shared device. The button
+             is hidden via display:none below when the gate is off. -->
+        <div id="delete-player-section" style="margin-top:14px;padding-top:14px;border-top:1px dashed var(--danger,#c14040);display:none">
+          <h4 style="margin:0 0 6px;font-size:13px;color:var(--danger,#c14040)">Delete a single player</h4>
+          <p class="help-text" style="margin-bottom:10px;font-size:12px">
+            Removes a player from <em>your local roster</em> and wipes their
+            lifetime stats / score history from this device only. Saved round
+            records (Rounds tab) keep their record of who played and are NOT
+            modified — other players still see every round they played in.
+            Useful for cleaning up test entries on your device.
+          </p>
+          <select id="delete-player-select" style="width:100%;margin-bottom:8px">
+            <option value="">— pick a player —</option>
+          </select>
+          <button id="btn-delete-player" style="background:var(--danger,#c14040);color:#fff;border-color:var(--danger,#c14040);width:100%" disabled>Delete this player</button>
+          <!-- TODO REMOVE BEFORE PROD (or before this feature ships to end
+               users): once authentication is in place, gate this with a
+               real ownership check instead of ROSTER_CLEANUP_ENABLED.
+               Specifically: only allow deleting a roster entry when (a)
+               the entry is "owned" by the current signed-in user, OR (b)
+               the user has the commissioner/admin role for any tournament
+               that player participates in. Don't ship this button to
+               everyone — it lets one user wipe their local view of
+               another player's stats, which is fine on a personal device
+               but should be admin-only on shared/family devices. -->
+        </div>
       </div>
     </div>
 
@@ -10588,6 +10639,10 @@ async function renderStats() {
   const roster = await getPlayerRoster();
   const select = $('stats-player-select');
   if (!select) return;
+  // Keep the danger-zone delete-player picker in sync with the current
+  // roster every time the Stats tab is rendered. No-op when the admin
+  // gate is off (function returns early).
+  try { await renderDeletePlayerPicker(); } catch (e) { /* non-fatal */ }
   // Sort roster: "me" first, then by lastUsed desc
   const meName = await getMeName();
   const sorted = [...roster].sort((a, b) => {
@@ -10884,18 +10939,49 @@ async function deleteRecentGame(code) {
 // confirm() so the user knows what they're about to do, then a typed
 // "RESET" challenge so a stray tap on the danger button can't nuke the
 // whole group's data.
+//
+// SCOPE OF THIS FUNCTION:
+// Local-only. This clears YOUR device's view: roster, last-game pointer,
+// "me" pointer, recent-rounds INDEX, tournaments INDEX, course-library
+// additions, welcome flag, and any cached game:CODE blobs.
+//
+// It does NOT delete any shared Supabase data:
+//   • Saved round records (rows in the `games` table) stay intact
+//   • The shared `recent-games` singleton stays intact in Supabase
+//   • The shared `tourneys` and `courses` singletons stay intact
+//
+// Why: an earlier version of this function called deleteRecentGame() in a
+// loop, which wiped Supabase rows. That meant resetting your stats here
+// would also erase every other player's record of those rounds. Bad.
+//
+// Note that because the recent-rounds list IS a shared singleton, after
+// reload your local copy will resync from Supabase and the rounds will
+// reappear. That's intentional — your data integrity is preserved, and
+// "reset" is really "clear my local stats / personal bindings." For test
+// data you genuinely want gone for everyone, an admin / commissioner
+// would need a separate "remove this specific round for the whole group"
+// flow, which is out of scope for now.
+//
+// TODO REMOVE / REVISIT WITH AUTH: once authentication is in place, the
+// danger-zone tools (this AND the single-player delete) MUST be locked
+// down. Right now anything that touches localStorage is unauthenticated
+// — anyone on a shared device, or anyone with the URL flag, could trigger
+// this. After auth lands: (a) require admin/commissioner role to expose
+// the UI at all; (b) make this function explicitly scope to data the
+// signed-in user owns; (c) audit-log every reset/delete with the actor.
 async function resetAllData() {
   // STEP 1 — informational confirmation
   const ok1 = confirm(
-    'Reset ALL data?\n\n' +
-    'This will permanently delete:\n' +
-    '  • Every saved round (yours and the whole group\'s)\n' +
-    '  • Every player\'s stats and score history\n' +
-    '  • Every tournament\n' +
-    '  • Every saved course scorecard\n' +
+    'Reset MY local stats?\n\n' +
+    'This will clear from THIS DEVICE ONLY:\n' +
+    '  • Your saved player roster + lifetime stats\n' +
+    '  • Local list of recent rounds\n' +
+    '  • Local list of tournaments\n' +
+    '  • Your "me" pointer + last-opened-round pointer\n' +
     '\n' +
-    'This wipes the SHARED database that everyone using the app sees.\n' +
-    'It cannot be undone.\n\n' +
+    'This does NOT delete shared round data. Other players will keep\n' +
+    'every round they played in. The shared rounds list will resync\n' +
+    'from the server after reload, so rounds may reappear here too.\n\n' +
     'Continue?'
   );
   if (!ok1) return;
@@ -10908,77 +10994,179 @@ async function resetAllData() {
     return;
   }
 
-  showToast('Wiping data…');
+  showToast('Clearing local data…');
 
-  // 1) Delete every individual game record. We do this first so each game's
-  //    underlying row in the games table is gone before we wipe the
-  //    recent-games index. deleteRecentGame handles both Supabase + local.
-  try {
-    const v = await safeGet(KEY_RECENT, true);
-    let recent = [];
-    if (v) {
-      try { recent = JSON.parse(v); } catch (e) { recent = []; }
-    }
-    for (const r of (recent || [])) {
-      if (r && r.code) {
-        try { await deleteRecentGame(r.code); } catch (e) {
-          console.warn('reset: failed to delete game', r.code, e);
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('reset: enumerate recent games failed', e);
-  }
-
-  // 2) Clear all the shared (group-visible) keys
-  const sharedKeysToWipe = [
-    KEY_RECENT,            // recent games index
-    KEY_TOURNEYS,          // tournaments
-    KEY_COURSE_DATA,       // saved course scorecards (including Michigan bootstrap)
-    KEY_COURSE_LIBRARY     // user-added course library entries
-  ];
-  for (const k of sharedKeysToWipe) {
-    try { await safeSet(k, '', true); } catch (e) {
-      console.warn('reset: failed to clear shared key', k, e);
+  // Helper: clear a single localStorage key. We deliberately bypass
+  // safeSet() here — safeSet would propagate the empty value to Supabase
+  // for shared singletons, which is what the old version did wrong.
+  function clearLocal(key) {
+    try { localStorage.removeItem(key); } catch (e) {
+      console.warn('reset: failed to remove ' + key, e);
     }
   }
 
-  // 3) Clear all personal/local keys
-  const personalKeysToWipe = [
-    KEY_PLAYER_ROSTER,     // your saved player roster + stats history
-    KEY_LAST,              // last opened game pointer
-    KEY_ME                 // "me" pointer (which roster entry is you)
-  ];
-  for (const k of personalKeysToWipe) {
-    try { await safeSet(k, '', false); } catch (e) {
-      console.warn('reset: failed to clear personal key', k, e);
-    }
-  }
+  // 1) Personal keys — entirely safe to nuke, these are local-only.
+  clearLocal(KEY_PLAYER_ROSTER);    // your saved player roster + lifetime stats
+  clearLocal(KEY_LAST);             // last opened game pointer
+  clearLocal(KEY_ME);               // "me" pointer (which roster entry is you)
+  clearLocal(KEY_WELCOME_SEEN);     // first-run welcome flag
 
-  // 4) Clear the welcome-seen flag and any straggler localStorage entries
-  //    (game:CODE caches that didn't get removed for any reason).
+  // 2) Local-cached copies of SHARED indexes. We clear our LOCAL cache so
+  //    the immediate view is empty, but the Supabase row underneath stays
+  //    intact for the rest of the group. On next read, our local cache
+  //    will resync from Supabase — so this is really a "reset my local
+  //    view" rather than a true wipe.
+  clearLocal(KEY_RECENT);           // recent games index (shared singleton)
+  clearLocal(KEY_TOURNEYS);         // tournaments (shared singleton)
+  clearLocal(KEY_COURSE_DATA);      // saved course scorecards (shared singleton)
+  clearLocal(KEY_COURSE_LIBRARY);   // user-added course library entries (local-only)
+
+  // 3) Drop locally cached game:CODE blobs. These are per-round local
+  //    caches; the authoritative copy lives in Supabase. Clearing them
+  //    here means the next time the user opens a round, it pulls fresh
+  //    from the server.
   try {
-    localStorage.removeItem(KEY_WELCOME_SEEN);
-  } catch (e) {}
-  try {
-    // Scrub any leftover 'game:*' cache entries
     const toRemove = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (k && k.indexOf('game:') === 0) toRemove.push(k);
     }
-    toRemove.forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
-  } catch (e) {}
+    toRemove.forEach(clearLocal);
+  } catch (e) {
+    console.warn('reset: failed to scan game:* cache entries', e);
+  }
 
-  // 5) Reload the page so all in-memory state (state.game, COURSE_LIBRARY,
+  // 4) Reload the page so all in-memory state (state.game, COURSE_LIBRARY,
   //    roster caches, etc.) re-initializes from the now-empty stores. The
-  //    Michigan 2026 bootstrap will re-run on boot and re-populate those
-  //    scorecards — but everything else (rounds, roster, tourneys) starts
-  //    from scratch.
-  showToast('All data wiped — reloading…');
+  //    Michigan 2026 bootstrap will re-run on boot — but ONLY if the
+  //    Supabase course data is also empty. If other players have already
+  //    written course data, the bootstrap is a no-op.
+  showToast('Local data cleared — reloading…');
   setTimeout(() => {
     try { window.location.reload(); } catch (e) {}
   }, 800);
+}
+
+// ============================================================
+// DELETE SINGLE PLAYER — testing-only cleanup tool
+// ============================================================
+// Surgically removes one player from the roster (along with their lifetime
+// stats / score history). Saved round records keep their record of who
+// played — we deliberately don't rewrite round data, because (a) that's
+// historical record, and (b) a player who's been deleted may show up later
+// as a fresh roster entry if they ever play another round, and we don't
+// want their old rounds to silently re-attach to a different person.
+//
+// TODO REMOVE BEFORE PROD (or replace gate): currently exposed only when
+// ROSTER_CLEANUP_ENABLED is true (set via ?cleanup=1 in URL). Once real
+// auth is wired up, this should require either:
+//   - the current user "owns" the player being deleted, OR
+//   - the current user is a commissioner of a tournament that includes
+//     this player.
+// Without that check, anyone on a shared device could nuke anyone's stats.
+async function renderDeletePlayerPicker() {
+  const section = $('delete-player-section');
+  const select = $('delete-player-select');
+  const btn = $('btn-delete-player');
+  if (!section || !select || !btn) return;
+  // Only render content when the admin gate is on. Otherwise leave the
+  // section hidden — wireDangerZoneDelete() already set display:none.
+  if (!ROSTER_CLEANUP_ENABLED) return;
+
+  const roster = await getPlayerRoster();
+  if (!roster || roster.length === 0) {
+    select.innerHTML = '<option value="">— no players in roster —</option>';
+    select.disabled = true;
+    btn.disabled = true;
+    return;
+  }
+  select.disabled = false;
+
+  // Sort alphabetically so picking is predictable. Display: full name + a
+  // small annotation showing round count, so the user can spot test-data
+  // entries (usually 0 rounds) vs real players.
+  const sorted = roster.slice().sort((a, b) =>
+    (displayFull(a) || '').localeCompare(displayFull(b) || '')
+  );
+  const opts = ['<option value="">— pick a player —</option>'];
+  sorted.forEach(p => {
+    const full = displayFull(p) || p.firstName || '?';
+    const rounds = (p.scoreHistory || []).length;
+    const key = rosterKey(p);
+    opts.push('<option value="' + escAttr(key) + '">' +
+      escAttr(full) + ' (' + rounds + ' round' + (rounds === 1 ? '' : 's') + ')' +
+      '</option>');
+  });
+  select.innerHTML = opts.join('');
+
+  // Button starts disabled; enable when a real player is selected.
+  btn.disabled = true;
+}
+
+// Wire the danger-zone delete-player UI. Called once on init.
+function wireDangerZoneDelete() {
+  const section = $('delete-player-section');
+  const select = $('delete-player-select');
+  const btn = $('btn-delete-player');
+  if (!section || !select || !btn) return;
+
+  // Hidden by default. Only show when the admin gate is enabled — same flag
+  // that controls the roster cleanup / merge UI.
+  if (!ROSTER_CLEANUP_ENABLED) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = 'block';
+
+  // Enable the delete button only when a real option is selected (not the
+  // placeholder "— pick a player —"). Belt-and-suspenders against the user
+  // tapping the button with nothing chosen.
+  select.onchange = () => {
+    btn.disabled = !select.value;
+  };
+
+  btn.onclick = async () => {
+    const key = select.value;
+    if (!key) return;
+    const roster = await getPlayerRoster();
+    const target = roster.find(p => rosterKey(p) === key);
+    if (!target) {
+      showToast('Player not found — list may be out of sync');
+      await renderDeletePlayerPicker();
+      return;
+    }
+    const full = displayFull(target) || target.firstName || '?';
+    const rounds = (target.scoreHistory || []).length;
+    // Confirm dialog spells out the scope precisely: local roster only.
+    // Round count surfaces in case the user accidentally picks a real
+    // player with real history. The "what stays" paragraph is critical
+    // — without it, the user can't tell if this is a global delete or
+    // a local one, and might assume the worst.
+    const msg = 'Delete "' + full + '" from your local roster?\n\n' +
+      'This will remove from THIS DEVICE ONLY:\n' +
+      '  • This player\'s roster entry\n' +
+      '  • Their ' + rounds + ' round' + (rounds === 1 ? '' : 's') + ' of lifetime stats / score history\n' +
+      '\n' +
+      'What stays untouched:\n' +
+      '  • Saved round records (Rounds tab) — other players still see\n' +
+      '    every round they played in, with this player\'s scores intact\n' +
+      '  • This player\'s entries on any other device\n' +
+      '\n' +
+      'Continue?';
+    if (!confirm(msg)) return;
+
+    try {
+      await deletePlayerFromRoster(target.firstName, target.lastName);
+      showToast('Deleted ' + full);
+      await renderDeletePlayerPicker();
+      // Refresh the stats player select too, since the deleted player
+      // would have appeared there.
+      try { await renderStats(); } catch (e) {}
+    } catch (e) {
+      console.warn('Delete player failed:', e);
+      showToast('Delete failed — see console');
+    }
+  };
 }
 
 // ============================================================
@@ -11410,6 +11598,12 @@ async function init() {
 
   // Stats tab: danger-zone full reset
   $('btn-reset-all-stats').onclick = () => resetAllData();
+
+  // Stats tab: danger-zone delete single player (admin-gated, see notes
+  // on renderDeletePlayerPicker / wireDangerZoneDelete). Wires once here;
+  // picker contents are refreshed each time the Stats tab is shown so the
+  // dropdown stays in sync after rounds are added / players deleted.
+  wireDangerZoneDelete();
 
   // Live slider label
   $('hcp-pct').oninput = (e) => {
