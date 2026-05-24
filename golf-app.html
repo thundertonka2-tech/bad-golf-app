@@ -2662,7 +2662,54 @@
          the user can dismiss without scrolling to find it. Styled as primary
          (blue) since "I'm done adding" is the main exit action. -->
     <div class="actions" style="margin-top:12px">
-      <button class="primary full" id="roster-cancel">Done adding players</button>
+      <button class="full" id="btn-roster-cleanup" style="flex:1">🧹 Clean up duplicates</button>
+      <button class="primary full" id="roster-cancel" style="flex:1">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Roster cleanup modal — duplicate review + merge UI -->
+<div class="modal-overlay" id="cleanup-modal">
+  <div class="modal" style="max-width:640px">
+    <h2 style="margin-bottom:4px">🧹 Clean up roster</h2>
+    <div class="small-text" style="margin-bottom:12px;color:var(--text-muted)">
+      Review suggested duplicates below. Merging combines all score history into the winner.
+    </div>
+    <div id="cleanup-content" style="max-height:60vh;overflow-y:auto"></div>
+    <div class="actions" style="margin-top:14px">
+      <button id="cleanup-manual" style="flex:1">Manual merge…</button>
+      <button class="primary" id="cleanup-close" style="flex:1">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manual merge modal — pick any two players to combine -->
+<div class="modal-overlay" id="manual-merge-modal">
+  <div class="modal">
+    <h2 style="margin-bottom:4px">Manual merge</h2>
+    <div class="small-text" style="margin-bottom:12px;color:var(--text-muted)">
+      Pick the player to keep (winner), then the duplicates to merge into them.
+    </div>
+    <label style="display:block;font-size:13px;margin-bottom:4px;font-weight:600">Keep this player:</label>
+    <select id="manual-merge-winner" style="width:100%;margin-bottom:12px"></select>
+    <label style="display:block;font-size:13px;margin-bottom:4px;font-weight:600">Merge these into them:</label>
+    <div id="manual-merge-losers" style="max-height:240px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:12px"></div>
+    <div class="actions">
+      <button id="manual-merge-cancel" style="flex:1">Cancel</button>
+      <button class="primary" id="manual-merge-confirm" style="flex:1">Merge</button>
+    </div>
+  </div>
+</div>
+
+<!-- Prevention modal — fired on Start round when a new player looks like an existing one -->
+<div class="modal-overlay" id="prevent-dupe-modal">
+  <div class="modal">
+    <h2 style="margin-bottom:4px" id="prevent-dupe-title">Same player?</h2>
+    <div class="small-text" style="margin-bottom:12px;color:var(--text-muted)" id="prevent-dupe-subtitle"></div>
+    <div id="prevent-dupe-options" style="max-height:50vh;overflow-y:auto"></div>
+    <div class="actions" style="margin-top:14px">
+      <button id="prevent-dupe-new" style="flex:1">No, new player</button>
+      <button id="prevent-dupe-cancel" style="flex:1">Back to edit</button>
     </div>
   </div>
 </div>
@@ -3421,17 +3468,20 @@ async function upsertPlayerInRoster(firstName, lastName, hcp) {
   const l = (lastName || '').trim();
   if (!f) return; // first name is required
   const roster = await getPlayerRoster();
-  const fLower = f.toLowerCase();
-  const lLower = l.toLowerCase();
-  // Match: same first + same last (both case-insensitive). Empty lastName
-  // only matches another empty lastName.
+  const fNorm = normalizeNameSegment(f);
+  const lNorm = normalizeNameSegment(l);
+  // Match using normalized comparison so apostrophe / hyphen / case variants
+  // resolve to the existing entry instead of creating a duplicate.
+  // "OConnor" matches "O'Connor"; "smith-jones" matches "Smith Jones".
   const idx = roster.findIndex(p =>
-    (p.firstName || '').toLowerCase() === fLower &&
-    (p.lastName || '').toLowerCase() === lLower
+    normalizeNameSegment(p.firstName) === fNorm &&
+    normalizeNameSegment(p.lastName) === lNorm
   );
   if (idx >= 0) {
     roster[idx].hcp = hcp;
     roster[idx].lastUsed = Date.now();
+    // Don't overwrite the existing canonical spelling — keep whatever's saved
+    // (e.g. keep "O'Connor" rather than letting "OConnor" overwrite it).
   } else {
     roster.push({
       firstName: f,
@@ -3443,7 +3493,8 @@ async function upsertPlayerInRoster(firstName, lastName, hcp) {
     });
   }
   roster.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
-  await savePlayerRoster(roster.slice(0, 50));
+  // Cap at 200 (was 50, which silently dropped tail entries for deep rosters).
+  await savePlayerRoster(roster.slice(0, 200));
 }
 
 async function deletePlayerFromRoster(firstName, lastName) {
@@ -3455,6 +3506,299 @@ async function deletePlayerFromRoster(firstName, lastName) {
       (p.lastName || '').toLowerCase() === lLower)
   );
   await savePlayerRoster(filtered);
+}
+
+// ============================================================
+// ROSTER DEDUPE — normalization, fuzzy matching, merge helpers
+// ============================================================
+// Normalize a name segment for comparison: lowercase, trim, strip apostrophes
+// and hyphens, collapse internal whitespace. So "O'Connor" / "OConnor" /
+// "o connor " all reduce to "oconnor".
+function normalizeNameSegment(s) {
+  return (s || '')
+    .toLowerCase()
+    .replace(/[\u2018\u2019'`-]/g, '') // straight + curly apostrophes + hyphens
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+// Stable identity key for a roster entry — used as map key for merges.
+// Uses the canonical (raw-cased, raw-punctuated) first+last so two records
+// that look identical to the eye but are stored differently get distinct
+// keys until the user decides to merge them.
+function rosterKey(p) {
+  return (p.firstName || '') + '\x1f' + (p.lastName || '');
+}
+
+// Iterative Levenshtein distance. Returns number of single-character edits
+// (insert, delete, substitute) to turn a into b. Used for "did you mean"
+// fuzzy matching on roster names — short strings (typical name lengths
+// under 20 chars), so O(n*m) is fine.
+function levenshtein(a, b) {
+  a = a || ''; b = b || '';
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  // Early exit if the length difference is already too big for the threshold
+  // callers care about (we always call with threshold 2).
+  if (Math.abs(a.length - b.length) > 4) return Math.abs(a.length - b.length);
+  let prev = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  let curr = new Array(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min(
+        curr[j - 1] + 1,        // insertion
+        prev[j] + 1,            // deletion
+        prev[j - 1] + cost      // substitution
+      );
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[b.length];
+}
+
+// Find pairs of roster entries that are likely the same person. Returns an
+// array of "suggestion" objects:
+//   { type: 'first-only' | 'fuzzy-full' | 'fuzzy-last',
+//     reason: string,           // human-readable explanation
+//     candidates: [p1, p2, ...] // 2+ roster entries; first is the proposed
+//                               //   winner (the one with most rounds/most-
+//                               //   recently-used + a non-empty last name)
+//   }
+// Suggestions are sorted with highest-confidence groupings first.
+function findRosterDuplicates(roster) {
+  if (!Array.isArray(roster) || roster.length < 2) return [];
+  const suggestions = [];
+  const used = new Set(); // rosterKeys already grouped — avoid double-flagging
+
+  // Helper: pick the "winner" from a list — most rounds played > most recent
+  // use > has a non-empty last name. The winner is what we'd default the
+  // merge target to (user can override in the UI).
+  function pickWinner(group) {
+    return group.slice().sort((a, b) => {
+      const ar = (a.scoreHistory || []).length;
+      const br = (b.scoreHistory || []).length;
+      if (ar !== br) return br - ar;
+      const aLast = (a.lastName || '').trim() ? 1 : 0;
+      const bLast = (b.lastName || '').trim() ? 1 : 0;
+      if (aLast !== bLast) return bLast - aLast;
+      return (b.lastUsed || 0) - (a.lastUsed || 0);
+    })[0];
+  }
+
+  // PASS 1 — Bare first name with no last name, when there's at least one
+  // other roster entry sharing that first name plus a last name. Example:
+  // "Tyler" alone + "Tyler O'Connor" → suggest merging Tyler → Tyler O'Connor.
+  roster.forEach(p => {
+    const key = rosterKey(p);
+    if (used.has(key)) return;
+    const f = normalizeNameSegment(p.firstName);
+    if (!f) return;
+    if ((p.lastName || '').trim() !== '') return; // only orphan-first entries
+    const matches = roster.filter(q => {
+      if (q === p) return false;
+      if (used.has(rosterKey(q))) return false;
+      return normalizeNameSegment(q.firstName) === f &&
+             (q.lastName || '').trim() !== '';
+    });
+    if (matches.length >= 1) {
+      const group = [p, ...matches];
+      const winner = pickWinner(group);
+      const ordered = [winner, ...group.filter(g => g !== winner)];
+      suggestions.push({
+        type: 'first-only',
+        reason: `"${displayFull(p) || p.firstName}" has no last name — likely the same as ${matches.map(m => '"' + displayFull(m) + '"').join(' / ')}`,
+        candidates: ordered
+      });
+      ordered.forEach(g => used.add(rosterKey(g)));
+    }
+  });
+
+  // PASS 2 — Fuzzy full-name match. Two entries that both have first + last,
+  // and whose normalized "firstname lastname" strings differ by ≤ 2 edits.
+  // Catches "O'Connor"/"OConnor" (0 edits after normalize), "Conor"/"Connor"
+  // (1 edit), "Mathew"/"Matthew" (1 edit), "Kilinc"/"Kilink" (1 edit).
+  const remaining = roster.filter(p => !used.has(rosterKey(p)));
+  for (let i = 0; i < remaining.length; i++) {
+    const p = remaining[i];
+    if (used.has(rosterKey(p))) continue;
+    const pFull = normalizeNameSegment((p.firstName || '') + ' ' + (p.lastName || ''));
+    if (!pFull) continue;
+    const group = [p];
+    for (let j = i + 1; j < remaining.length; j++) {
+      const q = remaining[j];
+      if (used.has(rosterKey(q))) continue;
+      const qFull = normalizeNameSegment((q.firstName || '') + ' ' + (q.lastName || ''));
+      if (!qFull) continue;
+      // Skip exact-normalized matches that have no last name on either side
+      // (those were handled by PASS 1).
+      if (pFull === qFull) {
+        group.push(q);
+        continue;
+      }
+      const d = levenshtein(pFull, qFull);
+      if (d > 0 && d <= 2) {
+        // Same first name as a precondition for fuzzy match — keeps us from
+        // bridging totally unrelated names that happen to be close (e.g.
+        // "Brian" / "Bryan" are fine to flag, but we don't want "Mike Lee" /
+        // "Mike Hee" to look like a dupe pair if first names differ).
+        const sameFirst = normalizeNameSegment(p.firstName) === normalizeNameSegment(q.firstName);
+        if (sameFirst) group.push(q);
+      }
+    }
+    if (group.length >= 2) {
+      const winner = pickWinner(group);
+      const ordered = [winner, ...group.filter(g => g !== winner)];
+      suggestions.push({
+        type: 'fuzzy-full',
+        reason: `Similar names: ${ordered.map(g => '"' + displayFull(g) + '"').join(' vs ')}`,
+        candidates: ordered
+      });
+      ordered.forEach(g => used.add(rosterKey(g)));
+    }
+  }
+
+  return suggestions;
+}
+
+// Merge a list of roster entries into a single canonical entry.
+//   winnerKey: rosterKey() of the entry that survives (gets the canonical
+//              firstName + lastName + the highest-info HCP).
+//   loserKeys: array of rosterKey()s to absorb into the winner.
+// Behavior: concatenates all loser scoreHistory[] onto winner, dedups by
+// (date + course + gross), picks the latest non-zero HCP, sets lastUsed
+// to the most recent across all merged entries. Removes losers. Roster
+// limit gets bumped from 50 → 200 since the original truncate was a bug.
+async function mergeRosterPlayers(winnerKey, loserKeys) {
+  const roster = await getPlayerRoster();
+  const winnerIdx = roster.findIndex(p => rosterKey(p) === winnerKey);
+  if (winnerIdx < 0) {
+    console.warn('mergeRosterPlayers: winner not found', winnerKey);
+    return false;
+  }
+  const winner = roster[winnerIdx];
+  const losers = roster.filter(p => loserKeys.includes(rosterKey(p)));
+  if (losers.length === 0) return false;
+
+  // Combine score history
+  const seen = new Set();
+  const combined = [];
+  function keyForRound(r) {
+    return [r.date || 0, r.course || '', r.gross != null ? r.gross : 'x', r.gameCode || ''].join('|');
+  }
+  [winner, ...losers].forEach(p => {
+    (p.scoreHistory || []).forEach(r => {
+      const k = keyForRound(r);
+      if (seen.has(k)) return;
+      seen.add(k);
+      combined.push(r);
+    });
+  });
+  combined.sort((a, b) => (b.date || 0) - (a.date || 0));
+  winner.scoreHistory = combined.slice(0, 50);
+
+  // Pick the best HCP across the group — most recent non-zero wins; fall
+  // back to whatever the winner had.
+  const sortedByRecent = [winner, ...losers].slice()
+    .sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+  const hcpSource = sortedByRecent.find(p => p.hcp != null && p.hcp !== 0);
+  if (hcpSource) winner.hcp = hcpSource.hcp;
+
+  // Set lastUsed to the most recent across all merged
+  winner.lastUsed = Math.max.apply(null,
+    [winner, ...losers].map(p => p.lastUsed || 0)
+  );
+  // Sync legacy `name` field with structured names
+  winner.name = combineName(winner.firstName, winner.lastName);
+
+  // Drop the losers from the roster
+  const filtered = roster.filter(p => !loserKeys.includes(rosterKey(p)));
+  // Make sure the winner is the updated reference (in case it moved)
+  const updatedWinnerIdx = filtered.findIndex(p => rosterKey(p) === winnerKey);
+  if (updatedWinnerIdx >= 0) filtered[updatedWinnerIdx] = winner;
+  filtered.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+  // Bump the truncate cap from 50 to 200 — 50 was silently dropping tail
+  // entries for groups with deep rosters + dupes.
+  await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(filtered.slice(0, 200)), false);
+  return true;
+}
+
+// Rename a single roster entry (used by the cleanup UI's "Edit" action).
+// Handles the rosterKey change without losing the entry.
+async function renameRosterPlayer(oldKey, newFirstName, newLastName) {
+  const roster = await getPlayerRoster();
+  const idx = roster.findIndex(p => rosterKey(p) === oldKey);
+  if (idx < 0) return false;
+  const f = (newFirstName || '').trim();
+  const l = (newLastName || '').trim();
+  if (!f) return false;
+  // If renaming would collide with an existing entry, refuse — caller should
+  // route through mergeRosterPlayers() instead.
+  const newKey = f + '\x1f' + l;
+  if (newKey !== oldKey && roster.some(p => rosterKey(p) === newKey)) {
+    return 'collision';
+  }
+  roster[idx].firstName = f;
+  roster[idx].lastName = l;
+  roster[idx].name = combineName(f, l);
+  await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
+  return true;
+}
+
+// Check a single new player (about to be added in setup) against the
+// existing roster for likely dupes. Returns:
+//   null                        — no conflict, safe to proceed
+//   { type, candidates: [...] } — conflict; show the prevention modal
+// Types:
+//   'first-only-orphan'     — user typed first name only, but roster has
+//                             ≥1 entries with that first name + a last name
+//   'fuzzy-existing'        — close match to an existing roster entry
+function checkPlayerForRosterConflict(firstName, lastName, roster) {
+  const f = (firstName || '').trim();
+  const l = (lastName || '').trim();
+  if (!f) return null;
+  if (!Array.isArray(roster) || roster.length === 0) return null;
+  const fNorm = normalizeNameSegment(f);
+  const lNorm = normalizeNameSegment(l);
+  const fullNorm = normalizeNameSegment(f + ' ' + l);
+
+  // Exact-match check first — if there's an exact-normalized hit, the user
+  // is just re-adding an existing player, not creating a dupe. No conflict.
+  const exact = roster.find(p =>
+    normalizeNameSegment(p.firstName) === fNorm &&
+    normalizeNameSegment(p.lastName) === lNorm
+  );
+  if (exact) return null;
+
+  // Case 1: user has not entered a last name, but the roster has matching
+  // first-name entries that DO have last names. Likely they meant one of
+  // those.
+  if (!l) {
+    const matches = roster.filter(p =>
+      normalizeNameSegment(p.firstName) === fNorm &&
+      (p.lastName || '').trim() !== ''
+    );
+    if (matches.length >= 1) {
+      return { type: 'first-only-orphan', candidates: matches };
+    }
+    return null;
+  }
+
+  // Case 2: user typed first + last, but it's a near-miss for an existing
+  // full name. Flag for confirmation.
+  const fuzzy = roster.filter(p => {
+    if (normalizeNameSegment(p.firstName) !== fNorm) return false;
+    const pFullNorm = normalizeNameSegment((p.firstName || '') + ' ' + (p.lastName || ''));
+    if (pFullNorm === fullNorm) return false; // identical → exact (handled)
+    const d = levenshtein(pFullNorm, fullNorm);
+    return d > 0 && d <= 2;
+  });
+  if (fuzzy.length >= 1) {
+    return { type: 'fuzzy-existing', candidates: fuzzy };
+  }
+  return null;
 }
 
 // Append a single round's scores to each player's history in the roster.
@@ -4672,6 +5016,261 @@ async function openRosterPicker() {
   $('roster-modal').classList.add('show');
   $('roster-search').value = '';
   await renderRosterList();
+}
+
+// ============================================================
+// ROSTER CLEANUP UI
+// ============================================================
+async function openRosterCleanup() {
+  $('cleanup-modal').classList.add('show');
+  await renderCleanupContent();
+}
+function closeRosterCleanup() {
+  $('cleanup-modal').classList.remove('show');
+}
+
+async function renderCleanupContent() {
+  const container = $('cleanup-content');
+  const roster = await getPlayerRoster();
+  const suggestions = findRosterDuplicates(roster);
+
+  // Always show roster stats at the top so the user sees what they're working with.
+  const statsHtml = `
+    <div style="padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:12px;font-size:13px">
+      <div><strong>${roster.length}</strong> player${roster.length === 1 ? '' : 's'} in roster</div>
+      <div style="color:var(--text-muted);font-size:11px;margin-top:2px">
+        ${suggestions.length === 0 ? 'No obvious duplicates found.' : suggestions.length + ' suggested merge' + (suggestions.length === 1 ? '' : 's') + ' below.'}
+      </div>
+    </div>
+  `;
+
+  if (suggestions.length === 0) {
+    container.innerHTML = statsHtml +
+      `<div class="small-text" style="text-align:center;padding:20px;color:var(--text-muted)">
+        Roster looks clean. Use "Manual merge…" if you spot any duplicates I missed.
+      </div>`;
+    return;
+  }
+
+  const cardsHtml = suggestions.map((sug, sugIdx) => {
+    const winnerKey = rosterKey(sug.candidates[0]);
+    const rowsHtml = sug.candidates.map((p, i) => {
+      const rounds = (p.scoreHistory || []).length;
+      const lastUsed = p.lastUsed
+        ? new Date(p.lastUsed).toLocaleDateString()
+        : '—';
+      const isWinner = i === 0;
+      return `
+        <label class="cleanup-row" style="display:flex;align-items:center;gap:8px;padding:8px;border-radius:6px;background:${isWinner ? 'var(--accent-soft, rgba(34,139,34,0.08))' : 'var(--surface-2)'};margin-bottom:4px;cursor:pointer">
+          <input type="radio" name="cleanup-winner-${sugIdx}" value="${esc(rosterKey(p))}" ${isWinner ? 'checked' : ''} style="margin:0;flex-shrink:0">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;font-size:14px">${esc(displayFull(p) || p.firstName || '?')}${isWinner ? ' <span class="small-text" style="color:var(--accent);font-weight:600;font-size:10px;background:var(--accent-soft, rgba(34,139,34,0.15));padding:1px 6px;border-radius:8px">KEEP</span>' : ''}</div>
+            <div class="small-text" style="color:var(--text-muted);font-size:11px">
+              HCP ${p.hcp != null ? p.hcp : '—'} · ${rounds} round${rounds === 1 ? '' : 's'} · last used ${lastUsed}
+            </div>
+          </div>
+        </label>
+      `;
+    }).join('');
+
+    return `
+      <div class="card" style="padding:12px;margin-bottom:10px;border:1px solid var(--border);border-radius:10px" data-sug-idx="${sugIdx}">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${esc(sug.reason)}</div>
+        ${rowsHtml}
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button class="small" data-action="skip" data-sug-idx="${sugIdx}" style="flex:1">Skip</button>
+          <button class="small primary" data-action="merge" data-sug-idx="${sugIdx}" style="flex:1">Merge into keeper</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  container.innerHTML = statsHtml + cardsHtml;
+
+  // Wire merge / skip buttons
+  container.querySelectorAll('button[data-action]').forEach(btn => {
+    btn.onclick = async (e) => {
+      const action = btn.dataset.action;
+      const sugIdx = parseInt(btn.dataset.sugIdx, 10);
+      const sug = suggestions[sugIdx];
+      if (!sug) return;
+      if (action === 'skip') {
+        // Just remove this card from the DOM — they can run cleanup again later.
+        const card = container.querySelector(`.card[data-sug-idx="${sugIdx}"]`);
+        if (card) card.remove();
+        return;
+      }
+      if (action === 'merge') {
+        const card = container.querySelector(`.card[data-sug-idx="${sugIdx}"]`);
+        const checked = card.querySelector(`input[name="cleanup-winner-${sugIdx}"]:checked`);
+        if (!checked) {
+          showToast('Pick a player to keep');
+          return;
+        }
+        const winnerKey = checked.value;
+        const loserKeys = sug.candidates
+          .map(p => rosterKey(p))
+          .filter(k => k !== winnerKey);
+        const ok = await mergeRosterPlayers(winnerKey, loserKeys);
+        if (ok) {
+          showToast('Merged');
+          await renderCleanupContent();
+          // Refresh the picker list too in case it's behind this modal
+          if ($('roster-modal').classList.contains('show')) {
+            await renderRosterList();
+          }
+        } else {
+          showToast('Merge failed');
+        }
+      }
+    };
+  });
+}
+
+// ============================================================
+// MANUAL MERGE UI
+// ============================================================
+async function openManualMerge() {
+  $('manual-merge-modal').classList.add('show');
+  await renderManualMerge();
+}
+function closeManualMerge() {
+  $('manual-merge-modal').classList.remove('show');
+}
+async function renderManualMerge() {
+  const roster = await getPlayerRoster();
+  const sorted = roster.slice().sort((a, b) =>
+    displayFull(a).localeCompare(displayFull(b))
+  );
+  const winnerSelect = $('manual-merge-winner');
+  winnerSelect.innerHTML = sorted.map(p =>
+    `<option value="${esc(rosterKey(p))}">${esc(displayFull(p) || p.firstName)}${(p.scoreHistory || []).length ? ' (' + (p.scoreHistory || []).length + ' rounds)' : ''}</option>`
+  ).join('');
+
+  function renderLosers() {
+    const winnerKey = winnerSelect.value;
+    const losers = sorted.filter(p => rosterKey(p) !== winnerKey);
+    const container = $('manual-merge-losers');
+    if (losers.length === 0) {
+      container.innerHTML = '<div class="small-text" style="text-align:center;padding:12px;color:var(--text-muted)">No other players to merge in.</div>';
+      return;
+    }
+    container.innerHTML = losers.map(p => `
+      <label style="display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:4px">
+        <input type="checkbox" value="${esc(rosterKey(p))}" style="margin:0;flex-shrink:0">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px">${esc(displayFull(p) || p.firstName)}</div>
+          <div class="small-text" style="color:var(--text-muted);font-size:10px">HCP ${p.hcp != null ? p.hcp : '—'} · ${(p.scoreHistory || []).length} rounds</div>
+        </div>
+      </label>
+    `).join('');
+  }
+  winnerSelect.onchange = renderLosers;
+  renderLosers();
+}
+
+// ============================================================
+// PREVENTION MODAL — fired pre-Start when a new player looks like a dupe
+// ============================================================
+// State for the prevention flow. Stores the list of rows we still need to
+// confirm and a callback to invoke when the user has resolved all of them.
+const _preventState = { queue: [], rowEls: [], onAllResolved: null };
+
+function showPreventDupeModal(rowEl, firstName, lastName, conflict, callbacks) {
+  const modal = $('prevent-dupe-modal');
+  const title = $('prevent-dupe-title');
+  const subtitle = $('prevent-dupe-subtitle');
+  const options = $('prevent-dupe-options');
+
+  const typedFull = (firstName + ' ' + lastName).trim();
+
+  if (conflict.type === 'first-only-orphan') {
+    title.textContent = `Did you mean…?`;
+    subtitle.textContent = `You entered "${firstName}" with no last name. There ${conflict.candidates.length === 1 ? 'is an existing player' : 'are existing players'} with that first name in your roster:`;
+  } else {
+    title.textContent = `Same player?`;
+    subtitle.textContent = `"${typedFull}" looks similar to an existing player in your roster:`;
+  }
+
+  options.innerHTML = conflict.candidates.map((p, i) => {
+    const rounds = (p.scoreHistory || []).length;
+    return `
+      <button class="full" data-key="${esc(rosterKey(p))}" data-first="${esc(p.firstName || '')}" data-last="${esc(p.lastName || '')}" style="padding:12px;margin-bottom:6px;text-align:left;display:block">
+        <div style="font-weight:600;font-size:14px">${esc(displayFull(p) || p.firstName)}</div>
+        <div class="small-text" style="color:var(--text-muted);font-size:11px;margin-top:2px">
+          Use this player · HCP ${p.hcp != null ? p.hcp : '—'} · ${rounds} round${rounds === 1 ? '' : 's'}
+        </div>
+      </button>
+    `;
+  }).join('');
+
+  // Wire "Use existing" buttons — replace the row's first+last with the
+  // chosen player's name and resolve.
+  options.querySelectorAll('button[data-key]').forEach(btn => {
+    btn.onclick = () => {
+      const newFirst = btn.dataset.first;
+      const newLast = btn.dataset.last;
+      const fi = rowEl.querySelector('.first-name');
+      const li = rowEl.querySelector('.last-name');
+      if (fi) fi.value = newFirst;
+      if (li) li.value = newLast;
+      modal.classList.remove('show');
+      callbacks.onResolved('use-existing');
+    };
+  });
+
+  // "No, new player" — proceed with what they typed
+  $('prevent-dupe-new').onclick = () => {
+    modal.classList.remove('show');
+    callbacks.onResolved('new');
+  };
+  // "Back to edit" — abort start-round; user goes back to the form
+  $('prevent-dupe-cancel').onclick = () => {
+    modal.classList.remove('show');
+    callbacks.onCancelled();
+  };
+
+  modal.classList.add('show');
+}
+
+// Walk all player rows in the setup form and check each for conflicts.
+// Returns a promise that resolves to `true` if the user resolved everything
+// and is ready to start the round, or `false` if they cancelled.
+async function preventDuplicatesBeforeStart() {
+  const roster = await getPlayerRoster();
+  if (!Array.isArray(roster) || roster.length === 0) return true;
+
+  // Collect ALL setup rows up front so we have a stable list even if the
+  // user picks "Use existing" (which mutates the row).
+  const list = $('players-list');
+  const rows = Array.from(list.querySelectorAll('.player-row'));
+
+  for (const row of rows) {
+    const fi = row.querySelector('.first-name');
+    const li = row.querySelector('.last-name');
+    const first = fi ? fi.value.trim() : '';
+    const last = li ? li.value.trim() : '';
+    if (!first) continue; // skip empty rows
+    const conflict = checkPlayerForRosterConflict(first, last, roster);
+    if (!conflict) continue;
+
+    // Show modal and wait for user resolution
+    const result = await new Promise(resolve => {
+      showPreventDupeModal(row, first, last, conflict, {
+        onResolved: (kind) => resolve({ resolved: true, kind }),
+        onCancelled: () => resolve({ resolved: false })
+      });
+    });
+    if (!result.resolved) {
+      return false; // user clicked "Back to edit"
+    }
+    // If they picked "Use existing", the row was rewritten — re-run from the
+    // top in case the rewrite created a new conflict against a different row
+    // (extremely unlikely but cheap). Actually no — only one row was changed,
+    // and we're walking rows linearly; the change can't reintroduce a conflict
+    // for a row we've already passed. Continue on.
+  }
+  return true;
 }
 
 // Render the roster list inside the modal (filtered by search box)
@@ -10619,6 +11218,55 @@ async function init() {
   $('roster-modal').onclick = (e) => {
     if (e.target.id === 'roster-modal') $('roster-modal').classList.remove('show');
   };
+
+  // Cleanup modal wiring
+  $('btn-roster-cleanup').onclick = () => openRosterCleanup();
+  $('cleanup-close').onclick = () => closeRosterCleanup();
+  $('cleanup-modal').onclick = (e) => {
+    if (e.target.id === 'cleanup-modal') closeRosterCleanup();
+  };
+  $('cleanup-manual').onclick = () => openManualMerge();
+
+  // Manual merge modal wiring
+  $('manual-merge-cancel').onclick = () => closeManualMerge();
+  $('manual-merge-modal').onclick = (e) => {
+    if (e.target.id === 'manual-merge-modal') closeManualMerge();
+  };
+  $('manual-merge-confirm').onclick = async () => {
+    const winnerKey = $('manual-merge-winner').value;
+    const loserKeys = Array.from(
+      $('manual-merge-losers').querySelectorAll('input[type=checkbox]:checked')
+    ).map(cb => cb.value);
+    if (!winnerKey || loserKeys.length === 0) {
+      showToast('Pick at least one player to merge in');
+      return;
+    }
+    if (!confirm(`Merge ${loserKeys.length} player${loserKeys.length === 1 ? '' : 's'} into the keeper? This combines all rounds and can't be undone.`)) {
+      return;
+    }
+    const ok = await mergeRosterPlayers(winnerKey, loserKeys);
+    if (ok) {
+      showToast('Merged');
+      closeManualMerge();
+      await renderCleanupContent();
+      if ($('roster-modal').classList.contains('show')) {
+        await renderRosterList();
+      }
+    } else {
+      showToast('Merge failed');
+    }
+  };
+
+  // Prevention modal — close on overlay tap behaves like "Back to edit"
+  $('prevent-dupe-modal').onclick = (e) => {
+    if (e.target.id === 'prevent-dupe-modal') {
+      $('prevent-dupe-modal').classList.remove('show');
+      // No explicit cancel callback fires here — the user dismissed the modal,
+      // which we treat as "back to edit" via the active button handler. To
+      // keep things consistent we invoke the cancel button programmatically.
+      $('prevent-dupe-cancel').click();
+    }
+  };
   $('roster-search').oninput = () => renderRosterList();
 
   // Par presets
@@ -10668,6 +11316,10 @@ async function init() {
 
   // Start round
   $('btn-start-round').onclick = async () => {
+    // First, intercept any roster duplicates with the prevention modal. If
+    // the user cancels at any point in this walk-through, abort start.
+    const dupesResolved = await preventDuplicatesBeforeStart();
+    if (!dupesResolved) return;
     const setup = gatherSetup();
     if (!setup) return;
     const code = $('display-code').dataset.code || generateCode();
