@@ -746,10 +746,11 @@
   /* Leaderboard */
   .lb-row {
     display: grid;
-    /* Position (28px) · Name (flex) · Score (auto) · Money (fixed-ish ~80px)
-       Money column gets explicit min-width via .money rule below so values
-       like -$100.50 fit without bursting through the right edge. */
-    grid-template-columns: 24px 1fr auto auto;
+    /* Position (24px) · Name (flex, min 0) · Score (auto, fixed-ish ~60px)
+       · Money (~78px). The name column is critical — it must take any free
+       width so player names show. Previously the score and money columns
+       were both 'auto' which sometimes squeezed the name to 0px. */
+    grid-template-columns: 24px minmax(60px, 1fr) auto auto;
     gap: 8px;
     align-items: center;
     padding: 10px 10px;
@@ -4972,6 +4973,29 @@ function applySavedConfig(config) {
     renderPlayerTeeSelects();
   }
 
+  // Forgiving name resolver — saved names from earlier sessions may not exactly
+  // match current player names due to edits, schema changes, or apostrophes.
+  // Used by participant restore AND multi-instance pair restore below.
+  //   1. Try exact match against current player.name
+  //   2. Case-insensitive trim match
+  //   3. firstName-only match if unique among current players
+  // Returns the CURRENT player's name (string) or null if not resolved.
+  const currentPlayersForResolve = getCurrentSetupPlayers();
+  function resolveSavedNameToCurrent(savedName) {
+    if (!savedName) return null;
+    let match = currentPlayersForResolve.find(p => p.name === savedName);
+    if (match) return match.name;
+    const sLow = savedName.trim().toLowerCase();
+    match = currentPlayersForResolve.find(p => p.name.trim().toLowerCase() === sLow);
+    if (match) return match.name;
+    const savedFirst = savedName.trim().split(/\s+/)[0].toLowerCase();
+    const firstMatches = currentPlayersForResolve.filter(p =>
+      (p.firstName || '').trim().toLowerCase() === savedFirst
+    );
+    if (firstMatches.length === 1) return firstMatches[0].name;
+    return null;
+  }
+
   // Handicap rules
   if (config.hcpRules) {
     if (config.hcpRules.basis) $('hcp-basis').value = config.hcpRules.basis;
@@ -5023,13 +5047,17 @@ function applySavedConfig(config) {
       : [games.nassau];
     state.nassauInstances = insts.map(inst => {
       // Resolve pair names. Prefer participantNames (stable), fall back to participants (IDs).
+      // Use forgiving name resolver — saved names may have minor differences
+      // from current player names. resolveSavedNameToCurrent handles those.
       let pair = [];
       if (Array.isArray(inst.participantNames)) {
-        pair = inst.participantNames.slice();
+        pair = inst.participantNames
+          .map(n => resolveSavedNameToCurrent(n))
+          .filter(Boolean);
       } else if (Array.isArray(inst.participants)) {
         pair = inst.participants.map(pid => {
           const p = (config.players || []).find(pl => pl.id === pid);
-          return p ? p.name : null;
+          return p ? resolveSavedNameToCurrent(p.name) : null;
         }).filter(Boolean);
       }
       return {
@@ -5089,11 +5117,13 @@ function applySavedConfig(config) {
     state.matchInstances = insts.map(inst => {
       let pair = [];
       if (Array.isArray(inst.participantNames)) {
-        pair = inst.participantNames.slice();
+        pair = inst.participantNames
+          .map(n => resolveSavedNameToCurrent(n))
+          .filter(Boolean);
       } else if (Array.isArray(inst.participants)) {
         pair = inst.participants.map(pid => {
           const p = (config.players || []).find(pl => pl.id === pid);
-          return p ? p.name : null;
+          return p ? resolveSavedNameToCurrent(p.name) : null;
         }).filter(Boolean);
       }
       return {
@@ -5148,7 +5178,9 @@ function applySavedConfig(config) {
   // Restore per-game participant sets. Two sources:
   //   - games.X.participantNames (saved tourneys, names) — preferred, stable
   //   - games.X.participants     (live in-progress rounds, IDs)
-  // The picker stores names internally.
+  // The picker stores names internally. Uses the forgiving resolver defined
+  // at the top of applySavedConfig so saved names map to current names even
+  // when small differences exist.
   if (!state.gameParticipants) state.gameParticipants = {};
   PARTICIPANT_GAME_KEYS.forEach(spec => {
     const cfgKey = ({
@@ -5161,11 +5193,17 @@ function applySavedConfig(config) {
     if (!cfgKey || !games[cfgKey]) return;
     const cfg = games[cfgKey];
     if (Array.isArray(cfg.participantNames)) {
-      cfg.participantNames.forEach(name => state.gameParticipants[spec.key].add(name));
+      cfg.participantNames.forEach(name => {
+        const resolved = resolveSavedNameToCurrent(name);
+        if (resolved) state.gameParticipants[spec.key].add(resolved);
+      });
     } else if (Array.isArray(cfg.participants)) {
       cfg.participants.forEach(pid => {
         const p = (config.players || []).find(pl => pl.id === pid);
-        if (p) state.gameParticipants[spec.key].add(p.name);
+        if (p) {
+          const resolved = resolveSavedNameToCurrent(p.name);
+          if (resolved) state.gameParticipants[spec.key].add(resolved);
+        }
       });
     }
   });
@@ -8464,10 +8502,17 @@ function renderBoard() {
     settlements.forEach(s => {
       const row = document.createElement('div');
       row.className = 'settle-row';
+      // Use first names to avoid truncation on phone widths. Full names get
+      // crushed when 2 fit on one row alongside an arrow + amount chip.
+      // Falls back to s.from / s.to if the player isn't found (defensive).
+      const fromP = g.players.find(p => p.id === s.fromId);
+      const toP = g.players.find(p => p.id === s.toId);
+      const fromLabel = fromP ? displayFirst(fromP) : s.from;
+      const toLabel = toP ? displayFirst(toP) : s.to;
       row.innerHTML = `
-        <div class="from">${s.from}</div>
+        <div class="from">${fromLabel}</div>
         <div class="arrow">→</div>
-        <div class="to">${s.to}</div>
+        <div class="to">${toLabel}</div>
         <div class="amt">$${s.amount.toFixed(2)}</div>
       `;
       sl.appendChild(row);
@@ -8487,9 +8532,13 @@ function renderBoard() {
     const cls = m > 0.005 ? 'pos' : (m < -0.005 ? 'neg' : 'zero');
     const row = document.createElement('div');
     row.className = 'lb-row';
+    // Defensive name display — fall back through firstName, name, then a
+    // visible placeholder if the player record is somehow empty (saved game
+    // missing names, restore bug, etc). Better to show "Player N" than blank.
+    const nameStr = displayFull(p) || displayFirst(p) || p.name || `Player ${i + 1}`;
     row.innerHTML = `
       <div class="pos">${i + 1}</div>
-      <div class="name">${displayFull(p)}${p.hcp > 0 ? ` <span style="color:var(--text-muted);font-weight:400;font-size:11px">(${p.hcp})</span>` : ''}</div>
+      <div class="name">${nameStr}${p.hcp > 0 && !p.playsGross ? ` <span style="color:var(--text-muted);font-weight:400;font-size:11px">(${p.hcp})</span>` : ''}</div>
       <div class="score">${t.count > 0 ? `${t.gross} (${t.count}h)` : '—'}</div>
       <div class="money ${cls}">${signed(m)}</div>
     `;
