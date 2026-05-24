@@ -4139,11 +4139,11 @@ const GAME_BLURBS = {
   },
   vegas: {
     title: 'Vegas',
-    body: 'Teams of 2. Each team\'s score is its two players\' scores concatenated low-high (e.g. a 4 and a 6 = 46). Lower team score wins the difference in points × $/point. Tie on a hole and the next hole\'s bet doubles.'
+    body: 'Teams of 2. Each team\'s score is its two players\' scores concatenated low-high (e.g. 4 and 6 = 46). Lower team score wins the difference × $/point. BOOSTS: birdie flips the opponent\'s score (high-low); 2 birdies, or any eagle, also doubles the bet; 2 eagles ×4; etc. If both teams boost, they cancel — but next hole still doubles. Plain tie also doubles the next hole.'
   },
   dvegas: {
     title: 'Dynamic Vegas',
-    body: 'Same as Vegas, but teams change every hole based on who scored lowest on the previous hole. Low scorer picks their partner for the next hole.'
+    body: 'Same scoring + boost rules as Vegas, but teams change every hole based on the previous hole\'s lowest and highest scorers (they partner up).'
   },
   sixes: {
     title: '6\'s (Round Robin)',
@@ -8080,35 +8080,65 @@ function calcVegas(g) {
     let aTeamScore = pairScores(aScores[0], aScores[1]);
     let bTeamScore = pairScores(bScores[0], bScores[1]);
 
-    // Birdie/eagle effects use gross scores
+    // Birdie/eagle BOOST detection — uses gross scores.
+    // Boost rules (when only ONE team has a boost):
+    //   1 birdie               → flip opponent's score (no double)
+    //   2 birdies              → flip + ×2
+    //   1 eagle (+ any birdies)→ flip + ×2 (birdies ignored if any eagle)
+    //   2 eagles               → flip + ×4
+    //   3+ eagles/better       → flip + ×8 etc. (multiplier = 2^eagles)
+    //   Albatross/HIO          → counted as eagle
+    // When BOTH teams have any boost, the boosts cancel — play this hole at
+    // straight scores. BUT a tieStreak +1 carries to the next hole so it
+    // doubles, since "anything vs anything" still escalates the action even
+    // when the boosts wash each other out.
     const aGross = teamA.map(p => getScore(p, false));
     const bGross = teamB.map(p => getScore(p, false));
-    const aHasBirdie = aGross.some(s => s !== null && s <= par - 1);
-    const bHasBirdie = bGross.some(s => s !== null && s <= par - 1);
-    const aHasEagle = aGross.some(s => s !== null && s <= par - 2);
-    const bHasEagle = bGross.some(s => s !== null && s <= par - 2);
+    const aBirdies = aGross.filter(s => s !== null && s === par - 1).length;
+    const bBirdies = bGross.filter(s => s !== null && s === par - 1).length;
+    const aEagles = aGross.filter(s => s !== null && s <= par - 2).length;
+    const bEagles = bGross.filter(s => s !== null && s <= par - 2).length;
+
+    // Compute each team's boost tier as a multiplier in {1, 2, 4, 8, ...}
+    // where 1 = "flip only", 2+ = "flip + ×N". 0 means no boost at all.
+    // tierMult for "flip only" is 1 because flip happens but no multiplier.
+    function computeTier(eagles, birdies) {
+      if (eagles >= 1) return Math.pow(2, eagles); // 1 eagle → 2, 2 eagles → 4, etc.
+      if (birdies === 1) return 1; // flip only, no double
+      if (birdies >= 2) return 2;  // flip + ×2
+      return 0; // no boost
+    }
+    const aTier = computeTier(aEagles, aBirdies);
+    const bTier = computeTier(bEagles, bBirdies);
 
     // Multiplier starts from any inherited tie carry: 2^tieStreak.
-    // tieStreak=0 → 1x, tieStreak=1 → 2x, tieStreak=2 → 4x, tieStreak=3 → 8x, etc.
     let multiplier = Math.pow(2, tieStreak);
     let flipNote = '';
     let streakNote = tieStreak > 0 ? `${multiplier}x (${tieStreak} tie${tieStreak > 1 ? 's' : ''} carrying)` : '';
 
-    // Birdie flip: a team with a birdie flips the OPPONENT's score (high digit
-    // first). Always on — matches Dynamic Vegas. No toggle.
-    if (aHasBirdie && !bHasBirdie) {
+    // Apply flip + boost-multiplier ONLY if exactly one team has a boost.
+    // Both-team boosts cancel (play straight) but still carry +1 to next hole.
+    let bothCancelCarry = false;
+    if (aTier > 0 && bTier === 0) {
+      // Team A boosts: flip B's score, multiply by tier
       const lo = Math.min(bScores[0], bScores[1]);
       const hi = Math.max(bScores[0], bScores[1]);
       if (hi < 10) bTeamScore = hi * 10 + lo;
-      flipNote = teamA.map(p => p.name).join(' & ') + ' birdied — flipped opponent';
-    } else if (bHasBirdie && !aHasBirdie) {
+      if (aTier > 1) multiplier *= aTier;
+      flipNote = teamA.map(p => p.name).join(' & ') + (aEagles ? (aEagles >= 2 ? ' eagled multiple — flipped + ' + aTier + 'x' : ' eagled — flipped + 2x') : (aBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
+    } else if (bTier > 0 && aTier === 0) {
+      // Team B boosts: flip A's score, multiply by tier
       const lo = Math.min(aScores[0], aScores[1]);
       const hi = Math.max(aScores[0], aScores[1]);
       if (hi < 10) aTeamScore = hi * 10 + lo;
-      flipNote = teamB.map(p => p.name).join(' & ') + ' birdied — flipped opponent';
+      if (bTier > 1) multiplier *= bTier;
+      flipNote = teamB.map(p => p.name).join(' & ') + (bEagles ? (bEagles >= 2 ? ' eagled multiple — flipped + ' + bTier + 'x' : ' eagled — flipped + 2x') : (bBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
+    } else if (aTier > 0 && bTier > 0) {
+      // Both teams boosted — cancel. Play straight scores this hole, but
+      // carry +1 to next hole's tieStreak so it doubles regardless of result.
+      bothCancelCarry = true;
+      flipNote = 'Both teams boosted — cancels (next hole doubles)';
     }
-    // Eagle: also doubles the point swing on that hole. Always on.
-    if ((aHasEagle && !bHasEagle) || (bHasEagle && !aHasEagle)) multiplier *= 2;
 
     const diff = Math.abs(aTeamScore - bTeamScore);
     const points = diff * multiplier;
@@ -8123,11 +8153,11 @@ function calcVegas(g) {
       const perPlayer = total / winners.length;
       winners.forEach(w => money[w.id] += perPlayer);
       losers.forEach(l => money[l.id] -= perPlayer);
-      // Won — reset streak
-      tieStreak = 0;
+      // Won — reset streak (but if both-cancel happened, still carry +1)
+      tieStreak = bothCancelCarry ? 1 : 0;
     } else {
-      // Tied — escalate
-      tieStreak += 1;
+      // Tied — escalate. If both-cancel ALSO happened, that adds an extra +1.
+      tieStreak += bothCancelCarry ? 2 : 1;
     }
 
     holeResults.push({
@@ -8261,34 +8291,47 @@ function calcDynamicVegas(g) {
     let aTeamScore = pairScores(aScores[0], aScores[1]);
     let bTeamScore = pairScores(bScores[0], bScores[1]);
 
-    // Birdie/eagle effects use gross scores
+    // Boost rules: see calcVegas for the full explanation. Identical here.
+    //   1 birdie → flip; 2 birdies → flip+×2; 1 eagle → flip+×2;
+    //   2 eagles → flip+×4; etc. Both teams boosted → cancel + carry +1.
     const aGross = teamA.map(p => getScore(p, h, false));
     const bGross = teamB.map(p => getScore(p, h, false));
-    const aHasBirdie = aGross.some(s => s !== null && s <= par - 1);
-    const bHasBirdie = bGross.some(s => s !== null && s <= par - 1);
-    const aHasEagle = aGross.some(s => s !== null && s <= par - 2);
-    const bHasEagle = bGross.some(s => s !== null && s <= par - 2);
+    const aBirdies = aGross.filter(s => s !== null && s === par - 1).length;
+    const bBirdies = bGross.filter(s => s !== null && s === par - 1).length;
+    const aEagles = aGross.filter(s => s !== null && s <= par - 2).length;
+    const bEagles = bGross.filter(s => s !== null && s <= par - 2).length;
+
+    function computeTier(eagles, birdies) {
+      if (eagles >= 1) return Math.pow(2, eagles);
+      if (birdies === 1) return 1;
+      if (birdies >= 2) return 2;
+      return 0;
+    }
+    const aTier = computeTier(aEagles, aBirdies);
+    const bTier = computeTier(bEagles, bBirdies);
 
     // Multiplier starts from any inherited tie carry: 2^tieStreak.
-    // tieStreak=0 → 1x, 1 → 2x, 2 → 4x, 3 → 8x, etc.
     let multiplier = Math.pow(2, tieStreak);
     let flipNote = '';
     let streakNote = tieStreak > 0 ? `${multiplier}x (${tieStreak} tie${tieStreak > 1 ? 's' : ''} carrying)` : '';
 
-    // Birdie flip: a team with a birdie flips the OPPONENT's score (high digit first)
-    if (aHasBirdie && !bHasBirdie) {
+    let bothCancelCarry = false;
+    if (aTier > 0 && bTier === 0) {
       const lo = Math.min(bScores[0], bScores[1]);
       const hi = Math.max(bScores[0], bScores[1]);
       if (hi < 10) bTeamScore = hi * 10 + lo;
-      flipNote = teamA.map(p => p.name).join(' & ') + ' birdied — flipped opponent';
-    } else if (bHasBirdie && !aHasBirdie) {
+      if (aTier > 1) multiplier *= aTier;
+      flipNote = teamA.map(p => p.name).join(' & ') + (aEagles ? (aEagles >= 2 ? ' eagled multiple — flipped + ' + aTier + 'x' : ' eagled — flipped + 2x') : (aBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
+    } else if (bTier > 0 && aTier === 0) {
       const lo = Math.min(aScores[0], aScores[1]);
       const hi = Math.max(aScores[0], aScores[1]);
       if (hi < 10) aTeamScore = hi * 10 + lo;
-      flipNote = teamB.map(p => p.name).join(' & ') + ' birdied — flipped opponent';
+      if (bTier > 1) multiplier *= bTier;
+      flipNote = teamB.map(p => p.name).join(' & ') + (bEagles ? (bEagles >= 2 ? ' eagled multiple — flipped + ' + bTier + 'x' : ' eagled — flipped + 2x') : (bBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
+    } else if (aTier > 0 && bTier > 0) {
+      bothCancelCarry = true;
+      flipNote = 'Both teams boosted — cancels (next hole doubles)';
     }
-    // Eagle: also doubles the point swing
-    if ((aHasEagle && !bHasEagle) || (bHasEagle && !aHasEagle)) multiplier *= 2;
 
     const diff = Math.abs(aTeamScore - bTeamScore);
     const points = diff * multiplier;
@@ -8303,9 +8346,9 @@ function calcDynamicVegas(g) {
       const perPlayer = total / winners.length;
       winners.forEach(w => money[w.id] += perPlayer);
       losers.forEach(l => money[l.id] -= perPlayer);
-      tieStreak = 0;
+      tieStreak = bothCancelCarry ? 1 : 0;
     } else {
-      tieStreak += 1;
+      tieStreak += bothCancelCarry ? 2 : 1;
     }
 
     holeResults.push({
