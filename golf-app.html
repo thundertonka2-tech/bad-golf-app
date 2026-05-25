@@ -8450,7 +8450,51 @@ function calcNassau(g) {
     const m = { instanceIdx: instIdx, a: a.name, aId: a.id, b: b.name, bId: b.id, value: v, front: null, back: null, overall: null };
     ['front', 'back', 'overall'].forEach(seg => {
       const [from, to] = segmentRange(seg);
-      const r = settleMatch(g, a.id, b.id, from, to, format);
+      let r = settleMatch(g, a.id, b.id, from, to, format);
+
+      // Match play overall: if front AND back are both settled but the overall
+      // is still "open" (lead ≤ remaining unplayed holes), force-settle it.
+      // This handles the common case where the back match closes early (e.g.
+      // 3&2 at hole 16) and players don't enter holes 17-18, leaving the
+      // overall mathematically undecided even though the round is done.
+      // The same logic applies to stroke play as a belt-and-suspenders guard —
+      // though for stroke play, if front and back both settled, all 18 holes
+      // must be entered, so the overall should always settle on its own.
+      if (seg === 'overall' && r && r.open && m.front !== null && m.back !== null) {
+        const s = pairwiseStandings(g, a.id, b.id, 1, 18);
+        if (s && s.holesPlayed > 0) {
+          if (s.aHolesWon === s.bHolesWon && format === 'match') {
+            r = { winnerId: null, loserId: null, status: 'tied', open: false };
+          } else if (format === 'match') {
+            const winner = s.aHolesWon > s.bHolesWon ? a.id : b.id;
+            const loser = winner === a.id ? b.id : a.id;
+            const lead = Math.abs(s.aHolesWon - s.bHolesWon);
+            r = { winnerId: winner, loserId: loser, status: lead + ' up', open: false };
+          } else {
+            // Stroke: if both sub-segments done but overall still open, sum strokes
+            let aStr = 0, bStr = 0, hp = 0;
+            for (let h = 1; h <= 18; h++) {
+              const idx = h - 1;
+              const aRaw = (g.scores[a.id] || [])[idx];
+              const bRaw = (g.scores[b.id] || [])[idx];
+              if (aRaw == null || bRaw == null) continue;
+              hp++;
+              aStr += netHoleScore(aRaw, effectiveHcp(a, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
+              bStr += netHoleScore(bRaw, effectiveHcp(b, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
+            }
+            if (hp > 0) {
+              if (aStr === bStr) {
+                r = { winnerId: null, loserId: null, status: 'tied', open: false };
+              } else {
+                const winner = aStr < bStr ? a.id : b.id;
+                const loser = winner === a.id ? b.id : a.id;
+                r = { winnerId: winner, loserId: loser, status: '+' + Math.abs(aStr - bStr), open: false };
+              }
+            }
+          }
+        }
+      }
+
       if (r && !r.open) {
         if (r.winnerId === a.id) {
           m[seg] = a.name + ' (' + r.status + ')';
@@ -10126,26 +10170,6 @@ function renderBoard() {
         div.innerHTML += `<div class="sub">${m.a} vs ${m.b}${valStr}: F=${m.front || '—'} · B=${m.back || '—'} · O=${m.overall || '—'}</div>`;
       }
     });
-    if (nassau.huckles && nassau.huckles.length > 0) {
-      div.innerHTML += `<div class="sub" style="margin-top:6px;font-weight:600;color:var(--info)">Huckles:</div>`;
-      nassau.huckles.forEach(h => {
-        const segLbl = h.segment === 'front' ? 'F9' : (h.segment === 'back' ? 'B9' : 'O18');
-        if (h.groupMode) {
-          // Group huckle: caller vs every other player
-          const oppsStr = (h.opponents || []).map(o => {
-            const tag = o.winnerId == null ? (o.status === 'in progress' ? 'in progress' : 'tied') :
-                        (o.winnerId === h.callerId ? `${h.callerName} won (${o.status})` : `${o.name} won (${o.status})`);
-            return `vs ${o.name}: ${tag}`;
-          }).join('; ');
-          div.innerHTML += `<div class="sub">${h.callerName} group-huckled (${segLbl} from h${h.callHole}): ${oppsStr}</div>`;
-        } else {
-          const callerName = (g.players.find(p => p.id === h.callerId) || {}).name || '?';
-          const opponentName = (g.players.find(p => p.id === h.opponentId) || {}).name || '?';
-          const result = h.winnerName ? (h.winnerName + ' won (' + h.status + ')') : ('called h' + h.callHole + ' — ' + h.status);
-          div.innerHTML += `<div class="sub">${callerName} vs ${opponentName} (${segLbl} from h${h.callHole}): ${result}</div>`;
-        }
-      });
-    }
     if (nassau.specials && nassau.specials.length > 0) {
       div.innerHTML += `<div class="sub" style="margin-top:6px;font-weight:600;color:var(--gold)">Special-score payouts:</div>`;
       nassau.specials.forEach(sp => {
@@ -10153,6 +10177,50 @@ function renderBoard() {
       });
     }
     gr.appendChild(div);
+  }
+
+  // Dedicated Huckles block — shown whenever any huckle exists, regardless of
+  // whether it's settled. This gives huckles visibility equal to match play
+  // rather than burying them as sub-lines inside the Nassau summary.
+  if (nassau && nassau.huckles && nassau.huckles.length > 0) {
+    const hDiv = document.createElement('div');
+    hDiv.className = 'game-result';
+    const settled = nassau.huckles.filter(h => h.status !== 'in progress').length;
+    const total = nassau.huckles.length;
+    hDiv.innerHTML = `<div class="head"><span class="lbl">🏴 Huckles (${total} call${total > 1 ? 's' : ''})</span><span class="val">${settled}/${total} settled</span></div>`;
+    nassau.huckles.forEach(h => {
+      const segLbl = h.segment === 'front' ? 'Front 9' : (h.segment === 'back' ? 'Back 9' : 'Overall 18');
+      const nassauCfg = g.games.nassau;
+      const instCfg = nassauCfg && Array.isArray(nassauCfg.instances) ? nassauCfg.instances[h.instanceIdx] : nassauCfg;
+      const betAmt = instCfg ? (instCfg.value || 0) : 0;
+      const amtStr = betAmt > 0 ? ` · $${betAmt}` : '';
+      if (h.groupMode) {
+        const oppsStr = (h.opponents || []).map(o => {
+          if (o.status === 'in progress') return `vs ${o.name}: in progress`;
+          if (o.winnerId == null) return `vs ${o.name}: tied`;
+          return o.winnerId === h.callerId
+            ? `vs ${o.name}: <strong>${h.callerName} won</strong> (${o.status})`
+            : `vs ${o.name}: <strong>${o.name} won</strong> (${o.status})`;
+        }).join(' · ');
+        hDiv.innerHTML += `<div class="sub"><strong>${h.callerName}</strong> huckled all (${segLbl} from h${h.callHole}${amtStr})<br><span style="font-size:11px">${oppsStr}</span></div>`;
+      } else {
+        const callerP = g.players.find(p => p.id === h.callerId);
+        const oppP = g.players.find(p => p.id === h.opponentId);
+        const callerName = callerP ? displayFirst(callerP) : '?';
+        const oppName = oppP ? displayFirst(oppP) : '?';
+        let resultStr;
+        if (h.status === 'in progress') {
+          resultStr = `<span style="color:var(--text-muted)">in progress</span>`;
+        } else if (!h.winnerName || h.winnerName === 'Tie') {
+          resultStr = `<span style="color:var(--text-muted)">Tied</span>`;
+        } else {
+          const winColor = 'color:var(--accent);font-weight:600';
+          resultStr = `<span style="${winColor}">${h.winnerName} won (${h.status})${amtStr}</span>`;
+        }
+        hDiv.innerHTML += `<div class="sub"><strong>${callerName}</strong> vs ${oppName} — ${segLbl} from h${h.callHole}: ${resultStr}</div>`;
+      }
+    });
+    gr.appendChild(hDiv);
   }
 
   if (stroke) {
