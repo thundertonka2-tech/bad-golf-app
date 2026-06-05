@@ -3017,6 +3017,8 @@
       <div class="card" id="account-card" style="margin-top:16px">
         <h3 style="margin-top:0">Account</h3>
         <div id="account-status" class="help-text" style="margin-bottom:10px">Playing as a guest.</div>
+        <!-- Phase 2 (Cloud): shows which roster player this account is linked to. -->
+        <div id="account-linked" style="margin-bottom:10px;display:none"></div>
         <button id="btn-account-action" class="primary full">Sign in</button>
       </div>
 
@@ -3113,6 +3115,31 @@
     </div>
     <div class="actions" style="margin-top:12px">
       <button id="auth-guest" class="full">Continue as guest</button>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 2 (Cloud): first-sign-in "which player are you?" picker. Links the
+     signed-in account to a roster player so lifetime stats follow the user. -->
+<div class="modal-overlay" id="me-picker-modal">
+  <div class="modal" style="max-width:460px">
+    <h2>Which player are you?</h2>
+    <p class="help-text" style="margin-bottom:10px">
+      Link your account to your spot in the roster so your lifetime stats follow
+      you on every device. You can change this anytime on the Stats tab.
+    </p>
+    <input type="text" id="me-picker-search" placeholder="Search names…" style="width:100%;margin-bottom:10px">
+    <div id="me-picker-list" style="max-height:300px;overflow-y:auto;margin-bottom:12px"></div>
+    <div style="border-top:1px solid var(--border,#ddd);padding-top:12px">
+      <div class="small-text" style="color:var(--text-muted);margin-bottom:6px">Not listed yet? Add yourself:</div>
+      <div class="row">
+        <div class="field"><input type="text" id="me-picker-first" placeholder="First name"></div>
+        <div class="field"><input type="text" id="me-picker-last" placeholder="Last name"></div>
+      </div>
+      <button class="primary full" id="me-picker-add" style="margin-top:4px">Add me &amp; link</button>
+    </div>
+    <div class="actions" style="margin-top:12px">
+      <button id="me-picker-skip" class="full">Skip for now</button>
     </div>
   </div>
 </div>
@@ -3663,6 +3690,11 @@ async function initAuth() {
       if (_authUser) {
         const m = document.getElementById('auth-modal');
         if (m) m.classList.remove('show');
+        // Phase 2 (Cloud): on a real sign-in, link this account to a roster
+        // player if it isn't already. No-op (one quick read) once linked.
+        if (_event === 'SIGNED_IN' || _event === 'INITIAL_SESSION') {
+          maybePromptPickMyPlayer();
+        }
       }
     });
   } catch (e) { console.warn('initAuth failed:', e); }
@@ -3746,6 +3778,30 @@ function renderAccountUI() {
     }
   }
   if (btn) btn.textContent = isSignedIn() ? 'Sign out' : 'Sign in';
+  // Phase 2 (Cloud): refresh the "you're playing as X" line (async — reads the
+  // account↔player link from the profile).
+  renderLinkedPlayerLine();
+}
+
+// Phase 2 (Cloud): show which roster player the signed-in account is linked to,
+// with a Change/Link affordance that reopens the player picker. Hidden for guests.
+async function renderLinkedPlayerLine() {
+  const el = document.getElementById('account-linked');
+  if (!el) return;
+  if (!isSignedIn()) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  let me = null;
+  try { me = await getMeName(); } catch (e) {}
+  el.style.display = 'block';
+  if (me) {
+    el.innerHTML = '<span class="help-text">You\'re playing as <strong>' + me +
+      '</strong>. </span><button id="btn-change-me" style="background:transparent;' +
+      'border:none;color:var(--accent-dark);text-decoration:underline;cursor:pointer;' +
+      'font-size:12px;padding:0">Change</button>';
+  } else {
+    el.innerHTML = '<button id="btn-change-me" class="full">Link your player →</button>';
+  }
+  const cm = document.getElementById('btn-change-me');
+  if (cm) cm.onclick = () => openMyPlayerPicker();
 }
 
 // Wire the account card + sign-in modal. Called once on init.
@@ -3820,6 +3876,99 @@ function maybeShowAuthPrompt() {
   if (modal) modal.classList.add('show');
 }
 
+// ============================================================
+// PHASE 2 (CLOUD) — "which player are you?" account↔roster link
+// ------------------------------------------------------------
+// Lifetime stats live on roster players. To make a signed-in user's stats
+// follow them across devices, each account is linked to exactly one roster
+// player (stored in profiles.my_player). We prompt for this once, right after
+// the first sign-in, and let them change it later from the Stats Account card.
+// ============================================================
+let _mePickerWired = false;
+
+// Prompt the picker only when signed in AND not yet linked.
+async function maybePromptPickMyPlayer() {
+  try {
+    if (!isSignedIn()) return;
+    const me = await getMeName();
+    if (me) return;            // already linked → nothing to do
+    await openMyPlayerPicker();
+  } catch (e) { console.warn('pick-my-player prompt failed:', e); }
+}
+
+async function openMyPlayerPicker() {
+  const modal = document.getElementById('me-picker-modal');
+  if (!modal) return;
+  wireMyPlayerPicker();
+  const search = document.getElementById('me-picker-search');
+  if (search) search.value = '';
+  const first = document.getElementById('me-picker-first');
+  const last = document.getElementById('me-picker-last');
+  if (first) first.value = '';
+  if (last) last.value = '';
+  await renderMyPlayerPickerList('');
+  modal.classList.add('show');
+}
+
+async function renderMyPlayerPickerList(filter) {
+  const listEl = document.getElementById('me-picker-list');
+  if (!listEl) return;
+  const roster = await getPlayerRoster();
+  const f = (filter || '').trim().toLowerCase();
+  const shown = roster
+    .filter(p => p && (!f || (p.name || '').toLowerCase().includes(f)))
+    .sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+  if (shown.length === 0) {
+    listEl.innerHTML = '<div class="small-text" style="color:var(--text-muted);padding:8px 0">' +
+      (roster.length === 0
+        ? 'No players in the roster yet — add yourself below.'
+        : 'No matches.') + '</div>';
+    return;
+  }
+  listEl.innerHTML = shown.map(p =>
+    '<button class="full me-pick-row" data-name="' +
+    (p.name || '').replace(/"/g, '&quot;') +
+    '" style="text-align:left;margin-bottom:6px">' + displayFull(p) + '</button>'
+  ).join('');
+  listEl.querySelectorAll('.me-pick-row').forEach(btn => {
+    btn.onclick = () => linkMeTo(btn.dataset.name);
+  });
+}
+
+async function linkMeTo(name) {
+  if (!name) return;
+  await setMeName(name);
+  const modal = document.getElementById('me-picker-modal');
+  if (modal) modal.classList.remove('show');
+  showToast("You're linked as " + name);
+  try { renderAccountUI(); } catch (e) {}
+  try {
+    const panel = document.getElementById('panel-stats');
+    if (panel && panel.classList.contains('active')) await renderStats();
+  } catch (e) {}
+}
+
+function wireMyPlayerPicker() {
+  if (_mePickerWired) return;
+  _mePickerWired = true;
+  const modal = document.getElementById('me-picker-modal');
+  const search = document.getElementById('me-picker-search');
+  if (search) search.oninput = () => renderMyPlayerPickerList(search.value);
+  const addBtn = document.getElementById('me-picker-add');
+  if (addBtn) addBtn.onclick = async () => {
+    const first = (document.getElementById('me-picker-first').value || '').trim();
+    const last = (document.getElementById('me-picker-last').value || '').trim();
+    if (!first) { showToast('Enter at least a first name'); return; }
+    await upsertPlayerInRoster(first, last, 0);
+    await linkMeTo(combineName(first, last));
+  };
+  const skip = document.getElementById('me-picker-skip');
+  if (skip) skip.onclick = () => { if (modal) modal.classList.remove('show'); };
+  if (modal) modal.onclick = (e) => {
+    if (e.target.id === 'me-picker-modal') modal.classList.remove('show');
+  };
+}
+
 // Determine if a key is "shared" (lives in Supabase) or "personal" (localStorage).
 // Shared keys are visible to everyone in the group; personal keys stay on each device.
 function isSharedKey(key) {
@@ -3878,6 +4027,15 @@ async function writeSharedSingleton(key, value) {
 // Storage shim: routes shared keys to Supabase (with localStorage cache as
 // fallback) and personal keys to localStorage only.
 async function safeGet(key, shared) {
+  // Phase 2 (Cloud): the player roster carries each player's lifetime stats
+  // (scoreHistory). When signed in, it follows the user across devices as a
+  // single FRIENDS-ONLY cloud row ('shared:player-roster'); guests keep their
+  // roster in localStorage only. RLS blocks anonymous access to this row.
+  if (key === KEY_PLAYER_ROSTER) {
+    if (isSignedIn()) return await readSharedSingleton(key);
+    try { return localStorage.getItem(key) || null; } catch (e) { return null; }
+  }
+
   // Personal keys: localStorage only
   if (!shared && !isSharedKey(key)) {
     try { return localStorage.getItem(key) || null; } catch (e) { return null; }
@@ -3918,6 +4076,14 @@ async function safeGet(key, shared) {
 async function safeSet(key, value, shared) {
   // Always cache locally first — works offline + provides instant local read
   try { localStorage.setItem(key, value); } catch (e) {}
+
+  // Phase 2 (Cloud): when signed in, the roster also writes up to the
+  // friends-only cloud row so other devices/friends see the same players and
+  // lifetime stats. Guests stay localStorage-only (cached above).
+  if (key === KEY_PLAYER_ROSTER) {
+    if (isSignedIn()) { await writeSharedSingleton(key, value); }
+    return true;
+  }
 
   // Personal keys: localStorage only
   if (!shared && !isSharedKey(key)) return true;
@@ -13014,10 +13180,30 @@ function buildRoundSummary(g) {
 // ============================================================
 const KEY_ME = 'golf:me-name';
 
+// Phase 2 (Cloud): "me" (which roster player this account IS) is PER-ACCOUNT,
+// stored on the user's profile so it follows them across devices and never
+// collides with another friend's "me". Guests fall back to localStorage.
 async function getMeName() {
+  if (isSignedIn() && supa && _authUser) {
+    try {
+      const { data } = await supa.from('profiles')
+        .select('my_player').eq('id', _authUser.id).maybeSingle();
+      if (data && data.my_player) {
+        try { localStorage.setItem(KEY_ME, data.my_player); } catch (e) {}
+        return data.my_player;
+      }
+      return null; // signed in but not yet linked → triggers the picker
+    } catch (e) { /* fall through to local cache */ }
+  }
   return await safeGet(KEY_ME, false);
 }
 async function setMeName(name) {
+  if (isSignedIn() && supa && _authUser) {
+    try {
+      await supa.from('profiles')
+        .update({ my_player: name || null }).eq('id', _authUser.id);
+    } catch (e) { /* non-fatal — local cache below still applies */ }
+  }
   return await safeSet(KEY_ME, name || '', false);
 }
 
@@ -13938,6 +14124,37 @@ function enableGameTabs(yes) {
 // ============================================================
 // INIT
 // ============================================================
+// Phase 2 (Cloud): one-time local clean slate. Clears THIS device's player
+// data (roster + lifetime stats, the "me" pointer, last-game pointer, and the
+// cached round/tournament indexes + per-round caches) exactly once, so everyone
+// starts fresh on the new cloud model. KEEPS the course library (Michigan
+// scorecards) and saved course scorecards. The authoritative cloud wipe is run
+// once via Phase2_Cloud_Setup.sql §3; this just clears each device's local copy
+// so stale local-only data doesn't linger after the migration.
+const KEY_PHASE2_RESET = 'golf:phase2-clean-slate-v1';
+async function runPhase2CleanSlateOnce() {
+  try {
+    if (localStorage.getItem(KEY_PHASE2_RESET) === '1') return;
+    const drop = (k) => { try { localStorage.removeItem(k); } catch (e) {} };
+    drop(KEY_PLAYER_ROSTER);  // roster + lifetime stats (was local-only)
+    drop(KEY_ME);             // old local "me" pointer (now per-account profile)
+    drop(KEY_LAST);           // last-opened-round pointer
+    drop(KEY_RECENT);         // cached recent-rounds index (resyncs from cloud)
+    drop(KEY_TOURNEYS);       // cached tournaments index (resyncs from cloud)
+    // Drop per-round local caches (authoritative copies live in Supabase).
+    try {
+      const rm = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.indexOf('game:') === 0) rm.push(k);
+      }
+      rm.forEach(drop);
+    } catch (e) {}
+    // Deliberately KEEP KEY_COURSE_DATA + KEY_COURSE_LIBRARY (course library).
+    localStorage.setItem(KEY_PHASE2_RESET, '1');
+  } catch (e) { console.warn('Phase 2 clean slate failed:', e); }
+}
+
 async function init() {
   // Initialize Supabase backend (loads CDN script, creates client)
   await initSupabase();
@@ -13946,6 +14163,10 @@ async function init() {
   // Initialize auth (reads any existing session, listens for changes).
   // Optional sign-in — guests are unaffected.
   await initAuth();
+
+  // Phase 2 (Cloud): one-time local clean slate (keeps courses). Runs before
+  // any roster/round reads so stale local-only data is gone for this migration.
+  await runPhase2CleanSlateOnce();
 
   // Load any user-added courses from Supabase into the in-memory library.
   // Safe to fail silently — if it errors, we just have the hardcoded seed.
