@@ -2888,17 +2888,24 @@
         <div id="stats-rounds-list"></div>
       </div>
 
+      <!-- Account / sign-in (Track B auth). Sign-in is optional; guests can
+           keep playing. Admins get the roster tools in the danger zone. -->
+      <div class="card" id="account-card" style="margin-top:16px">
+        <h3 style="margin-top:0">Account</h3>
+        <div id="account-status" class="help-text" style="margin-bottom:10px">Playing as a guest.</div>
+        <button id="btn-account-action" class="primary full">Sign in</button>
+      </div>
+
       <!-- Danger zone — reset all data. Sits at the very bottom of the
            stats panel so it's not in the path of common actions. Used
            primarily for clearing test/junk data between testing sessions. -->
       <div class="card" id="stats-danger-zone" style="margin-top:16px;border:1px solid var(--danger,#c14040);background:rgba(193,64,64,0.04)">
         <h3 style="margin-top:0;color:var(--danger,#c14040)">⚠️ Danger zone</h3>
 
-        <!-- 🔒 AUTH-LOCKDOWN BANNER — must be removed once real auth gates
-             the destructive tools. This is a visible reminder, NOT a
-             functional gate. See ROSTER_CLEANUP_ENABLED for the actual
-             gate. -->
-        <div style="padding:8px 10px;margin-bottom:12px;background:rgba(255,193,7,0.18);border:1px solid #b8860b;border-radius:6px;font-size:12px;line-height:1.4">
+        <!-- AUTH-LOCKDOWN BANNER — auto-hidden for admins via applyAdminGating().
+             Shown to guests / non-admins as a reminder that the destructive
+             roster tools require an admin account. -->
+        <div id="auth-lockdown-banner" style="padding:8px 10px;margin-bottom:12px;background:rgba(255,193,7,0.18);border:1px solid #b8860b;border-radius:6px;font-size:12px;line-height:1.4">
           <strong>⚠️ Pre-auth scaffolding.</strong> These tools currently only
           touch <em>your local device's</em> view and your personal roster — no
           shared data is destroyed. <strong>Before this app goes to a wider
@@ -2957,6 +2964,33 @@
     <button type="button" id="footer-about-btn" style="background:transparent;border:none;color:inherit;font:inherit;cursor:pointer;padding:0;text-decoration:underline;text-decoration-color:transparent;transition:text-decoration-color 0.15s" onmouseover="this.style.textDecorationColor='currentColor'" onmouseout="this.style.textDecorationColor='transparent'">Bad Golf, Good Times</button>
     <span id="sync-indicator" title="Sync status" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--text-muted);vertical-align:middle;margin-left:6px;transition:transform 0.2s,background 0.3s"></span>
   </footer>
+</div>
+
+<!-- Sign-in / account modal (Track B auth) -->
+<div class="modal-overlay" id="auth-modal">
+  <div class="modal" style="max-width:420px">
+    <h2 id="auth-modal-title">Sign in</h2>
+    <p class="help-text" style="margin-bottom:12px">
+      Signing in is optional — you can keep playing as a guest. It lets admins
+      manage the roster and keeps your identity for the future.
+    </p>
+    <button id="auth-google" class="full" style="margin-bottom:8px">Continue with Google</button>
+    <button id="auth-apple" class="full" style="margin-bottom:8px">Continue with Apple</button>
+    <div class="small-text" style="text-align:center;color:var(--text-muted);margin:10px 0">— or use email —</div>
+    <input type="email" id="auth-email" placeholder="Email" autocomplete="email" style="width:100%;margin-bottom:8px">
+    <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" style="width:100%;margin-bottom:8px">
+    <div id="auth-error" style="color:var(--danger,#c14040);font-size:12px;margin-bottom:8px;display:none"></div>
+    <div class="actions">
+      <button id="auth-signin" class="primary" style="flex:1">Sign in</button>
+      <button id="auth-signup" style="flex:1">Create account</button>
+    </div>
+    <div style="text-align:center;margin-top:10px">
+      <button id="auth-forgot" style="background:transparent;border:none;color:var(--accent-dark);text-decoration:underline;cursor:pointer;font-size:12px;padding:0">Forgot password?</button>
+    </div>
+    <div class="actions" style="margin-top:12px">
+      <button id="auth-cancel" class="full">Close</button>
+    </div>
+  </div>
 </div>
 
 <!-- Tournament create modal -->
@@ -3442,7 +3476,8 @@ async function initSupabase() {
       });
     }
     supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      realtime: { params: { eventsPerSecond: 5 } }
+      realtime: { params: { eventsPerSecond: 5 } },
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
     supaReady = true;
     return supa;
@@ -3450,6 +3485,186 @@ async function initSupabase() {
     console.error('Supabase init failed:', e);
     return null;
   }
+}
+
+// ============================================================
+// AUTHENTICATION + OWNERSHIP  (Track B)
+// ------------------------------------------------------------
+// Sign-in is OPTIONAL — the app works fully as a guest. Signing in
+// (Apple / Google / email) adds identity and, for admins, unlocks the
+// destructive roster tools. The REAL enforcement is Supabase Row-Level
+// Security; these client checks are UX only. Replaces the old honor-system
+// ROSTER_CLEANUP_ENABLED / ?cleanup=1 gate.
+// ============================================================
+let _authUser = null;     // current Supabase auth user, or null (guest)
+let _authRole = 'guest';  // 'guest' | 'user' | 'admin' | 'commissioner'
+
+// Legacy dev override: ?cleanup=1 still forces the admin tools on locally,
+// so the old tester workflow keeps working before accounts are seeded.
+const DEV_ADMIN_OVERRIDE = (() => {
+  try { return new URLSearchParams(location.search || '').get('cleanup') === '1'; }
+  catch (e) { return false; }
+})();
+
+function isSignedIn() { return !!_authUser; }
+function isAdmin() {
+  return DEV_ADMIN_OVERRIDE || _authRole === 'admin' || _authRole === 'commissioner';
+}
+function currentUserEmail() { return (_authUser && _authUser.email) ? _authUser.email : null; }
+
+// Look up the signed-in user's role from the profiles table.
+async function fetchMyRole() {
+  if (!_authUser || !supa) { _authRole = 'guest'; return; }
+  try {
+    const { data, error } = await supa.from('profiles')
+      .select('role').eq('id', _authUser.id).maybeSingle();
+    _authRole = (!error && data && data.role) ? data.role : 'user';
+  } catch (e) { _authRole = 'user'; }
+}
+
+// Initialize auth: read any existing session, then listen for changes.
+async function initAuth() {
+  if (!supa) return;
+  try {
+    const { data } = await supa.auth.getSession();
+    _authUser = (data && data.session) ? data.session.user : null;
+    await fetchMyRole();
+    supa.auth.onAuthStateChange(async (_event, session) => {
+      _authUser = session ? session.user : null;
+      await fetchMyRole();
+      try { applyAdminGating(); } catch (e) {}
+      try { renderAccountUI(); } catch (e) {}
+    });
+  } catch (e) { console.warn('initAuth failed:', e); }
+}
+
+// Fire-and-forget audit trail for destructive actions. Guests can't write
+// (RLS blocks it) — that's fine, only signed-in actors are auditable.
+async function audit(action, target, detail) {
+  try {
+    if (!supa || !_authUser) return;
+    await supa.from('audit_log').insert({
+      actor_id: _authUser.id, action: action,
+      target: target || null, detail: detail || null
+    });
+  } catch (e) { /* non-fatal */ }
+}
+
+// ---- sign-in methods ----
+async function signInWithGoogle() {
+  if (!supa) { await initSupabase(); }
+  await supa.auth.signInWithOAuth({ provider: 'google',
+    options: { redirectTo: location.origin + location.pathname } });
+}
+async function signInWithApple() {
+  // Provider stays OFF in Supabase until the Apple Developer account (Track A)
+  // is live. Swap the toast in wireAuthUI() for this call once it's enabled.
+  if (!supa) { await initSupabase(); }
+  await supa.auth.signInWithOAuth({ provider: 'apple',
+    options: { redirectTo: location.origin + location.pathname } });
+}
+async function signInWithEmail(email, password) {
+  if (!supa) { await initSupabase(); }
+  const { error } = await supa.auth.signInWithPassword({ email, password });
+  return error ? error.message : null;
+}
+async function signUpWithEmail(email, password) {
+  if (!supa) { await initSupabase(); }
+  const { error } = await supa.auth.signUp({ email, password,
+    options: { emailRedirectTo: location.origin + location.pathname } });
+  return error ? error.message : null;
+}
+async function resetPasswordEmail(email) {
+  if (!supa) { await initSupabase(); }
+  const { error } = await supa.auth.resetPasswordForEmail(email,
+    { redirectTo: location.origin + location.pathname });
+  return error ? error.message : null;
+}
+async function signOutUser() {
+  try { await supa.auth.signOut(); } catch (e) {}
+  _authUser = null; _authRole = 'guest';
+  try { applyAdminGating(); renderAccountUI(); } catch (e) {}
+  showToast('Signed out');
+}
+
+// Show/hide the admin-only roster tools based on the current role. Called on
+// init and on every auth state change, so tools appear the instant an admin
+// signs in mid-session.
+function applyAdminGating() {
+  const admin = isAdmin();
+  const cleanupBtn = document.getElementById('btn-roster-cleanup');
+  if (cleanupBtn) cleanupBtn.style.display = admin ? '' : 'none';
+  const delSection = document.getElementById('delete-player-section');
+  if (delSection) delSection.style.display = admin ? 'block' : 'none';
+  const banner = document.getElementById('auth-lockdown-banner');
+  if (banner) banner.style.display = admin ? 'none' : '';
+  if (admin) { try { renderDeletePlayerPicker(); } catch (e) {} }
+}
+
+// Update the Account card on the Stats tab.
+function renderAccountUI() {
+  const status = document.getElementById('account-status');
+  const btn = document.getElementById('btn-account-action');
+  if (status) {
+    if (isSignedIn()) {
+      const tag = (_authRole === 'admin' || _authRole === 'commissioner') ? ' · admin' : '';
+      status.textContent = 'Signed in as ' + (currentUserEmail() || 'you') + tag;
+    } else {
+      status.textContent = 'Playing as a guest. Sign in to manage the roster and keep your identity.';
+    }
+  }
+  if (btn) btn.textContent = isSignedIn() ? 'Sign out' : 'Sign in';
+}
+
+// Wire the account card + sign-in modal. Called once on init.
+function wireAuthUI() {
+  const modal = document.getElementById('auth-modal');
+  const errBox = document.getElementById('auth-error');
+  const showErr = (m) => { if (errBox) { errBox.textContent = m; errBox.style.display = m ? 'block' : 'none'; } };
+  const open = () => { showErr(''); if (modal) modal.classList.add('show'); };
+  const close = () => { if (modal) modal.classList.remove('show'); };
+
+  const acctBtn = document.getElementById('btn-account-action');
+  if (acctBtn) acctBtn.onclick = () => { if (isSignedIn()) signOutUser(); else open(); };
+
+  const g = document.getElementById('auth-google');
+  if (g) g.onclick = () => signInWithGoogle();
+  // Apple: provider not enabled yet (waiting on Apple Developer account).
+  // When it's live, replace this with: () => signInWithApple();
+  const a = document.getElementById('auth-apple');
+  if (a) a.onclick = () => showToast('Apple sign-in unlocks once our Apple Developer account is live');
+
+  const si = document.getElementById('auth-signin');
+  if (si) si.onclick = async () => {
+    const em = (document.getElementById('auth-email').value || '').trim();
+    const pw = document.getElementById('auth-password').value || '';
+    if (!em || !pw) { showErr('Enter your email and password.'); return; }
+    const err = await signInWithEmail(em, pw);
+    if (err) { showErr(err); return; }
+    close(); showToast('Signed in');
+  };
+  const su = document.getElementById('auth-signup');
+  if (su) su.onclick = async () => {
+    const em = (document.getElementById('auth-email').value || '').trim();
+    const pw = document.getElementById('auth-password').value || '';
+    if (!em || !pw) { showErr('Enter an email and a password (6+ characters).'); return; }
+    const err = await signUpWithEmail(em, pw);
+    if (err) { showErr(err); return; }
+    close(); showToast('Almost there — check your email to confirm your account');
+  };
+  const fp = document.getElementById('auth-forgot');
+  if (fp) fp.onclick = async () => {
+    const em = (document.getElementById('auth-email').value || '').trim();
+    if (!em) { showErr('Type your email above first, then tap Forgot password.'); return; }
+    const err = await resetPasswordEmail(em);
+    if (err) { showErr(err); return; }
+    showToast('Password reset email sent');
+  };
+  const c = document.getElementById('auth-cancel');
+  if (c) c.onclick = close;
+  if (modal) modal.onclick = (e) => { if (e.target.id === 'auth-modal') close(); };
+
+  renderAccountUI();
 }
 
 // Determine if a key is "shared" (lives in Supabase) or "personal" (localStorage).
@@ -12705,6 +12920,7 @@ async function resetAllData() {
   }
 
   showToast('Clearing local data…');
+  audit('reset_local', currentUserEmail());
 
   // Helper: clear a single localStorage key. We deliberately bypass
   // safeSet() here — safeSet would propagate the empty value to Supabase
@@ -12779,9 +12995,9 @@ async function renderDeletePlayerPicker() {
   const select = $('delete-player-select');
   const btn = $('btn-delete-player');
   if (!section || !select || !btn) return;
-  // Only render content when the admin gate is on. Otherwise leave the
-  // section hidden — wireDangerZoneDelete() already set display:none.
-  if (!ROSTER_CLEANUP_ENABLED) return;
+  // Only render content for admins. Otherwise leave the section hidden —
+  // applyAdminGating() controls visibility.
+  if (!isAdmin()) return;
 
   const roster = await getPlayerRoster();
   if (!roster || roster.length === 0) {
@@ -12820,13 +13036,8 @@ function wireDangerZoneDelete() {
   const btn = $('btn-delete-player');
   if (!section || !select || !btn) return;
 
-  // Hidden by default. Only show when the admin gate is enabled — same flag
-  // that controls the roster cleanup / merge UI.
-  if (!ROSTER_CLEANUP_ENABLED) {
-    section.style.display = 'none';
-    return;
-  }
-  section.style.display = 'block';
+  // Visibility is managed by applyAdminGating(). Always wire the handlers so
+  // the tools work the instant an admin signs in mid-session.
 
   // Enable the delete button only when a real option is selected (not the
   // placeholder "— pick a player —"). Belt-and-suspenders against the user
@@ -12864,6 +13075,7 @@ function wireDangerZoneDelete() {
       '\n' +
       'Continue?';
     if (!confirm(msg)) return;
+    audit('delete_player', full, { rounds: rounds });
 
     try {
       await deletePlayerFromRoster(target.firstName, target.lastName);
@@ -13132,6 +13344,10 @@ async function init() {
   await initSupabase();
   updateSyncIndicator();
 
+  // Initialize auth (reads any existing session, listens for changes).
+  // Optional sign-in — guests are unaffected.
+  await initAuth();
+
   // Load any user-added courses from Supabase into the in-memory library.
   // Safe to fail silently — if it errors, we just have the hardcoded seed.
   try {
@@ -13315,6 +13531,10 @@ async function init() {
   // dropdown stays in sync after rounds are added / players deleted.
   wireDangerZoneDelete();
 
+  // Stats tab: account card + sign-in modal, then apply role-based gating.
+  wireAuthUI();
+  applyAdminGating();
+
   // Live slider label
   $('hcp-pct').oninput = (e) => {
     $('hcp-pct-label').textContent = e.target.value + '%';
@@ -13340,26 +13560,20 @@ async function init() {
     if (e.target.id === 'roster-modal') $('roster-modal').classList.remove('show');
   };
 
-  // Cleanup modal wiring — gated behind ROSTER_CLEANUP_ENABLED (see flag
-  // definition near top of script). When the gate is off, hide the button
-  // entirely so regular users never see it. The prevention check on
-  // player-add (preventDuplicatesBeforeStart) is always on regardless.
-  if (ROSTER_CLEANUP_ENABLED) {
-    $('btn-roster-cleanup').onclick = () => openRosterCleanup();
-    $('cleanup-close').onclick = () => closeRosterCleanup();
-    $('cleanup-modal').onclick = (e) => {
-      if (e.target.id === 'cleanup-modal') closeRosterCleanup();
-    };
-    $('cleanup-manual').onclick = () => openManualMerge();
-  } else {
-    // Hide the button from the roster picker actions row when gated off
-    const cleanupBtn = $('btn-roster-cleanup');
-    if (cleanupBtn) cleanupBtn.style.display = 'none';
-  }
+  // Cleanup modal wiring. Handlers are always wired; applyAdminGating()
+  // controls whether the entry button is visible (admins only). The
+  // prevention check on player-add (preventDuplicatesBeforeStart) is always
+  // on regardless of role.
+  $('btn-roster-cleanup').onclick = () => openRosterCleanup();
+  $('cleanup-close').onclick = () => closeRosterCleanup();
+  $('cleanup-modal').onclick = (e) => {
+    if (e.target.id === 'cleanup-modal') closeRosterCleanup();
+  };
+  $('cleanup-manual').onclick = () => openManualMerge();
 
   // Manual merge modal wiring — also gated. Only reachable via the cleanup
   // modal, so safe to skip entirely when the gate is off.
-  if (ROSTER_CLEANUP_ENABLED) {
+  if (true) {
     $('manual-merge-cancel').onclick = () => closeManualMerge();
     $('manual-merge-modal').onclick = (e) => {
       if (e.target.id === 'manual-merge-modal') closeManualMerge();
