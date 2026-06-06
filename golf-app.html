@@ -1848,7 +1848,7 @@
         </div>
 
         <div class="card" id="setup-card-players">
-          <h2>Players (2-5) & handicaps</h2>
+          <h2>Players (1-5) & handicaps</h2>
           <p class="help-text" style="margin:0 0 8px">
             Enter each player's course handicap. Names are saved automatically when you start a round.
           </p>
@@ -5923,8 +5923,8 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
     }
   };
   row.querySelector('.remove').onclick = () => {
-    if (list.children.length > 2) row.remove();
-    else showToast('Need at least 2 players');
+    if (list.children.length > 1) row.remove();
+    else showToast('Need at least 1 player');
     updateReorderButtonStates();
     renderTeamPickers();
     renderParticipantPickers();
@@ -8026,8 +8026,8 @@ function gatherSetup() {
     }
   });
 
-  if (players.length < 2) {
-    showToast('Need at least 2 players with names');
+  if (players.length < 1) {
+    showToast('Need at least 1 player with a name');
     return null;
   }
 
@@ -8063,6 +8063,10 @@ function gatherSetup() {
   const hcpRules = { basis: hcpBasis, pct: hcpPct, noPar3Strokes, noHandicaps };
 
   const games = {};
+  // SOLO ROUND (1 player): skip all betting games — straight to scoring.
+  // Handicap differentials still record at round finish exactly like group
+  // rounds (course + tee + stroke index requirements unchanged).
+  if (players.length > 1) {
   if ($('game-skins').checked) {
     games.skins = {
       value: parseFloat($('skin-value').value) || 0,
@@ -8387,6 +8391,8 @@ function gatherSetup() {
     });
     games[cfgKey].participants = ids;
   }
+
+  } // end multi-player betting-games block
 
   // ── Validation gates ────────────────────────────────────────────────────
   // A round counts toward handicaps ONLY when it has a real course name, a
@@ -17778,8 +17784,9 @@ async function tryRestore() {
 /* ============================================================
    GPS + Satellite view module
    ------------------------------------------------------------
-   - Satellite tiles: Esri World Imagery (free, no key). To move to
-     Google later, swap GPS_TILE_URL + attribution only.
+   - Satellite tiles: Google Map Tiles API (2D satellite, session-token
+     handshake) by default, with Esri World Imagery as automatic fallback
+     and a persisted dev toggle (bottom-left of the overlay) to compare.
    - Course hole data: shared singleton 'golf:course-gps' (rides the
      existing games-table singleton pattern — synced to everyone).
    - Hole data sources: OpenStreetMap auto-import (Overpass API) with
@@ -17788,7 +17795,11 @@ async function tryRestore() {
      gracefully to raw distances.
    ============================================================ */
 const KEY_COURSE_GPS = 'golf:course-gps';
-const GPS_TILE_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const GPS_ESRI_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+// Google Map Tiles API (2D satellite). Key is referrer-restricted to the
+// GitHub Pages domain + restricted to Map Tiles API only, with a hard daily
+// quota cap — safe to ship client-side (standard for web map keys).
+const GPS_GOOGLE_KEY = 'AIzaSyCcjqCB2o39weiWkBytXqRpEj1yjUBvpL4';
 
 const gpsView = (() => {
   const YD = 1.0936133;
@@ -17866,12 +17877,14 @@ const gpsView = (() => {
     });
   }
 
-  function ensureMap() {
+  let maxZoomClamp = 19.4;
+  function ensureMap(cfg) {
     if (map) return;
+    maxZoomClamp = (cfg.maxzoom || 19) + 0.4;
     map = new maplibregl.Map({
       container: 'gps-map',
-      style: { version: 8, sources: { sat: { type: 'raster', tiles: [GPS_TILE_URL], tileSize: 256, maxzoom: 19,
-        attribution: 'Imagery © Esri' } }, layers: [{ id: 'sat', type: 'raster', source: 'sat' }] },
+      style: { version: 8, sources: { sat: { type: 'raster', tiles: cfg.tiles, tileSize: 256, maxzoom: cfg.maxzoom,
+        attribution: cfg.attr } }, layers: [{ id: 'sat', type: 'raster', source: 'sat' }] },
       center: courseCenter || [-96.46, 32.93], zoom: courseCenter ? 16 : 13,
       attributionControl: { compact: true }
     });
@@ -17923,8 +17936,10 @@ const gpsView = (() => {
     hole = state.currentHole || 1;
     const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === courseId) : null;
     courseCenter = firstMappedPoint() || null;
-    ensureMap();
+    const cfg = await tileConfig();
+    ensureMap(cfg);
     map.resize();
+    updateTileToggle();
     showHole(hole);
   }
   function close() {
@@ -17993,7 +18008,7 @@ const gpsView = (() => {
     const vh = el('gps-map').clientHeight || window.innerHeight;
     const mpp = d / (vh * 0.52);
     const zoom = Math.log2(156543.03392 * Math.cos(toRad(center[1])) / mpp);
-    map.jumpTo({ center, bearing: brg, zoom: Math.min(zoom, 19.4), pitch: 0 });
+    map.jumpTo({ center, bearing: brg, zoom: Math.min(zoom, maxZoomClamp), pitch: 0 });
   }
 
   function refresh() {
@@ -18219,6 +18234,56 @@ const gpsView = (() => {
     showHole(hole);
   }
 
+  // ---------- satellite tile source: Google (default) with Esri fallback ----------
+  let tileMode = 'google';
+  try { tileMode = localStorage.getItem('gps-tile-mode') || 'google'; } catch (e) {}
+  let googleTiles = null;
+
+  async function resolveGoogleTiles() {
+    if (googleTiles) return googleTiles;
+    try {
+      let sess = null;
+      try { sess = JSON.parse(localStorage.getItem('gps-google-session') || 'null'); } catch (e) {}
+      const now = Date.now() / 1000;
+      if (!sess || !sess.session || (sess.expiry && parseFloat(sess.expiry) < now + 600)) {
+        const r = await fetch('https://tile.googleapis.com/v1/createSession?key=' + GPS_GOOGLE_KEY, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mapType: 'satellite', language: 'en-US', region: 'US' })
+        });
+        if (!r.ok) throw new Error('session HTTP ' + r.status);
+        sess = await r.json();
+        try { localStorage.setItem('gps-google-session', JSON.stringify(sess)); } catch (e) {}
+      }
+      googleTiles = 'https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=' + encodeURIComponent(sess.session) + '&key=' + GPS_GOOGLE_KEY;
+      return googleTiles;
+    } catch (e) { console.warn('Google tiles unavailable, falling back to Esri:', e); return null; }
+  }
+
+  async function tileConfig() {
+    if (tileMode === 'google') {
+      const t = await resolveGoogleTiles();
+      if (t) return { tiles: [t], attr: 'Imagery © Google', maxzoom: 21 };
+      // transient failure: fall back for this session only (not persisted)
+    }
+    return { tiles: [GPS_ESRI_TILES], attr: 'Imagery © Esri', maxzoom: 19 };
+  }
+
+  async function switchTiles() {
+    tileMode = (tileMode === 'google') ? 'esri' : 'google';
+    try { localStorage.setItem('gps-tile-mode', tileMode); } catch (e) {}
+    if (map) { try { map.remove(); } catch (e) {} map = null; }
+    const cfg = await tileConfig();
+    ensureMap(cfg);
+    map.resize();
+    updateTileToggle();
+    if (mode === 'view' || mode === 'setup' || mode === 'wizard') showHole(hole);
+    gToast('Imagery: ' + (tileMode === 'google' ? 'Google' : 'Esri'));
+  }
+  function updateTileToggle() {
+    const tg = el('gps-tile-toggle');
+    if (tg) tg.textContent = 'Sat: ' + (tileMode === 'google' ? 'Google' : 'Esri');
+  }
+
   // ---------- wiring ----------
   function wire() {
     const btn = el('btn-gps-view');
@@ -18232,6 +18297,13 @@ const gpsView = (() => {
     };
     el('gps-do-import').onclick = osmImport;
     el('gps-do-wizard').onclick = wizardStart;
+    if (!el('gps-tile-toggle')) {
+      const tg = document.createElement('button');
+      tg.id = 'gps-tile-toggle';
+      tg.style.cssText = 'position:absolute;left:10px;bottom:calc(env(safe-area-inset-bottom, 10px) + 78px);z-index:21;background:rgba(20,20,22,0.7);color:#9fc4e8;border:none;border-radius:10px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;';
+      el('gps-overlay').appendChild(tg);
+      tg.onclick = switchTiles;
+    }
   }
   function stopWatchSilent() { /* keep GPS running across holes; ball resets per hole if too far */ }
   document.addEventListener('DOMContentLoaded', wire);
