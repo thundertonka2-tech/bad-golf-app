@@ -1790,6 +1790,8 @@
             <div class="course-picker-wrap">
               <input type="text" id="course-search" placeholder="Search name or city…" autocomplete="off">
               <button class="small" id="btn-add-new-course" type="button" style="margin-top:6px">+ Add new course to library</button>
+              <button class="small" id="btn-find-near" type="button" style="margin-top:6px">📍 Find courses near me</button>
+              <div id="near-courses" style="display:none"></div>
               <div id="course-list" class="course-list" style="display:none"></div>
             </div>
           </div>
@@ -5466,7 +5468,7 @@ async function saveCourseLibraryAdditions(list) {
 // Add a user-contributed course to the shared library. Refuses duplicates
 // (case-insensitive name + city match) so the picker doesn't fill with copies.
 // Returns the canonical course object (whether newly added or pre-existing).
-async function addCourseToLibrary(name, city, note) {
+async function addCourseToLibrary(name, city, note, extra) {
   const trimmed = (name || '').trim();
   const trimmedCity = (city || '').trim();
   if (!trimmed) return null;
@@ -5498,6 +5500,7 @@ async function addCourseToLibrary(name, city, note) {
     userAdded: true
   };
   if (note && note.trim()) newCourse.note = note.trim();
+  if (extra && typeof extra === 'object') Object.assign(newCourse, extra);
 
   const additions = await getCourseLibraryAdditions();
   additions.push(newCourse);
@@ -18204,14 +18207,62 @@ const gpsView = (() => {
     clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms);
   }
 
-  // ---------- shared-singleton store ----------
-  async function loadStore() {
-    try { const v = await safeGet(KEY_COURSE_GPS, true); courseGps = v ? JSON.parse(v) : {}; }
-    catch (e) { courseGps = {}; }
+  // ---------- per-course cloud storage (course_gps table) ----------
+  // One Supabase row per course: the app fetches only the course being
+  // played and writes only that row (scales to thousands of courses, no
+  // cross-group clobbering). localStorage caches each course for offline.
+  // Legacy fallback: the original shared blob ('golf:course-gps') is read
+  // when a course has no row yet and migrated up on the next save.
+  async function ensureSupa() {
+    try { if (!supaReady) await initSupabase(); } catch (e) {}
+    return !!(supa && supaOnline);
   }
-  async function saveStore() {
-    try { await safeSet(KEY_COURSE_GPS, JSON.stringify(courseGps), true); } catch (e) {}
+  function gpsCacheKey(cid) { return 'golf:course-gps-cache:' + cid; }
+  async function loadCourse(cid) {
+    if (!cid || courseGps[cid]) return;
+    if (await ensureSupa()) {
+      try {
+        const { data, error } = await supa.from('course_gps').select('holes,source,updated_at').eq('course_id', cid).maybeSingle();
+        if (!error && data && data.holes && Object.keys(data.holes).length) {
+          courseGps[cid] = { holes: data.holes, source: data.source || 'cloud', updatedAt: Date.parse(data.updated_at) || Date.now(), osmTried: true };
+          try { localStorage.setItem(gpsCacheKey(cid), JSON.stringify(courseGps[cid])); } catch (e) {}
+          return;
+        }
+      } catch (e) { console.warn('course_gps read failed:', e); }
+    }
+    try {
+      const v = localStorage.getItem(gpsCacheKey(cid));
+      if (v) { courseGps[cid] = JSON.parse(v); return; }
+    } catch (e) {}
+    try {
+      const v = await safeGet(KEY_COURSE_GPS, true);
+      const blob = v ? JSON.parse(v) : {};
+      if (blob && blob[cid]) {
+        courseGps[cid] = blob[cid];
+        saveCourseRow(cid); // write-through migration to the new table
+      }
+    } catch (e) {}
   }
+  async function saveCourseRow(cid) {
+    if (!cid || !courseGps[cid]) return;
+    try { localStorage.setItem(gpsCacheKey(cid), JSON.stringify(courseGps[cid])); } catch (e) {}
+    if (await ensureSupa()) {
+      try {
+        const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === cid) : null;
+        await supa.from('course_gps').upsert({
+          course_id: cid,
+          name: lib ? lib.name : cid,
+          city: lib ? (lib.city || '') : '',
+          holes: courseGps[cid].holes || {},
+          source: courseGps[cid].source || 'manual',
+          updated_at: new Date().toISOString()
+        });
+      } catch (e) { console.warn('course_gps write failed:', e); }
+    }
+  }
+  // Aliases used throughout this module (always scoped to the open course)
+  async function loadStore() { await loadCourse(courseId); }
+  async function saveStore() { await saveCourseRow(courseId); }
   function holeData(h) {
     const c = courseGps && courseGps[courseId];
     return (c && c.holes && c.holes[h]) ? c.holes[h] : null;
@@ -18475,6 +18526,7 @@ const gpsView = (() => {
   // ---------- OSM auto-import ----------
   async function geocodeCourseId(cid) {
     const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === cid) : null;
+    if (lib && typeof lib.lat === 'number' && typeof lib.lng === 'number') return [lib.lng, lib.lat];
     const q = lib ? (lib.name + ', ' + (lib.city || '')) : cid;
     const url = 'https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&maxLocations=1&singleLine=' + encodeURIComponent(q);
     const r = await fetch(url); const j2 = await r.json();
@@ -18562,19 +18614,18 @@ const gpsView = (() => {
   // shared course-gps row. Rate-limited to be polite to Overpass.
   const sleepMs = ms => new Promise(res => setTimeout(res, ms));
   async function batchImportLibrary() {
-    await loadStore();
     const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY : [];
-    const todo = lib.filter(c => {
-      const e = courseGps[c.id];
-      return !(e && e.holes && Object.keys(e.holes).length >= 18);
-    });
-    if (todo.length === 0) { showToast('All library courses already fully mapped 🎉'); return; }
+    const todo = lib.slice();
+    if (todo.length === 0) { showToast('Course library is empty'); return; }
     showToast('Importing ' + todo.length + ' courses from OpenStreetMap — keep this tab open…', 4000);
     const report = [];
     let totalHoles = 0, fullCourses = 0;
     for (let idx = 0; idx < todo.length; idx++) {
       const c = todo[idx];
       try {
+        await loadCourse(c.id);
+        const before = courseGps[c.id] && courseGps[c.id].holes ? Object.keys(courseGps[c.id].holes).length : 0;
+        if (before >= 18) { report.push(c.name + ': already fully mapped — skipped'); fullCourses++; continue; }
         const center = await geocodeCourseId(c.id);
         const n = await importCourseOsm(c.id, center);
         const have = courseGps[c.id] && courseGps[c.id].holes ? Object.keys(courseGps[c.id].holes).length : 0;
@@ -18585,7 +18636,7 @@ const gpsView = (() => {
         report.push(c.name + ': FAILED — ' + (e.message || 'error'));
       }
       showToast('Course import ' + (idx + 1) + '/' + todo.length + ': ' + c.name, 2500);
-      await saveStore(); // save as we go so a crash loses nothing
+      await saveCourseRow(c.id); // one row per course, saved as we go
       await sleepMs(1500);
     }
     console.log('OSM batch import report:\n' + report.join('\n'));
@@ -18815,6 +18866,59 @@ const gpsView = (() => {
 })();
 // Console + URL-flag access for the one-time library sweep.
 window.bgImportAllCourses = () => gpsView.batchImport();
+
+// "Find courses near me": discovers golf courses around the user's GPS
+// position from OpenStreetMap, adds the tapped one to the shared library
+// (with coordinates, so the GPS hole import skips geocoding) and selects it.
+(function initNearbyCourseFinder() {
+  const btn = document.getElementById('btn-find-near');
+  const box = document.getElementById('near-courses');
+  if (!btn || !box) return;
+  const reset = () => { btn.textContent = '📍 Find courses near me'; btn.disabled = false; };
+  btn.onclick = () => {
+    if (box.style.display === 'block') { box.style.display = 'none'; return; }
+    if (!navigator.geolocation) { showToast('No GPS on this device'); return; }
+    btn.textContent = '📍 Locating…'; btn.disabled = true;
+    navigator.geolocation.getCurrentPosition(async pos => {
+      const lat = pos.coords.latitude, lng = pos.coords.longitude;
+      btn.textContent = '📍 Searching nearby…';
+      try {
+        const q = '[out:json][timeout:25];(way["leisure"="golf_course"](around:32000,' + lat + ',' + lng + ');relation["leisure"="golf_course"](around:32000,' + lat + ',' + lng + '););out center tags;';
+        const r = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+        const j = await r.json();
+        const seen = new Set();
+        const courses = (j.elements || []).map(e => {
+          const name = e.tags && e.tags.name;
+          const c = e.center || null;
+          if (!name || !c) return null;
+          const key = name.toLowerCase();
+          if (seen.has(key)) return null;
+          seen.add(key);
+          const dLat = (c.lat - lat) * 111.19, dLng = (c.lon - lng) * 111.19 * Math.cos(lat * Math.PI / 180);
+          return { name, lat: c.lat, lng: c.lon, city: e.tags['addr:city'] || '', mi: Math.sqrt(dLat * dLat + dLng * dLng) * 0.621371 };
+        }).filter(Boolean).sort((a, b) => a.mi - b.mi).slice(0, 15);
+        reset();
+        if (!courses.length) { showToast('No courses found nearby in OpenStreetMap — add it by name instead'); return; }
+        box.style.display = 'block';
+        box.innerHTML = '<div class="small-text" style="margin:6px 0 4px;color:var(--text-muted)">Tap a course to add & select it:</div>';
+        courses.forEach(c => {
+          const d = document.createElement('div');
+          d.style.cssText = 'padding:9px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;background:var(--surface)';
+          d.innerHTML = '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis">⛳ ' + c.name + (c.city ? ' <span style="color:var(--text-muted)">· ' + c.city + '</span>' : '') + '</span><span style="color:var(--text-muted);flex-shrink:0">' + c.mi.toFixed(1) + ' mi</span>';
+          d.onclick = async () => {
+            const added = await addCourseToLibrary(c.name, c.city || '', '', { lat: c.lat, lng: c.lng });
+            box.style.display = 'none';
+            if (added) {
+              await selectCourseById(added.id);
+              showToast('Added & selected: ' + c.name);
+            }
+          };
+          box.appendChild(d);
+        });
+      } catch (e) { reset(); showToast('Course search failed — check your connection'); }
+    }, err => { reset(); showToast('GPS error: ' + err.message); }, { enableHighAccuracy: true, timeout: 12000 });
+  };
+})();
 
 // Closest to the Pin: build the 18 hole-picker chips once at boot.
 (function initCtpHoleChips() {
