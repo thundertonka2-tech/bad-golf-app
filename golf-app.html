@@ -15145,6 +15145,110 @@ async function openT2Round(code) {
   showToast(state.viewOnlyMode ? 'Viewing round (finished)' : 'Joined ' + code);
 }
 
+// ============================================================
+// CUP STANDINGS (Checkpoints D+E) — computed live from the actual group
+// rounds (the games table is the source of truth, so standings can never
+// drift from reality). Finished matches score 1 / 0.5 / 0; live matches
+// count toward a projected score. Every player's gross/net feeds the
+// stroke leaderboard regardless of format.
+// ============================================================
+async function t2ComputeStandings(t, days, groupsByDay) {
+  const res = { aFinal: 0, bFinal: 0, aProj: 0, bProj: 0, lines: [], stroke: {}, anyLive: false, anyRounds: false };
+  for (const d of days) {
+    const gs = groupsByDay[d.day_number] || [];
+    for (const grp of gs) {
+      if (!grp.game_code) continue;
+      let g = null;
+      try { g = await loadGame(grp.game_code); } catch (e) {}
+      if (!g) continue;
+      res.anyRounds = true;
+      const fmt = (g.t2 && g.t2.format) || d.format || 'stroke';
+      const finished = !!g.finishedAt;
+      // Stroke leaderboard — every player's gross/net from every round.
+      try {
+        const totals = calcTotals(g);
+        (g.players || []).forEach(p => {
+          const tot = totals[p.id];
+          if (!tot || !tot.count) return;
+          const key = (p.name || '').trim().toLowerCase();
+          if (!res.stroke[key]) res.stroke[key] = { name: p.name, gross: 0, net: 0, holes: 0 };
+          res.stroke[key].gross += tot.gross;
+          res.stroke[key].net += (tot.net != null ? tot.net : tot.gross);
+          res.stroke[key].holes += tot.count;
+        });
+      } catch (e) {}
+      // Cup points by format (team A in the round config = tournament Team A).
+      let aPts = null, bPts = null, label = '', decided = false;
+      try {
+        if (fmt === 'singles') {
+          const r = calcMatch(g);
+          const m = r && r.matches && r.matches[0];
+          if (m && m.played > 0) {
+            if (m.finalUp > 0) { aPts = 1; bPts = 0; }
+            else if (m.finalUp < 0) { aPts = 0; bPts = 1; }
+            else { aPts = 0.5; bPts = 0.5; }
+            decided = !!m.complete;
+            label = decided ? (m.winner === 'AS' ? 'halved' : (m.winner + ' ' + (m.closedScore || 'wins'))) : ('thru ' + m.played);
+          }
+        } else if (fmt === 'bestball') {
+          const r = calcTeamMatch(g);
+          const rr = r && r.result;
+          if (rr && rr.played > 0) {
+            if (rr.aHolesWon > rr.bHolesWon) { aPts = 1; bPts = 0; }
+            else if (rr.bHolesWon > rr.aHolesWon) { aPts = 0; bPts = 1; }
+            else { aPts = 0.5; bPts = 0.5; }
+            decided = !!rr.complete || finished;
+            label = (decided ? 'final ' : 'thru ' + rr.played + ' · ') + rr.aHolesWon + '–' + rr.bHolesWon;
+          }
+        } else if (fmt === 'scramble') {
+          const r = calcScramble(g);
+          if (r && r.holesComplete > 0) {
+            if (r.aHolesWon > r.bHolesWon) { aPts = 1; bPts = 0; }
+            else if (r.bHolesWon > r.aHolesWon) { aPts = 0; bPts = 1; }
+            else { aPts = 0.5; bPts = 0.5; }
+            decided = r.holesComplete === 18 || finished;
+            label = (decided ? 'final ' : 'thru ' + r.holesComplete + ' · ') + r.aHolesWon + '–' + r.bHolesWon;
+          }
+        } else if (fmt === 'altshot' || fmt === 'rydercup') {
+          const r = calcRyderCup(g);
+          if (r) {
+            const playedH = (r.holeResults || []).filter(x => x.result !== null).length;
+            if (playedH > 0) {
+              if (r.aPoints > r.bPoints) { aPts = 1; bPts = 0; }
+              else if (r.bPoints > r.aPoints) { aPts = 0; bPts = 1; }
+              else { aPts = 0.5; bPts = 0.5; }
+              decided = playedH === 18 || finished;
+              label = (decided ? 'final ' : 'thru ' + playedH + ' · ') + r.aPoints + '–' + r.bPoints;
+            }
+          }
+        } else if (fmt === 'teamquota') {
+          const r = calcTeamQuota(g);
+          if (r) {
+            const playedH = (r.holePoints || []).filter(x => x !== null).length;
+            if (playedH > 0) {
+              if (r.aTotal > r.bTotal) { aPts = 1; bPts = 0; }
+              else if (r.bTotal > r.aTotal) { aPts = 0; bPts = 1; }
+              else { aPts = 0.5; bPts = 0.5; }
+              decided = playedH === 18 || finished;
+              label = (decided ? 'final ' : 'thru ' + playedH + ' · ') +
+                (r.aTotal > 0 ? '+' : '') + r.aTotal + ' / ' + (r.bTotal > 0 ? '+' : '') + r.bTotal;
+            }
+          }
+        }
+        // 'quota' and 'stroke' days are leaderboard-only — no cup points.
+      } catch (e) { console.warn('t2 standings calc', e); }
+      if (aPts != null) {
+        const isFinal = decided || finished;
+        if (isFinal) { res.aFinal += aPts; res.bFinal += bPts; }
+        else { res.anyLive = true; }
+        res.aProj += aPts; res.bProj += bPts;
+        res.lines.push({ day: d.day_number, group: grp.group_number, label: label, final: isFinal });
+      }
+    }
+  }
+  return res;
+}
+
 async function renderT2Home() {
   const t = _t2Current;
   if (!t) return;
@@ -15159,6 +15263,7 @@ async function renderT2Home() {
     await Promise.all(gs.map(async g2 => { membersByGroup[g2.id] = await t2GetGroupMembers(g2.id); }));
   }));
   const pById = {}; players.forEach(p => pById[p.id] = p);
+  const standings = await t2ComputeStandings(t, days, groupsByDay);
   const teamA = players.filter(p => p.team === 'A');
   const teamB = players.filter(p => p.team === 'B');
   const unassigned = players.filter(p => !p.team);
@@ -15166,6 +15271,36 @@ async function renderT2Home() {
   let html = '<h2 style="margin:0 24px 2px 0">' + t2esc(t.name) + '</h2>';
   html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:12px">' +
     t.num_days + ' day' + (t.num_days === 1 ? '' : 's') + ' · ' + t2esc(t.status) + (amCommish ? ' · you are commissioner' : '') + '</div>';
+
+  // ---- Cup standings + stroke leaderboard (once any round exists) ----
+  if (standings.anyRounds) {
+    const projDiffers = standings.anyLive && (standings.aProj !== standings.aFinal || standings.bProj !== standings.bFinal);
+    html += '<div class="card" style="margin:0 0 14px;padding:12px;text-align:center;border:2px solid var(--accent)">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+      '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em">🏆 Cup standings</div>' +
+      '<button class="small" id="t2-refresh" title="Refresh scores">🔄</button></div>' +
+      '<div style="font-size:22px;font-weight:800">' +
+      t2esc(t.team_a_name) + ' <span style="color:var(--accent)">' + standings.aFinal + ' — ' + standings.bFinal + '</span> ' + t2esc(t.team_b_name) +
+      '</div>' +
+      (projDiffers ? '<div class="small-text" style="color:var(--text-muted);margin-top:2px">projected with live matches: ' + standings.aProj + ' — ' + standings.bProj + '</div>' : '') +
+      (standings.lines.length ? '<div style="text-align:left;margin-top:8px">' + standings.lines.map(l =>
+        '<div class="small-text" style="padding:2px 0;' + (l.final ? '' : 'color:var(--text-muted);') + '">D' + l.day + ' G' + l.group + ': ' + t2esc(l.label) + (l.final ? '' : ' (live)') + '</div>'
+      ).join('') + '</div>' : '') +
+      '</div>';
+    const strokeRows = Object.values(standings.stroke).sort((a, b) => (a.net - b.net) || (a.gross - b.gross));
+    if (strokeRows.length) {
+      html += '<div class="card" style="margin:0 0 14px;padding:12px">' +
+        '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">⛳ Stroke leaderboard</div>' +
+        '<div style="display:flex;font-size:11px;color:var(--text-muted);padding:2px 0"><div style="flex:1">Player</div><div style="width:50px;text-align:right">Holes</div><div style="width:50px;text-align:right">Gross</div><div style="width:50px;text-align:right">Net</div></div>' +
+        strokeRows.map((r, i) =>
+          '<div style="display:flex;font-size:13px;padding:3px 0;border-top:1px solid var(--border)">' +
+          '<div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (i + 1) + '. ' + t2esc(r.name) + '</div>' +
+          '<div style="width:50px;text-align:right">' + r.holes + '</div>' +
+          '<div style="width:50px;text-align:right">' + r.gross + '</div>' +
+          '<div style="width:50px;text-align:right;font-weight:600">' + r.net + '</div></div>'
+        ).join('') + '</div>';
+    }
+  }
 
   html += '<h3 style="margin:10px 0 6px">Players & teams</h3>';
   if (amCommish) {
@@ -15309,6 +15444,9 @@ async function renderT2Home() {
       navigator.clipboard.writeText(link).then(() => showToast('Invite link copied')).catch(() => showToast(link));
     } else { showToast(link); }
   });
+  // Standings refresh — re-pulls every group round and recomputes the cup.
+  const refreshBtn = document.getElementById('t2-refresh');
+  if (refreshBtn) refreshBtn.onclick = () => { showToast('Refreshing…'); renderT2Home(); };
   // Groups: open a group's round (any member); build/start (commissioner).
   body.querySelectorAll('.t2-open-round').forEach(b => b.onclick = () => openT2Round(b.dataset.code));
   if (amCommish) {
