@@ -2556,6 +2556,7 @@
         <p class="help-text" style="margin-bottom:12px">Multi-day, two-team events with live cup standings. Build the teams, set each day's format, and invite players with a tap.</p>
         <button class="primary full" id="t2-new-btn">+ New team tournament</button>
         <div id="t2-list" style="margin-top:12px"></div>
+        <div id="t2-templates"></div>
       </div>
 
       <div class="card">
@@ -14839,6 +14840,7 @@ function wireT2() {
 
 async function renderT2List() {
   wireT2();
+  renderT2Templates(); // fire-and-forget — fills the ⭐ Templates section
   const listEl = document.getElementById('t2-list');
   const newBtn = document.getElementById('t2-new-btn');
   if (!listEl) return;
@@ -14861,6 +14863,107 @@ async function renderT2List() {
 // Individual ("one-day") events: no teams, leaderboard-only. Flag lives in
 // tournaments.settings so every screen can adapt.
 function t2IsOneDay(t) { return !!(t && t.settings && t.settings.type === 'oneday'); }
+
+// ============================================================
+// TOURNAMENT TEMPLATES — up to 10 saved event setups per user, stored on the
+// profile (cloud — they follow the commissioner across devices). A template
+// captures everything except the players: type, team names, days + formats.
+// "Use" creates a fresh prefilled event — add players, build groups, go.
+// ============================================================
+const T2_TEMPLATE_LIMIT = 10;
+async function t2GetTemplates() {
+  if (!supa || !_authUser) return [];
+  try {
+    const { data } = await supa.from('profiles').select('t2_templates').eq('id', _authUser.id).maybeSingle();
+    return (data && Array.isArray(data.t2_templates)) ? data.t2_templates : [];
+  } catch (e) { return []; }
+}
+async function t2SaveTemplates(list) {
+  if (!supa || !_authUser) return false;
+  try {
+    const { error } = await supa.from('profiles').update({ t2_templates: list.slice(0, T2_TEMPLATE_LIMIT) }).eq('id', _authUser.id);
+    return !error;
+  } catch (e) { return false; }
+}
+
+// Capture the open tournament's setup as a template.
+async function t2SaveAsTemplate() {
+  const t = _t2Current; if (!t) return;
+  const list = await t2GetTemplates();
+  if (list.length >= T2_TEMPLATE_LIMIT) { showToast('Template limit reached (' + T2_TEMPLATE_LIMIT + ') — delete one first'); return; }
+  const name = prompt('Template name (e.g. "Saturday Stroke"):', t.name);
+  if (!name || !name.trim()) return;
+  const days = await t2GetDays(t.id);
+  const oneday = t2IsOneDay(t);
+  const tpl = {
+    id: 'tpl' + Date.now(),
+    name: name.trim(),
+    type: oneday ? 'oneday' : 'cup',
+    teamA: t.team_a_name, teamB: t.team_b_name,
+    numDays: t.num_days,
+    formats: [],
+    createdAt: Date.now()
+  };
+  for (let i = 1; i <= t.num_days; i++) {
+    const d = days.find(x => x.day_number === i);
+    tpl.formats.push(d ? d.format : (oneday ? 'stroke' : 'singles'));
+  }
+  list.push(tpl);
+  const ok = await t2SaveTemplates(list);
+  showToast(ok ? 'Template saved ⭐ (find it on the Events tab)' : 'Could not save template');
+  await renderT2Templates();
+}
+
+// Create a fresh event from a template — everything prefilled except players.
+async function t2UseTemplate(tplId) {
+  const list = await t2GetTemplates();
+  const tpl = list.find(x => x.id === tplId);
+  if (!tpl) { showToast('Template not found'); return; }
+  const defName = tpl.name + ' — ' + new Date().toLocaleDateString();
+  const name = prompt('Event name:', defName);
+  if (!name || !name.trim()) return;
+  const t = await t2Create({
+    name: name.trim(),
+    numDays: tpl.numDays || 1,
+    teamAName: tpl.type === 'oneday' ? 'Players' : (tpl.teamA || 'Team A'),
+    teamBName: tpl.type === 'oneday' ? '' : (tpl.teamB || 'Team B')
+  });
+  if (!t) return;
+  if (tpl.type === 'oneday') await t2Update(t.id, { settings: { type: 'oneday' } });
+  const days = [];
+  for (let i = 1; i <= (tpl.numDays || 1); i++) {
+    days.push({ dayNumber: i, format: (tpl.formats && tpl.formats[i - 1]) || (tpl.type === 'oneday' ? 'stroke' : 'singles') });
+  }
+  await t2SetDays(t.id, days);
+  showToast('Created from template — add your players, build groups, go');
+  await renderT2List();
+  openT2Home(t.id);
+}
+
+async function renderT2Templates() {
+  const box = document.getElementById('t2-templates');
+  if (!box) return;
+  if (!isSignedIn()) { box.innerHTML = ''; return; }
+  const tpls = await t2GetTemplates();
+  if (!tpls.length) { box.innerHTML = ''; return; }
+  box.innerHTML =
+    '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:12px 0 4px">⭐ Templates (' + tpls.length + '/' + T2_TEMPLATE_LIMIT + ')</div>' +
+    tpls.map(tp =>
+      '<div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-top:1px solid var(--border)">' +
+      '<div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + t2esc(tp.name) +
+      ' <span class="small-text" style="color:var(--text-muted)">· ' + (tp.type === 'oneday' ? 'individual' : 'cup') + ' · ' + (tp.numDays || 1) + 'd · ' + t2esc((tp.formats || []).join(', ')) + '</span></div>' +
+      '<button class="small t2-tpl-use" data-id="' + t2esc(tp.id) + '">▶ Use</button>' +
+      '<button class="small t2-tpl-del" data-id="' + t2esc(tp.id) + '" style="color:var(--danger);border-color:var(--danger)">×</button>' +
+      '</div>'
+    ).join('');
+  box.querySelectorAll('.t2-tpl-use').forEach(b => b.onclick = () => t2UseTemplate(b.dataset.id));
+  box.querySelectorAll('.t2-tpl-del').forEach(b => b.onclick = async () => {
+    const tp = tpls.find(x => x.id === b.dataset.id);
+    if (!confirm('Delete template "' + ((tp && tp.name) || '') + '"?')) return;
+    await t2SaveTemplates(tpls.filter(x => x.id !== b.dataset.id));
+    await renderT2Templates();
+  });
+}
 
 function openT2Create() {
   if (!isSignedIn()) { showToast('Sign in first'); return; }
@@ -15486,6 +15589,7 @@ async function renderT2Home() {
     html += '</div>';
   }
   if (amCommish) html += '<button class="primary full" id="t2-save-days" style="margin-top:6px">Save days</button>';
+  if (amCommish) html += '<button class="full" id="t2-save-template" style="margin-top:8px">⭐ Save as template</button>';
   if (amCommish) html += '<button class="full" id="t2-delete" style="margin-top:14px;color:var(--danger);border-color:var(--danger)">Delete tournament</button>';
 
   body.innerHTML = html;
@@ -15548,9 +15652,12 @@ async function renderT2Home() {
       if (!confirm('Delete "' + t.name + '"? This removes the tournament for everyone.')) return;
       await t2Delete(t.id);
       document.getElementById('t2-home-modal').classList.remove('show');
+      t2UnsubscribeHome();
       showToast('Deleted');
       await renderT2List();
     };
+    const saveTpl = document.getElementById('t2-save-template');
+    if (saveTpl) saveTpl.onclick = () => t2SaveAsTemplate();
     body.querySelectorAll('.t2-team-btn').forEach(b => b.onclick = async () => { await t2SetPlayerTeam(b.dataset.pid, b.dataset.team); await renderT2Home(); });
     body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { await t2RemovePlayer(b.dataset.pid); await renderT2Home(); });
     // Inline handicap edits — save on change, no re-render needed (keeps focus flow).
