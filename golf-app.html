@@ -3817,8 +3817,11 @@ async function initAuth() {
           // Phase 3: live invite delivery + catch any queued invites.
           try { subscribeToInvites(); } catch (e) {}
           try { checkPendingInvites(); } catch (e) {}
-          // Tournament 2.0: complete a join link the user opened before signing in.
-          if (_pendingTjoin) { const tk = _pendingTjoin; _pendingTjoin = null; processPendingTjoin(tk); }
+          // Tournament 2.0: complete a join link the user opened before signing
+          // in — including across an OAuth redirect (stashed in localStorage).
+          let _tjk = _pendingTjoin;
+          if (!_tjk) { try { _tjk = localStorage.getItem('golf:pending-tjoin'); } catch (e) {} }
+          if (_tjk) { _pendingTjoin = null; processPendingTjoin(_tjk); }
         }
       }
     });
@@ -14676,6 +14679,10 @@ async function t2SetPlayerTeam(playerId, team) {
   try { const { error } = await supa.from('tournament_players').update({ team }).eq('id', playerId); return !error; }
   catch (e) { return false; }
 }
+async function t2SetPlayerHcp(playerId, hcp) {
+  try { const { error } = await supa.from('tournament_players').update({ handicap: hcp }).eq('id', playerId); return !error; }
+  catch (e) { return false; }
+}
 async function t2RemovePlayer(playerId) {
   try { const { error } = await supa.from('tournament_players').delete().eq('id', playerId); return !error; }
   catch (e) { return false; }
@@ -14684,7 +14691,15 @@ async function t2ClaimSlot(token) {
   if (!supa || !_authUser) return null;
   try {
     const { data, error } = await supa.rpc('claim_tournament_slot', { token: token });
-    if (error) { console.warn('claim', error); showToast(error.message || 'Could not join'); return null; }
+    if (error) {
+      console.warn('claim', error);
+      const m = error.message || '';
+      if (/NOT_SIGNED_IN/i.test(m)) showToast('Sign in first, then open the invite link again');
+      else if (/INVALID_INVITE/i.test(m)) showToast("That invite link isn't valid — ask for a fresh one");
+      else if (/ALREADY_CLAIMED/i.test(m)) showToast('That spot was already claimed by someone else');
+      else showToast(m || 'Could not join');
+      return null;
+    }
     return data; // returns tournament_id
   } catch (e) { return null; }
 }
@@ -14692,6 +14707,7 @@ async function t2ClaimSlot(token) {
 // ---- days ----
 async function t2SetDays(tid, days) {
   // days: [{ dayNumber, format, playDate }]
+  // Returns null on success, or an error message string on failure.
   try {
     const rows = days.map(d => ({
       tournament_id: tid, day_number: d.dayNumber,
@@ -14699,8 +14715,9 @@ async function t2SetDays(tid, days) {
     }));
     const { error } = await supa.from('tournament_days')
       .upsert(rows, { onConflict: 'tournament_id,day_number' });
-    return !error;
-  } catch (e) { return false; }
+    if (error) { console.warn('t2SetDays', error); return error.message || 'save failed'; }
+    return null;
+  } catch (e) { console.warn('t2SetDays', e); return (e && e.message) || 'save failed'; }
 }
 async function t2GetDays(tid) {
   try { const { data } = await supa.from('tournament_days').select('*').eq('tournament_id', tid).order('day_number'); return data || []; }
@@ -14843,14 +14860,69 @@ function t2PlayerRow(p, amCommish) {
   const claimed = p.claimed ? ' <span class="small-text" style="color:var(--accent)">✓ joined</span>' : '';
   let row = '<div style="display:flex;align-items:center;gap:6px;padding:6px 0;border-top:1px solid var(--border)">';
   row += '<div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
-    t2esc(p.display_name) + (p.handicap != null ? ' <span class="small-text" style="color:var(--text-muted)">(' + p.handicap + ')</span>' : '') + claimed + '</div>';
+    t2esc(p.display_name) +
+    (!amCommish && p.handicap != null ? ' <span class="small-text" style="color:var(--text-muted)">(' + p.handicap + ')</span>' : '') +
+    claimed + '</div>';
   if (amCommish) {
+    // Editable handicap — adjust any player's HCP after the fact. Saves on change.
+    row += '<input type="number" class="t2-hcp-input" data-pid="' + p.id + '" step="0.1" min="0" max="54" ' +
+      'value="' + (p.handicap != null ? p.handicap : '') + '" placeholder="HCP" title="Handicap" ' +
+      'style="width:62px;padding:6px 8px;font-size:13px;flex:0 0 auto">';
     row += '<button class="small t2-team-btn" data-pid="' + p.id + '" data-team="' + other + '" title="Move to other team">→' + other + '</button>';
     if (!p.claimed) row += '<button class="small t2-invite-btn" data-token="' + t2esc(p.invite_token) + '" title="Copy invite link">🔗</button>';
     row += '<button class="small t2-remove-btn" data-pid="' + p.id + '" style="color:var(--danger);border-color:var(--danger)">×</button>';
   }
   row += '</div>';
   return row;
+}
+
+// A roster player's effective handicap for tournament play: the official
+// calculated index once established (3+ counting rounds), else their saved
+// manual handicap. Stored on the tournament player so individual-stroke
+// formats (Singles / Stroke / Quota) can score net in Checkpoint D.
+function t2RosterHcp(entry) {
+  try {
+    const calc = calcHandicapIndex(entry.scoreHistory || []);
+    if (calc && calc.index != null) return Math.round(calc.index * 10) / 10;
+  } catch (e) {}
+  return (typeof entry.hcp === 'number') ? entry.hcp : null;
+}
+
+// "From roster" picker inside the tournament home — lists saved players who
+// aren't already in this tournament; tapping one adds them to the currently
+// selected team with their handicap carried in.
+async function renderT2RosterPick() {
+  const box = document.getElementById('t2-roster-pick-list');
+  if (!box || !_t2Current) return;
+  const [roster, players] = await Promise.all([getPlayerRoster(), t2GetPlayers(_t2Current.id)]);
+  const inT = new Set(players.map(p => (p.display_name || '').trim().toLowerCase()));
+  const avail = roster
+    .filter(r => r && r.name && !inT.has(r.name.trim().toLowerCase()))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  if (!avail.length) {
+    box.innerHTML = '<div class="help-text">Everyone in the roster is already in this tournament.</div>';
+    return;
+  }
+  box.innerHTML = avail.map(r => {
+    const h = t2RosterHcp(r);
+    return '<button class="full t2-rp-row" data-name="' + t2esc(r.name) + '" data-hcp="' + (h != null ? h : '') + '" ' +
+      'style="text-align:left;margin-bottom:6px">' + t2esc(r.name) +
+      (h != null ? ' <span class="small-text" style="color:var(--text-muted)">(HCP ' + h + ')</span>' : '') +
+      '</button>';
+  }).join('');
+  box.querySelectorAll('.t2-rp-row').forEach(b => b.onclick = async () => {
+    const teamSel = document.getElementById('t2-add-team');
+    const hv = b.dataset.hcp;
+    await t2AddPlayer(_t2Current.id, {
+      displayName: b.dataset.name,
+      team: (teamSel && teamSel.value) || 'A',
+      handicap: hv !== '' ? parseFloat(hv) : null
+    });
+    await renderT2Home();
+    // Re-open the picker after the re-render so several players can be added quickly.
+    const again = document.getElementById('t2-pick-roster-btn');
+    if (again) again.click();
+  });
 }
 
 async function renderT2Home() {
@@ -14873,7 +14945,12 @@ async function renderT2Home() {
       '<div class="field"><input type="text" id="t2-add-name" placeholder="Name"></div>' +
       '<div class="field" style="max-width:64px"><input type="number" id="t2-add-hcp" placeholder="Hcp"></div>' +
       '<div class="field" style="max-width:64px"><select id="t2-add-team"><option value="A">A</option><option value="B">B</option></select></div>' +
-      '</div><button class="full" id="t2-add-player-btn" style="margin-bottom:10px">+ Add player</button>';
+      '</div>' +
+      '<div class="actions" style="margin-bottom:8px">' +
+      '<button id="t2-pick-roster-btn" style="flex:1">📋 From roster</button>' +
+      '<button id="t2-add-player-btn" style="flex:1">+ Add player</button>' +
+      '</div>' +
+      '<div id="t2-roster-pick-list" style="display:none;max-height:220px;overflow-y:auto;margin-bottom:10px"></div>';
   }
   const renderTeam = (label, arr) => {
     let h = '<div style="font-weight:600;margin:8px 0 2px">' + t2esc(label) + ' <span class="small-text" style="color:var(--text-muted)">(' + arr.length + ')</span></div>';
@@ -14911,6 +14988,31 @@ async function renderT2Home() {
       await t2AddPlayer(t.id, { displayName: nm, team: team, handicap: hcpv !== '' ? parseFloat(hcpv) : null });
       await renderT2Home();
     };
+    // "From roster" picker — toggle the list of saved players not yet in the event.
+    const pickBtn = document.getElementById('t2-pick-roster-btn');
+    if (pickBtn) pickBtn.onclick = async () => {
+      const box = document.getElementById('t2-roster-pick-list');
+      if (!box) return;
+      if (box.style.display === 'none' || !box.style.display) {
+        await renderT2RosterPick();
+        box.style.display = 'block';
+      } else {
+        box.style.display = 'none';
+      }
+    };
+    // Typing a known name? Pull their handicap automatically on blur
+    // (calculated index once established, otherwise their saved handicap).
+    const nmEl = document.getElementById('t2-add-name');
+    if (nmEl) nmEl.addEventListener('blur', async () => {
+      const v = (nmEl.value || '').trim();
+      const hEl = document.getElementById('t2-add-hcp');
+      if (!v || !hEl || hEl.value !== '') return;
+      try {
+        const roster = await getPlayerRoster();
+        const m = roster.find(r => (r.name || '').trim().toLowerCase() === v.toLowerCase());
+        if (m) { const h = t2RosterHcp(m); if (h != null) hEl.value = h; }
+      } catch (e) {}
+    });
     const saveDays = document.getElementById('t2-save-days');
     if (saveDays) saveDays.onclick = async () => {
       const arr = [];
@@ -14919,8 +15021,15 @@ async function renderT2Home() {
         const dateEl = document.querySelector('.t2-day-date[data-day="' + day + '"]');
         arr.push({ dayNumber: day, format: sel.value, playDate: (dateEl && dateEl.value) || null });
       });
-      const ok = await t2SetDays(t.id, arr);
-      showToast(ok ? 'Days saved' : 'Save failed');
+      saveDays.disabled = true;
+      saveDays.textContent = 'Saving…';
+      const err = await t2SetDays(t.id, arr);
+      saveDays.disabled = false;
+      saveDays.textContent = 'Save days';
+      if (err) { showToast('Could not save days: ' + err); return; }
+      showToast('Days saved ✓');
+      // Re-render from the cloud so what you see is exactly what was saved.
+      await renderT2Home();
     };
     const del = document.getElementById('t2-delete');
     if (del) del.onclick = async () => {
@@ -14932,6 +15041,12 @@ async function renderT2Home() {
     };
     body.querySelectorAll('.t2-team-btn').forEach(b => b.onclick = async () => { await t2SetPlayerTeam(b.dataset.pid, b.dataset.team); await renderT2Home(); });
     body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { await t2RemovePlayer(b.dataset.pid); await renderT2Home(); });
+    // Inline handicap edits — save on change, no re-render needed (keeps focus flow).
+    body.querySelectorAll('.t2-hcp-input').forEach(inp => inp.onchange = async () => {
+      const v = inp.value;
+      const ok = await t2SetPlayerHcp(inp.dataset.pid, v !== '' ? parseFloat(v) : null);
+      showToast(ok ? 'Handicap updated' : 'Could not save handicap');
+    });
   }
   body.querySelectorAll('.t2-invite-btn').forEach(b => b.onclick = () => {
     const link = location.origin + location.pathname + '?tjoin=' + b.dataset.token;
@@ -14945,9 +15060,13 @@ async function renderT2Home() {
 async function handleTournamentJoinLink() {
   let token = null;
   try { token = new URLSearchParams(location.search || '').get('tjoin'); } catch (e) {}
+  // A sign-in redirect (e.g. Google) reloads the page and strips the query
+  // string — fall back to the stashed token so the invite survives the trip.
+  if (!token) { try { token = localStorage.getItem('golf:pending-tjoin'); } catch (e) {} }
   if (!token) return;
   if (!isSignedIn()) {
     _pendingTjoin = token;
+    try { localStorage.setItem('golf:pending-tjoin', token); } catch (e) {}
     try { const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); } catch (e) {}
     showToast('Sign in to join the tournament');
     return;
@@ -14955,9 +15074,10 @@ async function handleTournamentJoinLink() {
   await processPendingTjoin(token);
 }
 async function processPendingTjoin(token) {
+  try { localStorage.removeItem('golf:pending-tjoin'); } catch (e) {}
   const tid = await t2ClaimSlot(token);
   if (tid) {
-    showToast('You joined the tournament!');
+    showToast('Welcome to the tournament!');
     try { history.replaceState({}, '', location.pathname); } catch (e) {}
     switchTab('tourneys');
     openT2Home(tid);
