@@ -3242,6 +3242,16 @@
   </div>
 </div>
 
+<!-- Tournament 2.0: pick the course when starting a day -->
+<div class="modal-overlay" id="t2-course-modal">
+  <div class="modal" style="max-width:440px">
+    <h2>Pick the course</h2>
+    <p class="help-text" style="margin-bottom:10px">This course and its scorecard are used for every group's round today.</p>
+    <div id="t2-course-list" style="max-height:300px;overflow-y:auto"></div>
+    <div class="actions" style="margin-top:10px"><button id="t2-course-cancel" class="full">Cancel</button></div>
+  </div>
+</div>
+
 <!-- Edit my display name -->
 <div class="modal-overlay" id="edit-name-modal">
   <div class="modal" style="max-width:420px">
@@ -14750,6 +14760,18 @@ async function t2GetGroupMembers(groupId) {
   try { const { data } = await supa.from('tournament_group_members').select('*').eq('group_id', groupId); return data || []; }
   catch (e) { return []; }
 }
+async function t2ClearGroups(dayId) {
+  try { const { error } = await supa.from('tournament_groups').delete().eq('day_id', dayId); return !error; }
+  catch (e) { return false; }
+}
+async function t2SetGroupCode(groupId, code) {
+  try { const { error } = await supa.from('tournament_groups').update({ game_code: code }).eq('id', groupId); return !error; }
+  catch (e) { return false; }
+}
+async function t2SetDayStatus(dayId, status) {
+  try { const { error } = await supa.from('tournament_days').update({ status: status }).eq('id', dayId); return !error; }
+  catch (e) { return false; }
+}
 
 // ---- matches + standings ----
 async function t2GetMatches(tid) {
@@ -14781,7 +14803,7 @@ let _t2Wired = false;
 let _t2Current = null;
 let _pendingTjoin = null;
 function t2esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-const T2_FORMATS = [['singles','Singles (1v1)'],['bestball','Best Ball (2v2)'],['scramble','Scramble (2v2)'],['altshot','Alt Shot (2v2)'],['quota','Quota (points)'],['teamquota','Team Quota'],['stroke','Stroke (leaderboard)']];
+const T2_FORMATS = [['singles','Singles (1v1)'],['bestball','Best Ball (2v2)'],['scramble','Scramble (2v2)'],['altshot','Alt Shot (2v2)'],['rydercup','Ryder Cup (2v2, 3 formats)'],['quota','Quota (points)'],['teamquota','Team Quota'],['stroke','Stroke (leaderboard)']];
 
 function wireT2() {
   if (_t2Wired) return;
@@ -14925,12 +14947,218 @@ async function renderT2RosterPick() {
   });
 }
 
+// ---- Start-day machinery: auto groups → pick course → generate rounds ----
+function t2Shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+  }
+  return a;
+}
+
+// Build (or rebuild) the day's groups automatically from the two teams:
+//   singles            → pairs, one A vs one B
+//   bestball/scramble/altshot/teamquota → foursomes, 2 A vs 2 B
+//   stroke/quota       → mixed foursomes (last group may be 3 or 5)
+// Reshuffles each time, so tap again for different pairings.
+async function t2BuildGroupsForDay(dayId, dayNumber) {
+  const t = _t2Current; if (!t) return;
+  // Persist this day's on-screen format/date first so grouping matches it.
+  const sel = document.querySelector('.t2-day-format[data-day="' + dayNumber + '"]');
+  const fmt = sel ? sel.value : 'singles';
+  const dateEl = document.querySelector('.t2-day-date[data-day="' + dayNumber + '"]');
+  await t2SetDays(t.id, [{ dayNumber: dayNumber, format: fmt, playDate: (dateEl && dateEl.value) || null }]);
+
+  const players = await t2GetPlayers(t.id);
+  const A = t2Shuffle(players.filter(p => p.team === 'A'));
+  const B = t2Shuffle(players.filter(p => p.team === 'B'));
+  const groups = []; const left = [];
+  if (fmt === 'singles') {
+    const n = Math.min(A.length, B.length);
+    for (let i = 0; i < n; i++) groups.push([{ p: A[i], team: 'A' }, { p: B[i], team: 'B' }]);
+    A.slice(n).concat(B.slice(n)).forEach(p => left.push(p));
+  } else if (fmt === 'bestball' || fmt === 'scramble' || fmt === 'altshot' || fmt === 'rydercup' || fmt === 'teamquota') {
+    const n = Math.min(Math.floor(A.length / 2), Math.floor(B.length / 2));
+    for (let i = 0; i < n; i++) groups.push([
+      { p: A[2 * i], team: 'A' }, { p: A[2 * i + 1], team: 'A' },
+      { p: B[2 * i], team: 'B' }, { p: B[2 * i + 1], team: 'B' }
+    ]);
+    A.slice(2 * n).concat(B.slice(2 * n)).forEach(p => left.push(p));
+  } else { // stroke / quota — mixed foursomes, flexible sizes
+    const all = []; const m = Math.max(A.length, B.length);
+    for (let i = 0; i < m; i++) { if (A[i]) all.push(A[i]); if (B[i]) all.push(B[i]); }
+    for (let i = 0; i < all.length; i += 4) groups.push(all.slice(i, i + 4).map(p => ({ p: p, team: p.team })));
+    if (groups.length > 1 && groups[groups.length - 1].length === 1) {
+      const solo = groups.pop()[0];
+      groups[groups.length - 1].push(solo);
+    }
+    if (groups.length === 1 && groups[0].length < 2) { left.push(groups.pop()[0].p); }
+  }
+  if (!groups.length) { showToast('Not enough players on both teams for this format'); return; }
+  await t2ClearGroups(dayId);
+  for (let gi = 0; gi < groups.length; gi++) {
+    const g = await t2CreateGroup(dayId, { groupNumber: gi + 1, size: groups[gi].length });
+    if (g) {
+      for (let si = 0; si < groups[gi].length; si++) {
+        const mm = groups[gi][si];
+        await t2AddGroupMember(g.id, mm.p.id, mm.team, si + 1);
+      }
+    }
+  }
+  if (left.length) showToast('Left out (uneven teams): ' + left.map(p => p.display_name).join(', '));
+  else showToast('Groups built — tap again to reshuffle, or Start day');
+  await renderT2Home();
+}
+
+let _t2StartCtx = null;
+let _t2CourseWired = false;
+function wireT2CourseModal() {
+  if (_t2CourseWired) return;
+  _t2CourseWired = true;
+  const m = document.getElementById('t2-course-modal');
+  const c = document.getElementById('t2-course-cancel');
+  if (c) c.onclick = () => m.classList.remove('show');
+  if (m) m.onclick = (e) => { if (e.target.id === 't2-course-modal') m.classList.remove('show'); };
+}
+
+async function t2StartDay(dayId, dayNumber) {
+  _t2StartCtx = { dayId: dayId, dayNumber: dayNumber };
+  wireT2CourseModal();
+  const saves = await getCourseSaves();
+  const ids = Object.keys(saves || {}).sort((a, b) => ((saves[a].name || '')).localeCompare(saves[b].name || ''));
+  const list = document.getElementById('t2-course-list');
+  let html = '';
+  ids.forEach(id => {
+    html += '<button class="full t2-course-row" data-cid="' + t2esc(id) + '" style="text-align:left;margin-bottom:6px">' + t2esc(saves[id].name || id) + '</button>';
+  });
+  html += '<button class="full t2-course-row" data-cid="" style="text-align:left;margin-bottom:6px">Standard Par 72 (no saved scorecard)</button>';
+  list.innerHTML = html;
+  list.querySelectorAll('.t2-course-row').forEach(b => b.onclick = () => t2LaunchDayRounds(b.dataset.cid));
+  document.getElementById('t2-course-modal').classList.add('show');
+}
+
+// Create one normal Bad Golf round per group, pre-configured with the day's
+// format game (at $0 — the cup runs on points; money is for side bets). The
+// rounds are FULLY normal: each group can add Nassau, Match Play, greenies,
+// junk, etc. mid-round via Setup, exactly like any round — the tournament
+// only scores its own format game.
+async function t2LaunchDayRounds(courseId) {
+  document.getElementById('t2-course-modal').classList.remove('show');
+  const ctx = _t2StartCtx; _t2StartCtx = null;
+  const t = _t2Current; if (!t || !ctx) return;
+  showToast('Creating rounds…');
+  const saves = await getCourseSaves();
+  const cs = courseId && saves[courseId] ? saves[courseId] : null;
+  const pars = cs ? cs.pars.slice() : STANDARD_PARS.slice();
+  const sis  = cs ? cs.sis.slice()  : DEFAULT_SI.slice();
+  const tees = (cs && Array.isArray(cs.tees)) ? cs.tees.slice() : [];
+  const courseName = cs ? cs.name : 'Standard Par 72';
+  const days = await t2GetDays(t.id);
+  const dRec = days.find(d => d.id === ctx.dayId);
+  const fmt = (dRec && dRec.format) || 'singles';
+  const groups = await t2GetGroups(ctx.dayId);
+  const players = await t2GetPlayers(t.id);
+  const pById = {}; players.forEach(p => pById[p.id] = p);
+  let made = 0;
+  for (const grp of groups) {
+    if (grp.game_code) continue; // already launched
+    const mem = await t2GetGroupMembers(grp.id);
+    mem.sort((a, b) => (a.slot || 0) - (b.slot || 0));
+    const gp = mem.map((m, i) => {
+      const tp = pById[m.tournament_player_id] || {};
+      const parts = (tp.display_name || 'Player').trim().split(/\s+/);
+      const first = parts[0] || 'Player';
+      const last = parts.slice(1).join(' ') || '';
+      const h = Math.round(parseFloat(tp.handicap) || 0);
+      return {
+        id: 't2p' + i + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        firstName: first, lastName: last, name: combineName(first, last),
+        hcp: h, rawHcp: h, playsGross: false,
+        teeLabel: tees.length === 1 ? tees[0].label : null,
+        _team: m.team
+      };
+    });
+    if (gp.length < 2) continue;
+    const Aids = gp.filter(p => p._team === 'A').map(p => p.id);
+    const Bids = gp.filter(p => p._team === 'B').map(p => p.id);
+    const games = {};
+    if (fmt === 'singles') {
+      const inst = { value: 0, net: true, pair: [gp[0].name, gp[1].name], participants: [gp[0].id, gp[1].id], participantNames: [gp[0].name, gp[1].name] };
+      games.match = Object.assign({}, inst, { instances: [inst] });
+    } else if (fmt === 'bestball') {
+      games.teamMatch = { value: 0, net: true, teamA: Aids, teamB: Bids };
+    } else if (fmt === 'scramble') {
+      games.scramble = { value: 0, scoring: 'match', teamA: Aids, teamB: Bids };
+    } else if (fmt === 'altshot') {
+      games.ryderCup = { value: 0, net: true, seg1: 'altshot', seg2: 'altshot', seg3: 'altshot', teamA: Aids, teamB: Bids };
+    } else if (fmt === 'rydercup') {
+      games.ryderCup = { value: 0, net: true, seg1: 'bestball', seg2: 'scramble', seg3: 'altshot', teamA: Aids, teamB: Bids };
+    } else if (fmt === 'quota') {
+      games.quota = { mode: 'pool', net: true, basis: 'auto', value: 0, buyin: 0, payout: 'winner' };
+    } else if (fmt === 'teamquota') {
+      games.teamQuota = { mode: 'perpoint', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids };
+    } // 'stroke' = leaderboard-only day: no game pre-configured
+    const code = generateCode();
+    const game = {
+      code: code,
+      course: courseName,
+      courseId: courseId || '',
+      pars: pars, sis: sis, tees: tees,
+      players: gp.map(p => { const c2 = Object.assign({}, p); delete c2._team; return c2; }),
+      games: games,
+      hcpRules: { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false },
+      unranked: false,
+      scores: {},
+      bankerData: { holes: {}, picks: {} },
+      wolfData: { holes: {} },
+      junkData: {},
+      tourneyId: null,
+      t2: { tournamentId: t.id, dayId: ctx.dayId, groupId: grp.id, format: fmt, group: grp.group_number, name: t.name, day: ctx.dayNumber },
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    game.players.forEach(p => game.scores[p.id] = new Array(18).fill(null));
+    const ok = await saveGame(game);
+    if (ok) { await t2SetGroupCode(grp.id, code); made++; }
+  }
+  await t2SetDayStatus(ctx.dayId, 'active');
+  showToast(made + ' round' + (made === 1 ? '' : 's') + ' created — each group taps ▶ Open to score');
+  await renderT2Home();
+}
+
+// Open a tournament group round to score (live, not read-only) and follow
+// realtime updates. Closes the tournament home modal.
+async function openT2Round(code) {
+  if (!code) return;
+  const g = await loadGame(code);
+  if (!g) { showToast('Round not found'); return; }
+  state.game = g;
+  state.viewOnlyMode = !!g.finishedAt;
+  state.currentHole = 1;
+  try { await safeSet(KEY_LAST, code, false); } catch (e) {}
+  try { await addToRecent(g); } catch (e) {}
+  enableGameTabs(true);
+  try { subscribeToGame(code); } catch (e) {}
+  const hm = document.getElementById('t2-home-modal');
+  if (hm) hm.classList.remove('show');
+  switchTab(state.viewOnlyMode ? 'board' : 'score');
+  showToast(state.viewOnlyMode ? 'Viewing round (finished)' : 'Joined ' + code);
+}
+
 async function renderT2Home() {
   const t = _t2Current;
   if (!t) return;
   const body = document.getElementById('t2-home-body');
   const amCommish = !!(_authUser && t.commissioner_id === _authUser.id);
   const [players, days] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id)]);
+  // Groups + members per saved day (small scale — a handful of queries).
+  const groupsByDay = {}; const membersByGroup = {};
+  await Promise.all(days.map(async d => {
+    const gs = await t2GetGroups(d.id);
+    groupsByDay[d.day_number] = gs;
+    await Promise.all(gs.map(async g2 => { membersByGroup[g2.id] = await t2GetGroupMembers(g2.id); }));
+  }));
+  const pById = {}; players.forEach(p => pById[p.id] = p);
   const teamA = players.filter(p => p.team === 'A');
   const teamB = players.filter(p => p.team === 'B');
   const unassigned = players.filter(p => !p.team);
@@ -14972,6 +15200,33 @@ async function renderT2Home() {
       '</select></div>' +
       '<div class="field"><input type="date" class="t2-day-date" data-day="' + i + '" value="' + (d.play_date || '') + '"' + (amCommish ? '' : ' disabled') + '></div>' +
       '</div>';
+    // Groups for this day (visible to every member; controls for the commissioner)
+    const gs = groupsByDay[i] || [];
+    html += '<div style="margin:0 0 12px 50px">';
+    gs.forEach(g2 => {
+      const mem = (membersByGroup[g2.id] || []).slice().sort((a, b) => (a.slot || 0) - (b.slot || 0));
+      const names = mem.map(m => {
+        const p = pById[m.tournament_player_id];
+        const nm = p ? p.display_name.split(/\s+/)[0] : '?';
+        return (m.team === 'A' ? '🔵' : '🔴') + nm;
+      });
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">' +
+        '<div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">G' + g2.group_number + ': ' + t2esc(names.join(' ')) + '</div>' +
+        (g2.game_code ? '<button class="small t2-open-round" data-code="' + t2esc(g2.game_code) + '">▶ Open</button>' : '') +
+        '</div>';
+    });
+    if (d.id) {
+      const started = d.status === 'active' || gs.some(g2 => g2.game_code);
+      if (amCommish && !started) {
+        html += '<div class="actions" style="margin:4px 0 2px">' +
+          '<button class="small t2-build-groups" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1">' + (gs.length ? '🔀 Reshuffle groups' : '⚡ Build groups') + '</button>' +
+          (gs.length ? '<button class="small t2-start-day" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1;background:var(--accent);color:#fff;border-color:var(--accent)">▶ Start day</button>' : '') +
+          '</div>';
+      } else if (started) {
+        html += '<div class="small-text" style="color:var(--accent);margin:2px 0">✓ Day started — groups tap ▶ Open to score. Side bets: open the round, then Setup → add any games.</div>';
+      }
+    }
+    html += '</div>';
   }
   if (amCommish) html += '<button class="primary full" id="t2-save-days" style="margin-top:6px">Save days</button>';
   if (amCommish) html += '<button class="full" id="t2-delete" style="margin-top:14px;color:var(--danger);border-color:var(--danger)">Delete tournament</button>';
@@ -15054,6 +15309,12 @@ async function renderT2Home() {
       navigator.clipboard.writeText(link).then(() => showToast('Invite link copied')).catch(() => showToast(link));
     } else { showToast(link); }
   });
+  // Groups: open a group's round (any member); build/start (commissioner).
+  body.querySelectorAll('.t2-open-round').forEach(b => b.onclick = () => openT2Round(b.dataset.code));
+  if (amCommish) {
+    body.querySelectorAll('.t2-build-groups').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
+    body.querySelectorAll('.t2-start-day').forEach(b => b.onclick = () => t2StartDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
+  }
 }
 
 // Bound deep-link join: ?tjoin=<token> claims a specific pre-assigned slot.
