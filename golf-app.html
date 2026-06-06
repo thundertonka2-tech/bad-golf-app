@@ -6135,7 +6135,7 @@ function escapeHtml(s) {
 // Build the filtered course list view based on the search query.
 // Shows: course rows grouped by city (when no search), or filtered matches
 // (when searching). Tap a row to select it.
-function renderCourseList(query) {
+async function renderCourseList(query) {
   const list = $('course-list');
   if (!list) return;
   const q = (query || '').trim().toLowerCase();
@@ -6166,6 +6166,31 @@ function renderCourseList(query) {
 
   const currentId = $('course-name').dataset.courseId || '';
   let html = '';
+
+  // Most recently PLAYED courses pinned to the top (skip while searching).
+  // Recency comes from the saved scorecards' updatedAt, which refreshes every
+  // time a round starts at that course.
+  if (!q) {
+    try {
+      const saves = await getCourseSaves();
+      const recents = Object.keys(saves || {})
+        .sort((a, b) => ((saves[b] && saves[b].updatedAt) || 0) - ((saves[a] && saves[a].updatedAt) || 0))
+        .map(id => COURSE_LIBRARY.find(c => c.id === id))
+        .filter(Boolean)
+        .slice(0, 4);
+      if (recents.length) {
+        html += `<div class="course-list-group-label">⏱ Recent</div>`;
+        recents.forEach(c => {
+          const sel = c.id === currentId ? ' selected' : '';
+          const note = c.note ? `<span class="row-note">${escapeHtml(c.note)}</span>` : '';
+          html += `<div class="course-list-row${sel}" data-course-id="${c.id}">
+            <span class="row-name">${escapeHtml(c.name)}</span>${note}
+          </div>`;
+        });
+      }
+    } catch (e) { /* recency is a nicety — list still renders */ }
+  }
+
   cities.forEach(city => {
     html += `<div class="course-list-group-label">${escapeHtml(city)}</div>`;
     byCity[city].forEach(c => {
@@ -14908,10 +14933,24 @@ async function t2SaveAsTemplate() {
     const d = days.find(x => x.day_number === i);
     tpl.formats.push(d ? d.format : (oneday ? 'stroke' : 'singles'));
   }
-  list.push(tpl);
-  const ok = await t2SaveTemplates(list);
-  showToast(ok ? 'Template saved ⭐ (find it on the Events tab)' : 'Could not save template');
-  await renderT2Templates();
+  // Optional default course — if set, "Use" events skip the course tap on Start day.
+  showToast('Pick a default course for this template — or "No default"');
+  t2OpenCoursePicker({ allowSkip: true, onPick: async (cid) => {
+    if (cid !== '__none__') {
+      tpl.courseId = cid;
+      if (cid === '') { tpl.courseName = 'Standard Par 72'; }
+      else {
+        try {
+          const saves = await getCourseSaves();
+          tpl.courseName = (saves && saves[cid] && saves[cid].name) || 'Saved course';
+        } catch (e) { tpl.courseName = 'Saved course'; }
+      }
+    }
+    list.push(tpl);
+    const ok = await t2SaveTemplates(list);
+    showToast(ok ? 'Template saved ⭐ (find it on the Events tab)' : 'Could not save template');
+    await renderT2Templates();
+  } });
 }
 
 // Create a fresh event from a template — everything prefilled except players.
@@ -14929,7 +14968,13 @@ async function t2UseTemplate(tplId) {
     teamBName: tpl.type === 'oneday' ? '' : (tpl.teamB || 'Team B')
   });
   if (!t) return;
-  if (tpl.type === 'oneday') await t2Update(t.id, { settings: { type: 'oneday' } });
+  const settings = {};
+  if (tpl.type === 'oneday') settings.type = 'oneday';
+  if (tpl.courseId !== undefined && tpl.courseId !== null) {
+    settings.defaultCourseId = tpl.courseId;
+    settings.defaultCourseName = tpl.courseName || '';
+  }
+  if (Object.keys(settings).length) await t2Update(t.id, { settings: settings });
   const days = [];
   for (let i = 1; i <= (tpl.numDays || 1); i++) {
     days.push({ dayNumber: i, format: (tpl.formats && tpl.formats[i - 1]) || (tpl.type === 'oneday' ? 'stroke' : 'singles') });
@@ -14951,7 +14996,8 @@ async function renderT2Templates() {
     tpls.map(tp =>
       '<div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-top:1px solid var(--border)">' +
       '<div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + t2esc(tp.name) +
-      ' <span class="small-text" style="color:var(--text-muted)">· ' + (tp.type === 'oneday' ? 'individual' : 'cup') + ' · ' + (tp.numDays || 1) + 'd · ' + t2esc((tp.formats || []).join(', ')) + '</span></div>' +
+      ' <span class="small-text" style="color:var(--text-muted)">· ' + (tp.type === 'oneday' ? 'individual' : 'cup') + ' · ' + (tp.numDays || 1) + 'd · ' + t2esc((tp.formats || []).join(', ')) +
+      (tp.courseName ? ' · ⛳ ' + t2esc(tp.courseName) : '') + '</span></div>' +
       '<button class="small t2-tpl-use" data-id="' + t2esc(tp.id) + '">▶ Use</button>' +
       '<button class="small t2-tpl-del" data-id="' + t2esc(tp.id) + '" style="color:var(--danger);border-color:var(--danger)">×</button>' +
       '</div>'
@@ -15152,20 +15198,48 @@ function wireT2CourseModal() {
   if (m) m.onclick = (e) => { if (e.target.id === 't2-course-modal') m.classList.remove('show'); };
 }
 
-async function t2StartDay(dayId, dayNumber) {
-  _t2StartCtx = { dayId: dayId, dayNumber: dayNumber };
+// Generic course picker — most recently PLAYED first. opts:
+//   { allowSkip: bool, onPick(cid) }  cid '' = Standard Par 72,
+//   '__none__' = the allowSkip "no default" choice.
+let _t2CoursePickCb = null;
+async function t2OpenCoursePicker(opts) {
   wireT2CourseModal();
+  _t2CoursePickCb = opts.onPick;
   const saves = await getCourseSaves();
-  const ids = Object.keys(saves || {}).sort((a, b) => ((saves[a].name || '')).localeCompare(saves[b].name || ''));
+  const ids = Object.keys(saves || {})
+    .sort((a, b) => ((saves[b] && saves[b].updatedAt) || 0) - ((saves[a] && saves[a].updatedAt) || 0));
   const list = document.getElementById('t2-course-list');
   let html = '';
-  ids.forEach(id => {
-    html += '<button class="full t2-course-row" data-cid="' + t2esc(id) + '" style="text-align:left;margin-bottom:6px">' + t2esc(saves[id].name || id) + '</button>';
+  if (opts.allowSkip) {
+    html += '<button class="full t2-course-row" data-cid="__none__" style="text-align:left;margin-bottom:6px;color:var(--text-muted)">No default — ask each time</button>';
+  }
+  ids.forEach((id, i) => {
+    html += '<button class="full t2-course-row" data-cid="' + t2esc(id) + '" style="text-align:left;margin-bottom:6px">' +
+      t2esc(saves[id].name || id) + (i === 0 ? ' <span class="small-text" style="color:var(--accent)">· most recent</span>' : '') + '</button>';
   });
   html += '<button class="full t2-course-row" data-cid="" style="text-align:left;margin-bottom:6px">Standard Par 72 (no saved scorecard)</button>';
   list.innerHTML = html;
-  list.querySelectorAll('.t2-course-row').forEach(b => b.onclick = () => t2LaunchDayRounds(b.dataset.cid));
+  list.querySelectorAll('.t2-course-row').forEach(b => b.onclick = () => {
+    document.getElementById('t2-course-modal').classList.remove('show');
+    const cb = _t2CoursePickCb; _t2CoursePickCb = null;
+    if (cb) cb(b.dataset.cid);
+  });
   document.getElementById('t2-course-modal').classList.add('show');
+}
+
+async function t2StartDay(dayId, dayNumber) {
+  _t2StartCtx = { dayId: dayId, dayNumber: dayNumber };
+  // Template default course? Skip the picker entirely — one less tap.
+  const t = _t2Current;
+  const defId = t && t.settings ? t.settings.defaultCourseId : undefined;
+  if (defId !== undefined && defId !== null) {
+    const saves = await getCourseSaves();
+    if (defId === '' || (saves && saves[defId])) {
+      showToast('Course: ' + (defId ? (saves[defId].name || 'saved course') : 'Standard Par 72') + ' (template default)');
+      return t2LaunchDayRounds(defId);
+    }
+  }
+  t2OpenCoursePicker({ allowSkip: false, onPick: (cid) => t2LaunchDayRounds(cid) });
 }
 
 // Create one normal Bad Golf round per group, pre-configured with the day's
