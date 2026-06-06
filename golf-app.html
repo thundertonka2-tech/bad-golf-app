@@ -15476,6 +15476,50 @@ async function t2UpsertStanding(row) {
   } catch (e) { return false; }
 }
 
+// Persist the computed results: decided matches become permanent rows in
+// tournament_matches (one per group; deduped by select-then-write since the
+// table has no group unique index), and cup totals + the stroke leaderboard
+// are cached in tournament_standings. Failures are non-fatal — standings
+// always render live from the rounds; this is the durable record.
+async function t2PersistStandings(t, players, standings) {
+  if (!supa || !_authUser || !standings || !standings.anyRounds) return;
+  try {
+    const now = new Date().toISOString();
+    // 1. Permanent match records for decided matches
+    const finals = (standings.lines || []).filter(l => l.final && l.groupId && !String(l.label || '').endsWith('· saved'));
+    for (const ln of finals) {
+      try {
+        const { data: existing } = await supa.from('tournament_matches')
+          .select('id,status,a_points,b_points').eq('group_id', ln.groupId).maybeSingle();
+        const rec = {
+          tournament_id: t.id, day_id: ln.dayId, group_id: ln.groupId,
+          format: ln.fmt || 'stroke', status: 'final',
+          a_points: ln.a, b_points: ln.b,
+          detail: { label: ln.label || '' },
+          decided_at: now, updated_at: now
+        };
+        if (existing && existing.id) {
+          if (existing.status !== 'final' || Number(existing.a_points) !== ln.a || Number(existing.b_points) !== ln.b) {
+            await supa.from('tournament_matches').update(rec).eq('id', existing.id);
+          }
+        } else {
+          await supa.from('tournament_matches').insert(rec);
+        }
+      } catch (e) { /* per-match failure shouldn't stop the rest */ }
+    }
+    // 2. Standings cache — cup totals + stroke leaderboard
+    await t2UpsertStanding({ tournament_id: t.id, scope: 'cup', entity: 'A', points: standings.aFinal, updated_at: now });
+    await t2UpsertStanding({ tournament_id: t.id, scope: 'cup', entity: 'B', points: standings.bFinal, updated_at: now });
+    const idByName = {};
+    (players || []).forEach(p => { idByName[String(p.display_name || '').trim().toLowerCase()] = p.id; });
+    for (const k of Object.keys(standings.stroke || {})) {
+      const s = standings.stroke[k];
+      await t2UpsertStanding({ tournament_id: t.id, scope: 'stroke',
+        entity: idByName[k] || s.name, gross: s.gross, net: s.net, updated_at: now });
+    }
+  } catch (e) { console.warn('t2 persist failed (standings still render live):', e); }
+}
+
 // ============================================================
 // TOURNAMENT 2.0 — UI (Checkpoint A/B/C foundation)
 // ============================================================
@@ -16052,15 +16096,31 @@ async function openT2Round(code) {
 // count toward a projected score. Every player's gross/net feeds the
 // stroke leaderboard regardless of format.
 // ============================================================
-async function t2ComputeStandings(t, days, groupsByDay) {
+async function t2ComputeStandings(t, days, groupsByDay, storedMatches) {
   const res = { aFinal: 0, bFinal: 0, aProj: 0, bProj: 0, lines: [], stroke: {}, anyLive: false, anyRounds: false };
+  const storedByGroup = {};
+  (storedMatches || []).forEach(m => { if (m && m.group_id) storedByGroup[m.group_id] = m; });
   for (const d of days) {
     const gs = groupsByDay[d.day_number] || [];
     for (const grp of gs) {
       if (!grp.game_code) continue;
       let g = null;
       try { g = await loadGame(grp.game_code); } catch (e) {}
-      if (!g) continue;
+      if (!g) {
+        // Round data unavailable (offline / cleaned up) — use the permanent
+        // match record written when the match was decided, so cup history
+        // never disappears with a game row.
+        const stored = grp.id != null ? storedByGroup[grp.id] : null;
+        if (stored && stored.status === 'final') {
+          res.anyRounds = true;
+          const a = Number(stored.a_points) || 0, b = Number(stored.b_points) || 0;
+          res.aFinal += a; res.bFinal += b; res.aProj += a; res.bProj += b;
+          res.lines.push({ day: d.day_number, group: grp.group_number, dayId: d.id, groupId: grp.id,
+            fmt: stored.format, label: ((stored.detail && stored.detail.label) || 'final') + ' · saved',
+            final: true, a: a, b: b });
+        }
+        continue;
+      }
       res.anyRounds = true;
       const fmt = (g.t2 && g.t2.format) || d.format || 'stroke';
       const finished = !!g.finishedAt;
@@ -16142,7 +16202,7 @@ async function t2ComputeStandings(t, days, groupsByDay) {
         if (isFinal) { res.aFinal += aPts; res.bFinal += bPts; }
         else { res.anyLive = true; }
         res.aProj += aPts; res.bProj += bPts;
-        res.lines.push({ day: d.day_number, group: grp.group_number, label: label, final: isFinal, a: aPts, b: bPts });
+        res.lines.push({ day: d.day_number, group: grp.group_number, dayId: d.id, groupId: grp.id, fmt: fmt, label: label, final: isFinal, a: aPts, b: bPts });
       }
     }
   }
@@ -16214,7 +16274,11 @@ async function renderT2Home() {
     await Promise.all(gs.map(async g2 => { membersByGroup[g2.id] = await t2GetGroupMembers(g2.id); }));
   }));
   const pById = {}; players.forEach(p => pById[p.id] = p);
-  const standings = await t2ComputeStandings(t, days, groupsByDay);
+  let t2StoredMatches = [];
+  try { t2StoredMatches = await t2GetMatches(t.id); } catch (e) {}
+  const standings = await t2ComputeStandings(t, days, groupsByDay, t2StoredMatches);
+  // Write decided matches + standings cache in the background (permanent record)
+  try { t2PersistStandings(t, players, standings); } catch (e) {}
   const od = t2IsOneDay(t); // individual event: no teams, leaderboard-only
   const teamA = players.filter(p => p.team === 'A');
   const teamB = players.filter(p => p.team === 'B');
