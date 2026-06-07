@@ -3812,7 +3812,7 @@
     <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--surface-2);border-bottom:1px solid var(--border);gap:12px">
         <span class="small-text" style="color:var(--text-muted);flex-shrink:0">Version</span>
-        <span style="font-weight:500" id="about-version">1.0</span>
+        <span style="font-weight:500" id="about-version">1.1 · 2026-06-06</span>
       </div>
       <!-- Support: stacked layout (label on top, email below). Email gets a
            normal font size so it fits on one line cleanly. word-break:break-all
@@ -5910,18 +5910,22 @@ async function setupNewGameForm(prefill) {
     } catch (e) { /* non-fatal — fall back to a blank row */ }
   }
   const startCount = (prefill && prefill.players && prefill.players.length) ? prefill.players.length : 1;
+  let prefillDropped = 0; // players beyond the 5-row scorecard cap (quiet mode — one toast below, not one prompt each)
   for (let i = 0; i < startCount; i++) {
     const p = prefill && prefill.players ? prefill.players[i] : null;
     if (p) {
       // Prefer structured fields; fall back to splitting combined name
       const firstName = p.firstName || ((p.name || '').trim().split(/\s+/)[0] || '');
       const lastName = p.lastName || ((p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
-      addPlayerRow(firstName, lastName, p.hcp || 0, !!p.playsGross);
+      if (!addPlayerRow(firstName, lastName, p.hcp || 0, !!p.playsGross, true)) prefillDropped++;
     } else if (i === 0 && mePlayer) {
       addPlayerRow(mePlayer.first, mePlayer.last, mePlayer.hcp, false);
     } else {
       addPlayerRow();
     }
+  }
+  if (prefillDropped > 0) {
+    showToast('Only the first 5 players were loaded — scorecards max out at 5. ' + prefillDropped + ' more in this group: use an Event (Events tab) for cart groups + one combined leaderboard.');
   }
 
   // Build junk options — each junk type as its own row with name + description
@@ -6021,7 +6025,10 @@ async function setupNewGameForm(prefill) {
 //   addPlayerRow()                              — blank row
 //   addPlayerRow('Tyler', 8)                    — single name (HCP in second slot)
 //   addPlayerRow('Tyler', "O'Connor", 8)        — first + last + HCP
-function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGross = false) {
+// `quiet` = programmatic prefill (saved tournament / saved game load): when the
+// 5-row cap is hit, return null WITHOUT firing the convert-to-Event offer — the
+// caller decides how to surface the overflow (one toast, not one per player).
+function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGross = false, quiet = false) {
   // Detect legacy 2-arg call: addPlayerRow(name, hcp)
   let lastName = '';
   let hcp = 0;
@@ -6040,8 +6047,8 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
   if (list.children.length >= 5) {
     // Normal rounds cap at 5 per scorecard. Bigger groups become a
     // tournament: split into cart groups, one combined leaderboard.
-    t2OfferBigGroup();
-    return;
+    if (!quiet) t2OfferBigGroup();
+    return null;
   }
   const row = document.createElement('div');
   row.className = 'player-row';
@@ -6150,6 +6157,7 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
   // picker until something else triggers a re-render (changing course tees,
   // saving config, etc.) — which left blank rows missing the dropdown.
   renderPlayerTeeSelects();
+  return row;
 }
 
 // Auto-fill a player row's handicap from the saved roster when a recognized
@@ -7794,16 +7802,23 @@ function applySavedConfig(config) {
   if (config.players && config.players.length > 0) {
     $('players-list').innerHTML = '';
     state.playerTees = state.playerTees || {};
+    let dropped = 0; // beyond the 5-row cap — quiet mode, single toast below
     config.players.forEach(p => {
       // Prefer structured fields; fall back to splitting combined name for legacy configs
       const firstName = p.firstName || ((p.name || '').trim().split(/\s+/)[0] || '');
       const lastName = p.lastName || ((p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
-      addPlayerRow(firstName, lastName, p.rawHcp != null ? p.rawHcp : (p.hcp || 0), !!p.playsGross);
+      if (!addPlayerRow(firstName, lastName, p.rawHcp != null ? p.rawHcp : (p.hcp || 0), !!p.playsGross, true)) {
+        dropped++;
+        return;
+      }
       // Restore each player's tee selection by name
       if (p.name && p.teeLabel) {
         state.playerTees[p.name] = p.teeLabel;
       }
     });
+    if (dropped > 0) {
+      showToast('Only the first 5 players were loaded — scorecards max out at 5. ' + dropped + ' more in this group: use an Event (Events tab) for cart groups + one combined leaderboard.');
+    }
     renderPlayerTeeSelects();
   }
 
@@ -18102,6 +18117,44 @@ async function init() {
         showToast('Rejoined ' + t.activeCode);
         return;
       }
+    }
+
+    // Big group? Legacy tournaments funnel into the single-scorecard setup
+    // form, which caps at 5 players. With 6+ players, run it as an Event
+    // (cart groups + one combined leaderboard) instead of silently dropping
+    // everyone past the 5th row.
+    const tPlayers = (t.savedConfig && Array.isArray(t.savedConfig.players) && t.savedConfig.players.length)
+      ? t.savedConfig.players.map(p => ({
+          name: p.name || combineName(p.firstName || '', p.lastName || ''),
+          hcp: (p.hcp != null ? p.hcp : null)
+        }))
+      : (t.players ? t.players.split(',').map(s => s.trim()).filter(Boolean).map(n => ({ name: n, hcp: null })) : []);
+    if (tPlayers.length > 5) {
+      if (!isSignedIn()) {
+        showToast('"' + t.name + '" has ' + tPlayers.length + ' players — scorecards max out at 5. Sign in to run it as an Event (cart groups + one combined leaderboard).');
+        return;
+      }
+      const okBig = confirm(
+        '"' + t.name + '" has ' + tPlayers.length + ' players.\n\n' +
+        "Scorecards max out at 5, so I'll run this as an Event instead:\n" +
+        '  • your group splits into cart groups (own scorecard each)\n' +
+        '  • everyone shows on ONE combined live leaderboard\n' +
+        '  • one final standings at the end\n\n' +
+        'Create the Event now with all ' + tPlayers.length + ' players?'
+      );
+      if (!okBig) return;
+      const ev = await t2Create({ name: t.name, numDays: 1, teamAName: 'Players', teamBName: '' });
+      if (!ev) { showToast('Could not create the Event — try again'); return; }
+      await t2Update(ev.id, { settings: { type: 'oneday' } });
+      await t2SetDays(ev.id, [{ dayNumber: 1, format: 'stroke' }]);
+      for (const p of tPlayers) {
+        await t2AddPlayer(ev.id, { displayName: p.name, team: 'A', handicap: p.hcp });
+      }
+      showToast(tPlayers.length + ' players carried over — build cart groups, then start the day');
+      await renderT2List();
+      switchTab('tourneys');
+      openT2Home(ev.id);
+      return;
     }
 
     // Otherwise, open the setup form pre-filled from the saved config (if any)
