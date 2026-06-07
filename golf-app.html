@@ -4112,7 +4112,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.06.3';
+const BG_BUILD = 'v2026.06.06.4';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -15935,7 +15935,7 @@ function t2Shuffle(a) {
 //   bestball/scramble/altshot/teamquota → foursomes, 2 A vs 2 B
 //   stroke/quota       → mixed foursomes (last group may be 3 or 5)
 // Reshuffles each time, so tap again for different pairings.
-async function t2BuildGroupsForDay(dayId, dayNumber) {
+async function t2BuildGroupsForDay(dayId, dayNumber, byHcp) {
   const t = _t2Current; if (!t) return;
   // Persist this day's on-screen format/date first so grouping matches it.
   const sel = document.querySelector('.t2-day-format[data-day="' + dayNumber + '"]');
@@ -15943,32 +15943,86 @@ async function t2BuildGroupsForDay(dayId, dayNumber) {
   const dateEl = document.querySelector('.t2-day-date[data-day="' + dayNumber + '"]');
   await t2SetDays(t.id, [{ dayNumber: dayNumber, format: fmt, playDate: (dateEl && dateEl.value) || null }]);
 
-  const players = await t2GetPlayers(t.id);
-  const A = t2Shuffle(players.filter(p => p.team === 'A'));
-  const B = t2Shuffle(players.filter(p => p.team === 'B'));
+  let players = await t2GetPlayers(t.id);
+  const teamFmt = (fmt !== 'stroke' && fmt !== 'quota');
+  const hcpOf = p => (p.handicap == null ? 999 : Number(p.handicap));
+  const byHcpSort = arr => arr.slice().sort((a, b) => hcpOf(a) - hcpOf(b));
+
+  // Daily/individual events: a team format needs two sides. Split the field
+  // into two balanced halves (serpentine by handicap: A B B A …) and save it.
+  if (teamFmt && t2IsOneDay(t)) {
+    const sorted = byHcpSort(players);
+    for (let k = 0; k < sorted.length; k++) {
+      const side = (k % 4 === 0 || k % 4 === 3) ? 'A' : 'B';
+      if (sorted[k].team !== side) {
+        try { await supa.from('tournament_players').update({ team: side }).eq('id', sorted[k].id); } catch (e) {}
+        sorted[k].team = side;
+      }
+    }
+    players = sorted;
+    if (!t.team_a_name || t.team_a_name === 'Players') {
+      try {
+        await t2Update(t.id, { team_a_name: 'Side A', team_b_name: 'Side B' });
+        _t2Current.team_a_name = 'Side A'; _t2Current.team_b_name = 'Side B';
+      } catch (e) {}
+    }
+  }
+
+  // byHcp: sorted low→high. Otherwise: shuffled (tap again to reshuffle).
+  const prep = arr => byHcp ? byHcpSort(arr) : t2Shuffle(arr);
+  const A = prep(players.filter(p => p.team === 'A'));
+  const B = prep(players.filter(p => p.team === 'B'));
   const groups = []; const left = [];
   if (fmt === 'singles') {
+    // byHcp: both sides sorted → low plays low, high plays high (fair matches)
     const n = Math.min(A.length, B.length);
-    for (let i = 0; i < n; i++) groups.push([{ p: A[i], team: 'A' }, { p: B[i], team: 'B' }]);
+    for (let i2 = 0; i2 < n; i2++) groups.push([{ p: A[i2], team: 'A' }, { p: B[i2], team: 'B' }]);
     A.slice(n).concat(B.slice(n)).forEach(p => left.push(p));
-  } else if (fmt === 'bestball' || fmt === 'scramble' || fmt === 'altshot' || fmt === 'rydercup' || fmt === 'teamquota') {
-    const n = Math.min(Math.floor(A.length / 2), Math.floor(B.length / 2));
-    for (let i = 0; i < n; i++) groups.push([
-      { p: A[2 * i], team: 'A' }, { p: A[2 * i + 1], team: 'A' },
-      { p: B[2 * i], team: 'B' }, { p: B[2 * i + 1], team: 'B' }
+  } else if (teamFmt) {
+    // Partner pairs. byHcp: lowest with highest, 2nd lowest with 2nd highest…
+    const pairsOf = arr => {
+      const out = [];
+      if (byHcp) {
+        let lo = 0, hi = arr.length - 1;
+        while (lo < hi) out.push([arr[lo++], arr[hi--]]);
+      } else {
+        for (let i2 = 0; i2 + 1 < arr.length; i2 += 2) out.push([arr[i2], arr[i2 + 1]]);
+      }
+      return out;
+    };
+    const ap = pairsOf(A), bp = pairsOf(B);
+    const n = Math.min(ap.length, bp.length);
+    for (let i2 = 0; i2 < n; i2++) groups.push([
+      { p: ap[i2][0], team: 'A' }, { p: ap[i2][1], team: 'A' },
+      { p: bp[i2][0], team: 'B' }, { p: bp[i2][1], team: 'B' }
     ]);
-    A.slice(2 * n).concat(B.slice(2 * n)).forEach(p => left.push(p));
-  } else { // stroke / quota — mixed foursomes, flexible sizes
-    const all = []; const m = Math.max(A.length, B.length);
-    for (let i = 0; i < m; i++) { if (A[i]) all.push(A[i]); if (B[i]) all.push(B[i]); }
-    for (let i = 0; i < all.length; i += 4) groups.push(all.slice(i, i + 4).map(p => ({ p: p, team: p.team })));
+    const used = new Set();
+    groups.forEach(g2 => g2.forEach(x => used.add(x.p.id)));
+    players.forEach(p => { if ((p.team === 'A' || p.team === 'B') && !used.has(p.id)) left.push(p); });
+  } else { // stroke / quota — mixed groups, flexible sizes
+    let all;
+    if (byHcp) {
+      // Lowest with highest and so on — balanced foursomes from both ends.
+      const s = byHcpSort(players);
+      all = [];
+      let lo = 0, hi = s.length - 1;
+      while (lo <= hi) {
+        all.push(s[lo++]);
+        if (lo <= hi + 1 && hi >= lo) all.push(s[hi--]);
+      }
+    } else {
+      all = [];
+      const m = Math.max(A.length, B.length);
+      for (let i2 = 0; i2 < m; i2++) { if (A[i2]) all.push(A[i2]); if (B[i2]) all.push(B[i2]); }
+    }
+    for (let i2 = 0; i2 < all.length; i2 += 4) groups.push(all.slice(i2, i2 + 4).map(p => ({ p: p, team: p.team })));
     if (groups.length > 1 && groups[groups.length - 1].length === 1) {
       const solo = groups.pop()[0];
       groups[groups.length - 1].push(solo);
     }
     if (groups.length === 1 && groups[0].length < 2) { left.push(groups.pop()[0].p); }
   }
-  if (!groups.length) { showToast('Not enough players on both teams for this format'); return; }
+  if (!groups.length) { showToast(teamFmt ? 'Not enough players on both sides for this format' : 'Not enough players'); return; }
   await t2ClearGroups(dayId);
   for (let gi = 0; gi < groups.length; gi++) {
     const g = await t2CreateGroup(dayId, { groupNumber: gi + 1, size: groups[gi].length });
@@ -15979,8 +16033,8 @@ async function t2BuildGroupsForDay(dayId, dayNumber) {
       }
     }
   }
-  if (left.length) showToast('Left out (uneven teams): ' + left.map(p => p.display_name).join(', '));
-  else showToast('Groups built — tap again to reshuffle, or Start day');
+  if (left.length) showToast('Left out (uneven sides): ' + left.map(p => p.display_name).join(', '));
+  else showToast(byHcp ? 'Paired by handicap — lowest with highest ⚖️' : 'Groups built — tap again to reshuffle, or Start day');
   await renderT2Home();
 }
 
@@ -16307,13 +16361,31 @@ async function t2SwapTap(ch) {
   }
   if (sel.mid === cur.mid) { _t2SwapSel = null; ch.style.outline = ''; return; }
   if (sel.day !== cur.day) { showToast('Swap within the same day'); return; }
-  if (sel.team !== cur.team) { showToast('Swap teammates only (🔵 with 🔵, 🔴 with 🔴) so the format stays valid'); return; }
+  const mixedDay = (ch.dataset.fmt === 'stroke' || ch.dataset.fmt === 'quota');
+  if (!mixedDay && sel.team !== cur.team) { showToast('Swap teammates only (🔵 with 🔵, 🔴 with 🔴) so the format stays valid'); return; }
   if (sel.gid === cur.gid) { _t2SwapSel = null; showToast('Pick someone in a different group'); await renderT2Home(); return; }
   try {
     await supa.from('tournament_group_members').update({ group_id: cur.gid, slot: cur.slot }).eq('id', sel.mid);
     await supa.from('tournament_group_members').update({ group_id: sel.gid, slot: sel.slot }).eq('id', cur.mid);
     showToast('Swapped');
   } catch (e) { showToast('Swap failed'); }
+  _t2SwapSel = null;
+  await renderT2Home();
+}
+
+// Move (not swap): tap a player chip, then "⤵ here" on another group.
+// Mixed-format days only — team formats need balanced 2v2s, so use swap there.
+async function t2MoveHere(btn) {
+  const sel = _t2SwapSel;
+  if (!sel) { showToast('Tap a player first, then ⤵ here'); return; }
+  const fmt = btn.dataset.fmt || 'stroke';
+  if (fmt !== 'stroke' && fmt !== 'quota') { showToast('This format needs even sides — swap two players instead'); return; }
+  if (btn.dataset.day !== sel.day) { showToast('Move within the same day'); _t2SwapSel = null; await renderT2Home(); return; }
+  if (btn.dataset.gid === sel.gid) { showToast('They\'re already in that group'); _t2SwapSel = null; await renderT2Home(); return; }
+  try {
+    await supa.from('tournament_group_members').update({ group_id: btn.dataset.gid, slot: 99 }).eq('id', sel.mid);
+    showToast('Moved');
+  } catch (e) { showToast('Move failed'); }
   _t2SwapSel = null;
   await renderT2Home();
 }
@@ -16350,7 +16422,7 @@ async function renderT2Home() {
 
   // ---- Cup standings (team events only) + stroke leaderboard ----
   if (standings.anyRounds) {
-    if (!od) {
+    if (!od || (standings.lines && standings.lines.length)) {
     const projDiffers = standings.anyLive && (standings.aProj !== standings.aFinal || standings.bProj !== standings.bFinal);
     html += '<div class="card" style="margin:0 0 14px;padding:12px;text-align:center;border:2px solid var(--accent)">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
@@ -16421,8 +16493,10 @@ async function renderT2Home() {
   }
 
   html += '<h3 style="margin:16px 0 6px">Days & formats</h3>';
-  // Individual events: only individual-scoring formats make sense.
-  const dayFormats = od ? T2_FORMATS.filter(f => f[0] === 'stroke' || f[0] === 'quota') : T2_FORMATS;
+  // Every format is available on every event. On daily/individual events,
+  // picking a team format auto-splits the field into two balanced sides
+  // (serpentine by handicap) the moment groups are built.
+  const dayFormats = T2_FORMATS;
   for (let i = 1; i <= t.num_days; i++) {
     const d = days.find(x => x.day_number === i) || { day_number: i, format: od ? 'stroke' : 'singles', play_date: '' };
     html += '<div class="row" style="margin-bottom:6px;align-items:center">' +
@@ -16448,7 +16522,7 @@ async function renderT2Home() {
           const nm = p ? p.display_name.split(/\s+/)[0] : '?';
           const dot = od ? '' : (m.team === 'A' ? '🔵' : '🔴');
           return '<button class="small t2-swap-chip" data-mid="' + m.id + '" data-team="' + (m.team || '') + '" ' +
-            'data-gid="' + m.group_id + '" data-slot="' + (m.slot || 0) + '" data-day="' + i + '" ' +
+            'data-gid="' + m.group_id + '" data-slot="' + (m.slot || 0) + '" data-day="' + i + '" data-fmt="' + (d.format || 'stroke') + '" ' +
             'style="padding:2px 8px;font-size:12px;margin:1px">' + dot + t2esc(nm) + '</button>';
         }).join('');
       } else {
@@ -16461,16 +16535,18 @@ async function renderT2Home() {
       }
       html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">' +
         '<div style="flex:1;min-width:0;' + (canSwap ? '' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis') + '">G' + g2.group_number + ': ' + namesHtml + '</div>' +
+        (canSwap ? '<button class="small t2-move-here" data-gid="' + g2.id + '" data-day="' + i + '" data-fmt="' + (d.format || 'stroke') + '" style="padding:2px 6px;font-size:11px;color:var(--text-muted)" title="Move the selected player to this group">⤵ here</button>' : '') +
         (g2.game_code ? '<button class="small t2-open-round" data-code="' + t2esc(g2.game_code) + '">▶ Open</button>' : '') +
         '</div>';
     });
     if (canSwap) {
-      html += '<div class="small-text" style="color:var(--text-muted);margin:2px 0">Tap two teammates to swap their groups.</div>';
+      html += '<div class="small-text" style="color:var(--text-muted);margin:2px 0">Tap a player, then another to swap — or tap ⤵ here on a different group to move them.</div>';
     }
     if (d.id) {
       if (amCommish && !started) {
         html += '<div class="actions" style="margin:4px 0 2px">' +
-          '<button class="small t2-build-groups" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1">' + (gs.length ? '🔀 Reshuffle groups' : '⚡ Build groups') + '</button>' +
+          '<button class="small t2-build-groups" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1">' + (gs.length ? '🔀 Reshuffle' : '⚡ Build groups') + '</button>' +
+          '<button class="small t2-build-hcp" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1">⚖️ By handicap</button>' +
           (gs.length ? '<button class="small t2-start-day" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1;background:var(--accent);color:#fff;border-color:var(--accent)">▶ Start day</button>' : '') +
           '</div>';
       } else if (started) {
@@ -16571,6 +16647,8 @@ async function renderT2Home() {
   body.querySelectorAll('.t2-open-round').forEach(b => b.onclick = () => openT2Round(b.dataset.code));
   if (amCommish) {
     body.querySelectorAll('.t2-build-groups').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
+  body.querySelectorAll('.t2-build-hcp').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10), true));
+  body.querySelectorAll('.t2-move-here').forEach(b => b.onclick = () => t2MoveHere(b));
     body.querySelectorAll('.t2-start-day').forEach(b => b.onclick = () => t2StartDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
     body.querySelectorAll('.t2-swap-chip').forEach(ch => ch.onclick = () => t2SwapTap(ch));
   }
