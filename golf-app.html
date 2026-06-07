@@ -4121,7 +4121,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.06.5';
+const BG_BUILD = 'v2026.06.06.7';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -15303,6 +15303,19 @@ async function sendGameInvite(toId) {
   } catch (e) { console.warn('sendGameInvite', e); showToast('Could not send invite'); }
 }
 
+// Tournament invite: same pipe as round invites, with a 'T2:' code prefix.
+// The receiver's modal + accept flow branch on the prefix.
+async function sendTournamentInvite(toId, t) {
+  if (!supa || !_authUser || !t) return false;
+  try {
+    await supa.from('game_invites').insert({
+      from_user: _authUser.id, to_user: toId,
+      game_code: 'T2:' + t.id, course: t.name || 'a tournament', status: 'pending'
+    });
+    return true;
+  } catch (e) { console.warn('sendTournamentInvite', e); return false; }
+}
+
 // Realtime: push new invites to this online user.
 function subscribeToInvites() {
   if (!supa || !_authUser) return;
@@ -15340,8 +15353,15 @@ async function showIncomingInvite(inv) {
     if (data) { const n = friendDisplayName(data); if (n && n !== 'Player') fromName = n; }
   } catch (e) {}
   const txt = document.getElementById('incoming-invite-text');
-  if (txt) txt.innerHTML = '<b>' + fromName + '</b> invited you to join their round' +
-    (inv.course ? ' at <b>' + inv.course + '</b>' : '') + '. Join now?';
+  const isT2 = String(inv.game_code || '').indexOf('T2:') === 0;
+  if (txt) {
+    if (isT2) {
+      txt.innerHTML = '<b>' + fromName + '</b> invited you to the tournament <b>' + (inv.course || '') + '</b> 🏆. Open it?';
+    } else {
+      txt.innerHTML = '<b>' + fromName + '</b> invited you to join their round' +
+        (inv.course ? ' at <b>' + inv.course + '</b>' : '') + '. Join now?';
+    }
+  }
   document.getElementById('incoming-invite-modal').classList.add('show');
 }
 
@@ -15350,6 +15370,13 @@ async function acceptIncomingInvite() {
   document.getElementById('incoming-invite-modal').classList.remove('show');
   if (!inv) return;
   try { await supa.from('game_invites').update({ status: 'accepted' }).eq('id', inv.id); } catch (e) {}
+  if (String(inv.game_code || '').indexOf('T2:') === 0) {
+    // Tournament invite — the event is already in their Events tab (they were
+    // added as a linked player). Take them straight to it.
+    switchTab('tourneys');
+    try { await openT2Home(inv.game_code.slice(3)); } catch (e) { showToast('Open the Events tab to see your tournament'); }
+    return;
+  }
   const g = await loadGame(inv.game_code);
   if (!g) { showToast('Round not found — it may have ended'); return; }
   state.game = g;
@@ -16464,6 +16491,93 @@ async function t2SwapTap(ch) {
   await renderT2Home();
 }
 
+// ---- Team logos ----------------------------------------------------------
+// Stored in tournaments.settings as logoA / logoB:
+//   { e: '🦅', bg: '#dbeafe' }  → stock badge (emoji on a colored disc)
+//   { img: 'data:image/jpeg…' } → photo from the user's library, downscaled
+//     to 96px so it lives happily inside the settings JSON and syncs to
+//     every player with the tournament row. No storage buckets needed.
+const T2_STOCK_LOGOS = [
+  ['🐶','#fde8e8'], ['🐱','#fdf3d8'], ['🦅','#dbeafe'], ['🦈','#d8f3f8'],
+  ['🐍','#e2f4e3'], ['🐊','#e2f4e3'], ['🦬','#efe3d5'], ['🐗','#f3e3e3'],
+  ['🦆','#e8f0d8'], ['🐢','#ddf2e4'], ['🔥','#ffe3d3'], ['⚡','#fdf3c8'],
+  ['💀','#ececec'], ['👑','#fdeeC8'.toLowerCase()], ['🍺','#fdf0d3'], ['🏴‍☠️','#e4e4ee'],
+  ['⛳','#ddf2e4'], ['🎯','#fde3e3'], ['🚀','#e3e9fd'], ['🤠','#f3ead8']
+];
+function t2TeamLogo(t, team) {
+  return (t && t.settings && t.settings['logo' + team]) || null;
+}
+function t2LogoHtml(logo, sizePx) {
+  const s = sizePx || 26;
+  if (logo && logo.img) {
+    return '<span style="display:inline-block;width:' + s + 'px;height:' + s + 'px;border-radius:50%;' +
+      'background-image:url(' + logo.img + ');background-size:cover;background-position:center;' +
+      'vertical-align:-' + Math.round(s * 0.25) + 'px;border:1px solid var(--border)"></span>';
+  }
+  if (logo && logo.e) {
+    return '<span style="display:inline-flex;align-items:center;justify-content:center;width:' + s + 'px;height:' + s + 'px;' +
+      'border-radius:50%;background:' + (logo.bg || 'var(--accent-light)') + ';font-size:' + Math.round(s * 0.62) + 'px;' +
+      'vertical-align:-' + Math.round(s * 0.25) + 'px">' + logo.e + '</span>';
+  }
+  return '';
+}
+async function t2SetTeamLogo(team, logo) {
+  const t = _t2Current; if (!t) return;
+  const settings = Object.assign({}, t.settings || {});
+  if (logo) settings['logo' + team] = logo;
+  else delete settings['logo' + team];
+  const ok = await t2Update(t.id, { settings: settings });
+  if (!ok) { showToast('Could not save the logo'); return; }
+  _t2Current.settings = settings;
+  await renderT2Home();
+}
+function t2OpenLogoPicker(team) {
+  const t = _t2Current; if (!t) return;
+  const teamName = team === 'A' ? t.team_a_name : t.team_b_name;
+  let panel = document.getElementById('t2-logo-panel');
+  if (panel) panel.remove();
+  panel = document.createElement('div');
+  panel.id = 't2-logo-panel';
+  panel.style.cssText = 'position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:20px';
+  const close = () => panel.remove();
+  panel.onclick = (e) => { if (e.target === panel) close(); };
+  const card = document.createElement('div');
+  card.style.cssText = 'background:var(--surface);border-radius:16px;padding:16px;max-width:340px;width:100%;max-height:80vh;overflow-y:auto';
+  card.innerHTML =
+    '<h3 style="margin:0 0 4px">Logo — ' + t2esc(teamName || ('Team ' + team)) + '</h3>' +
+    '<p class="help-text" style="margin:0 0 10px">Pick a badge, or use a photo from your library.</p>' +
+    '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px">' +
+    T2_STOCK_LOGOS.map((sl, i) =>
+      '<button class="t2-logo-stock" data-i="' + i + '" style="border:1px solid var(--border);background:' + sl[1] + ';' +
+      'border-radius:50%;width:52px;height:52px;font-size:26px;cursor:pointer">' + sl[0] + '</button>').join('') +
+    '</div>' +
+    '<button class="full" id="t2-logo-photo" style="margin-bottom:8px">📷 From my photos</button>' +
+    '<input type="file" id="t2-logo-file" accept="image/*" style="display:none">' +
+    (t2TeamLogo(t, team) ? '<button class="full" id="t2-logo-remove" style="margin-bottom:8px;color:var(--danger);border-color:var(--danger)">Remove logo</button>' : '') +
+    '<button class="full" id="t2-logo-cancel">Cancel</button>';
+  panel.appendChild(card);
+  document.body.appendChild(panel);
+  card.querySelectorAll('.t2-logo-stock').forEach(b => b.onclick = async () => {
+    const sl = T2_STOCK_LOGOS[parseInt(b.dataset.i, 10)];
+    close();
+    await t2SetTeamLogo(team, { e: sl[0], bg: sl[1] });
+  });
+  const fileInp = card.querySelector('#t2-logo-file');
+  card.querySelector('#t2-logo-photo').onclick = () => fileInp.click();
+  fileInp.onchange = async () => {
+    const f = fileInp.files && fileInp.files[0];
+    if (!f) return;
+    try {
+      const dataUrl = await downscaleImageToDataUrl(f, 96, 0.75);
+      close();
+      await t2SetTeamLogo(team, { img: dataUrl });
+    } catch (e) { showToast("Couldn't process that image"); }
+  };
+  const rm = card.querySelector('#t2-logo-remove');
+  if (rm) rm.onclick = async () => { close(); await t2SetTeamLogo(team, null); };
+  card.querySelector('#t2-logo-cancel').onclick = close;
+}
+
 // Move (not swap): tap a player chip, then "⤵ here" on another group.
 // Mixed-format days only — team formats need balanced 2v2s, so use swap there.
 async function t2MoveHere(btn) {
@@ -16520,7 +16634,7 @@ async function renderT2Home() {
       '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em">🏆 Cup standings</div>' +
       '<button class="small" id="t2-refresh" title="Refresh scores">🔄</button></div>' +
       '<div style="font-size:22px;font-weight:800">' +
-      t2esc(t.team_a_name) + ' <span style="color:var(--accent)">' + standings.aFinal + ' — ' + standings.bFinal + '</span> ' + t2esc(t.team_b_name) +
+      t2LogoHtml(t2TeamLogo(t, 'A'), 30) + ' ' + t2esc(t.team_a_name) + ' <span style="color:var(--accent)">' + standings.aFinal + ' — ' + standings.bFinal + '</span> ' + t2esc(t.team_b_name) + ' ' + t2LogoHtml(t2TeamLogo(t, 'B'), 30) +
       '</div>' +
       (projDiffers ? '<div class="small-text" style="color:var(--text-muted);margin-top:2px">projected with live matches: ' + standings.aProj + ' — ' + standings.bProj + '</div>' : '') +
       (function () {
@@ -16558,6 +16672,8 @@ async function renderT2Home() {
 
   html += '<h3 style="margin:10px 0 6px">' + (od ? 'Players' : 'Players & teams') + '</h3>';
   if (amCommish) {
+    html += '<button class="full" id="t2-invite-friends-btn" style="margin-bottom:8px">👥 Invite friends — they get a ping & the event lands in their Events tab</button>' +
+      '<div id="t2-friend-pick-list" style="display:none;margin-bottom:8px"></div>';
     html += '<div class="row" style="margin-bottom:8px">' +
       '<div class="field"><input type="text" id="t2-add-name" placeholder="Name"></div>' +
       '<div class="field" style="max-width:64px"><input type="number" id="t2-add-hcp" placeholder="Hcp"></div>' +
@@ -16569,8 +16685,13 @@ async function renderT2Home() {
       '</div>' +
       '<div id="t2-roster-pick-list" style="display:none;max-height:220px;overflow-y:auto;margin-bottom:10px"></div>';
   }
-  const renderTeam = (label, arr) => {
-    let h = '<div style="font-weight:600;margin:8px 0 2px">' + t2esc(label) + ' <span class="small-text" style="color:var(--text-muted)">(' + arr.length + ')</span></div>';
+  const renderTeam = (label, arr, teamKey) => {
+    const logo = teamKey ? t2TeamLogo(t, teamKey) : null;
+    let h = '<div style="font-weight:600;margin:8px 0 2px;display:flex;align-items:center;gap:6px">' +
+      (logo ? t2LogoHtml(logo, 26) : '') +
+      '<span>' + t2esc(label) + '</span> <span class="small-text" style="color:var(--text-muted)">(' + arr.length + ')</span>' +
+      (teamKey && amCommish ? '<button class="small t2-logo-btn" data-team="' + teamKey + '" style="margin-left:auto;padding:2px 8px;font-size:11px">' + (logo ? '🎨 Logo' : '🎨 Add logo') + '</button>' : '') +
+      '</div>';
     if (!arr.length) h += '<div class="help-text" style="margin-bottom:4px">No players yet.</div>';
     h += arr.map(p => t2PlayerRow(p, amCommish, od)).join('');
     return h;
@@ -16578,8 +16699,8 @@ async function renderT2Home() {
   if (od) {
     html += renderTeam('Players', players);
   } else {
-    html += renderTeam(t.team_a_name, teamA);
-    html += renderTeam(t.team_b_name, teamB);
+    html += renderTeam(t.team_a_name, teamA, 'A');
+    html += renderTeam(t.team_b_name, teamB, 'B');
     if (unassigned.length) html += renderTeam('Unassigned', unassigned);
   }
 
@@ -16740,6 +16861,46 @@ async function renderT2Home() {
     body.querySelectorAll('.t2-build-groups').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
   body.querySelectorAll('.t2-build-hcp').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10), true));
   body.querySelectorAll('.t2-move-here').forEach(b => b.onclick = () => t2MoveHere(b));
+  body.querySelectorAll('.t2-logo-btn').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
+  const invBtn2 = document.getElementById('t2-invite-friends-btn');
+  if (invBtn2) invBtn2.onclick = async () => {
+    const box = document.getElementById('t2-friend-pick-list');
+    if (!box) return;
+    if (box.style.display === 'block') { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    box.innerHTML = '<div class="help-text">Loading friends…</div>';
+    try {
+      const meId = _authUser ? _authUser.id : null;
+      const [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]);
+      const byId = {}; profiles.forEach(p2 => byId[p2.id] = p2);
+      const friends = edges.filter(e => e.status === 'accepted' && (e.requester === meId || e.addressee === meId))
+        .map(e => byId[e.requester === meId ? e.addressee : e.requester]).filter(Boolean);
+      const inEvent = new Set(players.map(p2 => p2.user_id).filter(Boolean));
+      const avail = friends.filter(f => !inEvent.has(f.id));
+      if (!avail.length) {
+        box.innerHTML = '<div class="help-text">' + (friends.length ? 'All your friends are already in this event 🎉' : 'No friends yet — add some on the Crew tab first.') + '</div>';
+        return;
+      }
+      box.innerHTML = avail.map(f =>
+        '<button class="full t2-friend-row" data-id="' + f.id + '" style="text-align:left;margin-bottom:6px">➕ ' +
+        friendDisplayName(f) + '</button>').join('');
+      box.querySelectorAll('.t2-friend-row').forEach(b2 => b2.onclick = async () => {
+        const prof = byId[b2.dataset.id];
+        if (!prof) return;
+        b2.disabled = true;
+        // Full player name for scoring identity; fall back to the short form.
+        const looksHuman = s => !!s && s.indexOf('@') < 0 && !/\d/.test(s);
+        const nm = [String(prof.my_player || '').trim(), String(prof.display_name || '').trim()].find(looksHuman) || friendDisplayName(prof);
+        const teamSel = document.getElementById('t2-add-team');
+        const team = od ? 'A' : ((teamSel && teamSel.value) || 'A');
+        const added = await t2AddPlayer(t.id, { displayName: nm, team: team, userId: prof.id });
+        if (!added) { showToast('Could not add ' + friendDisplayName(prof)); b2.disabled = false; return; }
+        const pinged = await sendTournamentInvite(prof.id, t);
+        showToast(friendDisplayName(prof) + ' added' + (od ? '' : ' to Team ' + team) + (pinged ? ' — ping sent 📨' : ''));
+        await renderT2Home();
+      });
+    } catch (e) { box.innerHTML = '<div class="help-text">Could not load friends — check your connection.</div>'; }
+  };
     body.querySelectorAll('.t2-start-day').forEach(b => b.onclick = () => t2StartDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
     body.querySelectorAll('.t2-swap-chip').forEach(ch => ch.onclick = () => t2SwapTap(ch));
   }
