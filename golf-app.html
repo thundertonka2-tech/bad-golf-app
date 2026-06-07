@@ -2818,7 +2818,7 @@
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
           <button id="btn-viewonly-close" title="Close" style="width:38px;height:38px;border-radius:50%;border:1px solid var(--gold);color:var(--gold);background:transparent;font-size:17px;font-weight:700;cursor:pointer;flex-shrink:0">✕</button>
           <div style="flex:1;min-width:0">
-            <h2 style="color:var(--gold);margin-bottom:4px">🔒 Round complete</h2>
+            <h2 style="color:var(--gold);margin-bottom:4px" id="view-only-banner-title">🔒 Round complete</h2>
             <p class="help-text" style="margin:0" id="view-only-banner-detail">Read-only view. Scores and game settings are locked.</p>
           </div>
           <button class="small" id="btn-reopen-round" style="border-color:var(--gold);color:var(--gold)">Reopen round</button>
@@ -4185,7 +4185,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.07.5';
+const BG_BUILD = 'v2026.06.07.7';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -11045,6 +11045,18 @@ function groupStrokeStandings(g, playerIds, fromHole, toHole) {
 // Each instance has its own pair, value, format, allowHuckle, special-shot bonuses.
 // Huckles are scoped to instance ID via huck.nassauIdx (legacy huckles without
 // nassauIdx are treated as instance 0 for backwards compat).
+// Which nines actually saw play (all listed players scored ≥1 hole there)?
+// Used so an early-finished round doesn't pay the OVERALL on top of the
+// front when only one nine was ever played — that would double-charge the
+// same 9 holes.
+function nassauHalvesPlayed(g, ids) {
+  const played = h => ids.every(id => g.scores[id] && g.scores[id][h] != null);
+  let f = false, b = false;
+  for (let h = 0; h < 9; h++) if (played(h)) { f = true; break; }
+  for (let h = 9; h < 18; h++) if (played(h)) { b = true; break; }
+  return { front: f, back: b };
+}
+
 function calcNassau(g) {
   if (!g.games.nassau) return null;
   const cfg = g.games.nassau;
@@ -11087,6 +11099,10 @@ function calcNassau(g) {
 
       ['front', 'back', 'overall'].forEach(seg => {
         const [from, to] = segmentRange(seg);
+        if (seg === 'overall' && g.finishedAt) {
+          const hp = nassauHalvesPlayed(g, players.map(p => p.id));
+          if (!hp.front || !hp.back) { m.overall = 'pushed — only one nine played'; return; }
+        }
         const s = groupStrokeStandings(g, players.map(p => p.id), from, to);
         if (!s) return;
         // Segment settles when complete — or, if the round was finished
@@ -11172,6 +11188,10 @@ function calcNassau(g) {
     const m = { instanceIdx: instIdx, a: a.name, aId: a.id, b: b.name, bId: b.id, value: v, front: null, back: null, overall: null };
     ['front', 'back', 'overall'].forEach(seg => {
       const [from, to] = segmentRange(seg);
+      if (seg === 'overall' && g.finishedAt) {
+        const hp = nassauHalvesPlayed(g, [a.id, b.id]);
+        if (!hp.front || !hp.back) { m.overall = 'pushed — only one nine played'; return; }
+      }
       let r = settleMatch(g, a.id, b.id, from, to, format);
 
       // Match play overall: if front AND back are both settled but the overall
@@ -13312,8 +13332,17 @@ function renderBoard() {
     if (banner) {
       banner.style.display = 'block';
       const detail = $('view-only-banner-detail');
-      if (detail && g.finishedAt) {
-        detail.textContent = `Finished ${new Date(g.finishedAt).toLocaleString()}. Read-only view — tap Reopen to make edits.`;
+      const title = $('view-only-banner-title');
+      const reopenBtn = $('btn-reopen-round');
+      if (g.finishedAt) {
+        if (title) title.textContent = '🔒 Round complete';
+        if (detail) detail.textContent = `Finished ${new Date(g.finishedAt).toLocaleString()}. Read-only view — tap Reopen to make edits.`;
+        if (reopenBtn) reopenBtn.style.display = '';
+      } else {
+        // Live round you're not playing in — spectator mode
+        if (title) title.textContent = '👀 Spectating';
+        if (detail) detail.textContent = "Live round, read-only — scores update as they're entered.";
+        if (reopenBtn) reopenBtn.style.display = 'none';
       }
     }
     if (finishBtn) finishBtn.style.display = 'none';
@@ -14198,7 +14227,7 @@ function updateActiveRoundBar() {
   // Only show on the Home tab — it's a launcher, not a status bar
   const homePanel = document.getElementById('panel-home');
   const onHome = homePanel && homePanel.classList.contains('active');
-  if (state.game && onHome) {
+  if (state.game && onHome && !state.viewOnlyMode) {
     document.body.classList.add('has-active-bar');
     bar.style.display = 'block';
     $('active-round-bar-info').innerHTML = `
@@ -14818,7 +14847,13 @@ async function removeRoundForMe(code) {
 }
 
 async function loadRounds() {
-  const recent = (await getRecent()).filter(r => !getHiddenRounds().includes(r.code));
+  // Only rounds YOU played in. Spectating other groups lives on the Crew tab
+  // (Live now / recent feed) — this list is your personal round history.
+  let meName = null;
+  try { meName = await getMeName(); } catch (e) {}
+  const recent = (await getRecent())
+    .filter(r => !getHiddenRounds().includes(r.code))
+    .filter(r => recentRowHasName(r, meName));
   const emptyCard = $('rounds-empty-card');
   const listCard = $('rounds-list-card');
 
@@ -14879,23 +14914,51 @@ async function loadRounds() {
   };
 }
 
-// Helper: open a recent game. If the round was finished (has finishedAt),
-// open it in view-only mode and land on Board (not Score).
+// Is the signed-in (linked) player actually IN this round? Guests without a
+// linked "me" can't be checked — treated as a member so nothing breaks.
+async function gameHasMe(g) {
+  try {
+    if (!g || !Array.isArray(g.players)) return false;
+    const me = await getMeName();
+    if (!me) return true;
+    const norm = s => normalizeNameSegment(String(s || ''));
+    const meN = norm(me);
+    return g.players.some(p => norm(p.name) === meN);
+  } catch (e) { return true; }
+}
+// Same check against a recent-list row's "players" string (names joined by
+// commas) — cheap pre-filter before the full game is even loaded.
+function recentRowHasName(r, meName) {
+  if (!meName || !r || !r.players) return true;
+  const meN = normalizeNameSegment(meName);
+  return String(r.players).split(',').some(n => normalizeNameSegment(n) === meN);
+}
+
+// Helper: open a recent game. Rounds YOU are in resume normally; rounds you
+// aren't in open as a SPECTATOR — read-only, live-updating, and never adopted
+// as your active round.
 async function openRecent(r) {
   const g = await loadGame(r.code);
-  if (g) {
+  if (!g) { showToast('Round not found — it may have been deleted'); return; }
+  const mine = await gameHasMe(g);
+  if (!mine) {
     state.game = g;
-    state.viewOnlyMode = !!g.finishedAt;
-    await safeSet(KEY_LAST, r.code, false);
+    state.viewOnlyMode = true;             // spectators never edit
     enableGameTabs(true);
-    if (state.viewOnlyMode) {
-      switchTab('board');
-      showToast('Viewing finished round (read-only)');
-    } else {
-      switchTab('score');
-    }
+    switchTab('board');
+    if (!g.finishedAt) { subscribeToGame(g.code); showToast('Spectating — live, read-only 👀'); }
+    else showToast('Viewing round (read-only)');
+    return;                                 // note: KEY_LAST untouched
+  }
+  state.game = g;
+  state.viewOnlyMode = !!g.finishedAt;
+  await safeSet(KEY_LAST, r.code, false);
+  enableGameTabs(true);
+  if (state.viewOnlyMode) {
+    switchTab('board');
+    showToast('Viewing finished round (read-only)');
   } else {
-    showToast('Round not found — it may have been deleted');
+    switchTab('score');
   }
 }
 
@@ -17800,8 +17863,14 @@ async function init() {
   }
 
   // New game button — if a round is already active, ask what to do first.
-  $('btn-new-game').onclick = () => {
-    const hasActiveRound = state.game && state.game.code && !state.viewOnlyMode;
+  $('btn-new-game').onclick = async () => {
+    let hasActiveRound = state.game && state.game.code && !state.viewOnlyMode;
+    // A round you're merely watching (or got stuck with) is NOT your active
+    // round — clear it quietly and proceed to the fresh form.
+    if (hasActiveRound && !(await gameHasMe(state.game))) {
+      await discardActiveRound();
+      hasActiveRound = false;
+    }
     if (hasActiveRound) {
       // Pre-fill confirm text with the current round's identity so user
       // knows what they're about to save or discard.
@@ -17810,6 +17879,15 @@ async function init() {
       $('new-round-confirm-text').innerHTML =
         `You have an active round at <strong>${course}</strong> (code <strong style="color:var(--accent)">${code}</strong>). What do you want to do?`;
       $('new-round-confirm-modal').classList.add('show');
+      return;
+    }
+    // A half-built setup (no active round) is sacred — coming back in through
+    // "New round" must NOT wipe what's already configured. Resume the form;
+    // Cancel inside Setup is the explicit "start over".
+    const formOpen = $('setup-with-game').style.display === 'block' && !state.editingLiveRound;
+    if (formOpen) {
+      switchTab('setup');
+      showToast('Resumed your setup in progress — tap Cancel to start over');
       return;
     }
     openFreshSetupForm();
@@ -18984,14 +19062,19 @@ async function tryRestore() {
   const code = await getLastGameCode();
   if (!code) return;
   const g = await loadGame(code);
-  if (g) {
-    state.game = g;
-    state.viewOnlyMode = !!g.finishedAt;
-    // Position the score tab on the next unscored hole so a page reload
-    // mid-round doesn't bounce the user back to hole 1.
-    state.currentHole = findNextUnscoredHole(g);
-    enableGameTabs(true);
+  if (!g) return;
+  // Never resurrect a round this player isn't in (e.g. they once viewed a
+  // crew round and it got stuck as their "active round").
+  if (!(await gameHasMe(g))) {
+    try { await safeSet(KEY_LAST, '', false); } catch (e) {}
+    return;
   }
+  state.game = g;
+  state.viewOnlyMode = !!g.finishedAt;
+  // Position the score tab on the next unscored hole so a page reload
+  // mid-round doesn't bounce the user back to hole 1.
+  state.currentHole = findNextUnscoredHole(g);
+  enableGameTabs(true);
 }
 
 
