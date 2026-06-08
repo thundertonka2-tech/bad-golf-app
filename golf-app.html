@@ -20299,31 +20299,36 @@ const gpsView = (() => {
     courseGps[cid].updatedAt = Date.now();
 
     // Auto-fill the course SCORECARD from OSM par/handicap tags when the
-    // group hasn't entered one yet. Imported courses used to land with a
-    // blank card; now any course whose 18 holes carry par tags in OSM gets
-    // pars (+ stroke index when tagged, else the default allocation). Course
-    // rating & slope aren't in OSM — those still need one-time manual entry
-    // before rounds count toward handicaps. Never overwrites an existing card.
+    // group hasn't entered one yet (course rating & slope aren't in OSM —
+    // those still need one-time manual entry before rounds count toward
+    // handicaps). SI comes from OSM handicap tags when all 18 are present.
+    const siByRef = {};
+    holeWays.forEach(hw => {
+      if (hw.ref >= 1 && hw.ref <= 18 && hw.si >= 1 && hw.si <= 18) siByRef[hw.ref] = hw.si;
+    });
+    await autofillScorecardFromGps(cid, siByRef);
+    return imported;
+  }
+
+  // Build a scorecard from already-imported GPS hole data (pars are stored on
+  // the holes). Runs after a fresh OSM import AND for courses the batch skips
+  // as already-tried — so blank cards backfill without re-crawling Overpass.
+  // Never overwrites a card the group has entered. Returns true if it wrote.
+  async function autofillScorecardFromGps(cid, siByRef) {
     try {
-      const have = courseGps[cid].holes || {};
+      const have = (courseGps[cid] && courseGps[cid].holes) || {};
       const pars = [];
       for (let hr = 1; hr <= 18; hr++) pars.push(have[hr] && have[hr].par ? have[hr].par : null);
-      if (pars.every(p2 => p2 != null) && typeof getCourseScorecard === 'function') {
-        const existing = await getCourseScorecard(cid);
-        if (!existing) {
-          const siByRef = {};
-          holeWays.forEach(hw => {
-            if (hw.ref >= 1 && hw.ref <= 18 && hw.si >= 1 && hw.si <= 18) siByRef[hw.ref] = hw.si;
-          });
-          const sis = [];
-          for (let hr = 1; hr <= 18; hr++) sis.push(siByRef[hr] || null);
-          const sisFinal = sis.every(s2 => s2 != null) ? sis : DEFAULT_SI.slice();
-          const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c2 => c2.id === cid) : null;
-          await persistCourseScorecard(cid, lib ? lib.name : cid, pars, sisFinal, []);
-        }
-      }
-    } catch (e) { console.warn('scorecard auto-fill from OSM failed:', e); }
-    return imported;
+      if (!pars.every(p2 => p2 != null)) return false;
+      const existing = await getCourseScorecard(cid);
+      if (existing) return false;
+      const sis = [];
+      for (let hr = 1; hr <= 18; hr++) sis.push((siByRef && siByRef[hr]) || null);
+      const sisFinal = sis.every(s2 => s2 != null) ? sis : DEFAULT_SI.slice();
+      const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c2 => c2.id === cid) : null;
+      await persistCourseScorecard(cid, lib ? lib.name : cid, pars, sisFinal, []);
+      return true;
+    } catch (e) { console.warn('scorecard auto-fill from OSM failed:', e); return false; }
   }
 
   // Per-course import launched from the GPS setup panel (UI wrapper).
@@ -20396,7 +20401,10 @@ const gpsView = (() => {
           const before = courseGps[c.id] && courseGps[c.id].holes ? Object.keys(courseGps[c.id].holes).length : 0;
           if (before >= 18) {
             fullCourses++;
-            log(tag + 'already mapped ✓', '#8fd19e');
+            // Backfill the scorecard from stored pars if the card is blank
+            // (covers courses GPS-imported before scorecard auto-fill shipped).
+            if (await autofillScorecardFromGps(c.id)) log(tag + 'already mapped ✓ + scorecard filled from OSM pars', '#8fd19e');
+            else log(tag + 'already mapped ✓', '#8fd19e');
             report.push(c.name + ': already fully mapped');
             continue;
           }
@@ -20405,7 +20413,8 @@ const gpsView = (() => {
           // every run from re-crawling the whole library; partially-mapped
           // courses need the 3-tap wizard, not another identical OSM query.
           if ((courseGps[c.id] && courseGps[c.id].osmTried) || osmTriedBefore(c.id)) {
-            log(tag + 'skipped — OSM already tried (' + before + '/18' + (before > 0 ? ', finish with 3-tap wizard' : '') + ')', '#9ad0ff');
+            if (await autofillScorecardFromGps(c.id)) log(tag + 'skipped (already tried) — but scorecard filled from OSM pars ✓', '#8fd19e');
+            else log(tag + 'skipped — OSM already tried (' + before + '/18' + (before > 0 ? ', finish with 3-tap wizard' : '') + ')', '#9ad0ff');
             report.push(c.name + ': skipped, OSM already tried (' + before + '/18)');
             continue;
           }
