@@ -4300,7 +4300,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.08.08';
+const BG_BUILD = 'v2026.06.08.11';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -7633,6 +7633,22 @@ function renderPlayerTeeSelects() {
       if (nm) state.playerTees[nm] = e.target.value;
       // Different tee → different course handicap (Index × Slope/113 + CR − Par)
       autofillHcpForRow(row);
+      // Player 1's tee becomes the group default: fill in every other player
+      // whose tee isn't set yet. They can still change their own afterward —
+      // an explicit pick is never overwritten.
+      const allRows = Array.prototype.slice.call(document.querySelectorAll('#players-list .player-row'));
+      if (allRows[0] === row && e.target.value) {
+        allRows.slice(1).forEach(r2 => {
+          const sel2 = r2.querySelector('.tee-select');
+          if (sel2 && !sel2.value) {
+            sel2.value = e.target.value;
+            const f2 = r2.querySelector('.first-name'), l2 = r2.querySelector('.last-name');
+            const n2 = f2 ? combineName(f2.value.trim(), l2 ? l2.value.trim() : '') : '';
+            if (n2) state.playerTees[n2] = e.target.value;
+            autofillHcpForRow(r2);
+          }
+        });
+      }
     };
   });
   applyDefaultTees(); // fill blanks: last-played tee, else Blue
@@ -16197,12 +16213,15 @@ async function acceptIncomingInvite() {
   if (!g) { showToast('Round not found — it may have ended'); return; }
   state.game = g;
   state.viewOnlyMode = !!g.finishedAt;
-  state.currentHole = 1;
+  // Land on the hole the group is actually on, not always hole 1.
+  state.currentHole = (!g.finishedAt && typeof findNextUnscoredHole === 'function')
+    ? (findNextUnscoredHole(g) || 1) : 1;
   await safeSet(KEY_LAST, inv.game_code, false);
   try { await addToRecent(g); } catch (e) {}
   enableGameTabs(true);
   switchTab(state.viewOnlyMode ? 'board' : 'score');
   showToast('Joined ' + inv.game_code);
+  if (!state.viewOnlyMode) openPlayGps(); // GPS default at the group's hole
 }
 async function declineIncomingInvite() {
   const inv = _pendingInvite;
@@ -19032,6 +19051,7 @@ async function init() {
     $('setup-no-game').style.display = 'block';
     switchTab('score');
     showToast('Round started — code ' + code);
+    openPlayGps(); // GPS is the default play screen (hole 1)
   };
 
   // Save edits to the active round — applies new game config retroactively.
@@ -19278,6 +19298,7 @@ async function init() {
     if (!checkWolfPickGate()) return;
     state.currentHole++;
     renderScoreEntry();
+    openPlayGps(); // GPS default on the new hole
   };
 
   // Auto-advance button
@@ -19287,6 +19308,7 @@ async function init() {
     state.currentHole++;
     renderScoreEntry();
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    openPlayGps(); // GPS default on the new hole
   };
 
   $('btn-refresh').onclick = async () => {
@@ -19959,9 +19981,14 @@ const gpsView = (() => {
   }
 
   // ---------- open / close ----------
-  async function open() {
+  // opts.auto = opened automatically (start/join/next-hole) as the default
+  // play screen. In auto mode we stay silent and only take over when THIS hole
+  // is actually mapped — otherwise we return to scoring rather than showing the
+  // mapping panel on every hole of an unmapped course.
+  async function open(opts) {
+    opts = opts || {};
     const g = state.game;
-    if (!g) { showToast('Start or join a round first to use GPS'); return; }
+    if (!g) { if (!opts.auto) showToast('Start or join a round first to use GPS'); return; }
     courseId = g.courseId || '';
     if (!courseId && g.course && typeof COURSE_LIBRARY !== 'undefined') {
       const lib = COURSE_LIBRARY.find(c => c.name.trim().toLowerCase() === String(g.course).trim().toLowerCase());
@@ -19971,7 +19998,10 @@ const gpsView = (() => {
         try { saveGame(g); } catch (e) {}
       }
     }
-    if (!courseId) { showToast('GPS needs a course chosen from the course library (Setup tab)'); return; }
+    if (!courseId) { if (!opts.auto) showToast('GPS needs a course chosen from the course library (Setup tab)'); return; }
+    // GPS is the default play screen — auto-open ALWAYS takes over when there's
+    // a course (only a course-less round stays on score). Mapped holes show the
+    // rangefinder; unmapped holes show the map panel, nudging the crew to map.
     el('gps-overlay').classList.add('open');
     mode = 'loading';
     try { await loadLib(); } catch (e) {
@@ -20044,7 +20074,11 @@ const gpsView = (() => {
     el('gps-setup-panel').style.display = 'none';
     el('gps-overlay').classList.add('viewing');
     hd.mid = hd.mid || midOf(hd.front, hd.back);
-    ball = (watchId != null && ball) ? ball : hd.tee.slice();
+    // Only treat live GPS as "the ball" when you're actually NEAR this hole.
+    // Mapping a course remotely (e.g. a Michigan course from Texas) used to put
+    // the ball at your real location, so the camera zoomed out to fit both —
+    // throwing you off the course. Far away → start from the tee instead.
+    ball = (watchId != null && ball && distM(ball, hd.mid) <= 3000) ? ball : hd.tee.slice();
     targetManual = false;
     target = smartTargetPos();
     clearMarkers();
@@ -20335,6 +20369,10 @@ const gpsView = (() => {
     watchId = navigator.geolocation.watchPosition(pos => {
       const p = [pos.coords.longitude, pos.coords.latitude];
       trackUpdate(p);
+      // While mapping or in the setup panel, ignore GPS for the map/ball — only
+      // the live "view" mode should follow your position. Stops your real
+      // location (far from the course) from disturbing the mapping view.
+      if (mode !== 'view') return;
       if (hd && distM(p, hd.mid) > 3000) {
         if (!farWarned) { farWarned = true; gToast("You're too far from this hole — showing from the tee"); }
         return;
@@ -20665,7 +20703,14 @@ const gpsView = (() => {
       try { gToast('Locating course…'); courseCenter = await geocodeCourse(); }
       catch (e) { gToast('Could not locate course — pan/zoom to it yourself'); }
     }
-    if (courseCenter && !firstMappedPoint()) map.jumpTo({ center: courseCenter, zoom: 16 });
+    // Center on the course before mapping. Always do it on the very first
+    // hole, and also snap back if the map has drifted far from the course
+    // (e.g. it got pulled toward your real location) so you never start lost.
+    if (courseCenter) {
+      let need = !firstMappedPoint();
+      try { const cc = map.getCenter(); if (distM([cc.lng, cc.lat], courseCenter) > 5000) need = true; } catch (e) {}
+      if (need) map.jumpTo({ center: courseCenter, zoom: 16 });
+    }
     wizardBanner();
   }
   function wizardBanner() {
@@ -21147,6 +21192,18 @@ const gpsView = (() => {
 
   return { open, close, batchImport: batchImportLibrary, overpass: overpassQuery, stateImport: stateImportRun };
 })();
+
+// GPS is the default play screen: open the rangefinder for the current hole
+// after Start round, Join, and each hole advance. Safe + silent — it returns
+// to the Score screen on its own when there's no course or the hole isn't
+// mapped yet (handled by gpsView.open's auto mode).
+async function openPlayGps() {
+  try {
+    if (state.viewOnlyMode) return;
+    if (typeof gpsView !== 'undefined' && gpsView.open) await gpsView.open({ auto: true });
+  } catch (e) {}
+}
+
 // Console + URL-flag access for the one-time library sweep.
 // bgImportAllCourses(true) = force mode (re-crawl incomplete courses).
 window.bgImportAllCourses = force => gpsView.batchImport(force);
