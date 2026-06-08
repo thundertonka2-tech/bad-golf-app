@@ -4300,7 +4300,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.08.11';
+const BG_BUILD = 'v2026.06.08.13';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -14631,6 +14631,129 @@ function hlIcon(type) {
   return '<span style="display:inline-block;width:18px;height:18px;vertical-align:-4px;margin-right:7px">' + svg + '</span>';
 }
 
+// ---- Reactions: fist-bumps + comments on crew highlights (live) ----
+// Each highlight has a deterministic target_key; reactions hang off that key
+// in the Supabase `reactions` table (see Reactions_Table_Setup.sql).
+let _reactionsChannel = null;
+let _myHlKeys = new Set(); // target_keys of highlights that belong to ME
+
+async function loadReactions(keys) {
+  if (!supa || !keys.length) return {};
+  try {
+    const { data } = await supa.from('reactions').select('*').in('target_key', keys).order('created_at', { ascending: true });
+    const map = {};
+    (data || []).forEach(r => {
+      const m = map[r.target_key] = map[r.target_key] || { fist: [], comments: [] };
+      if (r.kind === 'fistbump') m.fist.push(r); else m.comments.push(r);
+    });
+    return map;
+  } catch (e) { console.warn('loadReactions failed', e); return {}; }
+}
+
+async function toggleFistBump(key) {
+  if (!isSignedIn() || !supa || !_authUser) { showToast('Sign in (Crew tab) to react'); return; }
+  try {
+    const { data } = await supa.from('reactions').select('id').eq('target_key', key).eq('kind', 'fistbump').eq('author_id', _authUser.id);
+    if (data && data.length) await supa.from('reactions').delete().eq('id', data[0].id);
+    else {
+      let me = 'Player'; try { me = (await getMeName()) || 'Player'; } catch (e) {}
+      await supa.from('reactions').insert({ target_key: key, author_id: _authUser.id, author_name: me, kind: 'fistbump' });
+    }
+  } catch (e) { console.warn('fist-bump failed', e); }
+  hydrateReactions();
+}
+
+async function addComment(key, body) {
+  body = (body || '').trim();
+  if (!body) return;
+  if (!isSignedIn() || !supa || !_authUser) { showToast('Sign in (Crew tab) to comment'); return; }
+  try {
+    let me = 'Player'; try { me = (await getMeName()) || 'Player'; } catch (e) {}
+    await supa.from('reactions').insert({ target_key: key, author_id: _authUser.id, author_name: me, kind: 'comment', body: body.slice(0, 280) });
+  } catch (e) { console.warn('comment failed', e); }
+  hydrateReactions();
+}
+
+async function hydrateReactions() {
+  const items = Array.prototype.slice.call(document.querySelectorAll('#home-highlights .hl-item'));
+  const keys = items.map(el => el.dataset.key).filter(Boolean);
+  if (!keys.length) return;
+  const map = await loadReactions(keys);
+  const myId = _authUser ? _authUser.id : null;
+  items.forEach(el => {
+    const r = map[el.dataset.key] || { fist: [], comments: [] };
+    const iBumped = !!(myId && r.fist.some(f => f.author_id === myId));
+    const bumpBtn = el.querySelector('.hl-bump');
+    if (bumpBtn) {
+      bumpBtn.querySelector('.cnt').textContent = r.fist.length || '';
+      bumpBtn.style.background = iBumped ? 'var(--accent)' : 'transparent';
+      bumpBtn.style.color = iBumped ? '#fff' : 'var(--text-muted)';
+    }
+    const cmtBtn = el.querySelector('.hl-cmt-toggle');
+    if (cmtBtn) cmtBtn.querySelector('.cnt').textContent = r.comments.length || '';
+    const list = el.querySelector('.hl-cmt-list');
+    if (list) list.innerHTML = r.comments.length
+      ? r.comments.map(c => '<div style="font-size:12px;padding:2px 0"><b>' + escapeHtml(c.author_name || 'Player') + '</b> ' + escapeHtml(c.body || '') + '</div>').join('')
+      : '<div class="small-text" style="color:var(--text-muted)">No comments yet — say something 👊</div>';
+  });
+}
+
+function wireHighlightReactions() {
+  document.querySelectorAll('#home-highlights .hl-item').forEach(el => {
+    const key = el.dataset.key;
+    const bump = el.querySelector('.hl-bump');
+    if (bump) bump.onclick = () => toggleFistBump(key);
+    const toggle = el.querySelector('.hl-cmt-toggle');
+    const box = el.querySelector('.hl-comments');
+    if (toggle && box) toggle.onclick = () => { box.style.display = box.style.display === 'none' ? 'block' : 'none'; };
+    const send = el.querySelector('.hl-cmt-send');
+    const input = el.querySelector('.hl-cmt-input');
+    if (send && input) {
+      const go = () => { const v = input.value; input.value = ''; addComment(key, v); };
+      send.onclick = go;
+      input.onkeydown = (e) => { if (e.key === 'Enter') go(); };
+    }
+  });
+}
+
+function ensureReactionsRealtime() {
+  if (_reactionsChannel || !supa) return;
+  try {
+    _reactionsChannel = supa.channel('reactions-feed')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'reactions' }, () => { hydrateReactions(); notifyMyReactions(); })
+      .subscribe();
+  } catch (e) { console.warn('reactions realtime failed', e); }
+}
+
+// "Kevin fist-bumped your bomb 👊" — toast the owner when someone reacts to
+// one of THEIR highlights. First run just sets the baseline so old reactions
+// don't all fire at once; after that only brand-new ones (by other people)
+// pop a toast. Owner keys are collected in _myHlKeys during the feed render.
+async function notifyMyReactions() {
+  if (!supa || !_authUser || !_myHlKeys || !_myHlKeys.size) return;
+  let lastSeen = null;
+  try { const v = localStorage.getItem('golf:reactions-seen'); lastSeen = v != null ? (parseInt(v, 10) || 0) : null; } catch (e) {}
+  if (lastSeen == null) { try { localStorage.setItem('golf:reactions-seen', String(Date.now())); } catch (e) {} return; }
+  let data = [];
+  try {
+    const r = await supa.from('reactions').select('*').in('target_key', Array.from(_myHlKeys)).order('created_at', { ascending: true });
+    data = r.data || [];
+  } catch (e) { return; }
+  const labels = { ace: 'hole-in-one', eagle: 'eagle', birdie: 'birdie', herotax: 'Hero Tax', bomb: 'bomb' };
+  let maxTs = lastSeen; const toasts = [];
+  data.forEach(r => {
+    const ts = Date.parse(r.created_at) || 0;
+    if (ts > maxTs) maxTs = ts;
+    if (ts > lastSeen && r.author_id !== _authUser.id) {
+      const type = (r.target_key.split('|')[1]) || 'highlight';
+      const what = labels[type] || 'highlight';
+      toasts.push((r.author_name || 'Someone') + (r.kind === 'fistbump' ? ' fist-bumped your ' + what + ' 👊' : ' commented on your ' + what + ' 💬'));
+    }
+  });
+  toasts.slice(-3).forEach((t, i) => setTimeout(() => showToast(t, 4000), i * 1200));
+  if (maxTs > lastSeen) { try { localStorage.setItem('golf:reactions-seen', String(maxTs)); } catch (e) {} }
+}
+
 async function renderHomeLive() {
   const el = $('home-live');
   if (!el) return;
@@ -14694,12 +14817,15 @@ async function renderHomeLive() {
   if (hlEl) {
     const hlCut = Date.now() - 24 * 60 * 60 * 1000;
     const items = [];
+    let meNorm = '';
+    try { const _mn = await getMeName(); meNorm = _mn ? normalizeNameSegment(_mn) : ''; } catch (e) {}
     rows
-      .map(r => ({ g: r.data, t: r.updated_at ? Date.parse(r.updated_at) : 0 }))
+      .map(r => ({ g: r.data, t: r.updated_at ? Date.parse(r.updated_at) : 0, code: r.code }))
       .filter(x => x.g && Array.isArray(x.g.players) && x.t >= hlCut && isCrewGame(x.g))
       .forEach(x => {
         const g = x.g;
         const course = g.course || 'a round';
+        const gc = x.code || g.code || 'g'; // stable game id for reaction keys
         g.players.forEach(p => {
           if (!p || !p.name || !names.has(normalizeNameSegment(p.name))) return;
           const sc = g.scores && g.scores[p.id];
@@ -14707,9 +14833,10 @@ async function renderHomeLive() {
           for (let h = 0; h < 18; h++) {
             const s = sc[h], par = g.pars[h];
             if (s == null || par == null) continue;
-            if (s === 1) items.push({ w: 0, type: 'ace', txt: 'HOLE-IN-ONE — ' + displayFirst(p) + ', #' + (h + 1) + ' at ' + course, t: x.t });
-            else if (s - par === -2) items.push({ w: 1, type: 'eagle', txt: 'Eagle — ' + displayFirst(p) + ', #' + (h + 1) + ' at ' + course, t: x.t });
-            else if (s - par === -1) items.push({ w: 4, type: 'birdie', txt: 'Birdie — ' + displayFirst(p) + ', #' + (h + 1) + ' at ' + course, t: x.t });
+            const isMine = !!(meNorm && normalizeNameSegment(p.name) === meNorm);
+            if (s === 1) items.push({ w: 0, type: 'ace', txt: 'HOLE-IN-ONE — ' + displayFirst(p) + ', #' + (h + 1) + ' at ' + course, t: x.t, key: gc + '|ace|' + p.id + '|' + h, mine: isMine });
+            else if (s - par === -2) items.push({ w: 1, type: 'eagle', txt: 'Eagle — ' + displayFirst(p) + ', #' + (h + 1) + ' at ' + course, t: x.t, key: gc + '|eagle|' + p.id + '|' + h, mine: isMine });
+            else if (s - par === -1) items.push({ w: 4, type: 'birdie', txt: 'Birdie — ' + displayFirst(p) + ', #' + (h + 1) + ' at ' + course, t: x.t, key: gc + '|birdie|' + p.id + '|' + h, mine: isMine });
           }
         });
         // Hero Tax (Par 3 Greenie): the greenie winner who then 3-putts forfeits
@@ -14722,23 +14849,49 @@ async function renderHomeLive() {
             winners.filter(pid => tps.includes(pid)).forEach(pid => {
               const pl = g.players.find(pp => pp.id === pid);
               if (!pl || !pl.name || !names.has(normalizeNameSegment(pl.name))) return;
-              items.push({ w: 2.5, type: 'herotax', txt: 'Hero Tax — ' + displayFirst(pl) + ' won the greenie then 3-putted it away at ' + course + '. Hero to zero — that one stings! 😬', t: x.t });
+              items.push({ w: 2.5, type: 'herotax', txt: 'Hero Tax — ' + displayFirst(pl) + ' won the greenie then 3-putted it away at ' + course + '. Hero to zero — that one stings! 😬', t: x.t, key: gc + '|herotax|' + pid + '|' + hk, mine: !!(meNorm && normalizeNameSegment(pl.name) === meNorm) });
             });
           });
         }
         (Array.isArray(g.bigShots) ? g.bigShots : []).forEach(b => {
-          if (b && b.y >= 200 && (b.at || 0) >= hlCut) {
-            items.push({ w: 2, y: b.y, type: 'bomb', txt: b.y + '-yd bomb — ' + (b.n || 'someone') + (b.h ? ', #' + b.h : '') + ' at ' + course, t: b.at });
+          // Real drives only — cap at 450yd so test/erroneous GPS shots don't show.
+          if (b && b.y >= 200 && b.y <= 450 && (b.at || 0) >= hlCut) {
+            const bombMine = !!(meNorm && b.n && normalizeNameSegment(b.n).split(' ')[0] === meNorm.split(' ')[0]);
+            items.push({ w: 2, y: b.y, type: 'bomb', txt: b.y + '-yd bomb — ' + (b.n || 'someone') + (b.h ? ', #' + b.h : '') + ' at ' + course, t: b.at, key: gc + '|bomb|' + (b.at || 0), mine: bombMine });
           }
         });
       });
     items.sort((a, b) => a.w - b.w || (b.y || 0) - (a.y || 0) || b.t - a.t);
-    hlEl.innerHTML = items.length
-      ? '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">' +
+    // Remember which highlights are MINE so reaction notifications can fire.
+    _myHlKeys = new Set(items.filter(it => it.mine && it.key).map(it => it.key));
+    if (!items.length) { hlEl.innerHTML = ''; }
+    else {
+      const btnCss = 'border:none;background:transparent;cursor:pointer;font-size:14px;padding:2px 6px;border-radius:8px;display:inline-flex;align-items:center;gap:3px;color:var(--text-muted)';
+      hlEl.innerHTML = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">' +
         '<div style="font-weight:600;margin-bottom:4px">🏆 Crew highlights <span class="small-text" style="color:var(--text-muted)">last 24h</span></div>' +
-        items.slice(0, 8).map(it => '<div style="padding:4px 0;font-size:13px;display:flex;align-items:center">' + hlIcon(it.type) + '<span>' + escapeHtml(it.txt) + '</span></div>').join('') +
-        '</div>'
-      : '';
+        items.slice(0, 8).map(it =>
+          '<div class="hl-item" data-key="' + escAttr(it.key || '') + '" style="padding:5px 0;border-top:1px solid var(--border)">' +
+            '<div style="display:flex;align-items:center;gap:4px">' +
+              hlIcon(it.type) +
+              '<span style="flex:1;font-size:13px;min-width:0">' + escapeHtml(it.txt) + '</span>' +
+              '<button class="hl-bump" title="Fist bump" style="' + btnCss + '">👊<span class="cnt" style="font-size:11px"></span></button>' +
+              '<button class="hl-cmt-toggle" title="Comment" style="' + btnCss + '">💬<span class="cnt" style="font-size:11px"></span></button>' +
+            '</div>' +
+            '<div class="hl-comments" style="display:none;margin:2px 0 4px 26px">' +
+              '<div class="hl-cmt-list"></div>' +
+              '<div style="display:flex;gap:6px;margin-top:4px">' +
+                '<input class="hl-cmt-input" placeholder="Add a comment…" maxlength="280" style="flex:1;font-size:12px;padding:5px 7px">' +
+                '<button class="hl-cmt-send" style="border:none;background:var(--accent);color:#fff;border-radius:8px;padding:5px 12px;cursor:pointer;font-size:12px">Send</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>'
+        ).join('') +
+        '</div>';
+      wireHighlightReactions();
+      hydrateReactions();
+      ensureReactionsRealtime();
+    }
+    notifyMyReactions(); // toast me about new reactions on my highlights
   }
 }
 
