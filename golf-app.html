@@ -4310,7 +4310,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.08.19';
+const BG_BUILD = 'v2026.06.08.20';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -20310,15 +20310,59 @@ const gpsView = (() => {
   //   green ≤ 250y away          → middle of the green
   //   par 3                      → middle of the green
   //   par 3 but > 250y away      → in the fairway, 100y short of the green
+  // Walk aheadM metres along the hole centreline (the OSM golf=hole way, which
+  // follows the dogleg) starting from the point nearest the ball — so the
+  // target lands IN the fairway, not on a straight line through the trees.
+  // Returns null if there's no usable centreline (then we fall back to a line).
+  function targetAlongCenterline(line, from, aheadM) {
+    if (!Array.isArray(line) || line.length < 2) return null;
+    const ref = from;
+    const kx = Math.cos(toRad(ref[1])) * 111320, ky = 111320;
+    const toXY = p => [(p[0] - ref[0]) * kx, (p[1] - ref[1]) * ky];
+    const fromXY = xy => [ref[0] + xy[0] / kx, ref[1] + xy[1] / ky];
+    const pts = line.map(toXY);
+    const b = [0, 0];
+    // nearest point on the polyline to the ball
+    let best = { d2: Infinity, seg: 0, pt: pts[0] };
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], c = pts[i + 1];
+      const dx = c[0] - a[0], dy = c[1] - a[1];
+      const len2 = dx * dx + dy * dy || 1;
+      let t = ((b[0] - a[0]) * dx + (b[1] - a[1]) * dy) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const px = a[0] + t * dx, py = a[1] + t * dy;
+      const d2 = (b[0] - px) * (b[0] - px) + (b[1] - py) * (b[1] - py);
+      if (d2 < best.d2) best = { d2, seg: i, pt: [px, py] };
+    }
+    // walk forward (toward the green end) by aheadM
+    let remaining = aheadM, idx = best.seg, cur = best.pt;
+    while (idx < pts.length - 1) {
+      const next = pts[idx + 1];
+      const segLen = Math.hypot(next[0] - cur[0], next[1] - cur[1]);
+      if (segLen >= remaining) {
+        const f = remaining / (segLen || 1);
+        return fromXY([cur[0] + (next[0] - cur[0]) * f, cur[1] + (next[1] - cur[1]) * f]);
+      }
+      remaining -= segLen; idx++; cur = next;
+    }
+    return fromXY(pts[pts.length - 1]); // past the end → green
+  }
+
   function smartTargetPos() {
     const parsArr = state.game && state.game.pars;
     const par = parsArr ? (parsArr[hole - 1] || 4) : 4;
     const dGreenY = distM(ball, hd.mid) * YD;
     if (par === 3) {
-      if (dGreenY > 250) return offsetPt(hd.mid, 100 / YD, brgBetween(hd.mid, ball));
+      // Par 3 → aim at the middle of the green.
       return hd.mid.slice();
     }
     if (dGreenY <= 250) return hd.mid.slice();
+    // Par 4/5, green far away → 250y up the fairway. Follow the hole centreline
+    // (so doglegs aim down the fairway), falling back to a straight line.
+    if (Array.isArray(hd.line) && hd.line.length >= 2) {
+      const p = targetAlongCenterline(hd.line, ball, 250 / YD);
+      if (p) return p;
+    }
     return offsetPt(ball, 250 / YD, brgBetween(ball, hd.mid));
   }
 
@@ -20327,7 +20371,9 @@ const gpsView = (() => {
     const d = Math.max(distM(ball, hd.mid), 60);
     const center = midOf(ball, hd.mid);
     const vh = el('gps-map').clientHeight || window.innerHeight;
-    const mpp = d / (vh * 0.52);
+    // 0.42 (was 0.52) = a bit more zoomed OUT by default so you see the whole
+    // hole, the target, and surrounding fairway without having to pinch out.
+    const mpp = d / (vh * 0.42);
     const zoom = Math.log2(156543.03392 * Math.cos(toRad(center[1])) / mpp);
     map.jumpTo({ center, bearing: brg, zoom: Math.min(zoom, maxZoomClamp), pitch: 0 });
   }
@@ -20672,7 +20718,14 @@ const gpsView = (() => {
     let imported = 0;
     for (const hw of holeWays) {
       if (!hw.ref || hw.ref < 1 || hw.ref > 18) continue;
-      if (courseGps[cid].holes && courseGps[cid].holes[hw.ref]) continue; // never overwrite
+      if (courseGps[cid].holes && courseGps[cid].holes[hw.ref]) {
+        // Backfill the centreline (additive) onto an existing OSM hole that
+        // lacks one, so the fairway target works on courses mapped before this
+        // shipped. Never touches the tee/green mapping itself.
+        const exH = courseGps[cid].holes[hw.ref];
+        if (exH && !exH.line && Array.isArray(hw.pts) && hw.pts.length >= 2) exH.line = hw.pts.slice();
+        continue;
+      }
       const tee = hw.pts[0], lineEnd = hw.pts[hw.pts.length - 1];
       const prev = hw.pts.length >= 2 ? hw.pts[hw.pts.length - 2] : tee;
       let best = null, bestD = 80;
@@ -20696,7 +20749,7 @@ const gpsView = (() => {
         front = offsetPt(lineEnd, -14, axis); back = offsetPt(lineEnd, 14, axis); mid = lineEnd;
       }
       if (!courseGps[cid].holes) courseGps[cid].holes = {};
-      courseGps[cid].holes[hw.ref] = { tee, front, mid, back, par: hw.par || undefined };
+      courseGps[cid].holes[hw.ref] = { tee, front, mid, back, par: hw.par || undefined, line: (Array.isArray(hw.pts) && hw.pts.length >= 2) ? hw.pts.slice() : undefined };
       imported++;
     }
     courseGps[cid].osmTried = true;
