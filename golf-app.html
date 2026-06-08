@@ -4721,7 +4721,11 @@ function isSharedKey(key) {
 // Shared "singleton" keys — stored as one row each in the games table under a
 // reserved code prefix (shared:). The recent-rounds list lives here so all
 // devices see the same finished rounds. Same pattern for the course library.
-const SHARED_SINGLETONS = ['golf:courses', 'golf:recent-games', 'golf:tourneys', 'golf:course-gps'];
+const SHARED_SINGLETONS = ['golf:courses', 'golf:recent-games', 'golf:tourneys', 'golf:course-gps',
+  // Course library additions + the 48-state import queue MUST sync — without
+  // these entries safeGet/safeSet silently fall back to localStorage and
+  // user-added courses never reach anyone else's device.
+  'golf:course-library-additions', 'golf:state-import-progress'];
 function singletonRowCode(key) { return 'shared:' + key.replace(/^golf:/, ''); }
 
 // Track online/offline so the sync indicator can reflect reality
@@ -20155,10 +20159,20 @@ const gpsView = (() => {
             report.push(c.name + ': already fully mapped');
             continue;
           }
+          // Skip courses OSM was already asked about (cloud rows load with
+          // osmTried, zero-hole attempts are remembered per device). Stops
+          // every run from re-crawling the whole library; partially-mapped
+          // courses need the 3-tap wizard, not another identical OSM query.
+          if ((courseGps[c.id] && courseGps[c.id].osmTried) || osmTriedBefore(c.id)) {
+            log(tag + 'skipped — OSM already tried (' + before + '/18' + (before > 0 ? ', finish with 3-tap wizard' : '') + ')', '#9ad0ff');
+            report.push(c.name + ': skipped, OSM already tried (' + before + '/18)');
+            continue;
+          }
           log(tag + 'importing…');
           const center = await geocodeCourseId(c.id);
           const n = await importCourseOsm(c.id, center);
           await saveCourseRow(c.id);
+          rememberOsmTried(c.id);
           const have = courseGps[c.id] && courseGps[c.id].holes ? Object.keys(courseGps[c.id].holes).length : 0;
           totalHoles += n;
           if (have >= 18) fullCourses++;
@@ -20501,10 +20515,166 @@ const gpsView = (() => {
   document.addEventListener('DOMContentLoaded', wire);
   if (document.readyState !== 'loading') wire();
 
-  return { open, close, batchImport: batchImportLibrary, overpass: overpassQuery };
+  // ---------- per-device memory of OSM attempts ----------
+  // Courses where an OSM import already ran (even finding 0 holes) are
+  // remembered here so batch runs never re-crawl them. Cloud rows that hold
+  // holes also carry osmTried via loadCourse(); this covers the zero-hole
+  // and partial cases that have no cloud marker.
+  const OSM_TRIED_KEY = 'golf:osm-tried';
+  function osmTriedBefore(cid) {
+    try { return !!(JSON.parse(localStorage.getItem(OSM_TRIED_KEY) || '{}')[cid]); } catch (e) { return false; }
+  }
+  function rememberOsmTried(cid) {
+    try {
+      const s = JSON.parse(localStorage.getItem(OSM_TRIED_KEY) || '{}');
+      s[cid] = 1;
+      localStorage.setItem(OSM_TRIED_KEY, JSON.stringify(s));
+    } catch (e) {}
+  }
+
+  // ---------- whole-state course importer (?stateimport=1) ----------
+  // Pulls every named OSM golf course in one U.S. state into the shared
+  // course library (Supabase additions blob — syncs to everyone, no deploy).
+  // Skips courses already in the library; never touches existing entries.
+  // Progress is a shared row so the state queue advances once for the whole
+  // group no matter whose device runs it. Continental U.S. only.
+  // Order: TX + LA first (founder + tester markets), then golf-heavy states.
+  const STATE_IMPORT_QUEUE = [
+    'TX','LA','FL','CA','NY','MI','OH','PA','IL','NC','GA','WI','MN','SC',
+    'VA','IN','TN','MO','NJ','AZ','MA','AL','WA','KY','CO','IA','OK','KS',
+    'AR','MS','MD','CT','OR','NE','ID','NH','ME','UT','NM','MT','WV','NV',
+    'SD','ND','VT','WY','RI','DE'
+  ];
+  const STATE_NAMES = {
+    AL:'Alabama', AR:'Arkansas', AZ:'Arizona', CA:'California', CO:'Colorado',
+    CT:'Connecticut', DE:'Delaware', FL:'Florida', GA:'Georgia', IA:'Iowa',
+    ID:'Idaho', IL:'Illinois', IN:'Indiana', KS:'Kansas', KY:'Kentucky',
+    LA:'Louisiana', MA:'Massachusetts', MD:'Maryland', ME:'Maine', MI:'Michigan',
+    MN:'Minnesota', MO:'Missouri', MS:'Mississippi', MT:'Montana', NC:'North Carolina',
+    ND:'North Dakota', NE:'Nebraska', NH:'New Hampshire', NJ:'New Jersey', NM:'New Mexico',
+    NV:'Nevada', NY:'New York', OH:'Ohio', OK:'Oklahoma', OR:'Oregon',
+    PA:'Pennsylvania', RI:'Rhode Island', SC:'South Carolina', SD:'South Dakota',
+    TN:'Tennessee', TX:'Texas', UT:'Utah', VA:'Virginia', VT:'Vermont',
+    WA:'Washington', WI:'Wisconsin', WV:'West Virginia', WY:'Wyoming'
+  };
+  const STATE_PROGRESS_KEY = 'golf:state-import-progress';
+
+  async function readStateProgress() {
+    try {
+      const v = await safeGet(STATE_PROGRESS_KEY, true);
+      const p = v ? JSON.parse(v) : null;
+      return (p && typeof p === 'object') ? p : { done: {} };
+    } catch (e) { return { done: {} }; }
+  }
+
+  function slugifyCourseName(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+  }
+
+  async function stateImportRun(stOverride) {
+    // Progress panel (same pattern as the batch GPS importer)
+    let panel = document.getElementById('gps-state-panel');
+    if (panel) panel.remove();
+    panel = document.createElement('div');
+    panel.id = 'gps-state-panel';
+    panel.style.cssText = 'position:fixed;inset:8% 5% auto 5%;max-height:84%;z-index:9000;background:rgba(20,20,22,0.96);color:#fff;border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;font-size:13px';
+    panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+      '<strong id="gps-state-title">State course import</strong>' +
+      '<button id="gps-state-close" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button></div>' +
+      '<div id="gps-state-log" style="overflow-y:auto;flex:1;line-height:1.5"></div>';
+    document.body.appendChild(panel);
+    document.getElementById('gps-state-close').onclick = () => panel.remove();
+    const log = (msg, color) => {
+      const box = document.getElementById('gps-state-log');
+      if (!box) return;
+      const d = document.createElement('div');
+      if (color) d.style.color = color;
+      d.textContent = msg;
+      box.appendChild(d);
+      box.scrollTop = box.scrollHeight;
+    };
+    const setTitle = t => { const e2 = document.getElementById('gps-state-title'); if (e2) e2.textContent = t; };
+
+    try {
+      if (!(await ensureSupa())) { log('No connection to the shared library (Supabase offline) — try again online.', '#ff8a80'); return; }
+      if (typeof loadCourseLibrary === 'function') await loadCourseLibrary();
+
+      // Which state is up?
+      const progress = await readStateProgress();
+      let st = (stOverride || '').toUpperCase();
+      if (!STATE_IMPORT_QUEUE.includes(st)) st = STATE_IMPORT_QUEUE.find(s => !progress.done[s]) || null;
+      if (!st) { setTitle('All 48 states imported 🎉'); log('Every continental U.S. state is already in the shared library.'); return; }
+      const stName = STATE_NAMES[st];
+      if (progress.done[st] && !confirm(stName + ' is marked done (' + (progress.done[st].added || 0) + ' courses added). Re-run it anyway?')) { panel.remove(); return; }
+      if (!confirm('Import every OpenStreetMap golf course in ' + stName + ' into the shared course library?\n\nExisting courses are skipped, nothing is overwritten. Takes under a minute.')) { panel.remove(); return; }
+
+      setTitle('Importing ' + stName + ' courses…');
+      log('Asking OpenStreetMap for every golf course in ' + stName + '…');
+      const q = '[out:json][timeout:180];area["ISO3166-2"="US-' + st + '"][admin_level=4]->.a;(way["leisure"="golf_course"](area.a);relation["leisure"="golf_course"](area.a););out center tags;';
+      const j = await overpassQuery(q);
+      const elements = (j.elements || []).filter(e => e.tags && e.tags.name && (e.center || (typeof e.lat === 'number')));
+      log('OpenStreetMap returned ' + elements.length + ' named courses.');
+
+      // Existing-course keys: exact name+city, plus name-only within this state
+      const existsKey = new Set(), existsNameInState = new Set();
+      COURSE_LIBRARY.forEach(c => {
+        const nm = c.name.toLowerCase().trim();
+        existsKey.add(nm + '|' + (c.city || '').toLowerCase().trim());
+        const cityStr = (c.city || '').toUpperCase();
+        if (c.st === st || cityStr.endsWith(', ' + st) || cityStr === st) existsNameInState.add(nm);
+      });
+
+      const batch = [], batchIds = new Set(), seenInBatch = new Set();
+      let skipped = 0;
+      elements.forEach(e => {
+        const name = e.tags.name.trim();
+        const nm = name.toLowerCase();
+        const cityRaw = (e.tags['addr:city'] || '').trim();
+        const city = cityRaw ? cityRaw + ', ' + st : st;
+        const key = nm + '|' + city.toLowerCase();
+        if (seenInBatch.has(key) || existsKey.has(key) || existsNameInState.has(nm)) { skipped++; return; }
+        seenInBatch.add(key);
+        const c = e.center || { lat: e.lat, lon: e.lon };
+        let id = slugifyCourseName(name), n = 1;
+        while (batchIds.has(id) || COURSE_LIBRARY.some(x => x.id === id)) { n++; id = slugifyCourseName(name) + '-' + n; }
+        batchIds.add(id);
+        batch.push({ id, name, city, lat: c.lat, lng: c.lon, st, userAdded: true, src: 'osm-state', addedAt: Date.now() });
+      });
+
+      log(batch.length + ' new courses to add, ' + skipped + ' already in the library (skipped).');
+      if (batch.length) {
+        const additions = await getCourseLibraryAdditions();
+        additions.push(...batch);
+        await saveCourseLibraryAdditions(additions);
+        batch.forEach(c => COURSE_LIBRARY.push(c));
+        log('Saved to the shared library — synced to everyone. ✓', '#8fd19e');
+      }
+
+      // Advance the shared state queue
+      progress.done[st] = { added: batch.length, skipped, osmTotal: elements.length, at: new Date().toISOString() };
+      try { await safeSet(STATE_PROGRESS_KEY, JSON.stringify(progress), true); } catch (e) { log('Could not save state-queue progress: ' + e.message, '#ffd34d'); }
+
+      const remaining = STATE_IMPORT_QUEUE.filter(s => !progress.done[s]);
+      setTitle(stName + ' done — ' + batch.length + ' added, ' + skipped + ' skipped');
+      log('States remaining: ' + (remaining.length ? remaining.join(', ') : 'none — all 48 complete! 🎉'));
+      log('— You can close this panel. —');
+
+      if (batch.length && confirm(stName + ' courses are in. Also pull GPS hole data for them from OpenStreetMap now?\n\nThis crawls one course at a time (~1–2 hrs for a big state) — keep the tab open, or do it later with ?osmimport=1. Courses already attempted are skipped automatically.')) {
+        batchImportLibrary();
+      }
+    } catch (e) {
+      log('State import failed: ' + (e && e.message ? e.message : 'unknown error'), '#ff8a80');
+      console.error('State import crashed:', e);
+    }
+  }
+
+  return { open, close, batchImport: batchImportLibrary, overpass: overpassQuery, stateImport: stateImportRun };
 })();
 // Console + URL-flag access for the one-time library sweep.
 window.bgImportAllCourses = () => gpsView.batchImport();
+// Whole-state course importer: bgImportState() takes the next state in the
+// queue; bgImportState('FL') forces a specific state.
+window.bgImportState = st => gpsView.stateImport(st);
 
 // "Find courses near me": discovers golf courses around the user's GPS
 // position from OpenStreetMap, adds the tapped one to the shared library
@@ -20953,6 +21123,14 @@ async function nudgeJunkName() {
   } catch (e) {}
 }
 setTimeout(nudgeJunkName, 6000);
+
+// Admin one-shot: ?stateimport=1 imports the next state in the queue from
+// OpenStreetMap into the shared course library; ?stateimport=FL forces a
+// specific state. (Morning routine for the 48-state rollout.)
+{
+  const m = location.search.match(/[?&]stateimport=([A-Za-z0-9]+)/);
+  if (m) setTimeout(() => { window.bgImportState(m[1] === '1' ? null : m[1]); }, 3000);
+}
 
 // Admin one-shot: visiting the app with ?osmimport=1 offers to bulk-import
 // GPS hole data for every library course from OpenStreetMap (shared for all).
