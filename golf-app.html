@@ -4310,7 +4310,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.08.20';
+const BG_BUILD = 'v2026.06.08.22';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -18704,6 +18704,10 @@ async function init() {
     try { t2UnsubscribeHome(); } catch (e) {}
     enableGameTabs(false); // also unsubscribes the round's realtime channel
     try { await safeSet(KEY_LAST, '', false); } catch (e) {}
+    // Empty the setup form so a later "Play now" can't resume stale player rows.
+    $('setup-with-game').style.display = 'none';
+    $('setup-no-game').style.display = 'block';
+    { const _pl = $('players-list'); if (_pl) _pl.innerHTML = ''; }
   }
 
   // Helper: open the fresh setup form (the same logic the New Game button
@@ -19660,6 +19664,11 @@ async function init() {
     state.viewOnlyMode = false;
     enableGameTabs(false);
     await safeSet(KEY_LAST, '', false);
+    // Reset the setup form to empty so the NEXT "Play now" starts a clean round
+    // instead of resuming this finished round's leftover player rows.
+    $('setup-with-game').style.display = 'none';
+    $('setup-no-game').style.display = 'block';
+    { const _pl = $('players-list'); if (_pl) _pl.innerHTML = ''; }
     $('summary-modal').classList.remove('show');
     switchTab('home');
     showToast('Round saved');
@@ -21866,7 +21875,9 @@ function updateGamesCollapse() {
   if (!body) return;
   const on = k => { const el2 = document.getElementById('game-' + k); return !!(el2 && el2.checked); };
   const picked = ['skins','nassau','stroke','banker','vegas','dvegas','sixes','splix-sixes','stableford','bbb','wolf','match','team-match','team-lowball','quota','team-quota','ryder-cup','scramble'].filter(on).length;
-  const open = _gamesManual != null ? _gamesManual : true; // games default open
+  // Start COLLAPSED for a clean setup screen; auto-open only if games are
+  // already selected (e.g. editing a live round). Manual toggle always wins.
+  const open = _gamesManual != null ? _gamesManual : (picked > 0);
   body.style.display = open ? 'block' : 'none';
   const chev = document.getElementById('games-chevron');
   if (chev) chev.textContent = open ? '▾' : '▸';
@@ -22245,31 +22256,60 @@ async function courseDataImport(file, stateFilter) {
     // matches "Buffalo Creek GC". Used only as a SECONDARY match, and only when
     // exactly one library course shares that core in the state (no ambiguity) —
     // so we never assign a rating to the wrong course.
-    const STOP = new Set(['golf', 'club', 'course', 'country', 'links', 'the', 'at', 'and', 'gc', 'cc', 'inc', 'llc', 'g', 'c']);
-    const core = s => norm(s).split(' ').filter(w => w && !STOP.has(w)).join(' ');
-    const byNameState = {}, byName = {}, byCoreState = {};
+    // "core" = the distinctive words, with golf-entity + filler words dropped,
+    // so "Querbes Park Golf Course" and "Querbes Golf Course" both core to
+    // "querbes". coreSorted ignores word order (catches "Magnolia at Beau Chene"
+    // vs "Beau Chene - Magnolia"). Matching stays ambiguity-guarded throughout.
+    const STOP = new Set(['golf', 'club', 'course', 'country', 'links', 'the', 'at', 'and', 'of', 'gc', 'cc', 'inc', 'llc', 'g', 'c', 'park', 'municipal', 'memorial', 'racquet', 'recreation', 'public', 'sr', 'jr', 'driving', 'range']);
+    const coreToks = s => norm(s).split(' ').filter(w => w && !STOP.has(w));
+    const core = s => coreToks(s).join(' ');
+    const coreSorted = s => coreToks(s).slice().sort().join(' ');
+    const byNameState = {}, byName = {}, byCoreState = {}, byTokState = {}, coresByState = {};
     COURSE_LIBRARY.forEach(c => {
+      const st = libState(c);
       const n = norm(c.name);
-      byNameState[n + '|' + libState(c)] = c;
+      byNameState[n + '|' + st] = c;
       (byName[n] = byName[n] || []).push(c);
-      const k = core(c.name) + '|' + libState(c);
-      (byCoreState[k] = byCoreState[k] || []).push(c);
+      const cs = core(c.name);
+      (byCoreState[cs + '|' + st] = byCoreState[cs + '|' + st] || []).push(c);
+      (byTokState[coreSorted(c.name) + '|' + st] = byTokState[coreSorted(c.name) + '|' + st] || []).push(c);
+      if (cs) (coresByState[st] = coresByState[st] || []).push({ cs: cs, c: c });
     });
+    // Tiny edit-distance for guarded typo/apostrophe matching (Oaak→Oak).
+    function lev(a, b) {
+      if (a === b) return 0;
+      if (Math.abs(a.length - b.length) > 2) return 9;
+      let prev = []; for (let j = 0; j <= b.length; j++) prev[j] = j;
+      for (let i = 1; i <= a.length; i++) {
+        const cur = [i];
+        for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] !== b[j - 1] ? 1 : 0));
+        prev = cur;
+      }
+      return prev[b.length];
+    }
 
     const saves = await getCourseSaves();
     let matched = 0, filledTees = 0;
     const unmatched = [['name', 'state', 'city', 'tees']];
     const byStateMatched = {};
+    const usedLibIds = new Set(); // one library course can't be claimed twice
     groupList.forEach(g => {
       const n = norm(g.name);
-      let lib = byNameState[n + '|' + g.state];
-      if (!lib) { const cand = byName[n]; if (cand && cand.length === 1) lib = cand[0]; }
-      if (!lib) {
+      let lib = byNameState[n + '|' + g.state];                       // 1. exact name + state
+      if (!lib) { const cand = byName[n]; if (cand && cand.length === 1) lib = cand[0]; } // 2. unique name anywhere
+      if (!lib) { const cs = core(g.name); if (cs.length >= 4) { const c2 = byCoreState[cs + '|' + g.state]; if (c2 && c2.length === 1) lib = c2[0]; } } // 3. core name + state
+      if (!lib) { const tk = coreSorted(g.name); if (tk.length >= 4) { const c3 = byTokState[tk + '|' + g.state]; if (c3 && c3.length === 1) lib = c3[0]; } } // 4. same words any order
+      if (!lib) {                                                     // 5. guarded fuzzy (typos)
         const cs = core(g.name);
-        const cand2 = byCoreState[cs + '|' + g.state];
-        if (cand2 && cand2.length === 1 && cs.length >= 4) lib = cand2[0];
+        if (cs.length >= 5) {
+          const pool = coresByState[g.state] || [];
+          const near = pool.filter(x => Math.abs(x.cs.length - cs.length) <= 2 && lev(x.cs, cs) <= 2);
+          const uniq = Array.from(new Set(near.map(x => x.c)));
+          if (uniq.length === 1) lib = uniq[0];
+        }
       }
-      if (!lib) { unmatched.push([g.name, g.state, g.city || '', g.tees.length]); return; }
+      if (!lib || usedLibIds.has(lib.id)) { unmatched.push([g.name, g.state, g.city || '', g.tees.length]); return; }
+      usedLibIds.add(lib.id);
       const ex = saves[lib.id] || {};
       saves[lib.id] = {
         name: lib.name,
