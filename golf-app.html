@@ -4310,7 +4310,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.08.16';
+const BG_BUILD = 'v2026.06.08.17';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -21950,6 +21950,90 @@ window.bgCourseGaps = st => courseGapReport(st);
 {
   const m = location.search.match(/[?&]coursegaps=([A-Za-z0-9]+)/);
   if (m) setTimeout(() => { window.bgCourseGaps(m[1] === '1' ? null : m[1]); }, 2500);
+}
+
+// ---------- coverage check (?coursecheck=1 or =IL) -------------------------
+// Per-state readout of how complete the data is: courses in the library, how
+// many have GPS hole data, how many have tee rating/slope, and how many are
+// FULLY done. Use it to confirm a state finished after an interrupted import.
+async function courseCoverageReport(stOverride) {
+  let panel = document.getElementById('cov-panel');
+  if (panel) panel.remove();
+  panel = document.createElement('div');
+  panel.id = 'cov-panel';
+  panel.style.cssText = 'position:fixed;inset:7% 4% auto 4%;max-height:86%;z-index:9000;background:rgba(20,20,22,0.97);color:#fff;border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;font-size:13px';
+  panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<strong id="cov-title">Checking course coverage…</strong>' +
+    '<button id="cov-close" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button></div>' +
+    '<div id="cov-log" style="overflow:auto;flex:1;line-height:1.6;font-variant-numeric:tabular-nums"></div>';
+  document.body.appendChild(panel);
+  document.getElementById('cov-close').onclick = () => panel.remove();
+  const log = (msg, color) => { const b = document.getElementById('cov-log'); if (!b) return; const d = document.createElement('div'); if (color) d.style.color = color; d.innerHTML = msg; b.appendChild(d); };
+
+  try {
+    if (typeof loadCourseLibrary === 'function') await loadCourseLibrary();
+    const saves = await getCourseSaves();
+    const stFilter = (stOverride || '').toUpperCase();
+
+    // Bulk-fetch every course that has a GPS row (paginated past the row cap).
+    const gpsSet = new Set();
+    try {
+      if (!supaReady) await initSupabase();
+      if (supa && supaOnline) {
+        log('Loading GPS coverage…', '#9ad0ff');
+        let from = 0; const page = 1000;
+        while (true) {
+          const { data, error } = await supa.from('course_gps').select('course_id').range(from, from + page - 1);
+          if (error || !data || !data.length) break;
+          data.forEach(r => { if (r && r.course_id) gpsSet.add(r.course_id); });
+          if (data.length < page) break;
+          from += page;
+        }
+      } else { log('Offline — GPS counts unavailable. Reconnect and retry.', '#ffd34d'); }
+    } catch (e) { log('GPS coverage fetch failed: ' + e.message, '#ff8a80'); }
+
+    const stateOf = c => (c.st || (((c.city || '').match(/,\s*([A-Za-z]{2})$/) || [])[1]) || ((c.city || '').trim().length === 2 ? (c.city || '').trim() : 'Other')).toUpperCase();
+    const hasRS = id => { const s = saves[id]; return !!(s && Array.isArray(s.tees) && s.tees.some(t => t && t.rating != null && t.slope != null)); };
+
+    let progress = null;
+    try { const v = await safeGet('golf:state-import-progress', true); progress = v ? JSON.parse(v) : null; } catch (e) {}
+
+    const byState = {};
+    COURSE_LIBRARY.forEach(c => { const st = stateOf(c); if (stFilter && st !== stFilter) return; (byState[st] = byState[st] || []).push(c); });
+
+    document.getElementById('cov-title').textContent = 'Course coverage' + (stFilter ? ' — ' + stFilter : '');
+    log('<b>State&nbsp;&nbsp;Courses&nbsp;&nbsp;GPS&nbsp;&nbsp;Rating/Slope&nbsp;&nbsp;Fully&nbsp;done</b>');
+    const rows = [['state', 'courses', 'with_gps', 'with_rating_slope', 'fully_done', 'marked_done']];
+    let tC = 0, tG = 0, tR = 0, tF = 0;
+    Object.keys(byState).sort().forEach(st => {
+      const list = byState[st];
+      const gps = list.filter(c => gpsSet.has(c.id)).length;
+      const rs = list.filter(c => hasRS(c.id)).length;
+      const full = list.filter(c => gpsSet.has(c.id) && hasRS(c.id)).length;
+      tC += list.length; tG += gps; tR += rs; tF += full;
+      const marked = progress && progress.done && progress.done[st] ? 'yes' : 'no';
+      const pct = list.length ? Math.round(full / list.length * 100) : 0;
+      const col = pct >= 90 ? '#8fd19e' : (pct >= 50 ? '#ffd34d' : '#ff8a80');
+      log(st + ' — ' + list.length + ' courses · ' + gps + ' GPS · ' + rs + ' rating/slope · <b>' + full + ' fully done (' + pct + '%)</b>' + (marked === 'no' ? ' <span style="color:#ffd34d">[not marked done]</span>' : ''), col);
+      rows.push([st, list.length, gps, rs, full, marked]);
+    });
+    log('<br><b>Total: ' + tC + ' courses · ' + tG + ' GPS · ' + tR + ' rating/slope · ' + tF + ' fully done.</b>', '#9ad0ff');
+    log('Green ≥90% complete · yellow ≥50% · red below. To finish a state, re-run its 3 links — it only tops off what is missing.', '#9ad0ff');
+
+    const csv = rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'bad-golf-coverage' + (stFilter ? '-' + stFilter : '') + '.csv';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (e) {
+    log('Coverage check failed: ' + (e && e.message ? e.message : 'error'), '#ff8a80');
+    console.error('courseCoverageReport crashed:', e);
+  }
+}
+window.bgCourseCheck = st => courseCoverageReport(st);
+{
+  const m = location.search.match(/[?&]coursecheck=([A-Za-z0-9]+)/);
+  if (m) setTimeout(() => { window.bgCourseCheck(m[1] === '1' ? null : m[1]); }, 2500);
 }
 
 // ---------- licensed course-data import: tee rating / slope / yardage --------
