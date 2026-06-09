@@ -5926,6 +5926,39 @@ function checkPlayerForRosterConflict(firstName, lastName, roster) {
 // Players matched by name (case-insensitive). New players created if not in roster.
 // Each player uses their own tee's rating/slope. Players without a tee, or
 // rounds with incomplete 18-hole scoring, are silently skipped.
+// ---- "Invited but not yet joined" tracking ------------------------------
+// When you get a round invite you haven't accepted (declined OR ignored), the
+// round must NOT count toward your stats/handicap until you actually join.
+// We track those game codes locally (per device = per user) so archiving can
+// skip them; accepting/joining clears the code so it starts counting.
+function getPendingJoinCodes() { try { return JSON.parse(localStorage.getItem('golf:pending-join') || '[]'); } catch (e) { return []; } }
+function setPendingJoinCodes(l) { try { localStorage.setItem('golf:pending-join', JSON.stringify(l.slice(-200))); } catch (e) {} }
+function markInvitedNotJoined(code) { if (!code) return; const l = getPendingJoinCodes(); if (!l.includes(code)) { l.push(code); setPendingJoinCodes(l); } }
+function clearPendingJoin(code) { if (!code) return; setPendingJoinCodes(getPendingJoinCodes().filter(c => c !== code)); }
+function isInvitedNotJoined(code) { return !!code && getPendingJoinCodes().includes(code); }
+
+// Belt-and-suspenders for "notify only once": even if the cloud status update
+// is blocked, we remember locally which invite ids we've already shown so they
+// never pop a second time.
+function getSeenInviteIds() { try { return JSON.parse(localStorage.getItem('golf:seen-invites') || '[]'); } catch (e) { return []; } }
+function markInviteSeen(id) { if (id == null) return; const l = getSeenInviteIds(); if (!l.includes(id)) { l.push(id); try { localStorage.setItem('golf:seen-invites', JSON.stringify(l.slice(-300))); } catch (e) {} } }
+function inviteAlreadySeen(id) { return id != null && getSeenInviteIds().includes(id); }
+
+// Join a round after the fact so it counts toward your stats. Removes any
+// prior decline, clears the pending-join flag, records you as accepted, and
+// (if the round is already finished) archives it into your history now.
+async function joinRoundForStats(g, me) {
+  if (!g) return;
+  if (!me) { try { me = await getMeName(); } catch (e) {} }
+  clearPendingJoin(g.code);
+  if (me && Array.isArray(g.declinedBy)) g.declinedBy = g.declinedBy.filter(n => n !== me);
+  if (!Array.isArray(g.acceptedBy)) g.acceptedBy = [];
+  if (me && !g.acceptedBy.includes(me)) g.acceptedBy.push(me);
+  try { await saveGame(g); } catch (e) {}
+  try { if (g.finishedAt) await archiveScoresFromRound(g); } catch (e) {}
+  showToast('Joined — this round now counts toward your stats', 3500);
+}
+
 async function archiveScoresFromRound(g) {
   if (!g || !g.players || !g.scores) return;
   const date = g.createdAt || g.updatedAt || Date.now();
@@ -5958,6 +5991,11 @@ async function archiveScoresFromRound(g) {
 
   const roster = await getPlayerRoster();
   let changed = false;
+  // Who am I on this device? Used to skip rounds I was invited to but never
+  // joined — those don't count until I explicitly join (see joinRoundForStats).
+  let meName = null;
+  try { meName = await getMeName(); } catch (e) {}
+  const iSkipThisRound = !!(meName && isInvitedNotJoined(g.code));
 
   g.players.forEach(p => {
     const arr = g.scores[p.id] || [];
@@ -5967,6 +6005,9 @@ async function archiveScoresFromRound(g) {
     // Declined the invite → NOTHING from this round counts for them:
     // no rounds-played, no average, no money, no handicap differential.
     if (Array.isArray(g.declinedBy) && g.declinedBy.includes(p.name)) return;
+    // Invited but never joined (ignored the invite) → same treatment for ME:
+    // it can't count until I reopen the round and join it.
+    if (iSkipThisRound && p.name === meName) return;
 
     // Only count gross + differential for complete 18-hole rounds (per WHS,
     // a partial round's gross is meaningless). Incomplete rounds still get
@@ -17622,6 +17663,23 @@ async function openRecent(r) {
     else showToast('Viewing round (read-only)');
     return;                                 // note: KEY_LAST untouched
   }
+  // If I was invited to this round but never joined (declined or ignored), it
+  // isn't counting toward my stats. Opening it later is the chance to join.
+  try {
+    const me = await getMeName();
+    const iDeclined = me && Array.isArray(g.declinedBy) && g.declinedBy.includes(me);
+    if (me && (isInvitedNotJoined(g.code) || iDeclined)) {
+      if (g.finishedAt) {
+        // Finished round — let me decide whether to count it.
+        const ok = (typeof window.confirm === 'function') &&
+          window.confirm("You haven't joined this round, so it isn't counting toward your stats or handicap.\n\nJoin it now so it counts?");
+        if (ok) await joinRoundForStats(g, me);
+      } else {
+        // Opening a live round to play it IS joining — count it, no prompt.
+        await joinRoundForStats(g, me);
+      }
+    }
+  } catch (e) {}
   state.game = g;
   state.viewOnlyMode = !!g.finishedAt;
   await safeSet(KEY_LAST, r.code, false);
@@ -18330,13 +18388,40 @@ async function checkPendingInvites() {
   try {
     const { data } = await supa.from('game_invites')
       .select('*').eq('to_user', _authUser.id).eq('status', 'pending')
-      .order('created_at', { ascending: false }).limit(1);
-    if (data && data.length) showIncomingInvite(data[0]);
+      .order('created_at', { ascending: false }).limit(5);
+    if (data && data.length) {
+      // Show the newest invite that's still joinable; finished ones get expired
+      // inside showIncomingInvite and we move on, so over rounds never nag.
+      for (const inv of data) {
+        const shown = await showIncomingInvite(inv);
+        if (shown) break;
+      }
+    }
   } catch (e) { /* non-fatal */ }
 }
 
 async function showIncomingInvite(inv) {
-  if (!inv) return;
+  if (!inv) return false;
+  // Already shown once on this device → never notify again.
+  if (inviteAlreadySeen(inv.id)) return false;
+  const isT2 = String(inv.game_code || '').indexOf('T2:') === 0;
+  // Round invites: don't nag for rounds that are already over. Expire them so
+  // they never notify again. Also remember I was invited (so the round won't
+  // count toward my stats until I actually join).
+  if (!isT2) {
+    try {
+      const g0 = await loadGame(inv.game_code);
+      if (g0 && g0.finishedAt) {
+        try { await supa.from('game_invites').update({ status: 'expired' }).eq('id', inv.id); } catch (e) {}
+        return false;
+      }
+    } catch (e) {}
+    markInvitedNotJoined(inv.game_code);
+  }
+  // Only ever notify ONCE: remember locally + mark seen in the cloud so it
+  // won't pop again on the next launch. Accept/decline still update it by id.
+  markInviteSeen(inv.id);
+  try { await supa.from('game_invites').update({ status: 'seen' }).eq('id', inv.id); } catch (e) {}
   _pendingInvite = inv;
   wireFriendsModals();
   let fromName = 'A friend';
@@ -18345,7 +18430,6 @@ async function showIncomingInvite(inv) {
     if (data) { const n = friendDisplayName(data); if (n && n !== 'Player') fromName = n; }
   } catch (e) {}
   const txt = document.getElementById('incoming-invite-text');
-  const isT2 = String(inv.game_code || '').indexOf('T2:') === 0;
   if (txt) {
     if (isT2) {
       txt.innerHTML = '<b>' + fromName + '</b> invited you to the tournament <b>' + (inv.course || '') + '</b> 🏆. Open it?';
@@ -18355,6 +18439,7 @@ async function showIncomingInvite(inv) {
     }
   }
   document.getElementById('incoming-invite-modal').classList.add('show');
+  return true;
 }
 
 async function acceptIncomingInvite() {
@@ -18371,6 +18456,18 @@ async function acceptIncomingInvite() {
   }
   const g = await loadGame(inv.game_code);
   if (!g) { showToast('Round not found — it may have ended'); return; }
+  // Accepting = I've joined, so this round counts toward my stats. Clear the
+  // not-joined flag and undo any earlier decline.
+  try {
+    clearPendingJoin(inv.game_code);
+    const me = await getMeName();
+    if (me) {
+      if (Array.isArray(g.declinedBy)) g.declinedBy = g.declinedBy.filter(n => n !== me);
+      if (!Array.isArray(g.acceptedBy)) g.acceptedBy = [];
+      if (!g.acceptedBy.includes(me)) g.acceptedBy.push(me);
+      await saveGame(g);
+    }
+  } catch (e) {}
   state.game = g;
   state.viewOnlyMode = !!g.finishedAt;
   // Land on the hole the group is actually on, not always hole 1.
@@ -18399,8 +18496,9 @@ async function declineIncomingInvite() {
         if (!Array.isArray(g.declinedBy)) g.declinedBy = [];
         if (!g.declinedBy.includes(me)) { g.declinedBy.push(me); await saveGame(g); }
       }
+      clearPendingJoin(inv.game_code);
     } catch (e) {}
-    showToast("Declined — this round won't count toward your stats or handicap", 4000);
+    showToast("Declined — this round won't count. You can reopen it later to join.", 4500);
   }
 }
 
