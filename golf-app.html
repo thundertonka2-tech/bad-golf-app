@@ -1995,6 +1995,8 @@
             <span class="icon"></span>
             <span class="text"></span>
           </div>
+          <!-- Admin-only: fix a wrongly-named course (keeps all its data/scores). -->
+          <button id="btn-rename-course" style="display:none;margin-top:8px;background:#111;color:#fff;border:1px solid #111;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer">✏️ Rename course (admin)</button>
 
           <div id="scorecard-editor" style="display:none">
             <!-- Tees block. When a saved scorecard loads, this collapses into
@@ -4713,7 +4715,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.37';
+const BG_BUILD = 'v2026.06.09.38';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -4790,6 +4792,9 @@ async function initAuth() {
   try {
     const { data } = await supa.auth.getSession();
     _authUser = (data && data.session) ? data.session.user : null;
+    // Remember this device has had a real sign-in — powers the offline grace
+    // path (returning users get in offline; brand-new users still must sign in).
+    if (_authUser) { try { localStorage.setItem('golf:has-signed-in', '1'); } catch (e) {} }
     await fetchMyRole();
     supa.auth.onAuthStateChange(async (_event, session) => {
       _authUser = session ? session.user : null;
@@ -4805,6 +4810,7 @@ async function initAuth() {
       // Once a session is live, make sure the welcome/login prompt isn't
       // left covering the app (e.g. after returning from a Google redirect).
       if (_authUser) {
+        try { localStorage.setItem('golf:has-signed-in', '1'); } catch (e) {}
         const m = document.getElementById('auth-modal');
         if (m) m.classList.remove('show');
         // Phase 2 (Cloud): on a real sign-in, link this account to a roster
@@ -4885,6 +4891,9 @@ function applyAdminGating() {
   const admin = isAdmin();
   const cleanupBtn = document.getElementById('btn-roster-cleanup');
   if (cleanupBtn) cleanupBtn.style.display = admin ? '' : 'none';
+  // Course rename is admin-only; hide it the instant a non-admin is active.
+  const renameBtn = document.getElementById('btn-rename-course');
+  if (renameBtn && !admin) renameBtn.style.display = 'none';
   const delSection = document.getElementById('delete-player-section');
   if (delSection) delSection.style.display = admin ? 'block' : 'none';
   if (admin) { try { renderDeletePlayerPicker(); } catch (e) {} }
@@ -4996,6 +5005,13 @@ function maybeShowAuthPrompt() {
   if (isSignedIn()) return;
   // Maintenance/import link → never block it with the sign-in prompt.
   if (isMaintenanceLink()) return;
+  // Offline grace for RETURNING users only: if this device has signed in before
+  // but we're offline (so the session couldn't be read/refreshed), let them in.
+  // Brand-new users (no prior sign-in on this device) are still required to log in.
+  try {
+    const hasSignedInBefore = localStorage.getItem('golf:has-signed-in') === '1';
+    if (hasSignedInBefore && navigator.onLine === false) return;
+  } catch (e) {}
   // Mid sign-in: returning from an OAuth redirect with tokens in the URL —
   // the session is about to resolve, so don't flash the prompt.
   try {
@@ -6358,6 +6374,38 @@ async function addCourseToLibrary(name, city, note, extra) {
   return newCourse;
 }
 
+// Admin course-name overrides: { courseId: "Correct Name" }. Renaming keeps the
+// course id (and therefore all its rounds, scorecards, and GPS data) intact and
+// just changes the displayed name. Synced so the whole crew sees the fix.
+const KEY_COURSE_NAME_OVERRIDES = 'golf:course-name-overrides';
+async function getCourseNameOverrides() {
+  const v = await safeGet(KEY_COURSE_NAME_OVERRIDES, true);
+  if (!v) return {};
+  try { return JSON.parse(v) || {}; } catch (e) { return {}; }
+}
+async function renameCourse(courseId, newName) {
+  const nm = (newName || '').trim();
+  if (!courseId || !nm) return false;
+  if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can rename courses'); return false; }
+  const overrides = await getCourseNameOverrides();
+  overrides[courseId] = nm;
+  await safeSet(KEY_COURSE_NAME_OVERRIDES, JSON.stringify(overrides), true);
+  // Apply to the in-memory library now.
+  const c = COURSE_LIBRARY.find(x => x.id === courseId);
+  const oldName = c ? c.name : '';
+  if (c) c.name = nm;
+  // Persist on the addition record too, if this was a user-added course.
+  try {
+    const additions = await getCourseLibraryAdditions();
+    const a = additions.find(x => x.id === courseId);
+    if (a) { a.name = nm; await saveCourseLibraryAdditions(additions); }
+  } catch (e) {}
+  // Best-effort: update the course_gps row name so map/library reads match.
+  try { if (supa && supaOnline) await supa.from('course_gps').update({ name: nm }).eq('course_id', courseId); } catch (e) {}
+  try { audit('rename_course', courseId, oldName + ' → ' + nm); } catch (e) {}
+  return true;
+}
+
 // Load user-added courses at boot and merge them into the live COURSE_LIBRARY.
 async function loadCourseLibrary() {
   const additions = await getCourseLibraryAdditions();
@@ -6369,6 +6417,11 @@ async function loadCourseLibrary() {
       COURSE_LIBRARY.push(c);
     }
   });
+  // Apply admin name fixes (keeps ids/data; just corrects the displayed name).
+  try {
+    const overrides = await getCourseNameOverrides();
+    COURSE_LIBRARY.forEach(c => { if (overrides[c.id]) c.name = overrides[c.id]; });
+  } catch (e) {}
   // One-time bootstrap: pre-populate scorecards for the Michigan 2026 trip
   // so the group doesn't have to enter pars/SIs/tees on-site. Safe to call
   // repeatedly — it skips any course that already has a saved scorecard.
@@ -7873,6 +7926,7 @@ async function selectCourseById(id) {
     editor.style.display = 'none';
     $('course-name').value = '';
     $('course-name').dataset.courseId = '';
+    { const rb = document.getElementById('btn-rename-course'); if (rb) rb.style.display = 'none'; }
     updateSetupGates(); // course cleared → re-evaluate Bets reveal
     return;
   }
@@ -7881,6 +7935,8 @@ async function selectCourseById(id) {
 
   $('course-name').value = lib.name;
   $('course-name').dataset.courseId = id;
+  // Admin-only rename control for fixing a mis-named course.
+  { const rb = document.getElementById('btn-rename-course'); if (rb) rb.style.display = (typeof isAdmin === 'function' && isAdmin()) ? '' : 'none'; }
   // Per-hole tee yardages for the GPS tee-box display (empty for courses we
   // don't have hole-by-hole data for). Bridges combos set this in applyNineCombo.
   state.courseTeeYards = COURSE_HOLE_YARDS[id] || {};
@@ -21826,6 +21882,26 @@ async function init() {
 
   $('btn-end-round').onclick = () => switchTab('board');
   $('btn-back-score').onclick = () => { if (state.viewOnlyMode) { exitViewOnly(); } else { switchTab('score'); } };
+
+  // Admin-only: rename a mis-named course (keeps its id, so all rounds/GPS stay).
+  { const _rc = $('btn-rename-course'); if (_rc) _rc.onclick = async () => {
+      const id = $('course-name').dataset.courseId;
+      const cur = $('course-name').value || '';
+      if (!id) { showToast('Pick a course first'); return; }
+      if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can rename courses'); return; }
+      const nn = (typeof window.prompt === 'function')
+        ? window.prompt('Rename this course (keeps all its data & scores):', cur) : null;
+      if (nn === null) return;
+      const trimmed = nn.trim();
+      if (!trimmed || trimmed === cur) return;
+      const ok = await renameCourse(id, trimmed);
+      if (ok) {
+        $('course-name').value = trimmed;
+        if ($('course-search')) $('course-search').value = trimmed;
+        try { renderCourseList($('course-search') ? $('course-search').value : ''); } catch (e) {}
+        showToast('Course renamed to "' + trimmed + '"');
+      }
+    }; }
 
   // Re-Map Hole — re-run the 3-tap mapping wizard for the current hole.
   { const _rm = $('btn-remap-hole'); if (_rm) _rm.onclick = async () => {
