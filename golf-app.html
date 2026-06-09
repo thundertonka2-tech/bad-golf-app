@@ -4644,7 +4644,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.17';
+const BG_BUILD = 'v2026.06.09.19';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -5251,6 +5251,10 @@ function subscribeToGame(code) {
         state.game = incoming;
         // Cache the fresh copy locally
         try { localStorage.setItem('game:' + code, JSON.stringify(incoming)); } catch (e) {}
+
+        // 💧 If the scorer just announced a per-hole sip, fire it here too so
+        // the pop-up reaches every phone — not only the device that advanced.
+        try { if (typeof reactToSipAnnounce === 'function') reactToSipAnnounce(); } catch (e) {}
 
         // Refresh whichever screen is active — but skip if user is mid-edit on an input
         const focused = document.activeElement;
@@ -17783,18 +17787,36 @@ async function openAddFriend() {
 async function renderAddFriendList(filter) {
   const el = document.getElementById('add-friend-list');
   if (!el) return;
-  const meId = _authUser ? _authUser.id : null;
+  if (!_authUser) { el.innerHTML = '<div class="help-text">Sign in to add friends.</div>'; return; }
+  const meId = _authUser.id;
   const [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]);
-  const related = new Set();
-  edges.forEach(e => { related.add(e.requester); related.add(e.addressee); });
+  // Map each other person to my relationship with them: 'friend' or 'pending'.
+  // We no longer DROP already-related people — we show them with a status badge
+  // so the list is never mysteriously empty (the "no list to pick from" bug).
+  const status = {};
+  edges.forEach(e => {
+    const other = e.requester === meId ? e.addressee : (e.addressee === meId ? e.requester : null);
+    if (!other) return;
+    const st = e.status === 'accepted' ? 'friend' : 'pending';
+    if (status[other] !== 'friend') status[other] = st;
+  });
   const f = (filter || '').trim().toLowerCase();
-  const candidates = profiles
-    .filter(p => p.id !== meId && !related.has(p.id))
-    .filter(p => !f || friendDisplayName(p).toLowerCase().includes(f));
-  if (candidates.length === 0) { el.innerHTML = '<div class="help-text">No one to add right now.</div>'; return; }
-  el.innerHTML = candidates.map(p =>
-    '<button class="full af-row" data-id="' + p.id + '" style="text-align:left;margin-bottom:6px">' + friendDisplayName(p) + '</button>'
-  ).join('');
+  const people = profiles
+    .filter(p => p.id !== meId)
+    .filter(p => !f || friendDisplayName(p).toLowerCase().includes(f))
+    .sort((a, b) => friendDisplayName(a).localeCompare(friendDisplayName(b)));
+  if (people.length === 0) {
+    el.innerHTML = '<div class="help-text">' + (f ? 'No matches.' : 'No other players have signed up yet — invite your crew to create an account.') + '</div>';
+    return;
+  }
+  const badge = (txt, col) => '<span style="font-size:12px;font-weight:600;color:' + col + '">' + txt + '</span>';
+  el.innerHTML = people.map(p => {
+    const nm = friendDisplayName(p);
+    const st = status[p.id];
+    if (st === 'friend') return '<div class="af-static" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;margin-bottom:6px;border:1px solid var(--border);border-radius:8px;opacity:0.7">' + nm + badge('✓ Friends', 'var(--accent)') + '</div>';
+    if (st === 'pending') return '<div class="af-static" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;margin-bottom:6px;border:1px solid var(--border);border-radius:8px;opacity:0.7">' + nm + badge('Pending', 'var(--text-muted)') + '</div>';
+    return '<button class="full af-row" data-id="' + p.id + '" style="display:flex;justify-content:space-between;align-items:center;text-align:left;margin-bottom:6px">' + nm + badge('+ Add', 'var(--accent)') + '</button>';
+  }).join('');
   el.querySelectorAll('.af-row').forEach(b => b.onclick = async () => {
     await sendFriendRequest(b.dataset.id);
     await renderAddFriendList(filter);
@@ -23924,6 +23946,100 @@ function hydrationColor(t){
   return hex(c[0], c[1], c[2]);
 }
 
+// ============================================================
+// 💧 SIP POP-UP (per-hole) — fun, dismiss-on-any-tap, every phone
+// ============================================================
+// Reusable celebratory overlay. Big image + message, fills the screen, and
+// vanishes the instant ANYTHING is tapped or a key is pressed, so it never
+// blocks play. Falls back to a big emoji if the art file isn't deployed yet.
+// Shared by the sip pop-up and (later) the "you get a stroke" pop-up.
+function showFunPopup(opts){
+  opts = opts || {};
+  try {
+    const old = document.getElementById('fun-popup-overlay');
+    if (old) old.remove();
+    const ov = document.createElement('div');
+    ov.id = 'fun-popup-overlay';
+    ov.setAttribute('role', 'dialog');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;background:rgba(8,16,28,0.82);backdrop-filter:blur(3px);cursor:pointer';
+    const emoji = opts.fallbackEmoji || '🍺';
+    const imgHtml = opts.img
+      ? '<img src="' + opts.img + '" alt="" style="max-width:min(86vw,420px);max-height:54vh;width:auto;border-radius:18px;box-shadow:0 14px 50px rgba(0,0,0,0.55);object-fit:contain" ' +
+        'onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{textContent:\'' + emoji + '\',style:\'font-size:104px;line-height:1\'}))">'
+      : '<div style="font-size:104px;line-height:1">' + emoji + '</div>';
+    ov.innerHTML =
+      imgHtml +
+      (opts.title ? '<div style="color:#fff;font-size:30px;font-weight:900;letter-spacing:0.01em;text-shadow:0 2px 12px rgba(0,0,0,0.6)">' + opts.title + '</div>' : '') +
+      (opts.sub ? '<div style="color:#fff;font-size:17px;font-weight:600;max-width:520px;line-height:1.35;text-shadow:0 1px 8px rgba(0,0,0,0.6)">' + opts.sub + '</div>' : '') +
+      '<div style="color:rgba(255,255,255,0.7);font-size:12px;margin-top:2px">tap anywhere to dismiss</div>';
+    const close = () => { try { ov.remove(); } catch (e) {} document.removeEventListener('keydown', close, true); };
+    ov.addEventListener('click', close);
+    ov.addEventListener('touchstart', close, { passive: true });
+    document.addEventListener('keydown', close, true);
+    document.body.appendChild(ov);
+    if (opts.autoMs) setTimeout(close, opts.autoMs);
+  } catch (e) { console.warn('fun popup failed:', e); }
+}
+
+// Per-hole sip pop-up. The SCORER calls this on hole-advance; it stamps a
+// broadcast marker on the game so every subscribed phone fires the SAME pop-up
+// (each phone shows ITS OWN player's sips). Respects the Sip-time pop-ups
+// toggle and the 19th-hole "bank it" mode. Called AFTER the hole is advanced,
+// so it never interrupts score entry.
+async function maybeShowSipBanner(leaving){
+  try {
+    const g = state.game;
+    if (!g || !leaving) return;
+    if (!hydrationActive() || hydrationBanked() || !hydrationPopups()) return;
+    const hs = hydrationHoleSips(g, leaving);
+    const anySips = g.players.some(p => hs[p.id] && hs[p.id].count > 0);
+    if (!anySips) return;
+    g.sipAnnounce = { hole: leaving, at: Date.now() }; // broadcast marker
+    try { await saveGame(g); } catch (e) {}
+    reactToSipAnnounce();
+  } catch (e) { console.warn('sip banner skipped:', e); }
+}
+
+// Fires the sip pop-up for THIS device's player, once per announcement. Called
+// locally by the scorer and by every other phone via subscribeToGame.
+let _lastSipAnnounceAt = 0;
+async function reactToSipAnnounce(){
+  try {
+    const g = state.game;
+    if (!g || !g.sipAnnounce || !g.sipAnnounce.at) return;
+    if (g.sipAnnounce.at <= _lastSipAnnounceAt) return;          // already shown here
+    if (Date.now() - g.sipAnnounce.at > 60000) { _lastSipAnnounceAt = g.sipAnnounce.at; return; } // ignore stale on reload
+    _lastSipAnnounceAt = g.sipAnnounce.at;
+    if (!hydrationActive() || hydrationBanked() || !hydrationPopups()) return;
+    const hole = g.sipAnnounce.hole;
+    const hs = hydrationHoleSips(g, hole);
+    // Who is this phone? Match the linked player into this round's roster.
+    let mePid = null;
+    try {
+      const meName = await getMeName();
+      if (meName) {
+        const norm = s => normalizeNameSegment(String(s || ''));
+        const meP = g.players.find(p => norm(p.name) === norm(meName));
+        if (meP) mePid = meP.id;
+      }
+    } catch (e) {}
+    const water = hydrationWater();
+    let title, sub;
+    if (mePid && hs[mePid] && hs[mePid].count > 0) {
+      const cnt = hs[mePid].count;
+      const reasons = hs[mePid].reasons.map(r => r.label).join(' · ');
+      title = (water ? '💧 ' : '🍺 ') + cnt + ' sip' + (cnt !== 1 ? 's' : '') + '!';
+      sub = 'Hole ' + hole + (reasons ? ' — ' + reasons : '');
+    } else {
+      const owed = g.players.filter(p => hs[p.id] && hs[p.id].count > 0)
+        .map(p => displayFirst(p) + ' ' + hs[p.id].count);
+      if (mePid) { title = '😎 You stayed dry!'; sub = 'Hole ' + hole + (owed.length ? ' — ' + owed.join(' · ') : ''); }
+      else { if (!owed.length) return; title = water ? '💧 Time to sip!' : '🍺 Time to sip!'; sub = 'Hole ' + hole + ' — ' + owed.join(' · '); }
+    }
+    showFunPopup({ img: 'sips_popup.jpg', title, sub, fallbackEmoji: water ? '💧' : '🍺' });
+  } catch (e) { console.warn('sip react failed:', e); }
+}
+
 // Score-screen: manual 💧 chips + per-hole recap. Never blocks score entry.
 function renderHydrationEntry(){
   const sec = document.getElementById('hydration-entry-section');
@@ -23993,22 +24109,9 @@ function openSipChipPopup(pid){
 }
 
 // "Time to sip" banner — fires when leaving a resolved hole.
-function maybeShowSipBanner(h){
-  const g = state.game; if (!g) return;
-  if (!hydrationActive() || !hydrationPopups() || hydrationBanked()) return;
-  const hs = hydrationHoleSips(g, h);
-  const owed = g.players.filter(p => hs[p.id] && hs[p.id].count > 0);
-  if (!owed.length) return;
-  let ov = document.getElementById('sip-banner-overlay');
-  if (!ov) { ov = document.createElement('div'); ov.id = 'sip-banner-overlay'; ov.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9998;display:flex;justify-content:center;padding:14px'; document.body.appendChild(ov); }
-  let html = '<div style="background:var(--accent);color:#fff;border-radius:14px;max-width:420px;width:100%;padding:14px 16px;box-shadow:0 6px 30px rgba(0,0,0,0.35);cursor:pointer">';
-  html += '<div style="font-weight:800;font-size:15px;margin-bottom:6px">💧 Time to sip — hole ' + h + '</div>';
-  owed.forEach(p => { const reasons = hs[p.id].reasons.map(r => r.label).join(', '); html += '<div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:2px 0"><span><strong>' + displayFirst(p) + '</strong> · ' + reasons + '</span><span style="font-weight:700">' + hs[p.id].count + '</span></div>'; });
-  html += '<div style="text-align:center;font-size:11px;opacity:0.85;margin-top:8px">tap to dismiss</div></div>';
-  ov.innerHTML = html; ov.style.display = 'flex';
-  ov.onclick = () => { ov.style.display = 'none'; };
-  clearTimeout(maybeShowSipBanner._t); maybeShowSipBanner._t = setTimeout(() => { if (ov) ov.style.display = 'none'; }, 6000);
-}
+// NOTE: the per-hole sip pop-up (maybeShowSipBanner) now lives up in the
+// "SIP POP-UP" section — it's a full-screen cartoon overlay that broadcasts to
+// every phone. The old small auto-dismiss bottom banner was replaced there.
 
 // End-of-round color-scaled bars for the summary modal.
 function buildHydrationSummaryHtml(g){
