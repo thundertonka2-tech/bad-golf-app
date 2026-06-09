@@ -4672,7 +4672,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.26';
+const BG_BUILD = 'v2026.06.09.29';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -5285,6 +5285,8 @@ function subscribeToGame(code) {
         try { if (typeof reactToSipAnnounce === 'function') reactToSipAnnounce(); } catch (e) {}
         // 🐦 Deferred per-hole celebration → only the player it's about.
         try { if (typeof reactToHoleCelebration === 'function') reactToHoleCelebration(); } catch (e) {}
+        // ⛳ "You get a stroke" → only the player who receives one.
+        try { if (typeof reactToStrokeAnnounce === 'function') reactToStrokeAnnounce(); } catch (e) {}
 
         // Refresh whichever screen is active — but skip if user is mid-edit on an input
         const focused = document.activeElement;
@@ -11891,19 +11893,86 @@ async function reactToHoleCelebration(){
   } catch (e) { console.warn('hole celebration react failed:', e); }
 }
 
-// Celebration overlay with a small queue so multiple results (e.g. two players
-// on a single phone) chain one after another instead of clobbering each other.
-let _celebrationQueue = [];
-function showScoreCelebration(name, title, sub, emoji){
-  if (typeof popupsEnabled === 'function' && !popupsEnabled()) return; // #13 device toggle
-  _celebrationQueue.push({ name, title, sub, emoji });
-  if (!showScoreCelebration._active) _drainCelebrationQueue();
+// "You get a stroke" pop-up (#14). Broadcast at hole-advance, AFTER sips and
+// celebrations so it queues last. Shows only on the phone of a player who
+// actually receives a handicap stroke on that hole, and only when strokes are
+// in play (handicaps on). Uses the stroke cartoon, same dismiss rules as the
+// other pop-ups.
+function announceStrokes(leaving){
+  try {
+    const g = state.game;
+    if (!g || !leaving) return;
+    const rules = g.hcpRules || {};
+    if (rules.noHandicaps) return; // straight-up gross — no strokes given
+    const si = (g.sis && g.sis[leaving - 1] != null) ? g.sis[leaving - 1] : null;
+    if (si == null) return;
+    const par = g.pars ? g.pars[leaving - 1] : null;
+    const any = (g.players || []).some(p => strokesOnHole(effectiveHcp(p, rules), si, par, rules) > 0);
+    if (!any) return;
+    g.strokeHole = { hole: leaving, at: Date.now() };
+    try { saveGame(g); } catch (e) {}
+    reactToStrokeAnnounce();
+  } catch (e) { console.warn('stroke announce failed:', e); }
 }
-function _drainCelebrationQueue(){
-  const next = _celebrationQueue.shift();
-  if (!next) { showScoreCelebration._active = false; return; }
-  showScoreCelebration._active = true;
-  const { name, title, sub, emoji } = next;
+
+let _lastStrokeHoleAt = 0;
+async function reactToStrokeAnnounce(){
+  try {
+    const g = state.game;
+    if (!g || !g.strokeHole || !g.strokeHole.at) return;
+    const a = g.strokeHole;
+    if (a.at <= _lastStrokeHoleAt) return;
+    if (Date.now() - a.at > 90000) { _lastStrokeHoleAt = a.at; return; } // ignore stale on reload
+    _lastStrokeHoleAt = a.at;
+    if (typeof popupsSuppressedForScorer === 'function' && popupsSuppressedForScorer()) return; // #19
+    const rules = g.hcpRules || {};
+    const hole = a.hole;
+    const si = (g.sis && g.sis[hole - 1] != null) ? g.sis[hole - 1] : null;
+    if (si == null) return;
+    const par = g.pars ? g.pars[hole - 1] : null;
+    // "You get a stroke" is personal — needs to know who this phone is.
+    let meP = null;
+    try {
+      const meName = await getMeName();
+      if (meName) {
+        const norm = s => normalizeNameSegment(String(s || ''));
+        meP = (g.players || []).find(p => norm(p.name) === norm(meName)) || null;
+      }
+    } catch (e) {}
+    if (!meP) return; // no linked player → can't say "you"
+    const strokes = strokesOnHole(effectiveHcp(meP, rules), si, par, rules);
+    if (strokes <= 0) return;
+    const sub = 'Hole ' + hole + (strokes > 1 ? ' — ' + strokes + ' strokes here. Net is on your side.' : ' — net is on your side here.');
+    showFunPopup({ img: 'stroke_popup.JPG', title: 'You get a stroke!', sub, fallbackEmoji: '⛳' });
+  } catch (e) { console.warn('stroke react failed:', e); }
+}
+
+// ---- Unified deferred-popup queue ----------------------------------------
+// All deferred play pop-ups (sips, birdie/blow-up celebrations, "you get a
+// stroke") run through ONE queue so they appear one at a time, in order — the
+// stroke pop-up only shows once every other pop-up is done (#14). The device
+// pop-up toggle (#13) is enforced here, in one place.
+let _popupQueue = [];
+let _popupRunning = false;
+function _queuePopup(renderFn){
+  if (typeof popupsEnabled === 'function' && !popupsEnabled()) return; // #13
+  _popupQueue.push(renderFn);
+  if (!_popupRunning) _runNextPopup();
+}
+function _runNextPopup(){
+  const fn = _popupQueue.shift();
+  if (!fn) { _popupRunning = false; return; }
+  _popupRunning = true;
+  let advanced = false;
+  const done = () => { if (advanced) return; advanced = true; setTimeout(_runNextPopup, 180); };
+  try { fn(done); } catch (e) { console.warn('popup render failed:', e); done(); }
+}
+
+function showScoreCelebration(name, title, sub, emoji){
+  _queuePopup(done => _renderCelebration({ name, title, sub, emoji }, done));
+}
+function _renderCelebration(item, done){
+  const { name, title, sub, emoji } = item;
   let ov = document.getElementById('score-celebrate-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'score-celebrate-overlay'; ov.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(12,68,124,0.55);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:24px'; document.body.appendChild(ov); }
   ov.innerHTML = '<div style="background:var(--surface);border-radius:20px;max-width:320px;width:100%;padding:24px 22px;text-align:center;box-shadow:0 12px 50px rgba(0,0,0,0.4);border:2px solid var(--accent)">' +
@@ -11914,15 +11983,15 @@ function _drainCelebrationQueue(){
     '<div class="small-text" style="color:var(--text-muted);margin-top:6px">' + sub + '</div>' +
     '<div class="small-text" style="color:var(--text-muted);margin-top:14px;opacity:0.7">tap anywhere to close</div></div>';
   ov.style.display = 'flex';
+  let _t;
   const advance = () => {
-    clearTimeout(showScoreCelebration._t);
+    clearTimeout(_t);
     ov.onclick = null;
     ov.style.display = 'none'; ov.innerHTML = '';
-    setTimeout(_drainCelebrationQueue, 200); // brief gap, then the next one
+    done();
   };
   ov.onclick = advance;
-  clearTimeout(showScoreCelebration._t);
-  showScoreCelebration._t = setTimeout(advance, 5000);
+  _t = setTimeout(advance, 5000);
 }
 
 // ============================================================
@@ -15504,19 +15573,24 @@ function buildHomeKpiHtml(player) {
         '<div style="font-weight:700;font-size:17px;margin-bottom:2px">' + titleHtml + '</div>' +
         '<div class="small-text" style="color:var(--text-muted);font-size:11px;margin-bottom:3px">' + escapeHtml(calc.basis || '') + '</div>' +
         '<div style="font-size:12px;font-weight:500">' + trendHtml + '</div></div></div>' +
-    // Single 6-column grid so every tile is exactly one-third wide and lines up
-    // across all rows. The middle row has only two stats (Best Diff / Lifetime
-    // Bets), so they're placed at columns 2-3 and 4-5 — same width as the thirds
-    // above and below, and centered (columns 1 and 6 left empty).
+    // Three separate grids that share the same one-third tile width. The middle
+    // row (Best Diff / Lifetime Bets) is its OWN 6-col grid holding ONLY those
+    // two tiles, placed at cols 2-3 and 4-5 — centered and the same width as the
+    // thirds above/below. Keeping it a standalone grid avoids the mixed auto/
+    // explicit placement that made iOS Safari overlap the tiles (#20).
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">' +
+      tile(history.length, 'Rounds') + tile(avgGross, 'Avg Score') + tile(bestGross, 'Best Round') +
+    '</div>' +
     '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px">' +
-      tile(history.length, 'Rounds', null, 'span 2') + tile(avgGross, 'Avg Score', null, 'span 2') + tile(bestGross, 'Best Round', null, 'span 2') +
       tile(bestDiff, 'Best Diff.', null, '2 / span 2') + tile(moneyTxt, 'Lifetime Bets', moneyColor, '4 / span 2') +
-      ((totPHoles > 0 || totGHoles > 0 || totFHoles > 0)
-        ? tile(totPHoles > 0 ? (totPutts / totPHoles * 18).toFixed(1) : '—', 'Putts / Round', null, 'span 2') +
-          tile(totGHoles > 0 ? Math.round(totGirs / totGHoles * 100) + '%' : '—', 'GIR %', null, 'span 2') +
-          tile(totFHoles > 0 ? Math.round(totFw / totFHoles * 100) + '%' : '—', 'Fairway %', null, 'span 2')
-        : '') +
-    '</div>';
+    '</div>' +
+    ((totPHoles > 0 || totGHoles > 0 || totFHoles > 0)
+      ? '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px">' +
+        tile(totPHoles > 0 ? (totPutts / totPHoles * 18).toFixed(1) : '—', 'Putts / Round') +
+        tile(totGHoles > 0 ? Math.round(totGirs / totGHoles * 100) + '%' : '—', 'GIR %') +
+        tile(totFHoles > 0 ? Math.round(totFw / totFHoles * 100) + '%' : '—', 'Fairway %') +
+        '</div>'
+      : '');
 }
 
 async function renderHome() {
@@ -16095,7 +16169,11 @@ function buildRoundSummary(g) {
         ${g.players.map(p => {
           const v = gm.r.money[p.id] || 0;
           const cls = v > 0.005 ? 'color:var(--accent)' : (v < -0.005 ? 'color:var(--danger)' : 'color:var(--text-muted)');
-          return `<td style="text-align:right;padding:8px 12px;${cls};white-space:nowrap">${fmt(v)}</td>`;
+          // Point-based games (Stableford, Quota, 6's, BBB…) carry per-player
+          // points — show them under the money so totals are self-explanatory.
+          const pts = (gm.r.points && gm.r.points[p.id] != null) ? gm.r.points[p.id] : null;
+          const ptsHtml = pts != null ? `<div style="font-size:10px;color:var(--text-muted);font-weight:600">${pts} pt${pts === 1 ? '' : 's'}</div>` : '';
+          return `<td style="text-align:right;padding:8px 12px;${cls};white-space:nowrap">${fmt(v)}${ptsHtml}</td>`;
         }).join('')}
       </tr>`;
     });
@@ -21334,6 +21412,7 @@ async function init() {
     renderScoreEntry();
     if (typeof maybeShowSipBanner === 'function') maybeShowSipBanner(leaving);
     if (typeof announceHoleCelebrations === 'function') announceHoleCelebrations(leaving);
+    if (typeof announceStrokes === 'function') announceStrokes(leaving);
     openPlayGps(); // GPS default on the new hole
   };
 
@@ -21347,6 +21426,7 @@ async function init() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
     if (typeof maybeShowSipBanner === 'function') maybeShowSipBanner(leaving);
     if (typeof announceHoleCelebrations === 'function') announceHoleCelebrations(leaving);
+    if (typeof announceStrokes === 'function') announceStrokes(leaving);
     if (withGps) openPlayGps(); // GPS default on the new hole
   };
   $('auto-advance-btn').onclick = () => advanceNextHole(true);
@@ -24102,9 +24182,12 @@ function hydrationColor(t){
 // vanishes the instant ANYTHING is tapped or a key is pressed, so it never
 // blocks play. Falls back to a big emoji if the art file isn't deployed yet.
 // Shared by the sip pop-up and (later) the "you get a stroke" pop-up.
+// Public entry — routes through the unified popup queue so it never overlaps a
+// celebration or another fun popup, and respects the #13 device toggle.
 function showFunPopup(opts){
-  opts = opts || {};
-  if (typeof popupsEnabled === 'function' && !popupsEnabled()) return; // #13 device toggle
+  _queuePopup(done => _renderFunPopup(opts || {}, done));
+}
+function _renderFunPopup(opts, done){
   try {
     const old = document.getElementById('fun-popup-overlay');
     if (old) old.remove();
@@ -24122,13 +24205,14 @@ function showFunPopup(opts){
       (opts.title ? '<div style="color:#fff;font-size:30px;font-weight:900;letter-spacing:0.01em;text-shadow:0 2px 12px rgba(0,0,0,0.6)">' + opts.title + '</div>' : '') +
       (opts.sub ? '<div style="color:#fff;font-size:17px;font-weight:600;max-width:520px;line-height:1.35;text-shadow:0 1px 8px rgba(0,0,0,0.6)">' + opts.sub + '</div>' : '') +
       '<div style="color:rgba(255,255,255,0.7);font-size:12px;margin-top:2px">tap anywhere to dismiss</div>';
-    const close = () => { try { ov.remove(); } catch (e) {} document.removeEventListener('keydown', close, true); };
+    let _t;
+    const close = () => { clearTimeout(_t); try { ov.remove(); } catch (e) {} document.removeEventListener('keydown', close, true); done(); };
     ov.addEventListener('click', close);
     ov.addEventListener('touchstart', close, { passive: true });
     document.addEventListener('keydown', close, true);
     document.body.appendChild(ov);
-    if (opts.autoMs) setTimeout(close, opts.autoMs);
-  } catch (e) { console.warn('fun popup failed:', e); }
+    _t = setTimeout(close, opts.autoMs || 6000); // auto-close so the queue advances
+  } catch (e) { console.warn('fun popup failed:', e); done(); }
 }
 
 // Per-hole sip pop-up. The SCORER calls this on hole-advance; it stamps a
