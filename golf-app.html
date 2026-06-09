@@ -2962,6 +2962,13 @@
       <div style="margin-top:14px">
         <button class="danger full" id="btn-end-early" style="font-weight:600">⏹ End round early</button>
       </div>
+
+      <!-- Re-Map Hole: only shown for manually-mapped courses, and only until
+           the course has 3+ completed rounds since mapping (then it locks). -->
+      <div style="margin-top:10px">
+        <button id="btn-remap-hole" style="display:none;width:100%;background:#111;color:#fff;border:1px solid #111;border-radius:12px;padding:12px;font-size:14px;font-weight:700;letter-spacing:0.02em">🗺️ Re-Map Hole</button>
+        <div id="remap-hole-hint" class="small-text" style="display:none;text-align:center;color:var(--text-muted);margin-top:4px">Fix a hole that was mapped wrong — re-tap tee, front &amp; back of the green.</div>
+      </div>
     </div>
 
     <!-- ============ LEADERBOARD PANEL ============ -->
@@ -5434,6 +5441,40 @@ async function getRecent() {
   const v = await safeGet(KEY_RECENT, true);
   if (!v) return [];
   try { return JSON.parse(v); } catch (e) { return []; }
+}
+
+// Count finished rounds on a course (by name) — optionally only those finished
+// after `sinceTs`. Powers the "lock the map after 3 rounds" rule for re-mapping.
+async function countFinishedRoundsForCourse(courseName, sinceTs, excludeCode) {
+  if (!courseName) return 0;
+  let recent = [];
+  try { recent = await getRecent(); } catch (e) { return 0; }
+  const nm = String(courseName).trim().toLowerCase();
+  return recent.filter(r => r && r.finishedAt && r.code !== excludeCode
+    && String(r.course || '').trim().toLowerCase() === nm
+    && (!sinceTs || r.finishedAt > sinceTs)).length;
+}
+
+// Show the black "Re-Map Hole" button only when: the round is live, THIS hole
+// was manually mapped, and the course hasn't yet logged 3 completed rounds
+// since it was mapped (after which the mapping locks in).
+async function updateRemapButton() {
+  const btn = document.getElementById('btn-remap-hole');
+  const hint = document.getElementById('remap-hole-hint');
+  if (!btn) return;
+  btn.style.display = 'none'; if (hint) hint.style.display = 'none';
+  const g = state.game;
+  if (!g || state.viewOnlyMode) return;
+  if (typeof gpsView === 'undefined' || !gpsView.mapInfo) return;
+  const holeAtCall = state.currentHole;
+  let info = null;
+  try { info = await gpsView.mapInfo(holeAtCall); } catch (e) { return; }
+  if (holeAtCall !== state.currentHole) return; // hole changed mid-lookup
+  if (!info || !info.manual || !info.holeMapped) return;
+  let plays = 0;
+  try { plays = await countFinishedRoundsForCourse(g.course, info.mappedAt, g.code); } catch (e) {}
+  if (plays >= 3) return; // locked in
+  btn.style.display = ''; if (hint) hint.style.display = '';
 }
 
 async function getLastGameCode() {
@@ -9946,6 +9987,9 @@ function renderScoreEntry() {
   $('cur-hole').textContent = h;
   $('cur-par').textContent = g.pars[h - 1];
   $('cur-si').textContent = g.sis ? g.sis[h - 1] : '—';
+
+  // Re-Map Hole button (manually-mapped courses only, until 3 rounds lock it).
+  try { if (typeof updateRemapButton === 'function') updateRemapButton(); } catch (e) {}
 
   // Render game-specific banners (Banker, Wolf)
   renderGameBanners();
@@ -21768,6 +21812,16 @@ async function init() {
   $('btn-end-round').onclick = () => switchTab('board');
   $('btn-back-score').onclick = () => { if (state.viewOnlyMode) { exitViewOnly(); } else { switchTab('score'); } };
 
+  // Re-Map Hole — re-run the 3-tap mapping wizard for the current hole.
+  { const _rm = $('btn-remap-hole'); if (_rm) _rm.onclick = async () => {
+      const g = state.game;
+      if (!g) { showToast('Start a round first'); return; }
+      const ok = (typeof window.confirm !== 'function') || window.confirm(
+        'Re-map hole ' + state.currentHole + '?\n\nYou\'ll re-tap the tee, front and back of the green. This replaces the current mapping for everyone.');
+      if (!ok) return;
+      try { await gpsView.remapHole(); } catch (e) { showToast('Could not open the map'); }
+    }; }
+
   $('btn-end-early').onclick = () => {
     const g = state.game;
     if (!g) return;
@@ -23347,9 +23401,47 @@ const gpsView = (() => {
   }
   async function finishWizard() {
     const mid = midOf(wizPts.front, wizPts.back);
-    await saveHole(physHole(hole), { tee: wizPts.tee, front: wizPts.front, mid, back: wizPts.back }, 'manual');
+    await saveHole(physHole(hole), { tee: wizPts.tee, front: wizPts.front, mid, back: wizPts.back, src: 'manual' }, 'manual');
     gToast('Hole ' + hole + ' mapped — saved for the whole crew ✓');
     showHole(hole);
+    try { if (typeof updateRemapButton === 'function') updateRemapButton(); } catch (e) {}
+  }
+
+  // Resolve the course id for the active round the same way open() does, so the
+  // Score screen can ask about mapping state before GPS has been opened.
+  function resolveCourseId() {
+    const g = state.game;
+    if (!g) return '';
+    if (g.courseId) return g.courseId;
+    if (g.course && typeof COURSE_LIBRARY !== 'undefined') {
+      const lib = COURSE_LIBRARY.find(c => c.name.trim().toLowerCase() === String(g.course).trim().toLowerCase());
+      if (lib) return lib.id;
+    }
+    return '';
+  }
+
+  // Tells the Score screen whether THIS hole is manually mapped and when the
+  // course was last mapped (for the 3-rounds lock). Loads the course if needed.
+  async function mapInfo(playedHole) {
+    const cid = resolveCourseId();
+    if (!cid) return { manual: false, holeMapped: false, mappedAt: 0 };
+    await loadCourse(cid);
+    const c = courseGps && courseGps[cid];
+    if (!c || !c.holes) return { manual: false, holeMapped: false, mappedAt: 0 };
+    const ph = (function () { const g = state.game; if (!g || !g.nineMode) return playedHole; if (g.nineMode === 'f9x2') return ((playedHole - 1) % 9) + 1; if (g.nineMode === 'b9x2') return ((playedHole - 1) % 9) + 10; return playedHole; })();
+    const hd = c.holes[ph] || null;
+    // A hole counts as manually mapped if its own source is manual, or the
+    // course as a whole was hand-mapped ('manual'/'mixed' covers the case where
+    // older holes were saved before per-hole src tracking existed).
+    const manual = !!(hd && (hd.src === 'manual' || c.source === 'manual' || c.source === 'mixed'));
+    return { manual, holeMapped: !!hd, mappedAt: c.updatedAt || 0, source: c.source || '' };
+  }
+
+  // Re-run the 3-tap wizard for the current hole to fix a bad mapping.
+  async function remapHole() {
+    await open({});
+    if (mode === 'closed') return; // open() bailed (no course, etc.)
+    wizardStart();
   }
 
   // ---------- shot tracking: measure + brag — nothing is stored ----------
@@ -23818,7 +23910,7 @@ const gpsView = (() => {
     }
   }
 
-  return { open, close, batchImport: batchImportLibrary, overpass: overpassQuery, stateImport: stateImportRun };
+  return { open, close, batchImport: batchImportLibrary, overpass: overpassQuery, stateImport: stateImportRun, mapInfo, remapHole };
 })();
 
 // GPS is the default play screen: open the rangefinder for the current hole
