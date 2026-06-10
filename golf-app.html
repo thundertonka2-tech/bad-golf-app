@@ -1821,6 +1821,27 @@
     box-shadow: 0 2px 8px rgba(0,0,0,0.45);
   }
   #gps-overlay.viewing #gps-clubs { display: flex; }
+  /* Live money + match-play status — small, non-distracting chips on the lower
+     LEFT, stacked just above the settings/clubs gear. JS shows/hides per round:
+     hidden entirely when no money/match games are in play. Colors: green ahead,
+     red behind, white when even. */
+  #gps-moneymatch {
+    position: absolute; left: 10px;
+    bottom: calc(max(env(safe-area-inset-bottom), 8px) + 40px);
+    z-index: 22; display: none; flex-direction: column; gap: 4px; align-items: flex-start;
+    pointer-events: none;
+  }
+  .gps-mm {
+    display: none; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 800; line-height: 1;
+    padding: 4px 9px; border-radius: 12px; color: #fff; white-space: nowrap;
+    background: rgba(20, 20, 22, 0.62); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+  }
+  .gps-mm .mm-lbl { font-size: 8px; font-weight: 800; letter-spacing: 0.12em; opacity: 0.65; color: #fff; }
+  .gps-mm.pos { color: #46e06b; }
+  .gps-mm.neg { color: #ff5757; }
+  .gps-mm.even { color: #fff; }
   /* Scorecard chip — same white circle, bottom-RIGHT, sitting just above the
      map's "©/info" attribution button. */
   #gps-scorecard {
@@ -4617,6 +4638,12 @@
     </svg>
   </button>
 
+  <!-- Live money + match status (lower-left, above the gear). JS fills/toggles. -->
+  <div id="gps-moneymatch">
+    <div class="gps-mm" id="gps-mm-match"></div>
+    <div class="gps-mm" id="gps-mm-money"></div>
+  </div>
+
   <!-- Mini scorecard chip — bottom-right, just above the map's © info button. -->
   <button id="gps-scorecard" title="Scorecard" aria-label="Scorecard">
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
@@ -4897,7 +4924,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.83';
+const BG_BUILD = 'v2026.06.09.84';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -5992,6 +6019,9 @@ function subscribeToGame(code) {
         try { if (typeof reactToHoleCelebration === 'function') reactToHoleCelebration(); } catch (e) {}
         // ⛳ "You get a stroke" → only the player who receives one.
         try { if (typeof reactToStrokeAnnounce === 'function') reactToStrokeAnnounce(); } catch (e) {}
+        // ⛳ Group advanced to a new hole → idle phones follow to its GPS view.
+        try { if (typeof reactToGroupHole === 'function') reactToGroupHole(); } catch (e) {}
+        try { if (typeof updateGpsMoneyMatch === 'function') updateGpsMoneyMatch(); } catch (e) {}
 
         // Refresh whichever screen is active — but skip if user is mid-edit on an input
         const focused = document.activeElement;
@@ -13113,6 +13143,55 @@ function announceHoleCelebrations(leaving, localSuppress){
   } catch (e) { console.warn('hole celebration announce failed:', e); }
 }
 
+// ---- Group hole sync ------------------------------------------------------
+// When the scorer advances AND everyone's score for the hole they're leaving is
+// in, broadcast the new hole so the rest of the group's phones follow along to
+// that hole's GPS view — UNLESS a player is actively using their screen (then we
+// leave them be; idle phones keep getting moved along).
+let _lastUserActivityAt = Date.now();
+['pointerdown', 'keydown', 'touchstart', 'wheel', 'mousedown'].forEach(ev => {
+  try { document.addEventListener(ev, () => { _lastUserActivityAt = Date.now(); }, { passive: true, capture: true }); } catch (e) {}
+});
+function isUserActiveNow() {
+  const ACTIVE_MS = 20000; // touched/typed/scrolled within the last 20s = active
+  if (Date.now() - _lastUserActivityAt < ACTIVE_MS) return true;
+  const f = document.activeElement;
+  if (f && (f.tagName === 'INPUT' || f.tagName === 'SELECT' || f.tagName === 'TEXTAREA')) return true;
+  return false;
+}
+// Scorer side: broadcast the group's new hole, only if every player has a score
+// on the hole being left (and it's a real multi-player round).
+function maybeAnnounceGroupHole(leaving) {
+  try {
+    const g = state.game;
+    if (!g || !Array.isArray(g.players) || g.players.length < 2) return;
+    const allIn = g.players.every(p => g.scores && g.scores[p.id] && g.scores[p.id][leaving - 1] != null);
+    if (!allIn) return;
+    g.groupHole = { hole: state.currentHole, at: Date.now() };
+    try { saveGame(g); } catch (e) {}
+  } catch (e) { console.warn('group-hole announce failed:', e); }
+}
+// Every phone: follow the group to the broadcast hole's GPS view, unless this
+// user is active right now (don't interrupt someone mid-score / looking around).
+let _lastGroupHoleAt = 0;
+function reactToGroupHole() {
+  try {
+    const g = state.game;
+    if (!g || !g.groupHole || !g.groupHole.at) return;
+    const a = g.groupHole;
+    if (a.at <= _lastGroupHoleAt) return;
+    if (Date.now() - a.at > 90000) { _lastGroupHoleAt = a.at; return; } // ignore stale on reload
+    _lastGroupHoleAt = a.at;
+    if (state.viewOnlyMode) return;                 // spectators aren't dragged around
+    const target = a.hole;
+    if (!target || target === state.currentHole) return; // already here (incl. the scorer)
+    if (isUserActiveNow()) return;                  // active on their screen → leave them be
+    state.currentHole = target;                     // idle → move along to the new hole…
+    try { if (typeof renderScoreEntry === 'function') renderScoreEntry(); } catch (e) {}
+    try { openPlayGps(); } catch (e) {}             // …on the GPS screen, not scoring
+  } catch (e) { console.warn('group-hole react failed:', e); }
+}
+
 // Shows the deferred hole celebration for THIS device's player (or, on an
 // unlinked single phone, every player's result in sequence). Called locally at
 // advance and by every other phone via subscribeToGame.
@@ -15868,6 +15947,74 @@ function computeAllGameMoney(g) {
   });
   return { results, combined, byGame };
 }
+
+// ---- Live money + match chips on the GPS view (lower-left) ----------------
+// Resolve which player in this round is "me" (cached name → roster match).
+function gpsResolveMyId(g) {
+  try {
+    let me = '';
+    try { me = (localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
+    if (!Array.isArray(g.players) || !g.players.length) return null;
+    if (!me) return g.players[0].id;
+    const norm = s => normalizeNameSegment(String(s || ''));
+    const meParts = me.split(/\s+/); const meFull = norm(me), meFirst = norm(meParts[0]);
+    const hit = g.players.find(p => {
+      const pn = String(p.name || '').trim(); if (!pn) return false;
+      const pp = pn.split(/\s+/);
+      if (norm(pn) === meFull) return true;
+      if (pp.length === 1 || meParts.length === 1) return norm(pp[0]) === meFirst;
+      return false;
+    });
+    return hit ? hit.id : null;
+  } catch (e) { return null; }
+}
+// My status in the heads-up Match-play game (UP / DN / AS), if one is on.
+function gpsMyMatchStatus(g, res, myId) {
+  try {
+    const mp = res && res.results && res.results.matchPlay;
+    if (!mp || !Array.isArray(mp.matches)) return null;
+    const mine = mp.matches.filter(m => m.aId === myId || m.bId === myId);
+    if (!mine.length) return null;
+    const m = mine.find(x => !x.complete) || mine[0];
+    const myUp = (m.aId === myId) ? m.finalUp : -m.finalUp;
+    if (m.complete) {
+      if (m.finalUp === 0) return { text: 'AS', cls: 'even' };
+      return (myUp > 0) ? { text: 'WON', cls: 'pos' } : { text: 'LOST', cls: 'neg' };
+    }
+    if (myUp > 0) return { text: myUp + ' UP', cls: 'pos' };
+    if (myUp < 0) return { text: Math.abs(myUp) + ' DN', cls: 'neg' };
+    return { text: 'AS', cls: 'even' };
+  } catch (e) { return null; }
+}
+// Update (and show/hide) the two GPS chips. Safe to call often.
+function updateGpsMoneyMatch() {
+  const wrap = document.getElementById('gps-moneymatch');
+  if (!wrap) return;
+  const moneyEl = document.getElementById('gps-mm-money');
+  const matchEl = document.getElementById('gps-mm-match');
+  const hide = () => { wrap.style.display = 'none'; if (moneyEl) moneyEl.style.display = 'none'; if (matchEl) matchEl.style.display = 'none'; };
+  const g = state.game;
+  if (!g || !Array.isArray(g.players) || !g.players.length || typeof computeAllGameMoney !== 'function') return hide();
+  let res = null; try { res = computeAllGameMoney(g); } catch (e) { return hide(); }
+  const myId = gpsResolveMyId(g);
+  if (!myId || !res) return hide();
+  let any = false;
+  // Money — net across all wagered games (incl. match stakes). Show once money is in play.
+  if (res.byGame && res.byGame.length) {
+    const net = res.combined[myId] || 0;
+    const abs = Math.abs(net);
+    const amt = Number.isInteger(abs) ? String(abs) : abs.toFixed(2);
+    moneyEl.innerHTML = '<span class="mm-lbl">NET</span>' + (net >= 0 ? '+$' : '−$') + amt;
+    moneyEl.className = 'gps-mm ' + (net > 0 ? 'pos' : net < 0 ? 'neg' : 'even');
+    moneyEl.style.display = 'flex'; any = true;
+  } else if (moneyEl) { moneyEl.style.display = 'none'; }
+  // Match play — heads-up Match game status.
+  const ms = gpsMyMatchStatus(g, res, myId);
+  if (ms && matchEl) { matchEl.innerHTML = '<span class="mm-lbl">MATCH</span>' + ms.text; matchEl.className = 'gps-mm ' + ms.cls; matchEl.style.display = 'flex'; any = true; }
+  else if (matchEl) { matchEl.style.display = 'none'; }
+  wrap.style.display = any ? 'flex' : 'none';
+}
+window.updateGpsMoneyMatch = updateGpsMoneyMatch;
 
 // Build a plain-text settle-up summary for the active round so it can be
 // texted to the group ("who pays who") and everyone can pay out easily.
@@ -23080,6 +23227,7 @@ async function init() {
     if (typeof maybeShowSipBanner === 'function') maybeShowSipBanner(leaving, false);
     if (typeof announceHoleCelebrations === 'function') announceHoleCelebrations(leaving, false);
     if (typeof announceStrokes === 'function') announceStrokes(leaving, false);
+    maybeAnnounceGroupHole(leaving); // move idle group phones to this hole's GPS
     openPlayGps(); // GPS default on the new hole
   };
 
@@ -23097,7 +23245,8 @@ async function init() {
     if (typeof maybeShowSipBanner === 'function') maybeShowSipBanner(leaving, suppress);
     if (typeof announceHoleCelebrations === 'function') announceHoleCelebrations(leaving, suppress);
     if (typeof announceStrokes === 'function') announceStrokes(leaving, suppress);
-    if (withGps) openPlayGps(); // GPS default on the new hole
+    // Only the GPS advance moves the group; the "Score only" button stays local.
+    if (withGps) { maybeAnnounceGroupHole(leaving); openPlayGps(); }
   };
   $('auto-advance-btn').onclick = () => advanceNextHole(true);
   { const _sb = $('auto-advance-score-btn'); if (_sb) _sb.onclick = () => advanceNextHole(false); }
@@ -23940,6 +24089,7 @@ const gpsView = (() => {
   function enterSetup() {
     mode = 'setup';
     el('gps-overlay').classList.remove('viewing');
+    { const _mm = document.getElementById('gps-moneymatch'); if (_mm) _mm.style.display = 'none'; }
     clearMarkers(); if (map && map.getSource('gps-line')) setLine();
     ['gps-f','gps-m','gps-b'].forEach(id => { el(id).textContent = '—'; });
     const c = courseGps && courseGps[courseId];
@@ -23975,6 +24125,7 @@ const gpsView = (() => {
     frameHole();
     refresh();
     elev = null; fetchElev(); fetchWind();
+    try { updateGpsMoneyMatch(); } catch (e) {}
   }
 
   // Smart default target, recomputed as the player moves (unless they've
