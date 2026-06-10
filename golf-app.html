@@ -4861,7 +4861,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.77';
+const BG_BUILD = 'v2026.06.09.78';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -5585,7 +5585,7 @@ function wireAuthUI() {
 function isMaintenanceLink() {
   try {
     const src = (location.search || '') + ' ' + (location.hash || '');
-    return /[?&](courseimport|stateimport|osmimport|nextstate|coursecheck|coursegaps|coursecleanup|cleanup)=/.test(src);
+    return /[?&](courseimport|stateimport|osmimport|nextstate|coursecheck|coursegaps|coursecleanup|multinine|cleanup)=/.test(src);
   } catch (e) { return false; }
 }
 
@@ -26159,6 +26159,137 @@ window.bgCourseCleanup = st => courseCleanup(st);
 {
   const m = location.search.match(/[?&]coursecleanup=([A-Za-z0-9]+)/);
   if (m) setTimeout(() => { window.bgCourseCleanup(m[1] === '1' ? null : m[1]); }, 2500);
+}
+
+// ---------- multi-nine finder (?multinine=ST) -----------------------------
+// READ-ONLY scan that surfaces likely 27/36-hole facilities with separately
+// named/rated nines (like Firewheel Bridges: Champion/Tradition/Masters). It
+// changes NOTHING — it just lists candidates and downloads a CSV so Tyler can
+// send it back for rating research + setup (the same way The Bridges was done).
+// Two signals: (1) a single course name that mentions a 27/36/45/54-hole count
+// or joins two nine names with / & +; (2) "facility groups" — multiple library
+// courses that share a facility name (e.g. "Firewheel - Lakes/Old/Bridges", or
+// "X North/South/East"). Intentionally over-inclusive; we verify each by hand.
+// URL: ?multinine=TX   ·  console: bgMultiNine('TX')   (omit/"1" = all states)
+const MULTININE_HOLECOUNT_RE = /\b(27|36|45|54)\s*[-\s]?\s*holes?\b/i;
+const MULTININE_JOIN_RE = /\b[A-Za-z]{3,}\s*(?:\/|&|\+)\s*[A-Za-z]{3,}\b/;
+// Trailing nine/course tokens stripped to find the shared facility stem.
+const MULTININE_NINE_TOKEN = /\b(north|south|east|west|lake|lakes|hill|hills|ridge|creek|valley|meadow|meadows|championship|tradition|masters|legacy|highland|highlands|pine|pines|oak|oaks|dune|dunes|marsh|bridge|bridges|old|new|original|palm|palms|cypress|cove|bay|river|wood|woods|prairie|canyon|mesa|summit|cascade|red|white|blue|gold|orange|black|green|silver|emerald|nine|9|course|i|ii|iii|1|2|3|one|two|three)\b\s*$/i;
+function multiNineFacilityKey(name) {
+  let n = String(name || '');
+  // "Facility - Course" style → facility is the part before the dash.
+  const dash = n.split(/\s+[-–—]\s+/);
+  if (dash.length >= 2 && dash[0].trim().length >= 3) return dash[0].trim().toLowerCase();
+  n = n.toLowerCase()
+    .replace(/\b(golf|club|course|links|country|cc|gc|the|at|of|park)\b/g, ' ')
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+  // strip a trailing nine/course token so "Tierra Verde North" & "…South" share a stem
+  const stripped = n.replace(MULTININE_NINE_TOKEN, '').replace(/\s+/g, ' ').trim();
+  return (stripped.length >= 4 ? stripped : n);
+}
+async function multiNineScan(stOverride) {
+  let panel = document.getElementById('mn-panel');
+  if (panel) panel.remove();
+  panel = document.createElement('div');
+  panel.id = 'mn-panel';
+  panel.style.cssText = 'position:fixed;inset:6% 4% auto 4%;max-height:88%;z-index:9000;background:rgba(20,20,22,0.97);color:#fff;border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;font-size:13px';
+  panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<strong id="mn-title">Scanning for multi-nine courses…</strong>' +
+    '<button id="mn-close" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button></div>' +
+    '<div id="mn-log" style="overflow:auto;flex:1;line-height:1.55;font-variant-numeric:tabular-nums"></div>';
+  document.body.appendChild(panel);
+  document.getElementById('mn-close').onclick = () => panel.remove();
+  const log = (msg, color) => { const b = document.getElementById('mn-log'); if (!b) return; const d = document.createElement('div'); if (color) d.style.color = color; d.innerHTML = msg; b.appendChild(d); b.scrollTop = b.scrollHeight; };
+
+  try {
+    // Wait for the auth session/role to settle (the launcher fires on a timer).
+    if (typeof supa !== 'undefined' && supa) {
+      log('Checking your admin access…', '#9aa0a6');
+      for (let i = 0; i < 12 && !_authUser; i++) {
+        try { const { data } = await supa.auth.getSession(); _authUser = (data && data.session) ? data.session.user : null; } catch (e) {}
+        if (!_authUser) await new Promise(r => setTimeout(r, 500));
+      }
+      if (_authUser && _authRole !== 'admin' && _authRole !== 'commissioner' && typeof fetchMyRole === 'function') {
+        try { await fetchMyRole(); } catch (e) {}
+      }
+    }
+    if (typeof isAdmin === 'function' && !isAdmin()) {
+      log('Only admins can run this scan. Add <b>&cleanup=1</b> to the URL for the admin override, or promote this account in Supabase.', '#ff8a80');
+      return;
+    }
+    if (typeof loadCourseLibrary === 'function') await loadCourseLibrary();
+    const stFilter = (stOverride || '').toUpperCase();
+    const stateOf = c => (c.st || (((c.city || '').match(/,\s*([A-Za-z]{2})$/) || [])[1]) || ((c.city || '').trim().length === 2 ? (c.city || '').trim() : 'Other')).toUpperCase();
+    const alreadySetup = (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES) ? THREE_NINE_COURSES : {};
+
+    // Pass 1 — bucket the (state-filtered) library by facility key.
+    const groups = new Map(); // key -> [{id,name,city,st}]
+    const inScope = [];
+    (COURSE_LIBRARY || []).forEach(c => {
+      if (!c || !c.id) return;
+      const st = stateOf(c);
+      if (stFilter && st !== stFilter) return;
+      inScope.push(c);
+      const key = multiNineFacilityKey(c.name) + '|' + st;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ id: c.id, name: c.name || c.id, city: c.city || '', st });
+    });
+
+    // Pass 2 — collect candidates.
+    const seen = new Set();
+    const rows = [];   // {st, facility, groupSize, id, name, city, signals}
+    // (a) facility groups with 2+ courses
+    groups.forEach((members, key) => {
+      if (members.length < 2) return;
+      const facility = key.split('|')[0];
+      members.forEach(m => { seen.add(m.id); rows.push({ st: m.st, facility, groupSize: members.length, id: m.id, name: m.name, city: m.city, signals: 'facility-group(' + members.length + ')' }); });
+    });
+    // (b) single courses whose own name signals a multi-nine layout
+    inScope.forEach(c => {
+      if (seen.has(c.id)) return;
+      const nm = String(c.name || '');
+      const sig = [];
+      if (MULTININE_HOLECOUNT_RE.test(nm)) sig.push('hole-count');
+      if (nm.indexOf('/') >= 0 || MULTININE_JOIN_RE.test(nm)) sig.push('joined-nines');
+      if (sig.length) { seen.add(c.id); rows.push({ st: stateOf(c), facility: multiNineFacilityKey(nm), groupSize: 1, id: c.id, name: nm, city: c.city || '', signals: sig.join('+') }); }
+    });
+    // Note which candidates are already wired up as three-nine courses.
+    rows.forEach(r => { if (alreadySetup[r.id]) r.signals += '+ALREADY-SETUP'; });
+
+    document.getElementById('mn-title').textContent = 'Multi-nine finder' + (stFilter ? ' — ' + stFilter : ' — ALL STATES');
+    if (!rows.length) {
+      log('No likely multi-nine courses found' + (stFilter ? ' in ' + stFilter : '') + '. (Scanned ' + inScope.length + ' courses.)', '#8fd19e');
+      return;
+    }
+    // Sort: biggest facility groups first, then by facility name.
+    rows.sort((a, b) => (b.groupSize - a.groupSize) || a.facility.localeCompare(b.facility) || a.name.localeCompare(b.name));
+    const facilities = new Set(rows.map(r => r.facility + '|' + r.st));
+    log('<b>Found ' + rows.length + ' candidate course(s) across ' + facilities.size + ' facility group(s)' + (stFilter ? ' in ' + stFilter : '') + '.</b>', '#ffd34d');
+    log('Scanned ' + inScope.length + ' courses. These are GUESSES — verify each before setup.', '#9aa0a6');
+    log('<br><u>Candidates:</u>');
+    let lastFac = '';
+    rows.forEach(r => {
+      if (r.facility !== lastFac) { log('<br><b>' + (r.facility || '?') + '</b> <span style="color:#9aa0a6">— ' + r.st + (r.groupSize > 1 ? ' · ' + r.groupSize + ' courses' : '') + '</span>'); lastFac = r.facility; }
+      log('· ' + r.name + ' <span style="color:#9aa0a6">— ' + (r.city || r.st) + ' · ' + r.signals + '</span>');
+    });
+
+    const head = [['state', 'facility_group', 'group_size', 'course_id', 'course_name', 'city', 'signals']];
+    rows.forEach(r => head.push([r.st, r.facility, r.groupSize, r.id, r.name, r.city, r.signals]));
+    const csv = head.map(rr => rr.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' }); const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'bad-golf-multinine-' + (stFilter || 'ALL') + '.csv';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000);
+    log('<br>📥 CSV downloaded: <b>bad-golf-multinine-' + (stFilter || 'ALL') + '.csv</b> — send this back for rating research.', '#8fd19e');
+  } catch (e) {
+    log('Scan failed: ' + (e && e.message ? e.message : 'error'), '#ff8a80');
+    console.error('multiNineScan crashed:', e);
+  }
+}
+window.bgMultiNine = st => multiNineScan(st);
+{
+  const m = location.search.match(/[?&]multinine=([A-Za-z0-9]+)/);
+  if (m) setTimeout(() => { window.bgMultiNine(m[1] === '1' ? null : m[1]); }, 2500);
 }
 
 // ---------- licensed course-data import: tee rating / slope / yardage --------
