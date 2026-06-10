@@ -4861,7 +4861,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.71';
+const BG_BUILD = 'v2026.06.09.72';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -5585,7 +5585,7 @@ function wireAuthUI() {
 function isMaintenanceLink() {
   try {
     const src = (location.search || '') + ' ' + (location.hash || '');
-    return /[?&](courseimport|stateimport|osmimport|nextstate|coursecheck|coursegaps|cleanup)=/.test(src);
+    return /[?&](courseimport|stateimport|osmimport|nextstate|coursecheck|coursegaps|coursecleanup|cleanup)=/.test(src);
   } catch (e) { return false; }
 }
 
@@ -26028,6 +26028,109 @@ window.bgCourseCheck = st => courseCoverageReport(st);
 {
   const m = location.search.match(/[?&]coursecheck=([A-Za-z0-9]+)/);
   if (m) setTimeout(() => { window.bgCourseCheck(m[1] === '1' ? null : m[1]); }, 2500);
+}
+
+// ---------- junk cleanup (?coursecleanup=ST) -------------------------------
+// Removes non-golf "courses" the OSM import drags in: par-3 / pitch-and-putt,
+// driving ranges & practice/dome facilities, mini-golf / putt-putt / disc golf,
+// and closed/defunct/abandoned courses. Matches on the course NAME only.
+// SAFETY: previews everything and waits for your click before deleting; never
+// removes a course that already has a real tee rating/slope (treated as a true
+// course even if the name has a trigger word). Uses the same synced deleteCourse()
+// path as the Admin delete button, so removals stick across devices/reload.
+// Run it per state AFTER you finish that state's rating/slope import.
+// URL: ?coursecleanup=MI   ·  console: bgCourseCleanup('MI')  (omit/"1" = all states)
+const CLEANUP_RULES = [
+  ['par-3 / pitch&putt', /\bpar[\s-]?3\b|\bpar[\s-]?three\b|pitch\s*(?:and|&|-)\s*putt/i],
+  ['range / practice / dome', /driving range|golf range|\brange\b|practice\s*(?:center|area|facility|range)|learning center|golf dome|\bthe dome\b|golf center/i],
+  ['mini-golf / putt-putt / disc', /mini[\s-]?golf|putt[\s-]?putt|disc golf|family fun|fun park/i],
+  ['closed / defunct', /\(closed\)|\bclosed\b|\bdefunct\b|\babandoned\b|\(former\)|\bformer\b/i],
+];
+function classifyJunk(name) {
+  const n = String(name || '');
+  for (const [label, re] of CLEANUP_RULES) { if (re.test(n)) return label; }
+  return null;
+}
+async function courseCleanup(stOverride) {
+  let panel = document.getElementById('clean-panel');
+  if (panel) panel.remove();
+  panel = document.createElement('div');
+  panel.id = 'clean-panel';
+  panel.style.cssText = 'position:fixed;inset:6% 4% auto 4%;max-height:88%;z-index:9000;background:rgba(20,20,22,0.97);color:#fff;border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;font-size:13px';
+  panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<strong id="clean-title">Scanning for junk courses…</strong>' +
+    '<button id="clean-close" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button></div>' +
+    '<div id="clean-actions" style="margin-bottom:8px"></div>' +
+    '<div id="clean-log" style="overflow:auto;flex:1;line-height:1.55;font-variant-numeric:tabular-nums"></div>';
+  document.body.appendChild(panel);
+  document.getElementById('clean-close').onclick = () => panel.remove();
+  const log = (msg, color) => { const b = document.getElementById('clean-log'); if (!b) return; const d = document.createElement('div'); if (color) d.style.color = color; d.innerHTML = msg; b.appendChild(d); b.scrollTop = b.scrollHeight; };
+
+  try {
+    if (typeof isAdmin === 'function' && !isAdmin()) { log('Only admins can clean up the library. Sign in as admin and retry.', '#ff8a80'); return; }
+    if (typeof loadCourseLibrary === 'function') await loadCourseLibrary();
+    const saves = await getCourseSaves();
+    const stFilter = (stOverride || '').toUpperCase();
+    const stateOf = c => (c.st || (((c.city || '').match(/,\s*([A-Za-z]{2})$/) || [])[1]) || ((c.city || '').trim().length === 2 ? (c.city || '').trim() : 'Other')).toUpperCase();
+    const hasRS = id => { const s = saves[id]; return !!(s && Array.isArray(s.tees) && s.tees.some(t => t && t.rating != null && t.slope != null)); };
+
+    const candidates = [];   // {id,name,city,st,reason}
+    let protectedCount = 0;
+    COURSE_LIBRARY.forEach(c => {
+      const st = stateOf(c);
+      if (stFilter && st !== stFilter) return;
+      const reason = classifyJunk(c.name);
+      if (!reason) return;
+      if (hasRS(c.id)) { protectedCount++; return; } // real course (has rating/slope) — keep
+      candidates.push({ id: c.id, name: c.name, city: c.city || '', st, reason });
+    });
+
+    document.getElementById('clean-title').textContent = 'Junk cleanup' + (stFilter ? ' — ' + stFilter : ' — ALL STATES');
+    if (!candidates.length) {
+      log('No junk courses found' + (stFilter ? ' in ' + stFilter : '') + '. Nothing to remove. 🎉', '#8fd19e');
+      if (protectedCount) log(protectedCount + ' name-matched course(s) were kept because they have a real rating/slope.', '#9ad0ff');
+      return;
+    }
+    const byReason = {};
+    candidates.forEach(c => { (byReason[c.reason] = byReason[c.reason] || []).push(c); });
+    log('<b>Found ' + candidates.length + ' junk course(s)' + (stFilter ? ' in ' + stFilter : ' across all states') + ' to remove:</b>', '#ffd34d');
+    Object.keys(byReason).forEach(r => log('• <b>' + byReason[r].length + '</b> — ' + r));
+    if (protectedCount) log(protectedCount + ' name-matched course(s) kept (they have a real rating/slope).', '#9ad0ff');
+    log('<br><u>Courses queued for removal:</u>');
+    candidates.forEach(c => log('· ' + c.name + ' <span style="color:#9aa0a6">— ' + (c.city || c.st) + ' · ' + c.reason + '</span>'));
+
+    const rows = [['state', 'course_id', 'name', 'city', 'reason']];
+    candidates.forEach(c => rows.push([c.st, c.id, c.name, c.city, c.reason]));
+    const csv = rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+    const dl = (suffix) => { const blob = new Blob([csv], { type: 'text/csv' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'bad-golf-cleanup-' + (stFilter || 'ALL') + '-' + suffix + '.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000); };
+    dl('log');
+
+    const actions = document.getElementById('clean-actions');
+    actions.innerHTML = '<button id="clean-go" style="background:#c0392b;border:none;color:#fff;border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:600">🗑 Remove ' + candidates.length + ' junk course(s) — cannot be undone</button>' +
+      '<button id="clean-cancel" style="margin-left:8px;background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:9px 16px;cursor:pointer">Cancel</button>' +
+      '<span style="margin-left:10px;color:#8fd19e">📥 removal log downloaded</span>';
+    document.getElementById('clean-cancel').onclick = () => { log('<br>Cancelled — nothing was removed.', '#9ad0ff'); actions.innerHTML = ''; };
+    document.getElementById('clean-go').onclick = async () => {
+      actions.innerHTML = 'Removing…';
+      let done = 0, failed = 0;
+      for (const c of candidates) {
+        try { const ok = await deleteCourse(c.id); ok ? done++ : failed++; } catch (e) { failed++; }
+        if (done % 10 === 0) { const t = document.getElementById('clean-title'); if (t) t.textContent = 'Removing… ' + done + '/' + candidates.length; }
+      }
+      log('<br><b>✅ Removed ' + done + ' junk course(s)' + (failed ? ' (' + failed + ' failed)' : '') + '.</b> Reload or re-sync other devices to see it everywhere.', '#8fd19e');
+      log('A removal log CSV was downloaded (bad-golf-cleanup-' + (stFilter || 'ALL') + '-log.csv).', '#9ad0ff');
+      document.getElementById('clean-title').textContent = 'Junk cleanup — done (' + done + ' removed)';
+      actions.innerHTML = '';
+    };
+  } catch (e) {
+    log('Cleanup failed: ' + (e && e.message ? e.message : 'error'), '#ff8a80');
+    console.error('courseCleanup crashed:', e);
+  }
+}
+window.bgCourseCleanup = st => courseCleanup(st);
+{
+  const m = location.search.match(/[?&]coursecleanup=([A-Za-z0-9]+)/);
+  if (m) setTimeout(() => { window.bgCourseCleanup(m[1] === '1' ? null : m[1]); }, 2500);
 }
 
 // ---------- licensed course-data import: tee rating / slope / yardage --------
