@@ -3160,6 +3160,7 @@
           <button class="full" id="btn-reset-clubs" style="flex:1;color:var(--text-muted)">Reset to standard bag</button>
         </div>
         <p class="help-text" id="clubs-status" style="margin-top:8px;text-align:center"></p>
+        <button class="primary full" id="btn-save-clubs" style="margin-top:12px;font-weight:700">Save</button>
       </div>
     </div>
 
@@ -4490,7 +4491,7 @@
     <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--surface-2);border-bottom:1px solid var(--border);gap:12px">
         <span class="small-text" style="color:var(--text-muted);flex-shrink:0">Version</span>
-        <span style="font-weight:500" id="about-version">1.1 · 2026-06-09</span>
+        <span style="font-weight:500" id="about-version">1.1 · 2026-06-10</span>
       </div>
       <!-- Support: stacked layout (label on top, email below). Email gets a
            normal font size so it fits on one line cleanly. word-break:break-all
@@ -4926,7 +4927,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.88';
+const BG_BUILD = 'v2026.06.10.02';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -16070,45 +16071,164 @@ function buildRoundShareText() {
     lines.push('', 'Settle up:');
     settlements.forEach(s => lines.push(nm(s.fromId) + ' → ' + nm(s.toId) + '  $' + s.amount.toFixed(2)));
   }
-  // Full scorecard (gross) for the holes actually played. Monospace-style grid —
-  // won't align perfectly in every texting app's font, but it's readable and
-  // gives everyone the hole-by-hole. Front/back nines split with a divider.
-  try {
-    const pars = g.pars || [];
-    const played = [];
-    for (let h = 0; h < 18; h++) {
-      if (g.players.some(p => g.scores && g.scores[p.id] && g.scores[p.id][h] != null)) played.push(h);
-    }
-    if (played.length) {
-      const cell = v => String(v == null ? '-' : v).padStart(2, ' ');
-      const nameW = Math.min(9, Math.max(4, ...g.players.map(p => displayFirst(p).length)));
-      const pad = s => String(s).slice(0, nameW).padEnd(nameW, ' ');
-      // Insert a " |" divider between the front-nine (holes ≤9) and back-nine cells.
-      const rowCells = pick => played.map((h, idx) => {
-        const prefix = (h === 9 && idx > 0) ? ' |' : '';
-        return prefix + ' ' + cell(pick(h));
-      }).join('');
-      lines.push('', '📋 Scorecard (gross)');
-      lines.push(pad('Hole') + rowCells(h => h + 1));
-      lines.push(pad('Par') + rowCells(h => pars[h]) + '  =' + played.reduce((s, h) => s + (parseInt(pars[h]) || 0), 0));
-      g.players.forEach(p => {
-        const sc = (g.scores && g.scores[p.id]) || [];
-        const tot = played.reduce((s, h) => s + (sc[h] != null ? sc[h] : 0), 0);
-        lines.push(pad(displayFirst(p)) + rowCells(h => sc[h]) + '  =' + tot);
-      });
-    }
-  } catch (e) {}
+  // (The hole-by-hole scorecard is attached as an IMAGE in shareRoundSummary —
+  // a text grid never lines up in a messaging app's proportional font.)
   return lines.join('\n');
+}
+
+// Draw the round's gross scorecard onto a canvas (front/back split, totals,
+// score-vs-par coloring) and return it as a PNG Blob for sharing as an image.
+function buildScorecardCanvas(g) {
+  if (!g || !Array.isArray(g.players) || !g.players.length) return null;
+  const pars = g.pars || [];
+  const played = [];
+  for (let h = 0; h < 18; h++) {
+    if (g.players.some(p => g.scores && g.scores[p.id] && g.scores[p.id][h] != null)) played.push(h);
+  }
+  if (!played.length) return null;
+  const front = played.filter(h => h < 9), back = played.filter(h => h >= 9);
+  const segs = [];
+  if (front.length) segs.push({ holes: front, sub: 'OUT', total: false });
+  if (back.length) segs.push({ holes: back, sub: 'IN', total: true });
+  if (segs.length === 1) segs[0].total = true; // single 9 → show grand total col
+
+  const DPR = Math.min(3, Math.max(2, Math.round(window.devicePixelRatio || 2)));
+  const labelW = 132, cellW = 46, rowH = 40, padX = 18, padTop = 16;
+  const titleH = 54, headerNote = 22;
+  const colsFor = s => s.holes.length + 1 + (s.total ? 2 : 1); // label + holes + sub(+tot)
+  const maxCols = Math.max(...segs.map(colsFor));
+  const cssW = padX * 2 + labelW + (maxCols - 1) * cellW;
+  // rows per seg: hole header + par + players; plus gaps between segs
+  const segRows = 2 + g.players.length;
+  const segH = segRows * rowH + 14;
+  const cssH = padTop + titleH + headerNote + segs.length * (segH + 14) + 16;
+
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(cssW * DPR); cv.height = Math.round(cssH * DPR);
+  const ctx = cv.getContext('2d');
+  ctx.scale(DPR, DPR);
+  ctx.textBaseline = 'middle';
+  // bg
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cssW, cssH);
+
+  // title
+  ctx.fillStyle = '#0e3a64';
+  ctx.font = '700 22px -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('⛳ ' + (g.course || 'Round'), padX, padTop + 18);
+  ctx.fillStyle = '#6b7280';
+  ctx.font = '500 13px -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+  const dateStr = new Date(g.finishedAt || g.updatedAt || Date.now()).toLocaleDateString();
+  ctx.fillText(dateStr + '  ·  Bad Golf', padX, padTop + 40);
+
+  const colorFor = (sc, par) => {
+    if (sc == null || !par) return '#111827';
+    if (sc < par) return '#1f8a3b';      // under par → green
+    if (sc > par) return '#c0392b';      // over par → red
+    return '#111827';
+  };
+  let y = padTop + titleH + headerNote;
+  segs.forEach(seg => {
+    const cols = [{ key: 'label', w: labelW, txt: 'HOLE', align: 'left' }];
+    seg.holes.forEach(h => cols.push({ key: 'h', h, w: cellW, txt: String(h + 1), align: 'center' }));
+    cols.push({ key: 'sub', w: cellW, txt: seg.sub, align: 'center' });
+    if (seg.total) cols.push({ key: 'tot', w: cellW, txt: 'TOT', align: 'center' });
+    const xOf = i => { let x = padX; for (let k = 0; k < i; k++) x += cols[k].w; return x; };
+    const tableW = cols.reduce((s, c) => s + c.w, 0);
+
+    const drawRow = (ry, cellsTxt, opts) => {
+      opts = opts || {};
+      if (opts.bg) { ctx.fillStyle = opts.bg; ctx.fillRect(padX, ry, tableW, rowH); }
+      cols.forEach((c, i) => {
+        const cx = xOf(i);
+        const t = cellsTxt[i];
+        if (t == null || t === '') return;
+        ctx.fillStyle = (opts.colors && opts.colors[i]) || opts.color || '#111827';
+        ctx.font = (opts.font) || '600 16px -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+        ctx.textAlign = c.align === 'left' ? 'left' : 'center';
+        const tx = c.align === 'left' ? cx + 4 : cx + c.w / 2;
+        ctx.fillText(String(t), tx, ry + rowH / 2);
+      });
+      // bottom border
+      ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(padX, ry + rowH + 0.5); ctx.lineTo(padX + tableW, ry + rowH + 0.5); ctx.stroke();
+    };
+
+    // Hole header row
+    drawRow(y, cols.map(c => c.txt), { bg: '#0e3a64', color: '#ffffff', font: '800 14px -apple-system, Segoe UI, Roboto, Arial, sans-serif' });
+    y += rowH;
+    // Par row
+    const parOut = seg.holes.reduce((s, h) => s + (parseInt(pars[h]) || 0), 0);
+    const grandPar = played.reduce((s, h) => s + (parseInt(pars[h]) || 0), 0);
+    drawRow(y, cols.map(c => {
+      if (c.key === 'label') return 'Par';
+      if (c.key === 'h') return pars[c.h] != null ? pars[c.h] : '-';
+      if (c.key === 'sub') return parOut;
+      if (c.key === 'tot') return grandPar;
+      return '';
+    }), { bg: '#f3f4f6', color: '#374151', font: '700 15px -apple-system, Segoe UI, Roboto, Arial, sans-serif' });
+    y += rowH;
+    // Player rows
+    g.players.forEach((p, pi) => {
+      const sc = (g.scores && g.scores[p.id]) || [];
+      const segTot = seg.holes.reduce((s, h) => s + (sc[h] != null ? sc[h] : 0), 0);
+      const grand = played.reduce((s, h) => s + (sc[h] != null ? sc[h] : 0), 0);
+      const colors = cols.map(c => (c.key === 'h') ? colorFor(sc[c.h], pars[c.h]) : '#111827');
+      drawRow(y, cols.map(c => {
+        if (c.key === 'label') return displayFirst(p);
+        if (c.key === 'h') return sc[c.h] != null ? sc[c.h] : '–';
+        if (c.key === 'sub') return segTot;
+        if (c.key === 'tot') return grand;
+        return '';
+      }), { bg: pi % 2 ? '#ffffff' : '#fafafa', colors, font: '600 16px -apple-system, Segoe UI, Roboto, Arial, sans-serif' });
+      y += rowH;
+    });
+    y += 22; // gap before next segment
+  });
+  return cv;
+}
+function buildScorecardBlob(g) {
+  return new Promise(resolve => {
+    try {
+      const cv = buildScorecardCanvas(g);
+      if (!cv) { resolve(null); return; }
+      if (cv.toBlob) cv.toBlob(b => resolve(b), 'image/png');
+      else resolve(null);
+    } catch (e) { resolve(null); }
+  });
 }
 
 async function shareRoundSummary() {
   const text = buildRoundShareText();
   if (!text) { showToast('No round loaded'); return; }
-  try { if (navigator.share) { await navigator.share({ text }); return; } }
+  // Build the scorecard image and share it alongside the text where supported
+  // (iOS/Android Web Share with files). The columns line up because it's a real
+  // image, not text in a proportional messaging font.
+  let file = null;
+  try {
+    const blob = await buildScorecardBlob(state.game);
+    if (blob) file = new File([blob], 'bad-golf-scorecard.png', { type: 'image/png' });
+  } catch (e) {}
+  try {
+    if (file && navigator.canShare && navigator.canShare({ files: [file] }) && navigator.share) {
+      await navigator.share({ text, files: [file] }); return;
+    }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  // No file-share support → share the text, and offer the image as a download so
+  // it can be attached manually.
+  try { if (navigator.share) { await navigator.share({ text }); } }
   catch (e) { if (e && e.name === 'AbortError') return; }
-  try { window.location.href = 'sms:?&body=' + encodeURIComponent(text); return; } catch (e) {}
-  try { await navigator.clipboard.writeText(text); showToast('Results copied — paste into a text'); }
-  catch (e) { showToast('Could not share'); }
+  if (file) {
+    try {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement('a'); a.href = url; a.download = file.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      showToast('Scorecard image saved — attach it to your message');
+    } catch (e) {}
+  } else if (!navigator.share) {
+    try { window.location.href = 'sms:?&body=' + encodeURIComponent(text); } catch (e) {}
+  }
 }
 
 // Post the current player's round into the crew highlights feed on Home.
@@ -22073,6 +22193,12 @@ function findNextUnscoredHole(g) {
 }
 
 window.switchTab = function(name) {
+  // Remember the tab we're leaving so panels without their own nav (e.g. Clubs)
+  // can send the user back exactly where they came from.
+  const _prevActive = document.querySelector('.tab.active');
+  if (_prevActive && _prevActive.dataset.tab && _prevActive.dataset.tab !== name) {
+    window._prevTab = _prevActive.dataset.tab;
+  }
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   if (name === 'score') {
@@ -25891,6 +26017,37 @@ function wireClubRows() {
   };
   const back = document.getElementById('btn-clubs-back');
   if (back) back.onclick = () => { if (!returnFromGps()) { if (typeof switchTab === 'function') switchTab(state.game && !state.viewOnlyMode ? 'score' : 'home'); } };
+  const save = document.getElementById('btn-save-clubs');
+  if (save) save.onclick = async () => {
+    // Flush any pending debounced save and write immediately so the user has
+    // a confident, explicit save point.
+    clearTimeout(_clubsSaveTimer);
+    const clubs = collectClubs();
+    save.disabled = true;
+    const _label = save.textContent;
+    save.textContent = 'Saving…';
+    try { await saveMyClubs(clubs); } catch (e) { console.warn('saveMyClubs', e); }
+    window._myClubs = clubs;
+    updateClubsStatus();
+    const st = document.getElementById('clubs-status');
+    if (st) {
+      if (clubs._bad && clubs._bad.length) {
+        // A bad range was dropped — let them know, but the rest still saved.
+        st.style.color = 'var(--danger)';
+        st.textContent = '⚠️ Max must be more than min: ' + clubs._bad.join(', ') + ' — that range wasn\'t saved';
+      } else {
+        st.style.color = '';
+        st.textContent = st.textContent + '  · saved ✓';
+      }
+    }
+    save.disabled = false;
+    save.textContent = _label;
+    // Return to wherever the user came from.
+    if (!returnFromGps()) {
+      const dest = window._prevTab || (state.game && !state.viewOnlyMode ? 'score' : 'home');
+      if (typeof switchTab === 'function') switchTab(dest);
+    }
+  };
 })();
 loadMyClubs().then(c => { window._myClubs = c; }).catch(() => {});
 
