@@ -4897,7 +4897,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.82';
+const BG_BUILD = 'v2026.06.09.83';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -5621,7 +5621,7 @@ function wireAuthUI() {
 function isMaintenanceLink() {
   try {
     const src = (location.search || '') + ' ' + (location.hash || '');
-    return /[?&](courseimport|stateimport|osmimport|nextstate|coursecheck|coursegaps|coursecleanup|multinine|cleanup)=/.test(src);
+    return /[?&](courseimport|stateimport|osmimport|nextstate|coursecheck|coursegaps|coursecleanup|multinine|dupcleanup|cleanup)=/.test(src);
   } catch (e) { return false; }
 }
 
@@ -26662,6 +26662,121 @@ window.bgMultiNine = st => multiNineScan(st);
 {
   const m = location.search.match(/[?&]multinine=([A-Za-z0-9]+)/);
   if (m) setTimeout(() => { window.bgMultiNine(m[1] === '1' ? null : m[1]); }, 2500);
+}
+
+// ---------- duplicate cleanup (?dupcleanup) -------------------------------
+// Finds courses that exist in the library more than once for the SAME physical
+// place and removes the redundant copies, KEEPING the best one. Built after the
+// multi-nine sweep created combined three-nine entries that now sit alongside the
+// older flat OSM imports of the same course (e.g. Steele Canyon, Boone Creek).
+// SAFE BY DESIGN:
+//  • Groups only when name matches after stripping generic words (golf/course/
+//    club/the/at/of) — but KEEPS distinguishing words like "Country", "Lakes",
+//    "Old", "North" so "X Country Club" never merges with "X Golf Club", and
+//    Firewheel Lakes/Old/Bridges stay separate.
+//  • Only within the SAME state AND a real city (not a blank/2-letter), so two
+//    same-named courses in different towns are left alone.
+//  • Keeper preference: a wired three-nine/reversible course > an entry that has
+//    a saved rating/slope > a clean id (no trailing -N) > shortest id.
+//  • Plus a curated map for wired courses whose display name differs from the
+//    old import (e.g. "RTJ Golf Trail at Highland Oaks" vs "Highland Oaks Golf Course").
+//  • PREVIEW + downloaded CSV + explicit confirm before anything is deleted;
+//    uses the synced deleteCourse() path so removals stick across devices.
+// URL: ?dupcleanup=1   ·   console: bgDupCleanup()
+const DUP_WIRED_KEEP = { 'highland-oaks-golf-course': 'highland-oaks-dothan' };
+function dupSafeNorm(s) {
+  s = String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ');
+  s = s.replace(/\b(golf|course|club|the|at|of|gc)\b/g, ' ');
+  return s.replace(/\s+/g, ' ').trim();
+}
+function dupCityNorm(s) { return String(s || '').toLowerCase().split(',')[0].replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim(); }
+async function dupCleanup() {
+  let panel = document.getElementById('dup-panel');
+  if (panel) panel.remove();
+  panel = document.createElement('div');
+  panel.id = 'dup-panel';
+  panel.style.cssText = 'position:fixed;inset:6% 4% auto 4%;max-height:88%;z-index:9000;background:rgba(20,20,22,0.97);color:#fff;border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;font-size:13px';
+  panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<strong id="dup-title">Scanning for duplicate courses…</strong>' +
+    '<button id="dup-close" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button></div>' +
+    '<div id="dup-actions" style="margin-bottom:8px"></div>' +
+    '<div id="dup-log" style="overflow:auto;flex:1;line-height:1.55"></div>';
+  document.body.appendChild(panel);
+  document.getElementById('dup-close').onclick = () => panel.remove();
+  const log = (m, c) => { const b = document.getElementById('dup-log'); if (!b) return; const d = document.createElement('div'); if (c) d.style.color = c; d.innerHTML = m; b.appendChild(d); b.scrollTop = b.scrollHeight; };
+  try {
+    if (typeof supa !== 'undefined' && supa) {
+      log('Checking your admin access…', '#9aa0a6');
+      for (let i = 0; i < 12 && !_authUser; i++) { try { const { data } = await supa.auth.getSession(); _authUser = (data && data.session) ? data.session.user : null; } catch (e) {} if (!_authUser) await new Promise(r => setTimeout(r, 500)); }
+      if (_authUser && _authRole !== 'admin' && _authRole !== 'commissioner' && typeof fetchMyRole === 'function') { try { await fetchMyRole(); } catch (e) {} }
+    }
+    if (typeof isAdmin === 'function' && !isAdmin()) { log('Only admins can run duplicate cleanup. Add <b>&cleanup=1</b> for the override.', '#ff8a80'); return; }
+    if (typeof loadCourseLibrary === 'function') await loadCourseLibrary();
+    const saves = await getCourseSaves();
+    const hasRS = id => { const s = saves[id]; return !!(s && ((Array.isArray(s.tees) && s.tees.some(t => t && t.rating != null && t.slope != null)) || (s.rating != null && s.slope != null))); };
+    const isWired = id => (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]) || (typeof REVERSIBLE_COURSES === 'object' && REVERSIBLE_COURSES[id]);
+    const stOf = c => (c.st || (((c.city || '').match(/,\s*([A-Za-z]{2})$/) || [])[1]) || '').toUpperCase();
+
+    const groups = new Map();
+    (COURSE_LIBRARY || []).forEach(c => {
+      if (!c || !c.id) return;
+      const st = stOf(c), ci = dupCityNorm(c.city), nm = dupSafeNorm(c.name);
+      if (!nm || !ci || ci === st.toLowerCase() || ci.length <= 2) return; // need a real city
+      const key = st + '|' + nm + '|' + ci;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    });
+    const pickKeeper = arr => {
+      const w = arr.find(c => isWired(c.id)); if (w) return w;
+      const r = arr.find(c => hasRS(c.id)); if (r) return r;
+      const clean = arr.filter(c => !/-\d+$/.test(c.id));
+      const pool = clean.length ? clean : arr;
+      return pool.slice().sort((a, b) => a.id.length - b.id.length || a.id.localeCompare(b.id))[0];
+    };
+    const dels = []; // {keep, del}
+    groups.forEach(arr => {
+      const uniq = Array.from(new Map(arr.map(c => [c.id, c])).values());
+      if (uniq.length < 2) return;
+      const keep = pickKeeper(uniq);
+      uniq.forEach(c => { if (c.id !== keep.id) dels.push({ keepId: keep.id, keepName: keep.name, del: c }); });
+    });
+    // Curated wired-name-mismatch dups (import name differs from our combined entry).
+    const byId = new Map((COURSE_LIBRARY || []).map(c => [c.id, c]));
+    Object.keys(DUP_WIRED_KEEP).forEach(impId => {
+      const keepId = DUP_WIRED_KEEP[impId];
+      if (byId.has(impId) && byId.has(keepId) && !dels.some(d => d.del.id === impId)) {
+        dels.push({ keepId: keepId, keepName: (byId.get(keepId).name || keepId), del: byId.get(impId) });
+      }
+    });
+
+    document.getElementById('dup-title').textContent = 'Duplicate cleanup';
+    if (!dels.length) { log('No safe duplicates found. Library looks clean. 🎉', '#8fd19e'); return; }
+    log('<b>Found ' + dels.length + ' duplicate course(s) to remove</b> (keeping the best copy of each):', '#ffd34d');
+    dels.forEach(d => log('🗑 <b>' + escapeHtml(d.del.name || d.del.id) + '</b> <span style="color:#9aa0a6">(' + escapeHtml(d.del.city || '') + ' · ' + d.del.id + ')</span> → keep <span style="color:#8fd19e">' + escapeHtml(d.keepName) + '</span>'));
+
+    const rows = [['state', 'keep_id', 'keep_name', 'delete_id', 'delete_name', 'city']];
+    dels.forEach(d => rows.push([(d.del.st || stOf(d.del)), d.keepId, d.keepName, d.del.id, d.del.name, d.del.city]));
+    const csv = rows.map(r => r.map(v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"').join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' }); const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'bad-golf-dup-deletes.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000);
+
+    const actions = document.getElementById('dup-actions');
+    actions.innerHTML = '<button id="dup-go" style="background:#c0392b;border:none;color:#fff;border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:600">🗑 Remove ' + dels.length + ' duplicate(s) — keep the best copy</button>' +
+      '<button id="dup-cancel" style="margin-left:8px;background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:9px 16px;cursor:pointer">Cancel</button>' +
+      '<span style="margin-left:10px;color:#8fd19e">📥 list downloaded</span>';
+    document.getElementById('dup-cancel').onclick = () => { log('<br>Cancelled — nothing removed.', '#9ad0ff'); actions.innerHTML = ''; };
+    document.getElementById('dup-go').onclick = async () => {
+      actions.innerHTML = 'Removing…'; let done = 0, failed = 0;
+      for (const d of dels) { try { (await deleteCourse(d.del.id)) ? done++ : failed++; } catch (e) { failed++; } }
+      log('<br><b>✅ Removed ' + done + ' duplicate(s)' + (failed ? ' (' + failed + ' failed)' : '') + '.</b> Reload to see the cleaned list.', '#8fd19e');
+      document.getElementById('dup-title').textContent = 'Duplicate cleanup — done (' + done + ' removed)';
+      actions.innerHTML = '';
+    };
+  } catch (e) { log('Duplicate cleanup failed: ' + (e && e.message ? e.message : 'error'), '#ff8a80'); console.error('dupCleanup crashed:', e); }
+}
+window.bgDupCleanup = () => dupCleanup();
+{
+  if (/[?&]dupcleanup=/.test(location.search)) setTimeout(() => { window.bgDupCleanup(); }, 2500);
 }
 
 // ---------- licensed course-data import: tee rating / slope / yardage --------
