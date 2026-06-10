@@ -3089,7 +3089,7 @@
       <div style="margin-top:10px">
         <button id="btn-remap-hole" style="display:none;width:100%;background:#111;color:#fff;border:1px solid #111;border-radius:12px;padding:12px;font-size:14px;font-weight:700;letter-spacing:0.02em">🗺️ Re-Map Hole</button>
         <div id="remap-hole-hint" class="small-text" style="display:none;text-align:center;color:var(--text-muted);margin-top:4px">Fix a hole that was mapped wrong — re-tap tee, front &amp; back of the green.</div>
-        <button id="btn-delete-course" style="display:none;width:100%;margin-top:8px;background:var(--danger);color:#fff;border:1px solid var(--danger);border-radius:12px;padding:12px;font-size:14px;font-weight:700">🗑️ Delete course (admin)</button>
+        <button id="btn-delete-round" style="width:100%;margin-top:8px;background:var(--danger);color:#fff;border:1px solid var(--danger);border-radius:12px;padding:12px;font-size:14px;font-weight:700">🗑️ Delete round</button>
       </div>
     </div>
 
@@ -4924,7 +4924,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.09.84';
+const BG_BUILD = 'v2026.06.09.86';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -6209,14 +6209,8 @@ async function countFinishedRoundsForCourse(courseName, sinceTs, excludeCode) {
 async function updateRemapButton() {
   const btn = document.getElementById('btn-remap-hole');
   const hint = document.getElementById('remap-hole-hint');
-  // Admin Delete-course button sits under Re-Map; show it whenever an admin is
-  // on a round tied to a library course (independent of the remap conditions).
-  const delBtn = document.getElementById('btn-delete-course');
-  if (delBtn) {
-    const g0 = state.game;
-    const showDel = !!(g0 && g0.courseId && !state.viewOnlyMode && typeof isAdmin === 'function' && isAdmin());
-    delBtn.style.display = showDel ? '' : 'none';
-  }
+  // (Course deletion moved to the Admin tab; the per-user "Delete round" button
+  // below is always visible and needs no toggling here.)
   if (!btn) return;
   btn.style.display = 'none'; if (hint) hint.style.display = 'none';
   const g = state.game;
@@ -22995,15 +22989,32 @@ async function init() {
     g.trackGirs = setup.trackGirs || false;
     g.trackFairways = setup.trackFairways || false;
 
-    // Update raw handicaps + teeLabel for existing players (matched by name) without
-    // disturbing the score arrays. New players added in the form are ignored
-    // mid-round; removed players are also ignored — both would corrupt scoring.
+    // Update raw handicaps + teeLabel for existing players (matched by name)
+    // without disturbing their score arrays. NEW players added in the form ARE
+    // now welcomed mid-round (e.g. someone joins on the 1st tee): they're
+    // appended with a fresh 18-hole empty card, so existing scores are untouched
+    // and the newcomer simply has blanks for any holes already played. Removed
+    // players are still left in place — deleting a player mid-round would orphan
+    // their scores and break the bet math.
+    if (!g.scores) g.scores = {};
     setup.players.forEach(np => {
+      if (!np || !np.name) return;
       const existing = g.players.find(p => p.name === np.name);
       if (existing) {
         existing.rawHcp = np.rawHcp != null ? np.rawHcp : np.hcp;
         existing.hcp = np.hcp;
         if (np.teeLabel != null) existing.teeLabel = np.teeLabel;
+      } else {
+        // Brand-new player joining mid-round.
+        let pid = np.id;
+        if (!pid || g.players.some(p => p.id === pid)) pid = 'p' + Date.now() + Math.floor(Math.random() * 1e4);
+        g.players.push({
+          id: pid, name: np.name,
+          firstName: np.firstName || '', lastName: np.lastName || '',
+          hcp: np.hcp, rawHcp: np.rawHcp != null ? np.rawHcp : np.hcp,
+          playsGross: !!np.playsGross, teeLabel: np.teeLabel || null
+        });
+        g.scores[pid] = new Array(18).fill(null);
       }
     });
 
@@ -23287,18 +23298,24 @@ async function init() {
       }
     }; }
 
-  // Delete course (admin) — removes the course from the shared library + data.
-  { const _dc = $('btn-delete-course'); if (_dc) _dc.onclick = async () => {
+  // Delete round (ANY user) — per-user removal. Hides this round from YOUR list
+  // and pulls only YOUR score record (so your handicap recalculates). Everyone
+  // else in the round keeps it and their stats — the shared game is untouched.
+  // (Course deletion moved to the Admin tab.)
+  { const _dr = $('btn-delete-round'); if (_dr) _dr.onclick = async () => {
       const g = state.game;
-      const id = g && g.courseId;
-      if (!id) { showToast('No course on this round'); return; }
-      if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can delete courses'); return; }
-      const nm = g.course || 'this course';
-      const ok = (typeof window.confirm !== 'function') || window.confirm(
-        'Delete "' + nm + '" from the course library for everyone?\n\nThis removes its saved scorecard and GPS mapping. Rounds already played keep their scores. This cannot be undone.');
+      if (!g || !g.code) { showToast('No active round'); return; }
+      const code = g.code;
+      const ok = await uiConfirm(
+        'Delete this round from YOUR list?\n\nEveryone else in the round keeps it and their stats. If it counted toward your handicap, it’ll be removed and your handicap recalculated. This only affects you.',
+        { title: 'Delete round?', okLabel: 'Delete' });
       if (!ok) return;
-      const done = await deleteCourse(id);
-      if (done) { showToast('Course deleted'); try { _dc.style.display = 'none'; } catch (e) {} }
+      let hcpAffected = false;
+      try { hcpAffected = await removeRoundForMe(code); } catch (e) {}
+      try { await discardActiveRound(); } catch (e) {} // clear from THIS device only
+      showToast(hcpAffected ? 'Removed — your handicap was recalculated' : 'Round removed from your list');
+      try { await loadRounds(); } catch (e) {}
+      switchTab('home');
     }; }
 
   // Re-Map Hole — re-run the 3-tap mapping wizard for the current hole.
