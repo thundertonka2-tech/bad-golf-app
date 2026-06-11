@@ -4957,7 +4957,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.10.13';
+const BG_BUILD = 'v2026.06.10.14';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -27400,6 +27400,29 @@ async function statsReset() {
       btn.textContent = 'Export';
     });
 
+    // Commit the roster AND verify it reached the cloud (the shared row Kevin
+    // reads). Returns the live cloud stat-row count so we can prove it stuck —
+    // catches the silent-write-failure that left Kevin seeing old bets.
+    const commitRoster = async (rosterToSave) => {
+      const json = JSON.stringify(rosterToSave);
+      try { localStorage.setItem(KEY_PLAYER_ROSTER, json); } catch (e) {}
+      let cloudOk = false, cloudErr = '', cloudCount = null;
+      const rowCode = singletonRowCode(KEY_PLAYER_ROSTER);
+      try {
+        if (!supaReady) await initSupabase();
+        if (!(supa && supaOnline)) { cloudErr = 'offline — connect to the internet and retry'; }
+        else if (typeof isSignedIn === 'function' && !isSignedIn()) { cloudErr = 'not signed in'; }
+        else {
+          const { error } = await supa.from('games').upsert({ code: rowCode, data: JSON.parse(json), updated_at: new Date().toISOString() });
+          if (error) cloudErr = error.message || String(error); else cloudOk = true;
+          // Read it straight back to confirm what the cloud now holds.
+          const { data } = await supa.from('games').select('data').eq('code', rowCode).maybeSingle();
+          if (data && Array.isArray(data.data)) cloudCount = data.data.reduce((a, p) => a + (((p && p.scoreHistory) || []).length), 0);
+        }
+      } catch (e) { cloudErr = (e && e.message) || 'error'; }
+      return { cloudOk, cloudErr, cloudCount };
+    };
+
     // 3) Apply / Cancel.
     const actions = document.getElementById('sr-actions');
     actions.innerHTML =
@@ -27416,10 +27439,14 @@ async function statsReset() {
       actions.innerHTML = 'Clearing…';
       let cleared = 0;
       roster.forEach(p => { const n = (p.scoreHistory || []).length; if (n) cleared += n; p.scoreHistory = []; });
-      try { await savePlayerRoster(roster); }
-      catch (e) { log('Save failed: ' + (e && e.message || 'error') + ' — nothing changed on the server.', '#ff8a80'); actions.innerHTML = ''; return; }
-      log('<br><b>✅ All stats cleared</b> (' + cleared + ' stat row' + (cleared !== 1 ? 's' : '') + ' across all players). Everyone is back to 0 rounds.', '#8fd19e');
-      log('It\'s one shared row, so this clears it for Kevin too — have everyone fully close and reopen the app to resync.', '#9ad0ff');
+      const res = await commitRoster(roster);
+      if (res.cloudCount === 0) {
+        log('<br><b>✅ All stats cleared</b> (' + cleared + ' row' + (cleared !== 1 ? 's' : '') + ') and <b>CONFIRMED on the server</b> — the shared row now holds 0 rounds. Have everyone fully close &amp; reopen the app; Kevin\'s old bets will be gone.', '#8fd19e');
+      } else if (res.cloudOk) {
+        log('<br>Saved. Server now shows <b>' + (res.cloudCount == null ? '?' : res.cloudCount) + '</b> stat row(s). Reload everywhere to confirm.', '#8fd19e');
+      } else {
+        log('<br><b style="color:#ff8a80">⚠️ Cleared on THIS phone, but the cloud write did NOT stick</b> (' + (res.cloudErr || 'unknown') + '). That\'s why Kevin still sees old bets — other phones re-sync the old shared row. Fix: make sure THIS phone is online and is the admin, then press Clear ALL again until it says “CONFIRMED on the server”.', '#ff8a80');
+      }
       document.getElementById('sr-title').textContent = 'Stats Reset — all cleared';
       actions.innerHTML = '';
     };
@@ -27431,10 +27458,14 @@ async function statsReset() {
       if (!confirm('Reset stats now?\n\nRounds kept: ' + keep.size + '\nStat rows: ' + before + ' → ' + after + '\nPlayers fully zeroed: ' + playersCleared + '\n\nA backup was already downloaded. This cannot be undone.')) return;
       actions.innerHTML = 'Applying…';
       roster.forEach(p => { if (Array.isArray(p.scoreHistory)) p.scoreHistory = p.scoreHistory.filter(r => keep.has(recKey(r))); });
-      try { await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false); }
-      catch (e) { log('Save failed: ' + (e && e.message || 'error') + ' — nothing was changed on the server.', '#ff8a80'); actions.innerHTML = ''; return; }
-      log('<br><b>✅ Stats reset.</b> Kept ' + keep.size + ' round(s) (' + after + ' stat row' + (after !== 1 ? 's' : '') + '). All other stats cleared. Games, courses &amp; account untouched.', '#8fd19e');
-      log('Reload the app — and re-open it on other phones — to see the clean stats everywhere.', '#9ad0ff');
+      const res = await commitRoster(roster);
+      if (res.cloudCount === after) {
+        log('<br><b>✅ Stats reset</b> — kept ' + keep.size + ' round(s) (' + after + ' row' + (after !== 1 ? 's' : '') + ') and <b>CONFIRMED on the server</b>. Reload everywhere to see it (Kevin too).', '#8fd19e');
+      } else if (res.cloudOk) {
+        log('<br>Saved. Server now shows <b>' + (res.cloudCount == null ? '?' : res.cloudCount) + '</b> stat row(s) (expected ' + after + '). Reload everywhere to confirm.', '#8fd19e');
+      } else {
+        log('<br><b style="color:#ff8a80">⚠️ Applied on THIS phone, but the cloud write did NOT stick</b> (' + (res.cloudErr || 'unknown') + '). That\'s why Kevin still sees old bets. Make sure this phone is online + admin and retry until it says “CONFIRMED on the server”.', '#ff8a80');
+      }
       document.getElementById('sr-title').textContent = 'Stats Reset — done';
       actions.innerHTML = '';
     };
