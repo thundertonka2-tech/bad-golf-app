@@ -1791,9 +1791,18 @@
   #gps-score {
     background: rgba(29,111,214,0.96); backdrop-filter: blur(8px);
     color: #fff; border: 1px solid rgba(255,255,255,0.40); border-radius: 999px;
-    padding: 9px 28px; font-size: 15px; font-weight: 800; cursor: pointer;
+    padding: 9px 24px; font-size: 15px; font-weight: 800; cursor: pointer;
     box-shadow: 0 4px 18px rgba(29,111,214,0.5), 0 2px 8px rgba(0,0,0,0.4);
   }
+  /* Live to-par read-out tucked inside the Score pill (E / +3 / −1). Sits behind
+     a thin divider so the button still reads "Score" first. */
+  #gps-score .gps-score-topar {
+    margin-left: 8px; padding-left: 8px; font-size: 13px; font-weight: 800;
+    border-left: 1px solid rgba(255,255,255,0.35);
+  }
+  #gps-score .gps-score-topar.pos { color: #b9f5c8; }   /* under par */
+  #gps-score .gps-score-topar.neg { color: #ffd0d0; }   /* over par */
+  #gps-score .gps-score-topar.even { color: rgba(255,255,255,0.92); }
   /* Admin map session: green "Done mapping" replaces Score (which is hidden). */
   #gps-mapdone {
     display: none; background: rgba(31,138,59,0.96); backdrop-filter: blur(8px);
@@ -4643,7 +4652,8 @@
 
   <!-- Live money + match status (lower-left, above the gear). JS fills/toggles. -->
   <div id="gps-moneymatch">
-    <div class="gps-mm" id="gps-mm-match"></div>
+    <!-- Up to 3 live match/Nassau status boxes (JS fills) stacked above money. -->
+    <div id="gps-mm-matches" style="display:flex;flex-direction:column;gap:4px;align-items:flex-start"></div>
     <div class="gps-mm" id="gps-mm-money"></div>
   </div>
 
@@ -4927,7 +4937,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.10.06';
+const BG_BUILD = 'v2026.06.10.07';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -6011,9 +6021,30 @@ function subscribeToGame(code) {
         // Don't clobber if the incoming version is older than what we have
         if (incoming.updatedAt && state.game.updatedAt && incoming.updatedAt < state.game.updatedAt) return;
 
+        // Did the scorer just finish the round? Capture this BEFORE we overwrite
+        // state.game so we can auto-close the round on every device, not only the
+        // scorer's. (Spectators are already view-only, so the !viewOnlyMode guard
+        // skips them.)
+        const justFinished = !!(incoming.finishedAt) && !(state.game && state.game.finishedAt);
+
         state.game = incoming;
         // Cache the fresh copy locally
         try { localStorage.setItem('game:' + code, JSON.stringify(incoming)); } catch (e) {}
+
+        // Auto-close: the scorer tapped Finish → everyone's round closes into the
+        // read-only results view, so no one keeps scoring a round that's over.
+        if (justFinished && !state.viewOnlyMode) {
+          state.viewOnlyMode = true;
+          // Close the GPS overlay if a player is out on it, so the results board
+          // isn't hidden underneath.
+          try { const ov = document.getElementById('gps-overlay'); if (ov) ov.classList.remove('open', 'viewing', 'map-only'); } catch (e) {}
+          try { showToast('🏁 The scorer finished the round — here are the final results'); } catch (e) {}
+          try {
+            if (typeof switchTab === 'function') switchTab('board');
+            else if (typeof renderBoard === 'function') renderBoard();
+          } catch (e) {}
+          return; // board is now rendered; skip the live-score refresh below
+        }
 
         // 💧 If the scorer just announced a per-hole sip, fire it here too so
         // the pop-up reaches every phone — not only the device that advanced.
@@ -15965,31 +15996,102 @@ function gpsResolveMyId(g) {
     return hit ? hit.id : null;
   } catch (e) { return null; }
 }
-// My status in the heads-up Match-play game (UP / DN / AS), if one is on.
-function gpsMyMatchStatus(g, res, myId) {
+// All of MY live heads-up statuses for the GPS boxes: one per Match-play match
+// I'm in, plus the current nine's standing for each head-to-head Nassau I'm in.
+// Each entry: { label, text, cls }. Caller caps the list at 3 boxes.
+function gpsMyStatuses(g, res, myId) {
+  const out = [];
+  const initials = id => { const p = (g.players || []).find(x => x.id === id); return p ? displayInitials(p) : '?'; };
+  // ---- Match Play — one box per match I'm in (UP / DN / AS, then WON / LOST) ----
   try {
     const mp = res && res.results && res.results.matchPlay;
-    if (!mp || !Array.isArray(mp.matches)) return null;
-    const mine = mp.matches.filter(m => m.aId === myId || m.bId === myId);
-    if (!mine.length) return null;
-    const m = mine.find(x => !x.complete) || mine[0];
-    const myUp = (m.aId === myId) ? m.finalUp : -m.finalUp;
-    if (m.complete) {
-      if (m.finalUp === 0) return { text: 'AS', cls: 'even' };
-      return (myUp > 0) ? { text: 'WON', cls: 'pos' } : { text: 'LOST', cls: 'neg' };
+    if (mp && Array.isArray(mp.matches)) {
+      mp.matches.filter(m => m.aId === myId || m.bId === myId).forEach(m => {
+        const oppId = (m.aId === myId) ? m.bId : m.aId;
+        const myUp = (m.aId === myId) ? m.finalUp : -m.finalUp;
+        let text, cls;
+        if (m.complete) {
+          if (m.finalUp === 0) { text = 'AS'; cls = 'even'; }
+          else { text = myUp > 0 ? 'WON' : 'LOST'; cls = myUp > 0 ? 'pos' : 'neg'; }
+        } else if (myUp > 0) { text = myUp + ' UP'; cls = 'pos'; }
+        else if (myUp < 0) { text = Math.abs(myUp) + ' DN'; cls = 'neg'; }
+        else { text = 'AS'; cls = 'even'; }
+        out.push({ label: 'vs ' + initials(oppId), text, cls });
+      });
     }
-    if (myUp > 0) return { text: myUp + ' UP', cls: 'pos' };
-    if (myUp < 0) return { text: Math.abs(myUp) + ' DN', cls: 'neg' };
-    return { text: 'AS', cls: 'even' };
+  } catch (e) {}
+  // ---- Nassau — current nine's segment standing for each 1v1 instance I'm in ----
+  try {
+    const ncfg = g.games && g.games.nassau;
+    if (ncfg && typeof pairwiseStandings === 'function' && typeof segmentRange === 'function') {
+      const instances = Array.isArray(ncfg.instances) && ncfg.instances.length ? ncfg.instances : [ncfg];
+      const h = state.currentHole || 1;
+      const seg = h <= 9 ? 'front' : 'back';
+      const segShort = seg === 'front' ? 'F' : 'B';
+      const [from, to] = segmentRange(seg);
+      instances.forEach(inst => {
+        const ids = Array.isArray(inst.participants) ? inst.participants : [];
+        if (ids.length !== 2 || ids.indexOf(myId) < 0) return; // 1v1 only in the box
+        const st = pairwiseStandings(g, ids[0], ids[1], from, Math.min(h, to));
+        let text = 'AS', cls = 'even';
+        if (st && st.holesPlayed > 0) {
+          const myIsA = st.a.id === myId;
+          const format = inst.format || 'stroke';
+          // diff > 0 means I'm ahead (more holes won, or fewer net strokes).
+          const diff = (format === 'match')
+            ? (myIsA ? st.aHolesWon - st.bHolesWon : st.bHolesWon - st.aHolesWon)
+            : (myIsA ? st.bStrokes - st.aStrokes : st.aStrokes - st.bStrokes);
+          if (diff > 0) { text = diff + ' UP'; cls = 'pos'; }
+          else if (diff < 0) { text = Math.abs(diff) + ' DN'; cls = 'neg'; }
+        }
+        out.push({ label: 'NASSAU ' + segShort, text, cls });
+      });
+    }
+  } catch (e) {}
+  return out;
+}
+// My current gross-to-par across the holes I've scored (null if none scored).
+function gpsMyToPar(g, myId) {
+  try {
+    if (!g || !g.scores || !g.pars || !myId) return null;
+    const arr = g.scores[myId] || [];
+    let diff = 0, n = 0;
+    for (let i = 0; i < 18; i++) {
+      const s = arr[i], par = g.pars[i];
+      if (s != null && par != null) { diff += (s - par); n++; }
+    }
+    return n ? diff : null;
   } catch (e) { return null; }
 }
-// Update (and show/hide) the two GPS chips. Safe to call often.
+function fmtToPar(d) { return d == null ? '' : (d === 0 ? 'E' : (d > 0 ? '+' + d : String(d))); }
+// Keep the GPS "Score" button labelled "Score" but append where I stand to par
+// (E / +3 / −1). Same button, same size — just a live to-par read-out.
+function updateGpsScoreBtn() {
+  const btn = document.getElementById('gps-score');
+  if (!btn) return;
+  let label = 'Score';
+  try {
+    const g = state.game;
+    const myId = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null;
+    const d = gpsMyToPar(g, myId);
+    if (d != null) {
+      const cls = d < 0 ? 'pos' : (d > 0 ? 'neg' : 'even');
+      label = 'Score<span class="gps-score-topar ' + cls + '">' + fmtToPar(d) + '</span>';
+    }
+  } catch (e) {}
+  btn.innerHTML = label;
+}
+window.updateGpsScoreBtn = updateGpsScoreBtn;
+// Update (and show/hide) the GPS money chip + up to 3 match/Nassau boxes. Safe
+// to call often. Boxes hide automatically when no game is in play.
 function updateGpsMoneyMatch() {
+  try { updateGpsScoreBtn(); } catch (e) {}
   const wrap = document.getElementById('gps-moneymatch');
   if (!wrap) return;
   const moneyEl = document.getElementById('gps-mm-money');
-  const matchEl = document.getElementById('gps-mm-match');
-  const hide = () => { wrap.style.display = 'none'; if (moneyEl) moneyEl.style.display = 'none'; if (matchEl) matchEl.style.display = 'none'; };
+  const matchesEl = document.getElementById('gps-mm-matches');
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const hide = () => { wrap.style.display = 'none'; if (moneyEl) moneyEl.style.display = 'none'; if (matchesEl) matchesEl.innerHTML = ''; };
   const g = state.game;
   if (!g || !Array.isArray(g.players) || !g.players.length || typeof computeAllGameMoney !== 'function') return hide();
   let res = null; try { res = computeAllGameMoney(g); } catch (e) { return hide(); }
@@ -16005,10 +16107,17 @@ function updateGpsMoneyMatch() {
     moneyEl.className = 'gps-mm ' + (net > 0 ? 'pos' : net < 0 ? 'neg' : 'even');
     moneyEl.style.display = 'flex'; any = true;
   } else if (moneyEl) { moneyEl.style.display = 'none'; }
-  // Match play — heads-up Match game status.
-  const ms = gpsMyMatchStatus(g, res, myId);
-  if (ms && matchEl) { matchEl.innerHTML = '<span class="mm-lbl">MATCH</span>' + ms.text; matchEl.className = 'gps-mm ' + ms.cls; matchEl.style.display = 'flex'; any = true; }
-  else if (matchEl) { matchEl.style.display = 'none'; }
+  // Match / Nassau status — one box each, max 3.
+  let statuses = [];
+  try { statuses = gpsMyStatuses(g, res, myId) || []; } catch (e) { statuses = []; }
+  statuses = statuses.slice(0, 3);
+  if (matchesEl) {
+    matchesEl.innerHTML = statuses.map(s =>
+      '<div class="gps-mm ' + (s.cls || 'even') + '" style="display:flex">' +
+      '<span class="mm-lbl">' + esc(s.label) + '</span>' + esc(s.text) + '</div>'
+    ).join('');
+    if (statuses.length) any = true;
+  }
   wrap.style.display = any ? 'flex' : 'none';
 }
 window.updateGpsMoneyMatch = updateGpsMoneyMatch;
@@ -22309,6 +22418,18 @@ window.switchTab = function(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   if (name === 'score') {
+    // If you're only VIEWING a finished or spectated round (read-only), tapping
+    // Score should NOT reopen that round for scoring (which forced you to hit
+    // Finish round again). Start a fresh round instead — the round you were
+    // viewing stays saved in your Rounds history.
+    if (state.viewOnlyMode) {
+      state.viewOnlyMode = false;
+      state.game = null;
+      state._scoreResumeAsked = true;
+      try { if (typeof unsubscribeFromGame === 'function') unsubscribeFromGame(); } catch (e) {}
+      if (typeof window.openFreshSetupForm === 'function') { window.openFreshSetupForm(); return; }
+      return switchTab('setup');
+    }
     // First time you open Score after (re)launching the app with a round
     // already in progress, stop and ask: continue this round, or start a
     // new game? Without this, reopening the app dropped you straight back
@@ -22632,6 +22753,9 @@ async function init() {
     $('display-code').textContent = code;
     $('display-code').dataset.code = code;
   }
+  // Exposed so the top-level switchTab() can start a fresh round when Score is
+  // tapped while only viewing a finished/spectated round.
+  window.openFreshSetupForm = openFreshSetupForm;
 
   // New game button — if a round is already active, ask what to do first.
   $('btn-new-game').onclick = async () => {
@@ -23508,7 +23632,13 @@ async function init() {
     // next-hole is a GPS-view control → the scorer is on GPS, so show pop-ups.
     if (typeof maybeShowSipBanner === 'function') maybeShowSipBanner(leaving, false);
     if (typeof announceHoleCelebrations === 'function') announceHoleCelebrations(leaving, false);
-    if (typeof announceStrokes === 'function') announceStrokes(leaving, false);
+    // "You get a stroke" is a heads-up for the hole you're ABOUT to play, so it
+    // announces the hole you just landed on (state.currentHole) — not the one you
+    // left. Announcing `leaving` made the pop-up appear a hole late: it showed
+    // while you were already looking at the next hole, reading as if you got a
+    // stroke on a hole where you don't. (Sips/celebrations stay on `leaving` —
+    // those ARE about the hole just completed.)
+    if (typeof announceStrokes === 'function') announceStrokes(state.currentHole, false);
     maybeAnnounceGroupHole(leaving); // move idle group phones to this hole's GPS
     openPlayGps(); // GPS default on the new hole
   };
@@ -23526,7 +23656,8 @@ async function init() {
     const suppress = !withGps;
     if (typeof maybeShowSipBanner === 'function') maybeShowSipBanner(leaving, suppress);
     if (typeof announceHoleCelebrations === 'function') announceHoleCelebrations(leaving, suppress);
-    if (typeof announceStrokes === 'function') announceStrokes(leaving, suppress);
+    // Heads-up for the hole you're entering (see next-hole handler above).
+    if (typeof announceStrokes === 'function') announceStrokes(state.currentHole, suppress);
     // Only the GPS advance moves the group; the "Score only" button stays local.
     if (withGps) { maybeAnnounceGroupHole(leaving); openPlayGps(); }
   };
@@ -24228,6 +24359,9 @@ const gpsView = (() => {
   }
 
   let maxZoomClamp = 19.4;
+  // When the player pans/zooms/rotates by hand, pause auto-follow briefly so the
+  // camera doesn't fight them. Set on user-initiated map gestures only.
+  let lastUserMoveAt = 0;
   function ensureMap(cfg) {
     if (map) return;
     maxZoomClamp = (cfg.maxzoom || 19) + 0.4;
@@ -24250,6 +24384,12 @@ const gpsView = (() => {
     map.on('move', () => { if (mode === 'view') positionPills(); });
     map.on('rotate', renderWind);
     map.on('click', e => { if (mode === 'wizard') wizardTap([e.lngLat.lng, e.lngLat.lat]); });
+    // Only USER gestures carry an originalEvent — our own easeTo/jumpTo don't, so
+    // auto-follow re-frames never count as the player "taking control".
+    const noteUserMove = e => { if (e && e.originalEvent) lastUserMoveAt = Date.now(); };
+    map.on('dragstart', noteUserMove);
+    map.on('zoomstart', noteUserMove);
+    map.on('rotatestart', noteUserMove);
   }
 
   function lineData() {
@@ -24497,7 +24637,7 @@ const gpsView = (() => {
     return offsetPt(ball, tgtY / YD, brgBetween(ball, hd.mid));
   }
 
-  function frameHole() {
+  function frameHole(animate) {
     const brg = brgBetween(ball, hd.mid);
     const d = Math.max(distM(ball, hd.mid), 60);
     const center = midOf(ball, hd.mid);
@@ -24506,7 +24646,35 @@ const gpsView = (() => {
     // hole, the target, and surrounding fairway without having to pinch out.
     const mpp = d / (vh * 0.42);
     const zoom = Math.log2(156543.03392 * Math.cos(toRad(center[1])) / mpp);
-    map.jumpTo({ center, bearing: brg, zoom: Math.min(zoom, maxZoomClamp), pitch: 0 });
+    // offset [0,-44]: nudge the framing UP so the player's dot sits ABOVE the
+    // HOLE/Score/PAR bar at the bottom, with the target/green stacked above it.
+    const cam = { center, bearing: brg, zoom: Math.min(zoom, maxZoomClamp), pitch: 0, offset: [0, -44] };
+    if (animate) map.easeTo(Object.assign({ duration: 650 }, cam));
+    else map.jumpTo(cam);
+  }
+
+  // Keep the player's dot and the target/green on screen as the player walks up
+  // the hole. Without this, the camera stayed framed from where you arrived, so
+  // by the time you reached your ball your dot had climbed to the top and the
+  // target slid off. Re-frames only when something drifts out of a comfortable
+  // band — and never within 8s of a manual pan/zoom, so it doesn't fight you.
+  function maybeFollow() {
+    try {
+      if (mode !== 'view' || !map || !ball || !hd || !hd.mid) return;
+      if (Date.now() - lastUserMoveAt < 8000) return;
+      const mapEl = el('gps-map');
+      const vw = mapEl.clientWidth || window.innerWidth;
+      const vh = mapEl.clientHeight || window.innerHeight;
+      const bp = map.project(ball);
+      const gp = map.project(hd.mid);
+      const tp = target ? map.project(target) : gp;
+      const m = 48; // edge margin (px)
+      const off = pt => pt.x < m || pt.x > vw - m || pt.y < m || pt.y > vh - m;
+      // Player dot should live in the lower portion (above the score bar). If it
+      // has climbed into the top ~40% of the view, or the target/green has slid
+      // off, re-frame smoothly to bring everything back.
+      if (bp.y < vh * 0.40 || off(bp) || off(gp) || off(tp)) frameHole(true);
+    } catch (e) {}
   }
 
   function refresh() {
@@ -24827,6 +24995,7 @@ const gpsView = (() => {
       const mg2 = el('gps-mygps');
       if (mg2) { mg2.textContent = '🟢'; mg2.classList.add('live'); }
       refresh();
+      maybeFollow(); // keep the dot + target/green framed as you move up the hole
     }, err => gToast('GPS error: ' + err.message), { enableHighAccuracy: true, maximumAge: 3000 });
   }
 
