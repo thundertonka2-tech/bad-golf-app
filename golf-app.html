@@ -4937,7 +4937,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.06.10.07';
+const BG_BUILD = 'v2026.06.10.09';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -5661,7 +5661,7 @@ function wireAuthUI() {
 function isMaintenanceLink() {
   try {
     const src = (location.search || '') + ' ' + (location.hash || '');
-    return /[?&](courseimport|stateimport|osmimport|nextstate|coursecheck|coursegaps|coursecleanup|multinine|dupcleanup|cleanup)=/.test(src);
+    return /[?&](courseimport|stateimport|osmimport|nextstate|coursecheck|coursegaps|coursecleanup|multinine|dupcleanup|cleanup|statsreset)=/.test(src);
   } catch (e) { return false; }
 }
 
@@ -19476,6 +19476,24 @@ async function deleteRecentGame(code) {
   }
   try { localStorage.removeItem('game:' + code); } catch (e) {}
 
+  // STATS SYNC: a round's stats live in each roster player's scoreHistory keyed
+  // by gameCode. Deleting the round must also drop its stat record — otherwise
+  // the Stats tab keeps counting a round that's no longer in the Rounds list
+  // (the 22-vs-1 mismatch). Now "delete the round" cleanly fixes the stats too.
+  try {
+    const roster = await getPlayerRoster();
+    if (Array.isArray(roster) && roster.length) {
+      let touched = false;
+      roster.forEach(p => {
+        if (!Array.isArray(p.scoreHistory)) return;
+        const before = p.scoreHistory.length;
+        p.scoreHistory = p.scoreHistory.filter(r => !(r && r.gameCode === code));
+        if (p.scoreHistory.length !== before) touched = true;
+      });
+      if (touched) await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
+    }
+  } catch (e) { console.warn('stats sync on round delete failed:', e); }
+
   // If we just deleted the "last opened" pointer, clear it
   const last = await safeGet(KEY_LAST, false);
   if (last === code) await safeSet(KEY_LAST, '', false);
@@ -27170,6 +27188,137 @@ window.bgCourseCleanup = st => courseCleanup(st);
 {
   const m = location.search.match(/[?&]coursecleanup=([A-Za-z0-9]+)/);
   if (m) setTimeout(() => { window.bgCourseCleanup(m[1] === '1' ? null : m[1]); }, 2500);
+}
+
+// ---------- stats reset (?statsreset=1) ------------------------------------
+// Clears player STATS ONLY (each roster player's scoreHistory) while KEEPING
+// the round(s) you tick. Order of operations is deliberately safe:
+//   1. Download a full roster backup BEFORE anything changes (restore-able).
+//   2. Preview every distinct round; you pick which to KEEP (Buffalo pre-ticked).
+//   3. Optionally Export a kept round's FULL game JSON (scores + Nassau +
+//      huckleData) to verify the Huckle/Nassau payout.
+//   4. Apply only on explicit confirm.
+// Games, courses, friendships and your account are NOT touched — only stats.
+// URL: ?statsreset=1   ·  console: bgStatsReset()   (add &cleanup=1 if not admin)
+async function statsReset() {
+  let panel = document.getElementById('sr-panel');
+  if (panel) panel.remove();
+  panel = document.createElement('div');
+  panel.id = 'sr-panel';
+  panel.style.cssText = 'position:fixed;inset:5% 4% auto 4%;max-height:90%;z-index:9000;background:rgba(20,20,22,0.97);color:#fff;border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;font-size:13px';
+  panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<strong id="sr-title">Stats Reset — loading…</strong>' +
+    '<button id="sr-close" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button></div>' +
+    '<div id="sr-actions" style="margin-bottom:8px"></div>' +
+    '<div id="sr-log" style="overflow:auto;flex:1;line-height:1.55"></div>';
+  document.body.appendChild(panel);
+  document.getElementById('sr-close').onclick = () => panel.remove();
+  const log = (msg, color) => { const b = document.getElementById('sr-log'); if (!b) return; const d = document.createElement('div'); if (color) d.style.color = color; d.innerHTML = msg; b.appendChild(d); b.scrollTop = b.scrollHeight; };
+  const download = (name, text, type) => { const blob = new Blob([text], { type: type || 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); };
+  const recKey = r => r && (r.gameCode || ('d:' + (r.date || '') + '|' + (r.course || '')));
+
+  try {
+    // Admin gate (same pattern as course cleanup) — the roster is shared.
+    if (typeof supa !== 'undefined' && supa) {
+      for (let i = 0; i < 12 && !_authUser; i++) { try { const { data } = await supa.auth.getSession(); _authUser = (data && data.session) ? data.session.user : null; } catch (e) {} if (!_authUser) await new Promise(r => setTimeout(r, 400)); }
+      if (_authUser && _authRole !== 'admin' && _authRole !== 'commissioner' && typeof fetchMyRole === 'function') { try { await fetchMyRole(); } catch (e) {} }
+    }
+    if (typeof isAdmin === 'function' && !isAdmin()) {
+      log('Only admins can reset stats. Add <b>&cleanup=1</b> to the URL to use the admin override, then reload.', '#ff8a80');
+      return;
+    }
+
+    const roster = await getPlayerRoster();
+    if (!Array.isArray(roster) || !roster.length) { log('No players in the roster — nothing to reset.', '#9ad0ff'); return; }
+
+    // 1) BACK UP the full roster first — the safety net.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    download('bad-golf-roster-backup-' + stamp + '.json', JSON.stringify(roster, null, 2));
+    log('📥 <b>Backup downloaded</b> — bad-golf-roster-backup-' + stamp + '.json (your full roster; re-import to restore).', '#8fd19e');
+
+    // 2) Which rounds are still in your Rounds list? Stats should mirror it.
+    let recentCodes = new Set();
+    try { const rv = await safeGet(KEY_RECENT, true); if (rv) { const arr = JSON.parse(rv); if (Array.isArray(arr)) arr.forEach(g => { if (g && g.code) recentCodes.add(g.code); }); } } catch (e) {}
+
+    // Build the distinct-rounds list from every player's scoreHistory.
+    const rounds = {};
+    roster.forEach(p => { (p.scoreHistory || []).forEach(r => {
+      const k = recKey(r); if (!k) return;
+      const o = rounds[k] || (rounds[k] = { key: k, code: r.gameCode || null, course: r.course || '(no course)', date: r.date || 0, players: new Set(), count: 0 });
+      o.players.add(displayFull(p) || p.name || '?'); o.count++;
+      if ((r.date || 0) > o.date) o.date = r.date || 0;
+    }); });
+    const list = Object.values(rounds).sort((a, b) => (b.date || 0) - (a.date || 0));
+    if (!list.length) { log('No stats found in any player — nothing to reset.', '#9ad0ff'); return; }
+    list.forEach(o => { o.inList = !!(o.code && recentCodes.has(o.code)); });
+    const orphanCount = list.filter(o => !o.inList).length;
+
+    document.getElementById('sr-title').textContent = 'Stats Reset — keep rounds still in your Rounds list';
+    log('Found <b>' + list.length + '</b> round(s) in stats. <b>' + (list.length - orphanCount) + '</b> still in your Rounds list (pre-ticked to KEEP); <b>' + orphanCount + '</b> orphan(s) — the round was deleted but the stat lingered.', '#ffd34d');
+    log('<span style="color:#9aa0a6">Default keeps exactly what\'s in your Rounds tab. Tick/untick to adjust. Games, courses, friendships &amp; your account are NOT touched.</span>');
+
+    const listWrap = document.createElement('div'); listWrap.style.cssText = 'margin-top:6px';
+    const reTick = () => listWrap.querySelectorAll('.sr-keep').forEach(c => { c.checked = c.dataset.inlist === '1'; });
+    list.forEach(o => {
+      const dt = o.date ? new Date(o.date).toLocaleDateString() : '—';
+      const tag = o.inList ? ' <span style="color:#8fd19e">(in Rounds list — kept)</span>' : ' <span style="color:#ffb347">(orphan — not in Rounds list)</span>';
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-top:1px solid rgba(255,255,255,0.12)';
+      row.innerHTML =
+        '<input type="checkbox" class="sr-keep" data-key="' + encodeURIComponent(o.key) + '" data-inlist="' + (o.inList ? '1' : '0') + '" ' + (o.inList ? 'checked' : '') + ' style="margin-top:3px;width:auto">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-weight:600">' + (o.course) + tag + '</div>' +
+          '<div style="color:#9aa0a6;font-size:11px">' + dt + ' · ' + o.players.size + ' player' + (o.players.size !== 1 ? 's' : '') + ' · ' + Array.from(o.players).join(', ') + (o.code ? (' · code ' + o.code) : ' · (no code)') + '</div>' +
+        '</div>' +
+        (o.code ? '<button class="sr-export" data-code="' + o.code + '" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:5px 10px;cursor:pointer;font-size:11px;flex:0 0 auto">Export</button>' : '');
+      listWrap.appendChild(row);
+    });
+    document.getElementById('sr-log').appendChild(listWrap);
+
+    // Per-round Export → downloads the FULL game JSON (for payout verification).
+    listWrap.querySelectorAll('.sr-export').forEach(btn => btn.onclick = async () => {
+      const code = btn.dataset.code; btn.textContent = '…';
+      try {
+        const g = (typeof loadGame === 'function') ? await loadGame(code) : null;
+        if (!g) { log('Could not load the full game for code ' + code + ' (it may exist only as a summary).', '#ff8a80'); btn.textContent = 'Export'; return; }
+        download('bad-golf-round-' + code + '.json', JSON.stringify(g, null, 2));
+        log('📥 Exported round <b>' + code + '</b> (bad-golf-round-' + code + '.json) — send me this file to verify the Huckle/Nassau payout.', '#8fd19e');
+      } catch (e) { log('Export failed for ' + code + ': ' + (e && e.message || 'error'), '#ff8a80'); }
+      btn.textContent = 'Export';
+    });
+
+    // 3) Apply / Cancel.
+    const actions = document.getElementById('sr-actions');
+    actions.innerHTML =
+      '<button id="sr-sync" style="background:#1d6fd6;border:none;color:#fff;border-radius:8px;padding:9px 14px;cursor:pointer;font-weight:600">↺ Match my Rounds list</button>' +
+      '<button id="sr-go" style="margin-left:8px;background:#c0392b;border:none;color:#fff;border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:600">Apply — clear unticked stats (cannot be undone)</button>' +
+      '<button id="sr-cancel" style="margin-left:8px;background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:9px 16px;cursor:pointer">Cancel</button>';
+    document.getElementById('sr-sync').onclick = () => { reTick(); log('Re-ticked to match your Rounds list (' + (list.length - orphanCount) + ' kept, ' + orphanCount + ' orphan(s) will clear).', '#9ad0ff'); };
+    document.getElementById('sr-cancel').onclick = () => { log('<br>Cancelled — nothing changed.', '#9ad0ff'); actions.innerHTML = ''; };
+    document.getElementById('sr-go').onclick = async () => {
+      const keep = new Set(Array.from(listWrap.querySelectorAll('.sr-keep:checked')).map(c => decodeURIComponent(c.dataset.key)));
+      if (!keep.size && !confirm('No round is ticked to keep — this clears ALL player stats. Continue?')) return;
+      let before = 0, after = 0, playersCleared = 0;
+      roster.forEach(p => { const h = p.scoreHistory || []; before += h.length; const kept = h.filter(r => keep.has(recKey(r))); after += kept.length; if (h.length && kept.length === 0) playersCleared++; });
+      if (!confirm('Reset stats now?\n\nRounds kept: ' + keep.size + '\nStat rows: ' + before + ' → ' + after + '\nPlayers fully zeroed: ' + playersCleared + '\n\nA backup was already downloaded. This cannot be undone.')) return;
+      actions.innerHTML = 'Applying…';
+      roster.forEach(p => { if (Array.isArray(p.scoreHistory)) p.scoreHistory = p.scoreHistory.filter(r => keep.has(recKey(r))); });
+      try { await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false); }
+      catch (e) { log('Save failed: ' + (e && e.message || 'error') + ' — nothing was changed on the server.', '#ff8a80'); actions.innerHTML = ''; return; }
+      log('<br><b>✅ Stats reset.</b> Kept ' + keep.size + ' round(s) (' + after + ' stat row' + (after !== 1 ? 's' : '') + '). All other stats cleared. Games, courses &amp; account untouched.', '#8fd19e');
+      log('Reload the app — and re-open it on other phones — to see the clean stats everywhere.', '#9ad0ff');
+      document.getElementById('sr-title').textContent = 'Stats Reset — done';
+      actions.innerHTML = '';
+    };
+  } catch (e) {
+    log('Stats reset failed: ' + (e && e.message || 'error'), '#ff8a80');
+    console.error('statsReset crashed:', e);
+  }
+}
+window.bgStatsReset = () => statsReset();
+{
+  const m = location.search.match(/[?&]statsreset=([A-Za-z0-9]+)/);
+  if (m) setTimeout(() => { window.bgStatsReset(); }, 2500);
 }
 
 // ---------- multi-nine finder (?multinine=ST) -----------------------------
