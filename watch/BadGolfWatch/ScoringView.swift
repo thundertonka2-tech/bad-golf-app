@@ -11,38 +11,10 @@ struct ScoringView: View {
     @EnvironmentObject var store: RoundStore
 
     var body: some View {
-        VStack(spacing: 4) {
-            HStack {
-                Text("Hole \(store.currentHole)")
-                if let p = store.par { Text("· Par \(p)") }
-            }
-            .font(.system(size: 14, weight: .medium))
-            .foregroundStyle(.secondary)
-
-            HStack(spacing: 14) {
-                stepButton("minus.circle.fill") { store.bump(-1); haptic() }
-                Text("\(store.score(for: store.currentHole))")
-                    .font(.system(size: 56, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .frame(minWidth: 60)
-                stepButton("plus.circle.fill") { store.bump(1); haptic() }
-            }
-
-            Text(store.scoreToParText())
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.green)
-
-            HStack {
-                Button { store.prev() } label: { Image(systemName: "chevron.left") }
-                Spacer()
-                Text(syncLabel).font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer()
-                Button { store.next() } label: { Image(systemName: "chevron.right") }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.green)
+        ZStack {
+            Color.badGolfNavy.ignoresSafeArea()
+            content
         }
-        .padding(.horizontal, 6)
         .focusable(true)
         .digitalCrownRotation(
             .init(get: { Double(store.score(for: store.currentHole)) },
@@ -51,12 +23,48 @@ struct ScoringView: View {
         )
     }
 
+    private var content: some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text("Hole \(store.currentHole)")
+                if let p = store.par { Text("· Par \(p)") }
+            }
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.7))
+
+            HStack(spacing: 14) {
+                stepButton("minus.circle.fill") { store.bump(-1); haptic() }
+                Text("\(store.score(for: store.currentHole))")
+                    .font(.system(size: 56, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .frame(minWidth: 60)
+                stepButton("plus.circle.fill") { store.bump(1); haptic() }
+            }
+
+            Text(store.scoreToParText())
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.badGolfBlue)
+
+            HStack {
+                Button { store.prev() } label: { Image(systemName: "chevron.left") }
+                Spacer()
+                Text(syncLabel).font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.7))
+                Spacer()
+                Button { store.next() } label: { Image(systemName: "chevron.right") }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.badGolfBlue)
+        }
+        .padding(.horizontal, 6)
+    }
+
     private func stepButton(_ name: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: name).font(.system(size: 34))
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.green)
+        .foregroundStyle(Color.badGolfBlue)
     }
 
     private var syncLabel: String {

@@ -1,5 +1,5 @@
 // Bad Golf Watch — App entry
-// A 3-page swipe stack: Distance (primary), Scoring, Status.
+// A 2-page swipe stack: Distance (primary) and Scoring.
 // When a round is active it opens on Distance; otherwise the picker/empty state.
 
 import SwiftUI
@@ -8,6 +8,7 @@ import SwiftUI
 struct BadGolfWatchApp: App {
     @StateObject private var store = RoundStore()
     @StateObject private var loc = LocationManager()
+    @StateObject private var weather = WeatherService()
     @State private var page = 0
 
     var body: some Scene {
@@ -15,6 +16,7 @@ struct BadGolfWatchApp: App {
             RootView(page: $page)
                 .environmentObject(store)
                 .environmentObject(loc)
+                .environmentObject(weather)
                 .onAppear {
                     WatchConnectivityManager.shared.store = store
                     loc.requestPermission()
@@ -44,8 +46,6 @@ struct RootView: View {
                     .tag(0)
                 ScoringView()
                     .tag(1)
-                StatusView()
-                    .tag(2)
             }
             .tabViewStyle(.verticalPage)
         }

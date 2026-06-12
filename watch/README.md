@@ -15,15 +15,16 @@ The watch **never maps greens** (phone-only, per the permission spec) — it's r
 
 ## Files
 **`BadGolfWatch/`** — the watch app target source:
-- `BadGolfWatchApp.swift` — entry point, 3-page swipe stack (Distance / Scoring / Status).
+- `BadGolfWatchApp.swift` — entry point, 2-page swipe stack (Distance / Scoring).
 - `Models.swift` — Course / Hole / Round / HoleScore + the phone→watch handoff.
-- `Geo.swift` — haversine distance in yards.
+- `Geo.swift` — haversine distance in yards, bearing helper, plays-like math, and the shared brand color theme.
+- `WeatherService.swift` — Open-Meteo wind/temp + elevation (no API key) feeding the wind indicator and plays-like.
 - `LocationManager.swift` — watch GPS, battery-aware.
 - `SupabaseService.swift` — direct Supabase REST (fetch round/greens, write scores).
 - `SessionStore.swift` — shared session token / player id (App Group).
 - `RoundStore.swift` — state, local cache, offline sync queue.
 - `WatchConnectivityManager.swift` — receives the round handoff from the phone.
-- `DistanceView.swift`, `ScoringView.swift`, `RoundPickerView.swift`, `StatusView.swift` — screens.
+- `DistanceView.swift`, `ScoringView.swift`, `RoundPickerView.swift` — screens. (`StatusView.swift` remains in the folder but is no longer in the TabView.)
 
 **`iOS-companion/`** — add these to the **iOS app target** (the Capacitor app):
 - `PhoneWCSession.swift` — sends round + token to the watch; mirrors token to the App Group.

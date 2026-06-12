@@ -85,16 +85,33 @@
   }
 
   // --- native Google sign-in -----------------------------------------
+  // Uses @capgo/capacitor-social-login — the privacy-manifest-compliant
+  // plugin (ships PrivacyInfo.xcprivacy). This REPLACES the old
+  // @codetrix-studio/capacitor-google-auth, which triggered ITMS-91061.
+  var __socialLoginInit = false;
   async function nativeSignInWithGoogle() {
-    var Google = P.GoogleAuth;
+    var SocialLogin = P.SocialLogin;
     var supa = getSupa();
-    if (!Google || !supa) { toast('Google sign-in unavailable'); return; }
+    if (!SocialLogin || !supa) { toast('Google sign-in unavailable'); return; }
     try {
-      if (Google.initialize) {
-        try { await Google.initialize(); } catch (e) {}
+      if (!__socialLoginInit) {
+        await SocialLogin.initialize({
+          google: {
+            iOSClientId: '56040088868-larmg07pd7d9ue6crq69ka7e9pto6m4j.apps.googleusercontent.com'
+          }
+        });
+        __socialLoginInit = true;
       }
-      var user = await Google.signIn();
-      var idToken = user && (user.authentication && user.authentication.idToken || user.idToken);
+      var res = await SocialLogin.login({
+        provider: 'google',
+        options: { scopes: ['email', 'profile'] }
+      });
+      // Result shape varies: prefer res.result.idToken, fall back to
+      // res.result.accessToken (some versions nest the id token there).
+      var result = (res && res.result) || {};
+      var idToken = result.idToken ||
+        (result.accessToken && result.accessToken.idToken) ||
+        result.accessToken;
       if (!idToken) { toast('Google sign-in cancelled'); return; }
       var out = await supa.auth.signInWithIdToken({ provider: 'google', token: idToken });
       if (out.error) { toast('Google sign-in failed: ' + out.error.message); return; }
