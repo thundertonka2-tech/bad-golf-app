@@ -107,7 +107,10 @@
     try {
       Object.defineProperty(navigator, 'geolocation', { value: nativeGeo, configurable: true });
     } catch (e) {
-      navigator.geolocation = nativeGeo;
+      // On some iOS WKWebView builds navigator.geolocation is read-only, so a
+      // plain assignment throws in strict mode. Swallow it — the native plugin
+      // is still usable directly and this must never block app startup.
+      try { navigator.geolocation = nativeGeo; } catch (e2) {}
     }
     console.log('[native-bridge] Geolocation shim active.');
   })();
