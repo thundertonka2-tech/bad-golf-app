@@ -61,24 +61,36 @@
 
   window.BadGolfDeleteAccount = deleteAccount;
 
-  // Try to surface a button automatically. If the app has an account/settings
-  // menu with one of these hooks, we append a Delete row.
-  function injectButton() {
-    if (document.getElementById('bg-delete-account-btn')) return;
-    var host = document.querySelector('[data-account-menu], #accountMenu, .account-menu, #settingsMenu');
-    if (!host) return;
-    var btn = document.createElement('button');
-    btn.id = 'bg-delete-account-btn';
-    btn.textContent = 'Delete my account';
-    btn.style.cssText = 'display:block;width:100%;margin-top:12px;padding:12px;border:none;' +
-      'border-radius:10px;background:#7a1d1d;color:#fff;font-weight:600;cursor:pointer;';
-    btn.onclick = deleteAccount;
-    host.appendChild(btn);
-    console.log('[delete-account] Button injected.');
+  function isSignedIn() {
+    try { return (typeof window.isSignedIn === 'function') ? !!window.isSignedIn() : false; }
+    catch (e) { return false; }
   }
-  if (document.readyState === 'complete') setTimeout(injectButton, 800);
-  else window.addEventListener('load', function () { setTimeout(injectButton, 800); });
-  // Re-check when the user opens menus (cheap, idempotent).
-  document.addEventListener('click', function () { setTimeout(injectButton, 200); }, true);
+
+  // Drive the built-in Account-card button (#btn-delete-account): wire its click
+  // once, and show it only while signed in. Falls back to injecting a button if
+  // the built-in one isn't present (older layouts).
+  function wireButton() {
+    var btn = document.getElementById('btn-delete-account');
+    if (btn) {
+      if (!btn._bgWired) { btn.onclick = deleteAccount; btn._bgWired = true; }
+      btn.style.display = isSignedIn() ? 'block' : 'none';
+      return;
+    }
+    if (!isSignedIn() || document.getElementById('bg-delete-account-btn')) return;
+    var host = document.getElementById('account-card') ||
+      document.querySelector('[data-account-menu], #accountMenu, .account-menu, #settingsMenu');
+    if (!host) return;
+    var b = document.createElement('button');
+    b.id = 'bg-delete-account-btn';
+    b.textContent = 'Delete my account';
+    b.style.cssText = 'display:block;width:100%;margin-top:10px;padding:12px;border:none;' +
+      'border-radius:10px;background:#7a1d1d;color:#fff;font-weight:600;cursor:pointer;';
+    b.onclick = deleteAccount;
+    host.appendChild(b);
+  }
+  if (document.readyState === 'complete') setTimeout(wireButton, 600);
+  else window.addEventListener('load', function () { setTimeout(wireButton, 600); });
+  // Keep visibility in sync as the user signs in/out or opens the Account tab.
+  document.addEventListener('click', function () { setTimeout(wireButton, 200); }, true);
 
 })();
