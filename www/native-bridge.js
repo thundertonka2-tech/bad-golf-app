@@ -220,4 +220,40 @@
     console.log('[native-bridge] Chrome (status bar/splash/back) active.');
   })();
 
+  /* ------------------------------------------------------------------
+     6. UNIVERSAL LINKS  (invite link opens the app, else the web version)
+     When the app is opened via a https://…/golf-app.html?join=CODE (or ?tjoin=)
+     link, iOS hands us the URL here. The WKWebView loads the BUNDLED index, so
+     location.search won't contain it — we must parse the delivered URL and route
+     it into the app's existing join flow.
+  ------------------------------------------------------------------ */
+  (function universalLinks() {
+    var App = P.App;
+    if (!App) return;
+    function routeUrl(url) {
+      if (!url) return;
+      try {
+        var qi = url.indexOf('?');
+        if (qi < 0) return;
+        var params = new URLSearchParams(url.slice(qi + 1));
+        var tjoin = params.get('tjoin');
+        var join = params.get('join');
+        if (tjoin) {
+          try { localStorage.setItem('golf:pending-tjoin', tjoin); } catch (e) {}
+          var goT = function () { try { if (typeof window.handleTournamentJoinLink === 'function') window.handleTournamentJoinLink(); } catch (e) {} };
+          if (document.readyState === 'complete') setTimeout(goT, 500); else window.addEventListener('load', function () { setTimeout(goT, 700); });
+        }
+        if (join) {
+          var goJ = function () { try { if (typeof window.joinRoundByCode === 'function') window.joinRoundByCode(join); } catch (e) {} };
+          if (document.readyState === 'complete') setTimeout(goJ, 500); else window.addEventListener('load', function () { setTimeout(goJ, 700); });
+        }
+      } catch (e) {}
+    }
+    // Warm app: link tapped while the app is already running.
+    try { App.addListener('appUrlOpen', function (data) { routeUrl(data && data.url); }); } catch (e) {}
+    // Cold launch: app was opened FROM the link.
+    try { App.getLaunchUrl().then(function (r) { if (r && r.url) routeUrl(r.url); }).catch(function () {}); } catch (e) {}
+    console.log('[native-bridge] Universal Links active.');
+  })();
+
 })();

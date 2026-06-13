@@ -4023,6 +4023,8 @@
           <div class="card">
             <h2 id="wager-round-header" style="margin:0 0 2px">Round</h2>
             <div id="wager-round-sub" class="help-text" style="margin-top:0"></div>
+            <!-- Notify friends to come join/accept the bets on this round. -->
+            <button id="wager-propose" class="primary full" style="margin-top:10px">📣 Propose a bet to friends</button>
             <div style="display:flex;gap:6px;margin:12px 0 14px;flex-wrap:wrap">
               <button class="wager-type-tab small primary" data-wtype="win">Win pool</button>
               <button class="wager-type-tab small" data-wtype="h2h">Head-to-head</button>
@@ -5241,7 +5243,7 @@ const BG_BUILD = 'v2026.11.01';
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
 // otherwise it falls back to the web version automatically.
-const BG_PUBLIC_URL = 'https://thundertonka2-tech.github.io/golf-app.html';
+const BG_PUBLIC_URL = 'https://thundertonka2-tech.github.io/bad-golf-app/golf-app.html';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -20920,8 +20922,11 @@ async function renderAddFriendList(filter) {
 async function openInviteFriends() {
   if (!state.game || !state.game.code) { showToast('Open or start a round first'); return; }
   wireFriendsModals();
+  const modal = document.getElementById('invite-friends-modal');
+  const title = modal && modal.querySelector('h2');
+  if (title) title.textContent = 'Invite friends';   // reset (shared with the wager-propose modal)
   await renderInviteFriendsList();
-  document.getElementById('invite-friends-modal').classList.add('show');
+  modal.classList.add('show');
 }
 async function renderInviteFriendsList() {
   const el = document.getElementById('invite-friends-list');
@@ -20939,6 +20944,47 @@ async function renderInviteFriendsList() {
     b.textContent = '✓ Invited';
     b.disabled = true;
   });
+}
+
+// ---- Wager proposals: notify friends to come join/accept the bets on a round ----
+// Reuses the invite-friends modal + the game_invites notification pipe, tagged
+// with a 'W:' code prefix so the receiver's modal opens the Wager screen (where
+// the existing Join pool / Take head-to-head buttons live).
+async function openProposeWager(code) {
+  if (!code) { showToast('Open a round to wager on first'); return; }
+  wireFriendsModals();
+  const modal = document.getElementById('invite-friends-modal');
+  const title = modal && modal.querySelector('h2');
+  if (title) title.textContent = '📣 Propose a bet';
+  const el = document.getElementById('invite-friends-list');
+  if (el) {
+    await renderCrewFriends(); // refreshes _friendsCache
+    if (!_friendsCache || _friendsCache.length === 0) {
+      el.innerHTML = '<div class="help-text">Add friends first (Crew tab).</div>';
+    } else {
+      el.innerHTML = _friendsCache.map(p =>
+        '<button class="full inv-row" data-id="' + p.id + '" style="text-align:left;margin-bottom:6px">' + friendDisplayName(p) + '</button>'
+      ).join('');
+      el.querySelectorAll('.inv-row').forEach(b => b.onclick = async () => {
+        await sendWagerProposal(b.dataset.id, code);
+        b.textContent = '✓ Proposed';
+        b.disabled = true;
+      });
+    }
+  }
+  if (modal) modal.classList.add('show');
+}
+async function sendWagerProposal(toId, code) {
+  if (!supa || !_authUser || !code) return;
+  try {
+    const g = _wagerActiveGame || (await loadGame(code).catch(() => null));
+    const course = (g && g.course) || '';
+    await supa.from('game_invites').insert({
+      from_user: _authUser.id, to_user: toId,
+      game_code: 'W:' + code, course: course, status: 'pending'
+    });
+    showToast('Bet proposal sent');
+  } catch (e) { console.warn('sendWagerProposal', e); showToast('Could not send proposal'); }
 }
 async function sendGameInvite(toId) {
   if (!supa || !_authUser || !state.game) return;
@@ -21002,11 +21048,13 @@ async function showIncomingInvite(inv) {
   if (!inv) return false;
   // Already shown once on this device → never notify again.
   if (inviteAlreadySeen(inv.id)) return false;
-  const isT2 = String(inv.game_code || '').indexOf('T2:') === 0;
+  const code0 = String(inv.game_code || '');
+  const isT2 = code0.indexOf('T2:') === 0;
+  const isW = code0.indexOf('W:') === 0;   // wager proposal
   // Round invites: don't nag for rounds that are already over. Expire them so
   // they never notify again. Also remember I was invited (so the round won't
   // count toward my stats until I actually join).
-  if (!isT2) {
+  if (!isT2 && !isW) {
     try {
       const g0 = await loadGame(inv.game_code);
       if (g0 && g0.finishedAt) {
@@ -21015,6 +21063,15 @@ async function showIncomingInvite(inv) {
       }
     } catch (e) {}
     markInvitedNotJoined(inv.game_code);
+  } else if (isW) {
+    // Wager proposal: skip once the round is finished (wagers settle then, nothing to join).
+    try {
+      const g0 = await loadGame(code0.slice(2));
+      if (g0 && g0.finishedAt) {
+        try { await supa.from('game_invites').update({ status: 'expired' }).eq('id', inv.id); } catch (e) {}
+        return false;
+      }
+    } catch (e) {}
   }
   // Only ever notify ONCE: remember locally + mark seen in the cloud so it
   // won't pop again on the next launch. Accept/decline still update it by id.
@@ -21031,11 +21088,19 @@ async function showIncomingInvite(inv) {
   if (txt) {
     if (isT2) {
       txt.innerHTML = '<b>' + fromName + '</b> invited you to the tournament <b>' + (inv.course || '') + '</b> 🏆. Open it?';
+    } else if (isW) {
+      txt.innerHTML = '<b>' + fromName + '</b> started a bet' +
+        (inv.course ? ' on <b>' + inv.course + '</b>' : '') + ' 🎲. Join the action?';
     } else {
       txt.innerHTML = '<b>' + fromName + '</b> invited you to join their round' +
         (inv.course ? ' at <b>' + inv.course + '</b>' : '') + '. Join now?';
     }
   }
+  // Title + join-button label match the kind of invite.
+  { const titleEl = document.getElementById('incoming-invite-title');
+    if (titleEl) titleEl.textContent = isW ? '🎲 Bet proposal' : (isT2 ? '🏆 Tournament invite' : '⛳ Game invite'); }
+  { const joinBtn = document.getElementById('incoming-invite-join');
+    if (joinBtn) joinBtn.textContent = isW ? 'Join the bet' : (isT2 ? 'Open tournament' : 'Join round'); }
   document.getElementById('incoming-invite-modal').classList.add('show');
   return true;
 }
@@ -21050,6 +21115,14 @@ async function acceptIncomingInvite() {
     // added as a linked player). Take them straight to it.
     switchTab('tourneys');
     try { await openT2Home(inv.game_code.slice(3)); } catch (e) { showToast('Open the Events tab to see your tournament'); }
+    return;
+  }
+  if (String(inv.game_code || '').indexOf('W:') === 0) {
+    // Wager proposal — open the Wager screen for that round, where the Join pool /
+    // Take head-to-head buttons live (settles automatically from the final scores).
+    const wcode = inv.game_code.slice(2);
+    try { await openWagerScreen(wcode); }
+    catch (e) { switchTab('wager'); showToast('Open the Wager tab to join the bet'); }
     return;
   }
   const g = await loadGame(inv.game_code);
@@ -21084,6 +21157,8 @@ async function declineIncomingInvite() {
   _pendingInvite = null;
   if (!inv) return;
   try { await supa.from('game_invites').update({ status: 'declined' }).eq('id', inv.id); } catch (e) {}
+  // A wager proposal decline is just "no thanks to the bet" — nothing else to do.
+  if (String(inv.game_code || '').indexOf('W:') === 0) { return; }
   // Declined a ROUND invite: even if scores get entered for them anyway,
   // this round must never count toward their handicap.
   if (String(inv.game_code || '').indexOf('T2:') !== 0) {
@@ -21469,6 +21544,8 @@ async function openWagerScreen(code) {
   if (sub) sub.textContent = (g.players || []).map(p => displayFirst(p)).join(', ');
   buildWagerForms(g);
   refreshWagerLists();
+  // "Propose a bet to friends" — notify friends to come join/accept on this round.
+  { const pb = document.getElementById('wager-propose'); if (pb) pb.onclick = () => openProposeWager(code); }
   // Live updates: refresh wager lists when wagers change, and keep the game blob
   // fresh so settlement can fire the moment the round finishes.
   try { if (_wagerChannel && supa) supa.removeChannel(_wagerChannel); } catch (e) {}
