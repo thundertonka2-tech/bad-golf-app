@@ -114,46 +114,50 @@
       if (!__socialLoginInit) {
         await SocialLogin.initialize({
           google: {
-            iOSClientId: '56040088868-larmg07pd7d9ue6crq69ka7e9pto6m4j.apps.googleusercontent.com'
+            iOSClientId: '56040088868-larmg07pd7d9ue6crq69ka7e9pto6m4j.apps.googleusercontent.com',
+            mode: 'online'   // force a FRESH id_token (not a cached one) — Capgo docs
           }
         });
         __socialLoginInit = true;
       }
-      // Nonce handling (mirrors the Apple flow). Generate a raw nonce, send its
-      // SHA-256 to Google so it's embedded in the id_token, then hand the RAW
-      // nonce to Supabase. This fixes the iPad error "Passed nonce and nonce in
-      // id_token should either both exist or not" — we keep the two in lockstep.
-      var rawNonce = randomNonce(32);
-      var hashedNonce = await sha256Hex(rawNonce);
-      var res = await SocialLogin.login({
-        provider: 'google',
-        options: { scopes: ['email', 'profile'], nonce: hashedNonce }
-      });
-      // Result shape varies: prefer res.result.idToken, fall back to
-      // res.result.accessToken (some versions nest the id token there).
-      var result = (res && res.result) || {};
-      var idToken = result.idToken ||
-        (result.accessToken && result.accessToken.idToken) ||
-        result.accessToken;
-      // Supabase needs a JWT STRING. If the plugin handed back an object
-      // (e.g. { token: ... }), unwrap it so we never send the wrong thing.
-      if (idToken && typeof idToken !== 'string') {
-        idToken = idToken.token || idToken.idToken || idToken.value || '';
+      // One sign-in attempt. Per Capgo's Supabase guide: the RAW nonce goes to
+      // Supabase and its SHA-256 (hex) goes to Google (embedded in the id_token).
+      // We only forward the nonce to Supabase when the token actually carries one
+      // (a silent re-sign-in sometimes returns a token without it).
+      async function attempt() {
+        var rawNonce = randomNonce(32);
+        var hashedNonce = await sha256Hex(rawNonce);
+        var res = await SocialLogin.login({
+          provider: 'google',
+          options: { scopes: ['email', 'profile'], nonce: hashedNonce }
+        });
+        var result = (res && res.result) || {};
+        var idToken = result.idToken ||
+          (result.accessToken && result.accessToken.idToken) ||
+          result.accessToken;
+        if (idToken && typeof idToken !== 'string') {
+          idToken = idToken.token || idToken.idToken || idToken.value || '';
+        }
+        if (!idToken) return { error: { message: 'no ID token returned by plugin' } };
+        var tokenHasNonce = false;
+        try {
+          var b64 = idToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+          while (b64.length % 4) b64 += '=';
+          tokenHasNonce = !!JSON.parse(atob(b64)).nonce;
+        } catch (e) {}
+        var args = { provider: 'google', token: idToken };
+        if (tokenHasNonce) args.nonce = rawNonce;
+        return await supa.auth.signInWithIdToken(args);
       }
-      if (!idToken) { toast('Google: no ID token returned by plugin'); return; }
-      // Only pass the nonce to Supabase if the id_token actually carries one — a
-      // silent re-sign-in can return a token without it, and passing one then
-      // would trigger the very same "both exist or not" error in reverse.
-      var tokenHasNonce = false;
-      try {
-        var b64 = idToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-        while (b64.length % 4) b64 += '=';
-        tokenHasNonce = !!JSON.parse(atob(b64)).nonce;
-      } catch (e) {}
-      var args = { provider: 'google', token: idToken };
-      if (tokenHasNonce) args.nonce = rawNonce;
-      var out = await supa.auth.signInWithIdToken(args);
-      if (out.error) { toast('Google sign-in failed: ' + out.error.message); return; }
+      var out = await attempt();
+      // iOS caches Google tokens; a cached token carries a STALE nonce → "Nonce
+      // mismatch". Capgo's fix: log out of Google and retry once, which forces a
+      // brand-new token generated with our current nonce.
+      if (out && out.error && /nonce/i.test(out.error.message || '')) {
+        try { await SocialLogin.logout({ provider: 'google' }); } catch (e) {}
+        out = await attempt();
+      }
+      if (out && out.error) { toast('Google sign-in failed: ' + out.error.message); return; }
       // Success is silent — the app's auth listener hides the sign-in screen.
       console.log('[native-auth] Google sign-in OK');
     } catch (e) {
