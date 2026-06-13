@@ -136,8 +136,8 @@
       }
       if (!idToken) { toast('Google: no ID token returned by plugin'); return; }
       var out = await supa.auth.signInWithIdToken({ provider: 'google', token: idToken });
-      if (out.error) { toast('Google rejected by Supabase: ' + out.error.message); return; }
-      toast('Google sign-in OK');
+      if (out.error) { toast('Google sign-in failed: ' + out.error.message); return; }
+      // Success is silent — the app's auth listener hides the sign-in screen.
       console.log('[native-auth] Google sign-in OK');
     } catch (e) {
       if (e && /cancel|popup_closed/i.test(e.message || '')) return;
