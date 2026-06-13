@@ -16,7 +16,13 @@
 (function () {
   'use strict';
 
-  if (!window.__BADGOLF_NATIVE__) {
+  // Native detection: trust the flag native-bridge.js sets, but ALSO detect
+  // Capacitor directly as a safety net (covers any script-ordering timing miss
+  // where the flag isn't set yet when this file runs).
+  var __cap = window.Capacitor;
+  var __isNative = window.__BADGOLF_NATIVE__ ||
+    !!(__cap && ((__cap.isNativePlatform && __cap.isNativePlatform()) || __cap.isNative));
+  if (!__isNative) {
     console.log('[native-auth] Web mode — keeping web OAuth.');
     return;
   }
@@ -43,15 +49,22 @@
     return window.supa || (typeof supa !== 'undefined' ? supa : null);
   }
   function toast(msg) {
-    if (typeof window.gToast === 'function') window.gToast(msg);
-    else console.log('[native-auth]', msg);
+    // gToast is scoped inside the app and not exposed on window, so prefer a
+    // VISIBLE alert on device — otherwise sign-in errors vanish into the
+    // console where the user can't see them.
+    try { if (typeof window.gToast === 'function') { window.gToast(msg); return; } } catch (e) {}
+    try { alert(msg); } catch (e) { console.log('[native-auth]', msg); }
   }
 
   // --- native Sign in with Apple -------------------------------------
   async function nativeSignInWithApple() {
     var Apple = P.SignInWithApple;
     var supa = getSupa();
-    if (!Apple || !supa) { toast('Apple sign-in unavailable'); return; }
+    if (!Apple || !supa) {
+      toast('Apple unavailable — plugin:' + (Apple ? 'yes' : 'NO') +
+            ' supabase:' + (supa ? 'yes' : 'NO'));
+      return;
+    }
     try {
       var rawNonce = randomNonce(32);
       var hashedNonce = await sha256Hex(rawNonce);
@@ -65,7 +78,7 @@
       var out = await supa.auth.signInWithIdToken({
         provider: 'apple', token: idToken, nonce: rawNonce
       });
-      if (out.error) { toast('Apple sign-in failed: ' + out.error.message); return; }
+      if (out.error) { toast('Apple rejected by Supabase: ' + out.error.message); return; }
       // Capture the name Apple only returns on FIRST sign-in.
       var given = res.response.givenName, family = res.response.familyName;
       if ((given || family) && out.data && out.data.user) {
@@ -79,7 +92,7 @@
       console.log('[native-auth] Apple sign-in OK');
     } catch (e) {
       if (e && /cancel/i.test(e.message || '')) return;
-      toast('Apple sign-in error');
+      toast('Apple error: ' + (e && (e.message || e.code) || e));
       console.error('[native-auth] apple', e);
     }
   }
@@ -92,7 +105,11 @@
   async function nativeSignInWithGoogle() {
     var SocialLogin = P.SocialLogin;
     var supa = getSupa();
-    if (!SocialLogin || !supa) { toast('Google sign-in unavailable'); return; }
+    if (!SocialLogin || !supa) {
+      toast('Google unavailable — plugin:' + (SocialLogin ? 'yes' : 'NO') +
+            ' supabase:' + (supa ? 'yes' : 'NO'));
+      return;
+    }
     try {
       if (!__socialLoginInit) {
         await SocialLogin.initialize({
@@ -112,13 +129,19 @@
       var idToken = result.idToken ||
         (result.accessToken && result.accessToken.idToken) ||
         result.accessToken;
-      if (!idToken) { toast('Google sign-in cancelled'); return; }
+      // Supabase needs a JWT STRING. If the plugin handed back an object
+      // (e.g. { token: ... }), unwrap it so we never send the wrong thing.
+      if (idToken && typeof idToken !== 'string') {
+        idToken = idToken.token || idToken.idToken || idToken.value || '';
+      }
+      if (!idToken) { toast('Google: no ID token returned by plugin'); return; }
       var out = await supa.auth.signInWithIdToken({ provider: 'google', token: idToken });
-      if (out.error) { toast('Google sign-in failed: ' + out.error.message); return; }
+      if (out.error) { toast('Google rejected by Supabase: ' + out.error.message); return; }
+      toast('Google sign-in OK');
       console.log('[native-auth] Google sign-in OK');
     } catch (e) {
       if (e && /cancel|popup_closed/i.test(e.message || '')) return;
-      toast('Google sign-in error');
+      toast('Google error: ' + (e && (e.message || e.code) || e));
       console.error('[native-auth] google', e);
     }
   }
