@@ -150,11 +150,14 @@
     margin-bottom: 20px;
     overflow-x: auto;
   }
-  /* The full-screen GPS overlay should be JUST the map. The blurred tab bar can
-     leak above the overlay in iOS WKWebView (its backdrop-filter makes its own
-     stacking context), so hide it while GPS is open — tabs return on the Score
-     screen when the overlay closes. */
-  body.gps-open .tabs { display: none !important; }
+  /* The full-screen GPS overlay should be JUST the map. In iOS WKWebView,
+     elements with their own stacking context (the blurred tab bar, the score
+     screen header, the active-round bar) can paint ABOVE a fixed overlay and
+     leak in at the top. The GPS overlay is a separate top-level element, so we
+     simply hide the whole underlying app while it's open — everything returns
+     the moment the overlay closes. */
+  body.gps-open #main,
+  body.gps-open #active-round-bar { display: none !important; }
   .tab {
     flex: 1;
     min-width: 70px;
@@ -1663,6 +1666,21 @@
   }
   #gps-overlay.open { display: block; }
   #gps-map { position: absolute; inset: 0; }
+  /* Loading state — shown the instant GPS opens so a tap clearly registers,
+     hidden once the map + first hole are ready. */
+  #gps-loading {
+    position: absolute; inset: 0; z-index: 40; display: none;
+    flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    background: #0c0f0c; color: #fff;
+  }
+  #gps-loading.show { display: flex; }
+  #gps-loading .gps-spin {
+    width: 38px; height: 38px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.25); border-top-color: #fff;
+    animation: gps-spin 0.8s linear infinite;
+  }
+  #gps-loading .gps-loading-txt { font-size: 14px; font-weight: 600; opacity: 0.9; }
+  @keyframes gps-spin { to { transform: rotate(360deg); } }
   #gps-overlay .maplibregl-ctrl-attrib { font-size: 9px; opacity: 0.75; }
 
   .gps-topbar {
@@ -4856,6 +4874,7 @@
      ============================================================ -->
 <div id="gps-overlay">
   <div id="gps-map"></div>
+  <div id="gps-loading"><div class="gps-spin"></div><div class="gps-loading-txt">Loading GPS…</div></div>
   <div id="gps-wind-motion" aria-hidden="true"><div class="wm-field" id="gps-wm-field"></div></div>
   <button id="gps-close">✕</button>
 
@@ -5218,6 +5237,11 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
 const BG_BUILD = 'v2026.11.01';
+// Public website URL — used for SHAREABLE invite links. Inside the native app
+// location.origin is https://localhost (unreachable by recipients), so links must
+// point here. Universal Links open the native app from this URL when installed,
+// otherwise it falls back to the web version automatically.
+const BG_PUBLIC_URL = 'https://thundertonka2-tech.github.io/golf-app.html';
 
 const SUPABASE_URL = 'https://ojclesuwxhtzvrymqrwg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9qY2xlc3V3eGh0enZyeW1xcndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzgzMzksImV4cCI6MjA5NTAxNDMzOX0.GtqDnGsaAmolHplj65_90c50bwqzLaryZnlJYl2GoDk';
@@ -23190,7 +23214,7 @@ async function renderT2Home() {
     });
   }
   body.querySelectorAll('.t2-invite-btn').forEach(b => b.onclick = () => {
-    const link = location.origin + location.pathname + '?tjoin=' + b.dataset.token;
+    const link = BG_PUBLIC_URL + '?tjoin=' + b.dataset.token;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(link).then(() => showToast('Invite link copied')).catch(() => showToast(link));
     } else { showToast(link); }
@@ -25864,6 +25888,7 @@ const gpsView = (() => {
     // a course (only a course-less round stays on score). Mapped holes show the
     // rangefinder; unmapped holes show the map panel, nudging the crew to map.
     el('gps-overlay').classList.add('open');
+    el('gps-loading').classList.add('show');   // immediate feedback while the map loads
     document.body.classList.add('gps-open');   // hide the app tab bar behind the map
     el('gps-overlay').classList.toggle('spectating', !!spectate); // hides edit controls, leaves the scorecard
     mode = 'loading';
@@ -25879,6 +25904,7 @@ const gpsView = (() => {
     map.resize();
     updateTileToggle();
     showHole(hole);
+    el('gps-loading').classList.remove('show');   // map + first hole are up
     // Spectating: don't use the watcher's own GPS — drive the view from the
     // followed player's broadcast position instead. Otherwise start the watch.
     if (spectate) { try { renderSpectatePicker(); applySpectatePos(); } catch (e) {} }
@@ -25894,6 +25920,7 @@ const gpsView = (() => {
     stopWatch();
     mode = 'closed';
     el('gps-overlay').classList.remove('open', 'viewing', 'map-only', 'spectating');
+    el('gps-loading').classList.remove('show');
     document.body.classList.remove('gps-open');   // restore the tab bar on the Score screen
     spectate = null;
     { const _sb = el('gps-spectate-bar'); if (_sb) _sb.remove(); }
@@ -26014,27 +26041,32 @@ const gpsView = (() => {
     try {
       const parsArr2 = state.game && state.game.pars;
       const par2 = parsArr2 ? (parsArr2[hole - 1] || 4) : 4;
+      // Ask on EVERY unmarked par-4/5 hole (no per-course "dismiss forever" — the
+      // bar auto-hides after 3s and simply reappears on the next unmarked hole).
       if (typeof isAdmin === 'function' && isAdmin()
         && !state._mapSession && !state._fwcSession && !spectate
         && mode === 'view' && hd && !hd.fwc && (par2 === 4 || par2 === 5)
-        && courseId && !fwcDismissed.has(courseId)
-        && !fwcCourseComplete()) {
+        && courseId && !fwcCourseComplete()) {
         const b = el('gps-fwc-prompt');
         b.innerHTML = '<div class="inner">'
           + '<span class="msg">Please help us improve by marking the target.</span>'
           + '<button class="mark" id="gps-fwc-mark">Mark it</button>'
           + '<button class="no" id="gps-fwc-no">✕</button></div>';
         b.classList.add('show');
+        // Auto-dismiss after 3s if untouched (reappears on the next unmarked hole).
+        clearTimeout(b._hideTimer);
+        b._hideTimer = setTimeout(() => b.classList.remove('show'), 3000);
         el('gps-fwc-mark').onclick = () => {
           // Single-hole capture: enter fwc mode WITHOUT _fwcSession, so fwcTap
           // returns to the live view after one save. The tap instruction shows in
           // the top banner; the prompt bar tucks away.
+          clearTimeout(b._hideTimer);
           b.classList.remove('show');
           el('gps-banner').innerHTML = 'Hole ' + hole + ': tap the <b>FAIRWAY CENTER</b><small>The ideal landing area</small>';
           el('gps-banner').style.display = 'block';
           mode = 'fwc';
         };
-        el('gps-fwc-no').onclick = () => { if (courseId) fwcDismissed.add(courseId); b.classList.remove('show'); };
+        el('gps-fwc-no').onclick = () => { clearTimeout(b._hideTimer); b.classList.remove('show'); };
       }
     } catch (e) {}
   }
@@ -27555,6 +27587,10 @@ const gpsView = (() => {
 async function openPlayGps() {
   try {
     if (state.viewOnlyMode) return;
+    // Normal play is NEVER a map/fwc session. Clear any stale session flags so a
+    // dedicated "map this course" / "mark fairway centers" run that didn't close
+    // cleanly can't keep suppressing the during-play "mark the target" prompt.
+    if (state) { state._mapSession = false; state._fwcSession = false; }
     if (typeof gpsView !== 'undefined' && gpsView.open) await gpsView.open({ auto: true });
   } catch (e) {}
 }
@@ -27620,7 +27656,9 @@ setTimeout(() => {
 // post-LLC automated sender can reuse the same queue if we ever want it.
 // ============================================================
 function buildJoinLink(code) {
-  return location.origin + location.pathname + (code ? '?join=' + encodeURIComponent(code) : '');
+  // Always the PUBLIC url (not location.origin, which is https://localhost in the
+  // native app) so the link works for recipients and Universal-Links into the app.
+  return BG_PUBLIC_URL + (code ? '?join=' + encodeURIComponent(code) : '');
 }
 async function shareGameInvite(name) {
   const code = ($('display-code') && $('display-code').dataset.code) || (state.game && state.game.code) || '';
