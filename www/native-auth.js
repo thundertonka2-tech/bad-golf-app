@@ -119,9 +119,15 @@
         });
         __socialLoginInit = true;
       }
+      // Nonce handling (mirrors the Apple flow). Generate a raw nonce, send its
+      // SHA-256 to Google so it's embedded in the id_token, then hand the RAW
+      // nonce to Supabase. This fixes the iPad error "Passed nonce and nonce in
+      // id_token should either both exist or not" — we keep the two in lockstep.
+      var rawNonce = randomNonce(32);
+      var hashedNonce = await sha256Hex(rawNonce);
       var res = await SocialLogin.login({
         provider: 'google',
-        options: { scopes: ['email', 'profile'] }
+        options: { scopes: ['email', 'profile'], nonce: hashedNonce }
       });
       // Result shape varies: prefer res.result.idToken, fall back to
       // res.result.accessToken (some versions nest the id token there).
@@ -135,7 +141,18 @@
         idToken = idToken.token || idToken.idToken || idToken.value || '';
       }
       if (!idToken) { toast('Google: no ID token returned by plugin'); return; }
-      var out = await supa.auth.signInWithIdToken({ provider: 'google', token: idToken });
+      // Only pass the nonce to Supabase if the id_token actually carries one — a
+      // silent re-sign-in can return a token without it, and passing one then
+      // would trigger the very same "both exist or not" error in reverse.
+      var tokenHasNonce = false;
+      try {
+        var b64 = idToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4) b64 += '=';
+        tokenHasNonce = !!JSON.parse(atob(b64)).nonce;
+      } catch (e) {}
+      var args = { provider: 'google', token: idToken };
+      if (tokenHasNonce) args.nonce = rawNonce;
+      var out = await supa.auth.signInWithIdToken(args);
       if (out.error) { toast('Google sign-in failed: ' + out.error.message); return; }
       // Success is silent — the app's auth listener hides the sign-in screen.
       console.log('[native-auth] Google sign-in OK');
