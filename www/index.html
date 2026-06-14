@@ -3959,11 +3959,6 @@
           </div>
           <div id="crew-friend-requests"></div>
           <div id="crew-friends-list"><div class="help-text">Loading…</div></div>
-      <div class="card" id="feedback-inbox-card" style="display:none;margin-top:14px">
-        <h2>📬 Feedback inbox <span class="small-text" style="color:var(--text-muted)">(admins)</span></h2>
-        <div id="feedback-inbox-list"><div class="help-text">Loading…</div></div>
-        <button class="full" id="btn-admin-merge" style="margin-top:10px">🧹 Merge duplicate players</button>
-      </div>
         </div>
 
         <!-- Live now -->
@@ -3998,6 +3993,12 @@
         <h2>🛠 Admin</h2>
         <div id="admin-guard" class="help-text" style="display:none">Admins only — sign in with an admin account.</div>
         <div id="admin-body"></div>
+      </div>
+      <!-- Admin-only feedback inbox + merge duplicates (moved here from Crew). -->
+      <div class="card" id="feedback-inbox-card" style="display:none;margin-top:14px">
+        <h2>📬 Feedback inbox <span class="small-text" style="color:var(--text-muted)">(admins)</span></h2>
+        <div id="feedback-inbox-list"><div class="help-text">Loading…</div></div>
+        <button class="full" id="btn-admin-merge" style="margin-top:10px">🧹 Merge duplicate players</button>
       </div>
     </div>
 
@@ -4769,6 +4770,7 @@
     <div id="tam-ctp" class="small-text" style="display:none;margin:-6px 0 14px;padding:10px;background:var(--surface-2);border-radius:10px"></div>
     <div style="display:flex;flex-direction:column;gap:8px">
       <button class="primary full" id="tam-start">▶ Start round now</button>
+      <button class="full" id="tam-share">📤 Share invite link</button>
       <button class="full" id="tam-edit">Edit details</button>
       <button class="danger full" id="tam-delete">Delete game</button>
       <button class="full" id="tam-cancel">Cancel</button>
@@ -7242,6 +7244,10 @@ async function archiveScoresFromRound(g) {
   let meName = null;
   try { meName = await getMeName(); } catch (e) {}
   const iSkipThisRound = !!(meName && isInvitedNotJoined(g.code));
+  // A round I deleted from MY list must never re-enter MY stats, even if it's
+  // re-archived later from a sync (the round can still be live for other players).
+  let iDeletedThisRound = false;
+  try { iDeletedThisRound = !!(meName && getHiddenRounds().includes(g.code)); } catch (e) {}
 
   g.players.forEach(p => {
     const arr = g.scores[p.id] || [];
@@ -7254,6 +7260,7 @@ async function archiveScoresFromRound(g) {
     // Invited but never joined (ignored the invite) → same treatment for ME:
     // it can't count until I reopen the round and join it.
     if (iSkipThisRound && p.name === meName) return;
+    if (iDeletedThisRound && p.name === meName) return;
 
     // Only count gross + differential for complete 18-hole rounds (per WHS,
     // a partial round's gross is meaningless). Incomplete rounds still get
@@ -20572,6 +20579,8 @@ async function renderCrewRecent() {
   if (!el) return;
   let recent = await getRecent();
   if (!recent || recent.length === 0) { el.innerHTML = '<div class="help-text">No rounds yet.</div>'; return; }
+  // Drop rounds you've removed from your list so a re-synced copy can't reappear.
+  try { const hiddenSet = new Set(getHiddenRounds()); recent = recent.filter(r => r && !hiddenSet.has(r.code)); } catch (e) {}
   // Friends-only: only show rounds that include YOU or an accepted friend.
   const allowed = await friendNameSet();
   if (allowed && allowed.size) {
@@ -23994,10 +24003,10 @@ window.switchTab = function(name) {
   if (name === 'rounds') loadRounds();
   if (name === 'home') renderHome();
   if (name === 'stats') renderStats();
-  if (name === 'crew') { renderCrew(); try { renderFeedbackInbox(); } catch (e) {} }
+  if (name === 'crew') { renderCrew(); }
   if (name === 'clubs') renderClubs();
   if (name === 'wager') { try { renderWagerTab(); } catch (e) { console.warn('renderWagerTab', e); } }
-  if (name === 'admin') { try { renderAdmin(); } catch (e) { console.warn('renderAdmin', e); } }
+  if (name === 'admin') { try { renderAdmin(); } catch (e) { console.warn('renderAdmin', e); } try { renderFeedbackInbox(); } catch (e) {} }
   // Setup tab with a round in progress: don't silently drop into edit-live mode.
   // Ask first — continue the round, edit its settings, or start a new game
   // (which gives a clean "Start round" form). Reset the form behind the prompt
@@ -24352,6 +24361,10 @@ async function init() {
   // New-round confirm modal: Discard & start new — wipe state, open fresh setup.
   $('nrc-discard-and-new').onclick = async () => {
     if (!confirm('Throw away the current round without saving? This cannot be undone.')) return;
+    // "Throw away" means GONE — delete the round from the cloud + recent + every
+    // player's stats so it can't linger as a phantom LIVE round or in Recent.
+    const code = state.game && state.game.code;
+    if (code) { try { await deleteRecentGame(code); } catch (e) {} }
     await discardActiveRound();
     $('new-round-confirm-modal').classList.remove('show');
     openFreshSetupForm();
@@ -24445,6 +24458,9 @@ async function init() {
       return;
     }
     if (!(await uiConfirm(`Abandon this round without saving? All scores entered will be lost. This cannot be undone.`, { title: 'Abandon round?', okLabel: 'Abandon' }))) return;
+    // Abandon = GONE: delete from the cloud + recent + stats so it doesn't keep
+    // showing as a LIVE round in the Crew/Home feed.
+    if (code) { try { await deleteRecentGame(code); } catch (e) {} }
     await discardActiveRound();
     switchTab('home');
     showToast('Round abandoned');
@@ -25510,6 +25526,26 @@ async function init() {
     $('tourney-actions-modal').classList.remove('show');
     state.activeTourneyForActions = null;
   };
+  // Share invite link for a scheduled round. If it's already live, the link joins
+  // straight into the round (?join=CODE); otherwise it shares the event details +
+  // app link so friends can hop in once it starts.
+  $('tam-share').onclick = async () => {
+    const t = state.activeTourneyForActions;
+    if (!t) return;
+    const link = (t.status === 'live' && t.activeCode)
+      ? (BG_PUBLIC_URL + '?join=' + encodeURIComponent(t.activeCode))
+      : BG_PUBLIC_URL;
+    let dateStr = '';
+    try { if (t.date) dateStr = new Date(t.date + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); } catch (e) {}
+    const text = 'Join "' + (t.name || 'our round') + '"' +
+      (t.course ? ' at ' + t.course : '') +
+      (dateStr ? ' (' + dateStr + (t.time ? ' · ' + t.time : '') + ')' : '') +
+      ' on Bad Golf! ' + link;
+    try { if (navigator.share) { await navigator.share({ text: text }); return; } }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(text); showToast('Invite copied — paste it anywhere 📋'); }
+    catch (e) { showToast(text, 6000); }
+  };
   $('tourney-actions-modal').onclick = (e) => {
     if (e.target.id === 'tourney-actions-modal') {
       $('tourney-actions-modal').classList.remove('show');
@@ -26070,19 +26106,28 @@ const gpsView = (() => {
     document.body.classList.add('gps-open');   // hide the app tab bar behind the map
     el('gps-overlay').classList.toggle('spectating', !!spectate); // hides edit controls, leaves the scorecard
     mode = 'loading';
-    try { await loadLib(); } catch (e) {
+    // Load the map library, course data, and tile config IN PARALLEL (they're
+    // independent) instead of one-after-another — cuts the start→GPS wait.
+    let cfg;
+    try {
+      const results = await Promise.all([ loadLib(), loadStore(), tileConfig() ]);
+      cfg = results[2];
+    } catch (e) {
       gToast('Could not load the map — check your connection'); close(); return;
     }
-    await loadStore();
     hole = state.currentHole || 1;
     const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === courseId) : null;
     courseCenter = firstMappedPoint() || null;
-    const cfg = await tileConfig();
     ensureMap(cfg);
     map.resize();
     updateTileToggle();
     showHole(hole);
-    el('gps-loading').classList.remove('show');   // map + first hole are up
+    // Keep the spinner up until the map actually paints its first frame — tiles
+    // load over the network and showHole() returns before they appear, which
+    // looked frozen. Hide on the map's first idle, with a safety timeout.
+    { const hideSpin = () => { try { el('gps-loading').classList.remove('show'); } catch (e) {} };
+      try { if (map && map.once) { map.once('idle', hideSpin); setTimeout(hideSpin, 8000); } else hideSpin(); }
+      catch (e) { hideSpin(); } }
     // Spectating: don't use the watcher's own GPS — drive the view from the
     // followed player's broadcast position instead. Otherwise start the watch.
     if (spectate) { try { renderSpectatePicker(); applySpectatePos(); } catch (e) {} }
@@ -28037,17 +28082,16 @@ function defaultClubBag() {
 // half-filled bag (or no bag) still suggests a sensible club instead of getting
 // stuck on the one club that had a range set.
 function myClubFor(y) {
-  const byLabel = {};
-  defaultClubBag().forEach(c => { byLabel[c.label] = { label: c.label, min: c.min, max: c.max }; });
-  (window._myClubs || []).forEach(c => {
-    if (c && c.label && c.min != null && c.max != null && Number(c.max) > 0) {
-      byLabel[c.label] = { label: c.label, min: Number(c.min), max: Number(c.max) };
-    }
-  });
-  const clubs = Object.keys(byLabel).map(k => byLabel[k]);
+  // Recommend ONLY from the player's own configured bag — never seed the default
+  // clubs, or a club they removed (e.g. a 54° wedge) would get suggested even
+  // though it's not in their bag. Returns null when they haven't set a bag yet;
+  // callers fall back to typicalClub() for the generic amateur recommendation.
+  const clubs = (window._myClubs || [])
+    .filter(c => c && c.label && c.min != null && c.max != null && Number(c.max) > 0)
+    .map(c => ({ label: c.label, min: Number(c.min), max: Number(c.max) }));
   if (!clubs.length) return null;
-  const mid = c => (Number(c.min) + Number(c.max)) / 2;
-  const inRange = clubs.filter(c => y >= Number(c.min) && y <= Number(c.max));
+  const mid = c => (c.min + c.max) / 2;
+  const inRange = clubs.filter(c => y >= c.min && y <= c.max);
   const pool = inRange.length ? inRange : clubs.slice();
   pool.sort((a, b) => Math.abs(mid(a) - y) - Math.abs(mid(b) - y));
   return pool[0].label;
