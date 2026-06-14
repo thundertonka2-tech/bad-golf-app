@@ -11,8 +11,11 @@
 <!-- Warm the map up in the background so the FIRST "Start round → GPS" is fast:
      fetch (don't execute) the MapLibre library + CSS while the app boots, and
      open early connections to the imagery + data hosts. -->
-<link rel="preload" as="script" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" crossorigin>
-<link rel="preload" as="style" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" crossorigin>
+<!-- prefetch (not preload): the ~800KB map library fetches at idle/low priority
+     so it doesn't compete with first paint, but is still warm in cache when GPS
+     opens. (It's also lazy-loaded on demand in loadLib() as the real trigger.) -->
+<link rel="prefetch" as="script" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js" crossorigin>
+<link rel="prefetch" as="style" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" crossorigin>
 <link rel="preconnect" href="https://server.arcgisonline.com" crossorigin>
 <link rel="preconnect" href="https://ojclesuwxhtzvrymqrwg.supabase.co" crossorigin>
 <script async src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
@@ -5257,7 +5260,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.02';
+const BG_BUILD = 'v2026.11.03';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -5342,7 +5345,12 @@ async function initAuth() {
     // Remember this device has had a real sign-in — powers the offline grace
     // path (returning users get in offline; brand-new users still must sign in).
     if (_authUser) { try { localStorage.setItem('golf:has-signed-in', '1'); } catch (e) {} }
-    await fetchMyRole();
+    // Don't block first paint on the role lookup — it only gates admin-only UI.
+    // Resolve it in the background and refresh the admin gating + account card
+    // when it lands. (Saves one network round-trip on the startup critical path.)
+    fetchMyRole()
+      .then(() => { try { applyAdminGating(); } catch (e) {} try { renderAccountUI(); } catch (e) {} })
+      .catch(() => {});
     supa.auth.onAuthStateChange(async (_event, session) => {
       _authUser = session ? session.user : null;
       await fetchMyRole();
@@ -6111,9 +6119,22 @@ function maybeShowAuthPrompt() {
 // once the URL's ?v matches the latest build we never reload again.
 async function checkForNewBuild() {
   try {
-    const res = await fetch(location.pathname + '?nocache=' + Date.now(), { cache: 'no-store' });
-    if (!res.ok) return;
-    const txt = await res.text();
+    // Read only the slice of the deployed file that holds the version line
+    // instead of downloading the whole ~1.5 MB app on every launch just to read
+    // one string. BG_BUILD sits early in the script (~260 KB in); 400 KB gives
+    // headroom. If the host ignores Range (or the marker isn't in the slice), we
+    // fall back to a full fetch, so this can never miss a real update.
+    const url = location.pathname + '?nocache=' + Date.now();
+    let txt = '';
+    try {
+      const partial = await fetch(url, { cache: 'no-store', headers: { Range: 'bytes=0-400000' } });
+      if (partial.ok || partial.status === 206) txt = await partial.text();
+    } catch (e) { /* fall through to full fetch */ }
+    if (!/BG_BUILD\s*=\s*'/.test(txt)) {
+      const res = await fetch(location.pathname + '?nocache=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) return;
+      txt = await res.text();
+    }
     const m = txt.match(/BG_BUILD\s*=\s*'([^']+)'/);
     const latest = m && m[1];
     if (!latest || latest === BG_BUILD) return;
@@ -6275,7 +6296,20 @@ window.addEventListener('offline', () => { supaOnline = false; updateSyncIndicat
 
 // Read a shared singleton (courses, recent-games list) from Supabase with
 // localStorage cache fallback. Returns the JSON string, or null if not found.
+// Coalesce concurrent identical reads: if the same shared singleton is already
+// being fetched, hand every caller the SAME in-flight promise instead of each
+// firing its own network round-trip. (A render pass often reads the roster /
+// recent / tourneys several times at once.) No caching/staleness is introduced —
+// the moment the fetch resolves the entry is cleared — so read-modify-write
+// flows on scores/bets stay correct.
+const _singletonInFlight = {};
 async function readSharedSingleton(key) {
+  if (_singletonInFlight[key]) return _singletonInFlight[key];
+  const p = _readSharedSingletonNow(key);
+  _singletonInFlight[key] = p;
+  try { return await p; } finally { delete _singletonInFlight[key]; }
+}
+async function _readSharedSingletonNow(key) {
   const rowCode = singletonRowCode(key);
   try {
     if (!supaReady) await initSupabase();
@@ -6719,9 +6753,20 @@ async function saveTourneys(list) {
 }
 
 // Course scorecards saved by the group (shared)
+// Scorecards blob ('golf:courses') — pars/SIs/tees/ratings for every course.
+// Read from ~15 places, so memoize it for a short window to avoid re-fetching the
+// whole blob over the network each time. We cache the RAW JSON and parse a fresh
+// object on every return, so a caller mutating its copy can't corrupt the cache.
+// saveCourseSaves() refreshes the cache, keeping read-after-write correct.
+let _courseSavesCache = null, _courseSavesAt = 0;
+function invalidateCourseSavesCache() { _courseSavesCache = null; _courseSavesAt = 0; }
 async function getCourseSaves() {
+  if (_courseSavesCache != null && (Date.now() - _courseSavesAt < 20000)) {
+    try { return JSON.parse(_courseSavesCache); } catch (e) { _courseSavesCache = null; }
+  }
   const v = await safeGet(KEY_COURSE_DATA, true);
-  if (!v) return {};
+  if (!v) { _courseSavesCache = '{}'; _courseSavesAt = Date.now(); return {}; }
+  _courseSavesCache = v; _courseSavesAt = Date.now();
   try { return JSON.parse(v); } catch (e) { return {}; }
 }
 
@@ -7502,7 +7547,9 @@ async function backfillStatsFromSavedRounds() {
 }
 
 async function saveCourseSaves(saves) {
-  return await safeSet(KEY_COURSE_DATA, JSON.stringify(saves), true);
+  const json = JSON.stringify(saves);
+  _courseSavesCache = json; _courseSavesAt = Date.now(); // keep cache in sync with the write
+  return await safeSet(KEY_COURSE_DATA, json, true);
 }
 
 async function getCourseScorecard(courseId) {
@@ -7542,6 +7589,7 @@ async function getCourseLibraryAdditions() {
 }
 
 async function saveCourseLibraryAdditions(list) {
+  try { invalidateCourseLibraryCache(); } catch (e) {} // any write must force a fresh load
   return await safeSet(KEY_COURSE_LIBRARY, JSON.stringify(list), true);
 }
 
@@ -7606,6 +7654,7 @@ async function renameCourse(courseId, newName) {
   if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can rename courses'); return false; }
   const overrides = await getCourseNameOverrides();
   overrides[courseId] = nm;
+  try { invalidateCourseLibraryCache(); } catch (e) {}
   await safeSet(KEY_COURSE_NAME_OVERRIDES, JSON.stringify(overrides), true);
   // Apply to the in-memory library now.
   const c = COURSE_LIBRARY.find(x => x.id === courseId);
@@ -7640,6 +7689,7 @@ async function deleteCourse(courseId) {
   const nm = c ? c.name : courseId;
   // Record the deletion (synced overlay).
   const dels = await getCourseDeletes();
+  try { invalidateCourseLibraryCache(); } catch (e) {}
   if (!dels.includes(courseId)) { dels.push(courseId); await safeSet(KEY_COURSE_DELETES, JSON.stringify(dels), true); }
   // Pull from the user-added store if present.
   try {
@@ -7657,35 +7707,52 @@ async function deleteCourse(courseId) {
 }
 
 // Load user-added courses at boot and merge them into the live COURSE_LIBRARY.
-async function loadCourseLibrary() {
-  const additions = await getCourseLibraryAdditions();
-  // Reset to seed, then merge additions (avoids accumulating duplicates if
-  // this is called more than once during a session)
-  COURSE_LIBRARY = [...COURSE_LIBRARY_SEED];
-  additions.forEach(c => {
-    if (!COURSE_LIBRARY.some(existing => existing.id === c.id)) {
-      COURSE_LIBRARY.push(c);
+// PERF: this is called from ~a dozen places and each run did 3 shared-network
+// reads (additions + name overrides + deletes) plus two scorecard-bootstrap
+// passes. We now memoize the result for a short window and collapse concurrent
+// calls, so repeated calls during a session are instant. Any course
+// add/rename/delete calls invalidateCourseLibraryCache() to force a fresh load.
+let _courseLibLoadedAt = 0;
+let _courseLibInFlight = null;
+let _courseBootstrapsDone = false;
+function invalidateCourseLibraryCache() { _courseLibLoadedAt = 0; }
+async function loadCourseLibrary(force) {
+  if (!force && _courseLibLoadedAt && (Date.now() - _courseLibLoadedAt < 45000)) return;
+  if (_courseLibInFlight) return _courseLibInFlight; // collapse concurrent callers onto one load
+  _courseLibInFlight = (async () => {
+    const additions = await getCourseLibraryAdditions();
+    // Reset to seed, then merge additions (avoids accumulating duplicates if
+    // this is called more than once during a session)
+    COURSE_LIBRARY = [...COURSE_LIBRARY_SEED];
+    additions.forEach(c => {
+      if (!COURSE_LIBRARY.some(existing => existing.id === c.id)) {
+        COURSE_LIBRARY.push(c);
+      }
+    });
+    // Apply admin name fixes (keeps ids/data; just corrects the displayed name).
+    try {
+      const overrides = await getCourseNameOverrides();
+      COURSE_LIBRARY.forEach(c => { if (overrides[c.id]) c.name = overrides[c.id]; });
+    } catch (e) {}
+    // Apply admin deletions (hide removed courses from the library).
+    try {
+      const dels = await getCourseDeletes();
+      if (dels.length) { const set = new Set(dels); COURSE_LIBRARY = COURSE_LIBRARY.filter(c => !set.has(c.id)); }
+    } catch (e) {}
+    // Scorecard bootstraps are idempotent but iterate (and may write), so only
+    // run them once per session — not on every library refresh.
+    if (!_courseBootstrapsDone) {
+      try { await bootstrapMichigan2026Scorecards(); } catch (e) {
+        console.warn('Michigan 2026 bootstrap failed:', e);
+      }
+      try { await bootstrapSeedScorecards(); } catch (e) {
+        console.warn('Seed scorecards bootstrap failed:', e);
+      }
+      _courseBootstrapsDone = true;
     }
-  });
-  // Apply admin name fixes (keeps ids/data; just corrects the displayed name).
-  try {
-    const overrides = await getCourseNameOverrides();
-    COURSE_LIBRARY.forEach(c => { if (overrides[c.id]) c.name = overrides[c.id]; });
-  } catch (e) {}
-  // Apply admin deletions (hide removed courses from the library).
-  try {
-    const dels = await getCourseDeletes();
-    if (dels.length) { const set = new Set(dels); COURSE_LIBRARY = COURSE_LIBRARY.filter(c => !set.has(c.id)); }
-  } catch (e) {}
-  // One-time bootstrap: pre-populate scorecards for the Michigan 2026 trip
-  // so the group doesn't have to enter pars/SIs/tees on-site. Safe to call
-  // repeatedly — it skips any course that already has a saved scorecard.
-  try { await bootstrapMichigan2026Scorecards(); } catch (e) {
-    console.warn('Michigan 2026 bootstrap failed:', e);
-  }
-  try { await bootstrapSeedScorecards(); } catch (e) {
-    console.warn('Seed scorecards bootstrap failed:', e);
-  }
+    _courseLibLoadedAt = Date.now();
+  })();
+  try { await _courseLibInFlight; } finally { _courseLibInFlight = null; }
 }
 
 // ------------------------------------------------------------
@@ -26107,19 +26174,26 @@ async function init() {
     if (e.target.id === 'huckle-modal') $('huckle-modal').classList.remove('show');
   };
 
-  // Auto-refresh every 8s
+  // Live-round refresh. subscribeToGame()'s realtime channel already PUSHES every
+  // change instantly, so this poll is just a backstop for when realtime is down.
+  // When realtime is connected we poll only ~every 60s (1 in 4 ticks); when it's
+  // down we poll every 15s. (Was a full network fetch every 8s on every phone.)
+  let _pollTick = 0;
   setInterval(async () => {
     if (!state.game) return;
-    const activePanel = document.querySelector('.panel.active').id;
-    if (activePanel === 'panel-score' || activePanel === 'panel-board') {
-      const fresh = await loadGame(state.game.code);
-      if (fresh && fresh.updatedAt > state.game.updatedAt) {
-        state.game = fresh;
-        if (activePanel === 'panel-score') renderScoreEntry();
-        else renderBoard();
-      }
+    const ap = document.querySelector('.panel.active');
+    const activePanel = ap && ap.id;
+    if (activePanel !== 'panel-score' && activePanel !== 'panel-board') return;
+    _pollTick++;
+    const realtimeUp = !!activeRealtimeSub;
+    if (realtimeUp && (_pollTick % 4 !== 0)) return; // realtime covers it; slow backstop only
+    const fresh = await loadGame(state.game.code);
+    if (fresh && fresh.updatedAt > state.game.updatedAt) {
+      state.game = fresh;
+      if (activePanel === 'panel-score') renderScoreEntry();
+      else renderBoard();
     }
-  }, 8000);
+  }, 15000);
 
   // (Restoring the last round + rendering Home are deferred to the background
   // block at the end of init() so they don't hold up first paint.)
