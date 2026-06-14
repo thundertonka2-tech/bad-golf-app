@@ -8514,6 +8514,10 @@ function setPopupsEnabled(on){
 // SETUP UI
 // ============================================================
 async function setupNewGameForm(prefill) {
+  // Fresh form build → clear any team assignments left over from a previous
+  // round. Rows get brand-new puids below, so stale keys would otherwise be
+  // orphaned; for prefilled rounds applySavedConfig re-applies the saved teams.
+  state.teamAssignments = {};
   // Build par + SI inputs (initially with standard defaults)
   const parGrid = $('par-grid');
   parGrid.innerHTML = '';
@@ -8737,6 +8741,10 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
   }
   const row = document.createElement('div');
   row.className = 'player-row';
+  // Stable per-row id (puid). Team assignments are keyed by this — NOT by the
+  // player's name — so editing a name (e.g. adding a last name after picking
+  // teams) can't silently wipe the team selection. Survives reorders too.
+  row.dataset.puid = 'pu' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   // Escape values for the value="" attributes
   const esc = s => String(s || '').replace(/"/g, '&quot;');
   // "Plays gross" toggle is OFF by default — most players use their HCP.
@@ -10094,7 +10102,7 @@ function getCurrentSetupPlayers() {
       lastName = parts.slice(1).join(' ') || '';
     }
     const name = combineName(firstName, lastName);
-    return { idx: i, firstName, lastName, name };
+    return { idx: i, firstName, lastName, name, puid: row.dataset.puid };
   }).filter(p => p.firstName); // drop blank rows — they aren't real players
 }
 
@@ -10262,35 +10270,44 @@ function renderTeamPickers() {
     const container = document.getElementById('team-picker-' + gameKey);
     if (!container) return;
     const players = getCurrentSetupPlayers();
-    // Keep team assignments by player name; default everyone to A
+    // Team assignments are keyed by each row's STABLE puid (not name) so editing
+    // a player's name never wipes their team. Migrate any legacy name-keyed entry.
     if (!state.teamAssignments) state.teamAssignments = {};
     if (!state.teamAssignments[gameKey]) state.teamAssignments[gameKey] = {};
     const assigns = state.teamAssignments[gameKey];
+    players.forEach(p => {
+      if (p.puid != null && assigns[p.puid] == null &&
+          (assigns[p.name] === 'A' || assigns[p.name] === 'B')) {
+        assigns[p.puid] = assigns[p.name];
+        delete assigns[p.name];
+      }
+    });
 
     // Initialize new players: split evenly so first half = A, second half = B
     players.forEach((p, i) => {
-      if (assigns[p.name] !== 'A' && assigns[p.name] !== 'B') {
-        assigns[p.name] = i < Math.ceil(players.length / 2) ? 'A' : 'B';
+      if (assigns[p.puid] !== 'A' && assigns[p.puid] !== 'B') {
+        assigns[p.puid] = i < Math.ceil(players.length / 2) ? 'A' : 'B';
       }
     });
-    // Drop assignments for removed players
-    Object.keys(assigns).forEach(n => {
-      if (!players.find(p => p.name === n)) delete assigns[n];
+    // Drop assignments for removed rows (anything whose puid is no longer present)
+    const livePuids = new Set(players.map(p => p.puid));
+    Object.keys(assigns).forEach(k => {
+      if (!livePuids.has(k)) delete assigns[k];
     });
 
-    const teamA = players.filter(p => assigns[p.name] === 'A');
-    const teamB = players.filter(p => assigns[p.name] === 'B');
+    const teamA = players.filter(p => assigns[p.puid] === 'A');
+    const teamB = players.filter(p => assigns[p.puid] === 'B');
     const balanced = teamA.length === teamB.length && teamA.length > 0 && players.length % 2 === 0;
 
     container.className = 'team-picker' + (balanced ? '' : ' unbalanced');
     container.innerHTML = `
       <div class="team-col">
         <div class="team-header a">Team A · ${teamA.length}</div>
-        ${teamA.map(p => `<button class="player-chip" data-game="${gameKey}" data-name="${p.name}">${displayFirst(p)}</button>`).join('') || '<div class="small-text" style="text-align:center;padding:8px">empty</div>'}
+        ${teamA.map(p => `<button class="player-chip" data-game="${gameKey}" data-puid="${p.puid}">${displayFirst(p)}</button>`).join('') || '<div class="small-text" style="text-align:center;padding:8px">empty</div>'}
       </div>
       <div class="team-col">
         <div class="team-header b">Team B · ${teamB.length}</div>
-        ${teamB.map(p => `<button class="player-chip" data-game="${gameKey}" data-name="${p.name}">${displayFirst(p)}</button>`).join('') || '<div class="small-text" style="text-align:center;padding:8px">empty</div>'}
+        ${teamB.map(p => `<button class="player-chip" data-game="${gameKey}" data-puid="${p.puid}">${displayFirst(p)}</button>`).join('') || '<div class="small-text" style="text-align:center;padding:8px">empty</div>'}
       </div>
     `;
 
@@ -10311,8 +10328,8 @@ function renderTeamPickers() {
     // Wire chip clicks
     container.querySelectorAll('.player-chip').forEach(chip => {
       chip.onclick = () => {
-        const name = chip.dataset.name;
-        assigns[name] = (assigns[name] === 'A') ? 'B' : 'A';
+        const puid = chip.dataset.puid;
+        assigns[puid] = (assigns[puid] === 'A') ? 'B' : 'A';
         renderTeamPickers();
       };
     });
@@ -10721,7 +10738,8 @@ function buildTeamAssignment(players, gameKey) {
   const teamA = [];
   const teamB = [];
   players.forEach(p => {
-    const t = assigns[p.name];
+    // Keyed by stable row id (puid); fall back to name for legacy assigns maps.
+    const t = (p.puid != null && assigns[p.puid] != null) ? assigns[p.puid] : assigns[p.name];
     if (t === 'A') teamA.push(p.id);
     else if (t === 'B') teamB.push(p.id);
     else {
@@ -10921,16 +10939,27 @@ function applySavedConfig(config) {
     if (games.vegas.value != null) $('vegas-value').value = games.vegas.value;
     $('vegas-net').value = games.vegas.net ? 'net' : 'gross';
     $('vegas-rotate').value = games.vegas.rotate === 'fixed' ? 'fixed' : 'rotate';
-    // Fixed teams: restore the saved 2v2 into the picker (by name), then reveal it.
+    // Fixed teams: restore the saved 2v2 into the picker. The picker is keyed by
+    // each setup row's stable puid, but the saved teams hold player IDs (or, on
+    // older saves, names). So: saved entry -> NAME (stable across save/reload) ->
+    // the matching current setup row's puid.
     if (games.vegas.rotate === 'fixed' && Array.isArray(games.vegas.teamA) && Array.isArray(games.vegas.teamB)) {
       try {
         if (!state.teamAssignments) state.teamAssignments = {};
-        const map = {};
-        const byId = {};
-        getCurrentSetupPlayers().forEach(p => { byId[p.id] = p; });
-        games.vegas.teamA.forEach(id => { if (byId[id]) map[byId[id].name] = 'A'; });
-        games.vegas.teamB.forEach(id => { if (byId[id]) map[byId[id].name] = 'B'; });
-        if (Object.keys(map).length) state.teamAssignments.vegas = map;
+        const idToName = {};
+        (config.players || []).forEach(p => { if (p && p.id != null) idToName[p.id] = p.name; });
+        const toName = v => idToName[v] || v; // tolerate entries that are already names
+        const nameToPuid = {};
+        getCurrentSetupPlayers().forEach(p => { if (p.name) nameToPuid[p.name] = p.puid; });
+        const aPuids = games.vegas.teamA.map(toName).map(n => nameToPuid[n]).filter(Boolean);
+        const bPuids = games.vegas.teamB.map(toName).map(n => nameToPuid[n]).filter(Boolean);
+        // Apply only a clean balanced 2v2 — never leave a lopsided team behind.
+        if (aPuids.length === 2 && bPuids.length === 2) {
+          const map = {};
+          aPuids.forEach(pu => { map[pu] = 'A'; });
+          bPuids.forEach(pu => { map[pu] = 'B'; });
+          state.teamAssignments.vegas = map;
+        }
       } catch (e) {}
     }
     try { updateVegasTeamSection(); } catch (e) {}
@@ -11227,6 +11256,7 @@ function gatherSetup() {
       const courseHcp = computeCourseHcp(hcpIndex, teeObj, parTotal);
       players.push({
         id: playerId,
+        puid: row.dataset.puid, // stable row id — keys team assignments (name-edit safe)
         firstName,
         lastName,
         name, // legacy combined-name field — kept for backwards compat with internal lookups
@@ -12898,11 +12928,21 @@ function renderGameBanners() {
       const vRes = calcVegas(g);
       const holeResults = vRes ? vRes.holeResults : [];
 
+      // Fixed teams use the EXPLICIT assignment (cfg.teamA/teamB) — NOT the default
+      // first-two-vs-last-two rotation pairing — so the banner names AND the point
+      // tally match what calcVegas actually scored.
+      let fixedT1 = null, fixedT2 = null;
+      if (isFixed && Array.isArray(cfg.teamA) && cfg.teamA.length === 2 && Array.isArray(cfg.teamB) && cfg.teamB.length === 2) {
+        const byId = {}; g.players.forEach(p => { byId[p.id] = p; });
+        const fa = cfg.teamA.map(id => byId[id]).filter(Boolean);
+        const fb = cfg.teamB.map(id => byId[id]).filter(Boolean);
+        if (fa.length === 2 && fb.length === 2) { fixedT1 = fa; fixedT2 = fb; }
+      }
       // For each segment, compute team names + net points + completion state.
       // Fixed-teams mode is shown as a single "Holes 1-18" row instead of 3 segs.
       const segData = (isFixed ? [allPairings[0]] : allPairings).map((pair, segIdx) => {
-        const t1Players = pair[0].map(i => vParts[i]);
-        const t2Players = pair[1].map(i => vParts[i]);
+        const t1Players = (isFixed && fixedT1) ? fixedT1 : pair[0].map(i => vParts[i]);
+        const t2Players = (isFixed && fixedT2) ? fixedT2 : pair[1].map(i => vParts[i]);
         const segStart = isFixed ? 0 : segIdx * 6;
         const segEnd = isFixed ? 18 : segStart + 6;
         const segLen = segEnd - segStart;
@@ -12961,6 +13001,10 @@ function renderGameBanners() {
         if (net1 > 0) leftStyle = 'color:var(--accent);font-weight:700';
         else if (net1 < 0) rightStyle = 'color:var(--accent);font-weight:700';
         const tieNote = net1 === 0 ? ' · tied on points' : '';
+        // Show the latest scored hole's math so players can see HOW the points
+        // were figured (e.g. "Hole 2: Tyler & Chris 45 vs Frank & Matt 55 → 10 pts").
+        const lastHr = (vRes && Array.isArray(vRes.holeResults) && vRes.holeResults.length) ? vRes.holeResults[vRes.holeResults.length - 1] : null;
+        const calcLine = lastHr ? `<div class="small-text" style="margin-top:5px;padding-top:5px;border-top:1px solid rgba(0,0,0,0.08)">Hole ${lastHr.hole}: ${lastHr.teamA} <b>${lastHr.aScore}</b> vs ${lastHr.teamB} <b>${lastHr.bScore}</b> → <b>${lastHr.points} pt${lastHr.points === 1 ? '' : 's'}</b>${(lastHr.winner && lastHr.winner !== 'Tie') ? ' to ' + lastHr.winner : ' · tie'}${lastHr.multiplier > 1 ? ' (' + lastHr.multiplier + '×)' : ''}</div>` : '';
         curBlock = `<div style="margin-top:6px;padding:8px;background:rgba(24,95,165,0.08);border-radius:6px">
           <div style="font-size:13px">
             <span style="${leftStyle}">${cur.t1Name}: ${cur.t1Points} pts</span>
@@ -12968,6 +13012,7 @@ function renderGameBanners() {
             <span style="${rightStyle}">${cur.t2Name}: ${cur.t2Points} pts</span>
           </div>
           <div class="small-text" style="margin-top:2px">thru ${cur.holesScored} of ${cur.segLen} holes${tieNote}</div>
+          ${calcLine}
         </div>`;
       }
 
@@ -21758,11 +21803,53 @@ function buildWagerForms(g) {
   }
 }
 
+// Most holes any single player has a score on — used to decide when a round is
+// "through nine" for the purpose of voiding wagers nobody took.
+function wHolesScored(g) {
+  let max = 0;
+  try {
+    (g && g.players || []).forEach(p => {
+      const arr = (g.scores && g.scores[p.id]) || [];
+      let c = 0; arr.forEach(s => { if (s !== null && s !== undefined) c++; });
+      if (c > max) max = c;
+    });
+  } catch (e) {}
+  return max;
+}
+
+// A single-sided wager (head-to-head or over/under) that nobody took never
+// settles. Once the round is finished OR past 9 holes, void those still-'open'
+// wagers so they drop off the board instead of lingering forever. Win pools are
+// untouched — anyone can join them and they settle off the winner. Best-effort:
+// RLS lets the creator void their own row; other viewers' attempts no-op.
+async function wVoidUnmatchedIfOver(code, g, wagers) {
+  if (!supa || !g || !Array.isArray(wagers)) return false;
+  const roundOver = !!g.finishedAt || wHolesScored(g) >= 9;
+  if (!roundOver) return false;
+  const stale = wagers.filter(w => w.status === 'open' && (w.bet_type === 'h2h' || w.bet_type === 'ou'));
+  if (!stale.length) return false;
+  let any = false;
+  for (const w of stale) {
+    try {
+      const { error } = await supa.from('wagers')
+        .update({ status: 'void', result: 'void' })
+        .eq('id', w.id).eq('status', 'open');
+      if (!error) any = true;
+    } catch (e) { /* best-effort */ }
+  }
+  return any;
+}
+
 async function refreshWagerLists() {
   const code = _wagerActiveCode;
   if (!code) return;
   const g = _wagerActiveGame;
   let wagers = await wFetchForRound(code);
+
+  // Void any single-sided wager nobody took once the round is past 9 holes / done.
+  try {
+    if (await wVoidUnmatchedIfOver(code, g, wagers)) wagers = await wFetchForRound(code);
+  } catch (e) { console.warn('wVoidUnmatched', e); }
 
   // If the round just finished, auto-settle then refetch the settled results.
   try {
@@ -21777,13 +21864,15 @@ async function refreshWagerLists() {
     return p ? displayFirst(p) : 'Player';
   };
 
-  // Open / matched wagers list.
+  // Open / matched wagers list. Voided wagers (single-sided, nobody took them
+  // before the round ended) are dropped from the list entirely.
   const openEl = document.getElementById('wager-open-list');
   if (openEl) {
-    if (!wagers.length) {
+    const visible = wagers.filter(w => w.status !== 'void');
+    if (!visible.length) {
       openEl.innerHTML = '<div class="help-text">No wagers yet. Be the first to put a friendly bet on this round.</div>';
     } else {
-      openEl.innerHTML = wagers.map((w, i) => {
+      openEl.innerHTML = visible.map((w, i) => {
         let desc = '';
         if (w.bet_type === 'win') {
           desc = '<b>Win pool</b> · ' + escapeHtml(w.creator_name || 'Someone') + ' picks ' + escapeHtml(nameOf(w.pick_player_id)) + ' · $' + (w.amount || 1);
@@ -25445,6 +25534,13 @@ async function init() {
       // when reopened later from the Rounds tab.
       g.finishedAt = Date.now();
       try { await saveGame(g); } catch (e) { console.warn('saveGame on finish failed:', e); }
+      // Void any single-sided wagers nobody took, then auto-settle the rest, so a
+      // finished round never leaves a dangling "open" bet on the board.
+      try {
+        const _w = await wFetchForRound(g.code);
+        await wVoidUnmatchedIfOver(g.code, g, _w);
+        await autoSettleWagers(g.code, g, _w.filter(w => w.status !== 'open' || w.bet_type === 'win'));
+      } catch (e) { console.warn('wager finish cleanup failed:', e); }
       // Make sure the round is in the recent list (addToRecent normally runs on every
       // saveGame, but if the user joined and finished without editing, it might not have)
       try { await addToRecent(g); } catch (e) { console.warn('addToRecent failed:', e); }
@@ -25908,6 +26004,30 @@ const gpsView = (() => {
   async function loadCourse(cid) {
     if (!courseGps) courseGps = {};
     if (!cid || courseGps[cid]) return;
+    // CACHE-FIRST: if this course is cached locally, use it immediately so the
+    // map paints without waiting on a network round trip, then refresh from the
+    // cloud in the BACKGROUND (picks up holes a partner mapped since last time).
+    // GPS course data is effectively static mid-round, so the brief staleness
+    // window before the background refresh lands is harmless.
+    try {
+      const v = localStorage.getItem(gpsCacheKey(cid));
+      if (v) {
+        courseGps[cid] = JSON.parse(v);
+        (async () => {
+          try {
+            if (await ensureSupa()) {
+              const { data, error } = await supa.from('course_gps').select('holes,source,updated_at').eq('course_id', cid).maybeSingle();
+              if (!error && data && data.holes && Object.keys(data.holes).length) {
+                courseGps[cid] = { holes: data.holes, source: data.source || 'cloud', updatedAt: Date.parse(data.updated_at) || Date.now(), osmTried: true };
+                try { localStorage.setItem(gpsCacheKey(cid), JSON.stringify(courseGps[cid])); } catch (e) {}
+              }
+            }
+          } catch (e) { /* background refresh is best-effort */ }
+        })();
+        return;
+      }
+    } catch (e) {}
+    // No local cache → fetch from the cloud (blocking), then legacy blob.
     if (await ensureSupa()) {
       try {
         const { data, error } = await supa.from('course_gps').select('holes,source,updated_at').eq('course_id', cid).maybeSingle();
@@ -25918,10 +26038,6 @@ const gpsView = (() => {
         }
       } catch (e) { console.warn('course_gps read failed:', e); }
     }
-    try {
-      const v = localStorage.getItem(gpsCacheKey(cid));
-      if (v) { courseGps[cid] = JSON.parse(v); return; }
-    } catch (e) {}
     try {
       const v = await safeGet(KEY_COURSE_GPS, true);
       const blob = v ? JSON.parse(v) : {};
@@ -26088,24 +26204,27 @@ const gpsView = (() => {
       }
     }
     if (!courseId) { if (!opts.auto) showToast('GPS needs a course chosen from the course library (Setup tab)'); return; }
-    // Resolve THIS user's tee so each hole can show its tee-box yardage. Use the
-    // signed-in player's row, else player 1; look up that tee in g.teeYards.
-    teeHoleYards = null; teeLabelForYds = '';
-    try {
-      let me = null; try { me = await getMeName(); } catch (e) {}
-      let pl = (me && Array.isArray(g.players)) ? g.players.find(p => p.name === me) : null;
-      if (!pl && Array.isArray(g.players) && g.players.length) pl = g.players[0];
-      const label = pl && pl.teeLabel;
-      if (label && g.teeYards && Array.isArray(g.teeYards[label])) { teeHoleYards = g.teeYards[label]; teeLabelForYds = label; }
-    } catch (e) {}
     // GPS is the default play screen — auto-open ALWAYS takes over when there's
     // a course (only a course-less round stays on score). Mapped holes show the
     // rangefinder; unmapped holes show the map panel, nudging the crew to map.
+    // Show the overlay + spinner FIRST (before any data load) so tapping GPS
+    // gives instant feedback instead of a frozen-looking pause.
     el('gps-overlay').classList.add('open');
     el('gps-loading').classList.add('show');   // immediate feedback while the map loads
     document.body.classList.add('gps-open');   // hide the app tab bar behind the map
     el('gps-overlay').classList.toggle('spectating', !!spectate); // hides edit controls, leaves the scorecard
     mode = 'loading';
+    // Resolve THIS user's tee so each hole can show its tee-box yardage. Use the
+    // LOCAL me-name cache (instant) — never block the map's first paint on a
+    // profile network round trip; the tee-box readout is cosmetic.
+    teeHoleYards = null; teeLabelForYds = '';
+    try {
+      let me = null; try { me = await safeGet(KEY_ME, false); } catch (e) {}
+      let pl = (me && Array.isArray(g.players)) ? g.players.find(p => p.name === me) : null;
+      if (!pl && Array.isArray(g.players) && g.players.length) pl = g.players[0];
+      const label = pl && pl.teeLabel;
+      if (label && g.teeYards && Array.isArray(g.teeYards[label])) { teeHoleYards = g.teeYards[label]; teeLabelForYds = label; }
+    } catch (e) {}
     // Load the map library, course data, and tile config IN PARALLEL (they're
     // independent) instead of one-after-another — cuts the start→GPS wait.
     let cfg;
