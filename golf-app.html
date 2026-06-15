@@ -2279,6 +2279,8 @@
             <div class="course-picker-wrap">
               <input type="text" id="course-search" placeholder="Search by course name or state…" autocomplete="off">
               <button class="small" id="btn-add-new-course" type="button" style="margin-top:6px">+ Add new course to library</button>
+              <button class="small" type="button" onclick="openCourseRequestModal('new')" style="margin-top:6px">📩 Request a new course</button>
+              <button class="small" type="button" onclick="openCourseRequestModal('remap')" style="margin-top:6px">🛠 Report a course needing a re-map</button>
               <div id="near-courses" style="display:none"></div>
               <div id="course-list" class="course-list" style="display:none"></div>
             </div>
@@ -5305,7 +5307,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.22';
+const BG_BUILD = 'v2026.11.23';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -5674,6 +5676,298 @@ function openRoundCard(idx) {
   document.body.appendChild(ov);
 }
 
+// ===========================================================================
+// Course requests — users ask for a NEW course or a RE-MAP fix. Stored in the
+// Supabase `course_requests` table; surfaced as counts on the Admin dashboard.
+// (Run course_requests.sql once in Supabase to create the table + policies.)
+// ===========================================================================
+async function crCreate(type, payload) {
+  if (!supa) { try { showToast('Connect to the cloud to send a request'); } catch (e) {} return null; }
+  try {
+    let me = null; try { me = await getMeName(); } catch (e) {}
+    const row = Object.assign({ type: type, status: 'open', requester_id: (_authUser && _authUser.id) || null, requester_name: me || null }, payload || {});
+    const { data, error } = await supa.from('course_requests').insert(row).select().maybeSingle();
+    if (error) { console.warn('crCreate', error); try { showToast(error.message || 'Could not send request — is the table set up?'); } catch (e) {} return null; }
+    return data;
+  } catch (e) { console.warn('crCreate', e); try { showToast('Could not send request'); } catch (e2) {} return null; }
+}
+async function crFetchAll() {
+  if (!supa) return [];
+  try {
+    const { data, error } = await supa.from('course_requests').select('*').order('created_at', { ascending: false });
+    if (error) { console.warn('crFetchAll', error); return []; }
+    return data || [];
+  } catch (e) { console.warn('crFetchAll', e); return []; }
+}
+function openCourseRequestModal(type, prefillName) {
+  if (document.getElementById('course-req-ov')) return;
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+  const ea = (typeof escAttr === 'function') ? escAttr : (x => String(x).replace(/"/g, '&quot;'));
+  const isNew = type !== 'remap';
+  const title = isNew ? '📩 Request a new course' : '🛠 Report a course needing a re-map';
+  const blurb = isNew
+    ? "Can't find a course in the library? Tell us its name and where it is and we'll add it."
+    : "Playing a course whose GPS or hole layout is wrong? Tell us which one and what's off.";
+  const ov = document.createElement('div');
+  ov.id = 'course-req-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100003;background:rgba(0,0,0,0.6);display:flex;align-items:flex-end;justify-content:center';
+  ov.innerHTML =
+    '<div onclick="event.stopPropagation()" style="background:var(--surface);width:100%;max-width:520px;max-height:90vh;overflow-y:auto;border-radius:18px 18px 0 0;padding:18px 16px calc(env(safe-area-inset-bottom,12px) + 18px)">'
+    + '<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">'
+    +   '<div style="flex:1"><div style="font-size:18px;font-weight:800">' + title + '</div></div>'
+    +   '<button aria-label="Close" onclick="var o=document.getElementById(\'course-req-ov\');if(o)o.remove()" style="flex:0 0 auto;width:36px;height:36px;border-radius:50%;border:none;background:var(--surface-2);color:var(--text);font-size:18px;font-weight:800;cursor:pointer">✕</button>'
+    + '</div>'
+    + '<div class="help-text" style="margin-bottom:10px">' + blurb + '</div>'
+    + '<label style="display:block;margin:6px 0 3px;font-size:13px;font-weight:600">Course name</label>'
+    + '<input type="text" id="creq-name" value="' + (prefillName ? ea(prefillName) : '') + '" placeholder="e.g. Pine Valley GC" style="width:100%;padding:11px;margin-bottom:8px">'
+    + (isNew ? '<label style="display:block;margin:6px 0 3px;font-size:13px;font-weight:600">City &amp; State</label>'
+        + '<input type="text" id="creq-loc" placeholder="e.g. Baton Rouge, LA" style="width:100%;padding:11px;margin-bottom:8px">' : '')
+    + '<label style="display:block;margin:6px 0 3px;font-size:13px;font-weight:600">' + (isNew ? 'Anything else (optional)' : "What's wrong? (optional)") + '</label>'
+    + '<textarea id="creq-note" rows="3" placeholder="' + (isNew ? 'Tees, website, etc.' : 'e.g. hole 4 green pin is in the wrong spot') + '" style="width:100%;padding:11px;margin-bottom:10px"></textarea>'
+    + '<div id="creq-err" style="color:var(--danger);font-size:12px;margin-bottom:8px;display:none"></div>'
+    + '<button id="creq-send" class="primary" style="width:100%;padding:12px;font-weight:700">Send request</button>'
+    + '</div>';
+  ov.onclick = () => { try { ov.remove(); } catch (e) {} };
+  document.body.appendChild(ov);
+  const btn = document.getElementById('creq-send');
+  if (btn) btn.onclick = async () => {
+    const nameEl = document.getElementById('creq-name');
+    const name = (nameEl && nameEl.value || '').trim();
+    const errEl = document.getElementById('creq-err');
+    if (!name) { if (errEl) { errEl.textContent = 'Please enter the course name.'; errEl.style.display = 'block'; } return; }
+    const locEl = document.getElementById('creq-loc');
+    const noteEl = document.getElementById('creq-note');
+    btn.disabled = true; btn.textContent = 'Sending…';
+    const payload = { course_name: name, note: (noteEl && noteEl.value || '').trim() || null };
+    if (isNew && locEl) payload.location = (locEl.value || '').trim() || null;
+    const res = await crCreate(isNew ? 'new' : 'remap', payload);
+    if (res) { try { showToast('Request sent — thank you!'); } catch (e) {} const o = document.getElementById('course-req-ov'); if (o) o.remove(); }
+    else { btn.disabled = false; btn.textContent = 'Send request'; }
+  };
+}
+
+// ===========================================================================
+// Admin dashboard — an in-app analytics view (Apple App-Store-Analytics style).
+// Shows every metric we can compute from in-app + Supabase data, date-filtered,
+// plus greyed-out "coming soon" cards for metrics that need outside hooks
+// (App Store Connect downloads, payments/MRR, crash reporting, retention).
+// ===========================================================================
+let _dashRangeKey = 'month', _dashFrom = null, _dashTo = null, _dashCache = null;
+function dashRange(key, cf, ct) {
+  const now = new Date();
+  const sod = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  let from, to, label;
+  if (key === 'day') { from = sod(now); to = from + 86400000 - 1; label = 'Today'; }
+  else if (key === 'month') { from = new Date(now.getFullYear(), now.getMonth(), 1).getTime(); to = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime() - 1; label = 'This month'; }
+  else if (key === 'lastmonth') { from = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime(); to = new Date(now.getFullYear(), now.getMonth(), 1).getTime() - 1; label = 'Last month'; }
+  else if (key === 'year') { from = new Date(now.getFullYear(), 0, 1).getTime(); to = new Date(now.getFullYear() + 1, 0, 1).getTime() - 1; label = 'This year'; }
+  else if (key === 'lastyear') { from = new Date(now.getFullYear() - 1, 0, 1).getTime(); to = new Date(now.getFullYear(), 0, 1).getTime() - 1; label = 'Last year'; }
+  else if (key === 'custom') { from = cf != null ? cf : (now.getTime() - 30 * 86400000); to = ct != null ? ct : now.getTime(); label = 'Custom range'; }
+  else { from = 0; to = now.getTime(); label = 'All time'; }
+  return { key: key, from: from, to: to, label: label };
+}
+function _dashSpark(vals, color) {
+  vals = vals || [];
+  if (vals.length < 2 || !vals.some(v => v > 0)) return '';
+  const w = 120, h = 30, max = Math.max(1, ...vals);
+  const pts = vals.map((v, i) => { const x = (i / (vals.length - 1)) * w; const y = h - (v / max) * (h - 2) - 1; return x.toFixed(1) + ',' + y.toFixed(1); }).join(' ');
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" style="width:100%;height:30px;margin-top:6px;display:block"><polyline points="' + pts + '" fill="none" stroke="' + (color || 'var(--accent)') + '" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+}
+function _dashBuckets(times, from, to) {
+  const day = 86400000, span = Math.max(1, to - from);
+  let n = span <= 31 * day ? Math.ceil(span / day) : (span <= 366 * day ? Math.ceil(span / (15 * day)) : 12);
+  n = Math.max(2, Math.min(n, 40));
+  const size = Math.ceil((span + 1) / n);
+  const b = new Array(n).fill(0);
+  (times || []).forEach(t => { if (t >= from && t <= to) { let i = Math.floor((t - from) / size); if (i < 0) i = 0; if (i >= n) i = n - 1; b[i]++; } });
+  return b;
+}
+async function _dashLoadRaw() {
+  const out = { rounds: [], rosterRaw: [], users: [], wagers: [], requests: [], live: 0,
+    courses: { total: 0, complete: 0, verified: 0, open: 0, needsGps: 0, needsRs: 0, needsTargets: 0, dupes: 0 } };
+  let roster = [];
+  try { roster = await getPlayerRoster(); } catch (e) {}
+  out.rosterRaw = roster || [];
+  const seen = new Set();
+  (roster || []).forEach(p => {
+    const hist = Array.isArray(p.scoreHistory) ? p.scoreHistory : [];
+    hist.forEach(s => {
+      const key = s.gameCode || ((s.date || '') + '|' + (s.course || ''));
+      if (seen.has(key)) return; seen.add(key);
+      out.rounds.push(s);
+    });
+  });
+  try { out.users = await getAdminUsers(); } catch (e) {}
+  try { if (supa) { const r = await supa.from('wagers').select('*'); out.wagers = (r && r.data) || []; } } catch (e) {}
+  try { out.requests = await crFetchAll(); } catch (e) {}
+  try { const rec = await getRecent(); out.live = (rec || []).filter(r => r && r.code && !r.finishedAt && !isRoundStale(r)).length; } catch (e) {}
+  try {
+    await ensureAdminData();
+    const work = _adminWork || [];
+    out.courses.total = (typeof COURSE_LIBRARY !== 'undefined' ? COURSE_LIBRARY : []).length;
+    out.courses.complete = work.filter(c => c.complete).length;
+    out.courses.open = Math.max(0, out.courses.total - out.courses.complete);
+    out.courses.needsGps = work.filter(c => !c.hasGPS).length;
+    out.courses.needsRs = work.filter(c => !c.hasRS).length;
+    out.courses.needsTargets = work.filter(c => c.needsTargets).length;
+    out.courses.verified = (_adminVerified && _adminVerified.size) || 0;
+    const nm = {}; (typeof COURSE_LIBRARY !== 'undefined' ? COURSE_LIBRARY : []).forEach(c => { const k = (c.name || '').trim().toLowerCase(); if (k) nm[k] = (nm[k] || 0) + 1; });
+    out.courses.dupes = Object.keys(nm).filter(k => nm[k] > 1).reduce((a, k) => a + nm[k], 0);
+  } catch (e) {}
+  return out;
+}
+function openAdminDashboard() {
+  if (document.getElementById('admin-dash-ov')) return;
+  const ov = document.createElement('div');
+  ov.id = 'admin-dash-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch';
+  ov.innerHTML =
+    '<div style="max-width:760px;margin:0 auto;padding:14px 14px calc(env(safe-area-inset-bottom,16px) + 28px)">'
+    + '<div style="display:flex;align-items:center;gap:8px;position:sticky;top:0;background:var(--bg);padding:8px 0 10px;z-index:2">'
+    +   '<div style="flex:1;font-size:20px;font-weight:800">📊 Admin Dashboard</div>'
+    +   '<button onclick="_dashCache=null;renderDashboard()" class="small" style="padding:8px 10px">↻ Refresh</button>'
+    +   '<button aria-label="Close" onclick="var o=document.getElementById(\'admin-dash-ov\');if(o)o.remove()" style="width:38px;height:38px;border-radius:50%;border:none;background:var(--surface-2);color:var(--text);font-size:18px;font-weight:800;cursor:pointer">✕</button>'
+    + '</div>'
+    + '<div id="dash-filter"></div>'
+    + '<div id="dash-body"></div>'
+    + '</div>';
+  document.body.appendChild(ov);
+  renderDashFilter();
+  renderDashboard();
+}
+function renderDashFilter() {
+  const el = document.getElementById('dash-filter'); if (!el) return;
+  const chips = [['day', 'Today'], ['month', 'This month'], ['lastmonth', 'Last month'], ['year', 'This year'], ['lastyear', 'Last year'], ['custom', 'Custom']];
+  const chip = (k, l) => '<button onclick="_dashSetRange(\'' + k + '\')" style="border:none;border-radius:999px;padding:7px 13px;font-size:13px;font-weight:600;cursor:pointer;' + (_dashRangeKey === k ? 'background:var(--accent);color:#fff' : 'background:var(--surface-2);color:var(--text)') + '">' + l + '</button>';
+  let html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">' + chips.map(c => chip(c[0], c[1])).join('') + '</div>';
+  if (_dashRangeKey === 'custom') {
+    const fv = _dashFrom ? new Date(_dashFrom).toISOString().slice(0, 10) : '';
+    const tv = _dashTo ? new Date(_dashTo).toISOString().slice(0, 10) : '';
+    html += '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap">'
+      + '<input type="date" id="dash-from" value="' + fv + '" style="flex:1;min-width:130px;padding:9px">'
+      + '<span class="small-text">to</span>'
+      + '<input type="date" id="dash-to" value="' + tv + '" style="flex:1;min-width:130px;padding:9px">'
+      + '<button class="small primary" onclick="_dashApplyCustom()" style="padding:9px 12px">Apply</button></div>';
+  }
+  el.innerHTML = html;
+}
+function _dashSetRange(k) { _dashRangeKey = k; renderDashFilter(); if (k !== 'custom' || (_dashFrom && _dashTo)) renderDashboard(); }
+function _dashApplyCustom() {
+  const f = document.getElementById('dash-from'), t = document.getElementById('dash-to');
+  if (f && f.value) _dashFrom = new Date(f.value + 'T00:00:00').getTime();
+  if (t && t.value) _dashTo = new Date(t.value + 'T23:59:59').getTime();
+  if (_dashFrom && _dashTo && _dashFrom > _dashTo) { const tmp = _dashFrom; _dashFrom = _dashTo; _dashTo = tmp; }
+  renderDashboard();
+}
+async function renderDashboard() {
+  const body = document.getElementById('dash-body'); if (!body) return;
+  body.innerHTML = '<div class="help-text" style="padding:24px 0;text-align:center">Crunching the numbers…</div>';
+  if (!_dashCache) { try { _dashCache = await _dashLoadRaw(); } catch (e) { _dashCache = {}; } }
+  const d = _dashCache || {};
+  const r = dashRange(_dashRangeKey, _dashFrom, _dashTo);
+  const span = r.to - r.from;
+  const pr = { from: r.from - span - 1, to: r.from - 1 };
+  const inR = (t, a, b) => t != null && !isNaN(t) && t >= a && t <= b;
+  const parseT = v => typeof v === 'number' ? v : (v ? Date.parse(v) : NaN);
+  // --- engagement (rounds) ---
+  const roundsAll = d.rounds || [];
+  const rIn = roundsAll.filter(s => inR(s.date, r.from, r.to));
+  const rPrev = roundsAll.filter(s => inR(s.date, pr.from, pr.to));
+  const completed = rIn.filter(s => s.complete);
+  const unfinished = rIn.length - completed.length;
+  const holes = rIn.reduce((a, s) => a + (s.holesScored || (s.complete ? 18 : 0)), 0);
+  const grossArr = completed.filter(s => s.gross != null).map(s => s.gross);
+  const avg = grossArr.length ? Math.round(grossArr.reduce((a, b) => a + b, 0) / grossArr.length) : null;
+  // --- players ---
+  const activeSet = new Set();
+  (d.rosterRaw || []).forEach(p => { const h = Array.isArray(p.scoreHistory) ? p.scoreHistory : []; if (h.some(s => inR(s.date, r.from, r.to))) activeSet.add(p.name); });
+  const totalAcct = (d.users || []).length;
+  const userTimes = (d.users || []).map(u => parseT(u.created_at)).filter(t => !isNaN(t));
+  const hasAcctDates = userTimes.length > 0;
+  const newAcct = userTimes.filter(t => inR(t, r.from, r.to)).length;
+  const newAcctPrev = userTimes.filter(t => inR(t, pr.from, pr.to)).length;
+  // --- wagers ---
+  const wTimes = (d.wagers || []).map(w => parseT(w.created_at)).filter(t => !isNaN(t));
+  const wIn = wTimes.filter(t => inR(t, r.from, r.to)).length;
+  const wPrev = wTimes.filter(t => inR(t, pr.from, pr.to)).length;
+  // --- requests ---
+  const reqs = d.requests || [];
+  const openReqs = reqs.filter(x => (x.status || 'open') === 'open');
+  const reqNew = openReqs.filter(x => x.type === 'new').length;
+  const reqRemap = openReqs.filter(x => x.type === 'remap').length;
+  // --- courses (snapshot) ---
+  const c = d.courses || {};
+  const pctComplete = c.total ? Math.round(c.complete / c.total * 100) : 0;
+  // helpers
+  const delta = (cur, prev) => { if (!prev) return cur > 0 ? '+100%' : ''; const p = Math.round((cur - prev) / prev * 100); return (p >= 0 ? '+' : '') + p + '%'; };
+  const card = (label, val, opts) => {
+    opts = opts || {};
+    return '<div style="background:var(--surface-2);border-radius:12px;padding:12px 12px 10px;' + (opts.dim ? 'opacity:0.5;' : '') + '">'
+      + '<div class="small-text" style="text-transform:uppercase;letter-spacing:0.03em;color:var(--text-muted);font-size:10px;font-weight:700">' + label + '</div>'
+      + '<div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;margin-top:2px"><div style="font-size:24px;font-weight:800;line-height:1.1">' + val + '</div>'
+      + (opts.delta ? '<div style="font-size:12px;font-weight:700;color:' + (/^-/.test(opts.delta) ? 'var(--danger)' : 'var(--money-pos)') + '">' + opts.delta + '</div>' : '') + '</div>'
+      + (opts.sub ? '<div class="small-text" style="color:var(--text-muted);font-size:11px;margin-top:1px">' + opts.sub + '</div>' : '')
+      + (opts.spark || '')
+      + (opts.note ? '<div class="small-text" style="color:var(--text-muted);font-size:10px;margin-top:5px;font-style:italic">' + opts.note + '</div>' : '')
+      + '</div>';
+  };
+  const grid = cards => '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:4px">' + cards.join('') + '</div>';
+  const section = (t, extra) => '<h3 style="margin:18px 0 8px;font-size:15px">' + t + (extra ? ' <span class="small-text" style="font-weight:500;color:var(--text-muted);font-size:11px">' + extra + '</span>' : '') + '</h3>';
+  let html = '';
+  html += '<div class="small-text" style="color:var(--text-muted);margin:2px 0 4px">Showing: <strong>' + r.label + '</strong></div>';
+  // Engagement
+  html += section('⛳ Engagement', '· ' + r.label);
+  html += grid([
+    card('Rounds played', rIn.length, { delta: delta(rIn.length, rPrev.length), spark: _dashSpark(_dashBuckets(rIn.map(s => s.date), r.from, r.to)) }),
+    card('Rounds completed', completed.length, { sub: unfinished + ' unfinished' }),
+    card('Holes played', holes, {}),
+    card('Avg score', avg != null ? avg : '—', { sub: grossArr.length ? 'over ' + grossArr.length + ' rounds' : 'no completed rounds' })
+  ]);
+  // Players
+  html += section('👥 Players & accounts');
+  html += grid([
+    card('Active players', activeSet.size, { sub: 'played in range' }),
+    card('Live rounds now', d.live || 0, { sub: 'in progress' }),
+    card('Total accounts', totalAcct, {}),
+    card('New signups', hasAcctDates ? newAcct : '—', hasAcctDates ? { delta: delta(newAcct, newAcctPrev) } : { note: 'needs a signup date on profiles' })
+  ]);
+  // Wagers
+  html += section('💵 Wagers');
+  html += grid([
+    card('Wagers placed', wIn, { delta: delta(wIn, wPrev), spark: _dashSpark(_dashBuckets(wTimes, r.from, r.to)) }),
+    card('Total wagers (all time)', (d.wagers || []).length, {})
+  ]);
+  // Course requests
+  html += section('📩 Course requests', '· open');
+  html += grid([
+    card('New-course requests', reqNew, { sub: 'awaiting action' }),
+    card('Re-map requests', reqRemap, { sub: 'awaiting action' })
+  ]);
+  // Course library
+  html += section('🗺 Course library', '· current');
+  html += grid([
+    card('Verified', c.verified || 0, {}),
+    card('Complete', c.complete || 0, { sub: pctComplete + '% of library' }),
+    card('Open', c.open || 0, { sub: 'not complete' }),
+    card('Total courses', c.total || 0, {})
+  ]);
+  html += grid([
+    card('Needs GPS', c.needsGps || 0, {}),
+    card('Needs ratings', c.needsRs || 0, {}),
+    card('Needs targets', c.needsTargets || 0, {}),
+    card('Duplicates flagged', c.dupes || 0, {})
+  ]);
+  // Coming soon
+  html += section('🔌 Coming soon', '· needs outside connections');
+  html += grid([
+    card('Downloads & impressions', '—', { dim: true, note: 'App Store Connect' }),
+    card('Revenue / MRR', '—', { dim: true, note: 'needs a payments system' }),
+    card('Crashes by version', '—', { dim: true, note: 'needs crash reporting' }),
+    card('Retention D1/7/14/28', '—', { dim: true, note: 'needs analytics' })
+  ]);
+  body.innerHTML = html;
+}
+
 // Render the Users list: matches the search (name, linked player, OR email), each
 // a card with the account's profile photo, role, email, and three actions that
 // wrap to fit a phone — Reset password, Make/Revoke admin, Delete.
@@ -5791,7 +6085,8 @@ async function getAdminUsers() {
   // basic columns if the email column isn't present so the list never breaks.
   try {
     if (supa && supaOnline) {
-      let r = await supa.from('profiles').select('id,display_name,my_player,role,email');
+      let r = await supa.from('profiles').select('id,display_name,my_player,role,email,created_at');
+      if (r.error) r = await supa.from('profiles').select('id,display_name,my_player,role,email');
       if (r.error) r = await supa.from('profiles').select('id,display_name,my_player,role');
       return r.data || [];
     }
@@ -9463,7 +9758,7 @@ async function setupNewGameForm(prefill) {
       if (!me) { try { me = await safeGet(KEY_ME, false); } catch (e) {} }
       if (me) {
         const roster = await getPlayerRoster();
-        const entry = roster.find(p => p.name === me);
+        const entry = findMyRosterPlayer(roster, me);
         const parts = me.split(/\s+/);
         const first = entry ? (entry.firstName || parts[0] || '') : (parts[0] || '');
         const last = entry ? (entry.lastName || '') : (parts.slice(1).join(' ') || '');
@@ -19050,7 +19345,7 @@ async function renderHome() {
     try { me = await getMeName(); } catch (e) {}
     const myEl = $('home-my-hcp');
     if (myEl) {
-      const mine = me ? roster.find(p => p.name === me) : null;
+      const mine = findMyRosterPlayer(roster, me);
       if (mine && Array.isArray(mine.scoreHistory) && mine.scoreHistory.length > 0) {
         // Identical look to the top of the Stats tab — index bubble + tiles.
         myEl.innerHTML = buildHomeKpiHtml(mine);
@@ -19786,6 +20081,20 @@ async function setMeName(name) {
   }
   return await safeSet(KEY_ME, name || '', false);
 }
+// Resolve the signed-in user's roster player. The cloud `my_player` string can
+// drift from the roster's `name` by punctuation/case (e.g. stored "Tyler
+// O'Connor" vs the roster's derived "Tyler OConnor" after first/last migration),
+// which used to make "me" un-findable — wiping the Home stats, the profile photo,
+// and defaulting the Stats picker to someone else. Try an exact match first, then
+// a normalized (apostrophe/hyphen/case-insensitive) match so we always land on
+// the right player.
+function findMyRosterPlayer(roster, me) {
+  if (!me || !Array.isArray(roster)) return null;
+  const exact = roster.find(x => x && x.name === me);
+  if (exact) return exact;
+  const n = normalizeNameSegment(me);
+  return roster.find(x => x && normalizeNameSegment(x.name) === n) || null;
+}
 
 // Friends-only (#10): given the sorted local roster, return only YOU and your
 // accepted friends' linked players. Falls back to the full list for guests, when
@@ -19798,13 +20107,13 @@ async function visiblePlayersForStats(list, meName) {
     const [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]);
     const byId = {}; profiles.forEach(pr => { byId[pr.id] = pr; });
     const allowed = new Set();
-    if (meName) allowed.add(meName);
+    if (meName) allowed.add(normalizeNameSegment(meName));
     edges.filter(e => e.status === 'accepted' && (e.requester === meId || e.addressee === meId))
       .map(e => byId[e.requester === meId ? e.addressee : e.requester])
       .filter(Boolean)
-      .forEach(pr => { if (pr.my_player) allowed.add(pr.my_player); });
+      .forEach(pr => { if (pr.my_player) allowed.add(normalizeNameSegment(pr.my_player)); });
     if (!allowed.size) return list;                 // not linked & no friends yet
-    const filtered = list.filter(p => allowed.has(p.name));
+    const filtered = list.filter(p => allowed.has(normalizeNameSegment(p.name)));
     return filtered.length ? filtered : list;       // safety: never show an empty picker
   } catch (e) { return list; }                       // offline → fall back to local roster
 }
@@ -19851,8 +20160,9 @@ async function renderStats(forceMe) {
   if (playerCard) playerCard.style.display = 'block';
   // Preserve current selection if still valid; otherwise pick "me" or first
   const prevValue = select.value;
+  const meNorm = meName ? normalizeNameSegment(meName) : '';
   select.innerHTML = visible.map(p => {
-    const isMe = meName && p.name === meName;
+    const isMe = meNorm && normalizeNameSegment(p.name) === meNorm;
     const fn = (p.firstName || (p.name || '').split(/\s+/)[0] || '').trim();
     const ln = (p.lastName || (p.name || '').split(/\s+/).slice(1).join(' ') || '').trim();
     const shortNm = fn + (ln ? ' ' + ln.charAt(0).toUpperCase() + '.' : '');
@@ -19862,10 +20172,9 @@ async function renderStats(forceMe) {
   // never lands on the PREVIOUS user's stats.
   if (!forceMe && prevValue && visible.find(p => p.name === prevValue)) {
     select.value = prevValue;
-  } else if (meName && visible.find(p => p.name === meName)) {
-    select.value = meName;
   } else {
-    select.value = visible[0].name;
+    const myP = findMyRosterPlayer(visible, meName);
+    select.value = myP ? myP.name : visible[0].name;
   }
 
   await renderStatsForSelectedPlayer();
@@ -20945,7 +21254,7 @@ async function removeRoundForMe(code) {
     const me = await getMeName();
     if (me) {
       const roster = await getPlayerRoster();
-      const entry = roster.find(p => p.name === me);
+      const entry = findMyRosterPlayer(roster, me);
       if (entry && Array.isArray(entry.scoreHistory)) {
         const before = entry.scoreHistory.length;
         entry.scoreHistory = entry.scoreHistory.filter(s => s.gameCode !== code);
@@ -20967,7 +21276,7 @@ async function reconcileMyScoreHistory() {
   try {
     const me = await getMeName(); if (!me) return;
     const roster = await getPlayerRoster();
-    const entry = (roster || []).find(p => p && p.name === me);
+    const entry = findMyRosterPlayer(roster, me);
     if (!entry || !Array.isArray(entry.scoreHistory) || !entry.scoreHistory.length) return;
     const before = entry.scoreHistory.length;
     // 1) Always drop rounds you explicitly hid/deleted (the × on the Rounds tab).
@@ -21425,7 +21734,7 @@ async function renderCrewMyProfile() {
     if (!signedIn) return;
     const me = await getMeName();
     const roster = await getPlayerRoster();
-    const p = me ? roster.find(x => x.name === me) : null;
+    const p = findMyRosterPlayer(roster, me);
     const av = document.getElementById('crew-my-avatar');
     const nm = document.getElementById('crew-my-name');
     const em = document.getElementById('stats-profile-email');
@@ -21487,7 +21796,7 @@ async function openEditProfile() {
     // Prefill avatar + name preview from the linked roster player.
     const me = await getMeName();
     const roster = await getPlayerRoster();
-    const p = me ? roster.find(x => x.name === me) : null;
+    const p = findMyRosterPlayer(roster, me);
     const av = document.getElementById('edit-profile-avatar');
     const nm = document.getElementById('edit-profile-name');
     if (nm) nm.textContent = me || 'Set your name →';
@@ -21880,7 +22189,7 @@ async function handleCrewPhoto(e) {
   try {
     const dataUrl = await downscaleImageToDataUrl(file, 96, 0.7);
     const roster = await getPlayerRoster();
-    const p = roster.find(x => x.name === me);
+    const p = findMyRosterPlayer(roster, me);
     if (!p) { showToast("Your player isn't in the roster yet"); return; }
     p.avatar = dataUrl;
     await savePlayerRoster(roster);
@@ -21972,7 +22281,7 @@ async function openEditMyName() {
   const me = await getMeName();
   if (!me) { showToast('Sign in to set your name'); return; }
   const roster = await getPlayerRoster();
-  const entry = roster.find(p => p.name === me);
+  const entry = findMyRosterPlayer(roster, me);
   const first = entry ? (entry.firstName || '') : (me.split(/\s+/)[0] || '');
   const last = entry ? (entry.lastName || '') : (me.split(/\s+/).slice(1).join(' ') || '');
   const fEl = document.getElementById('edit-name-first');
@@ -29800,7 +30109,7 @@ async function loadMyClubs() {
         const me = await getMeName();
         if (me) {
           const roster = await getPlayerRoster();
-          const entry = roster.find(p => p.name === me);
+          const entry = findMyRosterPlayer(roster, me);
           if (entry && Array.isArray(entry.clubs) && entry.clubs.length) {
             await supa.from('profiles').update({ clubs: entry.clubs }).eq('id', _authUser.id);
             return entry.clubs;
