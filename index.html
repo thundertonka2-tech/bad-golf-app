@@ -5491,7 +5491,8 @@ function applyAdminGating() {
 // ============================================================
 // ADMIN TAB — course worklist (rename / delete / map) + user roles
 // ============================================================
-let _adminFilter = 'map';   // map (needs GPS) | rate (needs ratings) | all
+let _adminFilter = 'all';   // all | nomap | partial | rate | targets | skip
+let _adminSort = 'worklist';   // 'worklist' = incomplete-first (default) | 'az' = A-Z to spot duplicates
 let _adminSearch = '';
 let _adminStateFilter = ''; // '' = all states
 let _adminShow = 0;         // how many worklist rows to show (0 = the default page); "Show more" raises it
@@ -5538,6 +5539,7 @@ function renderAdminUserList() {
 // — so we count the holes and treat only fully-mapped (18-hole) courses as done.
 async function getMappedCourseIdSet() {
   const counts = new Map();
+  counts.fwc = new Map();   // course_id → # holes that have a fairway-center (target) marked
   // .has(id) → true only when a course is FULLY mapped (18 holes); otherwise it
   // still needs mapping. (We keep the name .has so callers read naturally.)
   counts.has = function (id) { return (this.get(id) || 0) >= 18; };
@@ -5548,7 +5550,13 @@ async function getMappedCourseIdSet() {
       while (true) {
         const { data, error } = await supa.from('course_gps').select('course_id,holes').range(from, from + page - 1);
         if (error || !data || !data.length) break;
-        data.forEach(r => { if (r && r.course_id) counts.set(r.course_id, r.holes ? Object.keys(r.holes).length : 0); });
+        data.forEach(r => {
+          if (!r || !r.course_id) return;
+          const hs = r.holes || {};
+          counts.set(r.course_id, Object.keys(hs).length);
+          let fc = 0; for (const k in hs) { const h = hs[k]; if (h && Array.isArray(h.fwc) && h.fwc.length === 2) fc++; }
+          counts.fwc.set(r.course_id, fc);
+        });
         if (data.length < page) break;
         from += page;
       }
@@ -5572,6 +5580,7 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
     const sc = saves[id];
     const name = lib.name || (sc && sc.name) || id;
     const holes = (mappedSet && typeof mappedSet.get === 'function') ? (mappedSet.get(id) || 0) : 0;
+    const fwcCount = (mappedSet && mappedSet.fwc && typeof mappedSet.fwc.get === 'function') ? (mappedSet.fwc.get(id) || 0) : 0;
     const hasGPS = holes >= 18;                 // fully mapped
     const hasRS = !!(sc && Array.isArray(sc.tees) && sc.tees.some(t => t && t.rating != null && t.slope != null))
       || !!(sc && sc.rating != null && sc.slope != null);
@@ -5581,7 +5590,7 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
     // renderAdminWorklist) until the admin searches or picks a state.
     const flag = complete ? 'done' : (hasGPS ? 'rs' : (hasRS ? 'gps' : 'both'));
     const st = lib.st || (typeof courseStateCode === 'function' ? courseStateCode(lib) : '') || '';
-    items.push({ id, name, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, pop: playCount[name.toLowerCase()] || 0 });
+    items.push({ id, name, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, fwcCount, needsTargets: hasGPS && fwcCount === 0, pop: playCount[name.toLowerCase()] || 0 });
   });
   // Partially-mapped courses first (closest to done — quickest to finish), most
   // holes already done first; then popularity, then name.
@@ -5635,13 +5644,23 @@ function renderAdminWorklist() {
   });
   // Filters are action-oriented: "Needs mapping" = EVERY course without full GPS,
   // "Needs ratings" = mapped courses missing rating/slope, "Skipped" = parked ones.
-  const cMap = base.filter(it => !it.hasGPS).length;
-  const cRate = base.filter(it => it.hasGPS && !it.hasRS).length;
+  const cNoMap = base.filter(it => !it.hasGPS && (it.holes || 0) === 0).length;   // no GPS at all
+  const cPartial = base.filter(it => !it.hasGPS && (it.holes || 0) > 0).length;   // some holes, not all 18
+  const cRate = base.filter(it => !it.hasRS).length;                              // missing rating/slope
+  const cTargets = base.filter(it => it.hasGPS && it.fwcCount === 0).length;      // mapped, no fairway centers
   const chip = (key, label, n) => '<button class="adm-filter' + (f === key ? ' active' : '') + '" data-filter="' + key + '">' + label + ' (' + n + ')</button>';
-  const chipsHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 10px">'
-    + chip('map', '🗺 Needs mapping', cMap) + chip('rate', '📋 Needs ratings', cRate)
+  const sortBtn = (key, label) => '<button class="adm-filter' + (_adminSort === key ? ' active' : '') + '" data-sort="' + key + '">' + label + '</button>';
+  const chipsHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px">'
     + chip('all', 'All', base.length)
-    + chip('skip', '⏭ Skipped', cSkip) + '</div>';
+    + chip('nomap', '🚫 Not mapped', cNoMap)
+    + chip('partial', '📍 Missing holes', cPartial)
+    + chip('rate', '📋 Missing rating', cRate)
+    + chip('targets', '🎯 Needs targets', cTargets)
+    + chip('skip', '⏭ Skipped', cSkip) + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px;align-items:center">'
+    + '<span class="small-text" style="color:var(--text-muted)">Sort:</span>'
+    + sortBtn('worklist', '⚑ Incomplete first')
+    + sortBtn('az', '🔤 A–Z (find duplicates)') + '</div>';
 
   // Performance: don't render the (potentially huge) worklist until the admin
   // narrows it — pick a state or search a course. Keeps the Admin screen fast
@@ -5653,14 +5672,24 @@ function renderAdminWorklist() {
 
   // Which items to show. The Skipped bucket shows parked courses (regardless of
   // complete), still respecting the state filter so they can be reviewed by state.
+  const matchFilter = it => {
+    if (f === 'nomap') return !it.hasGPS && (it.holes || 0) === 0;     // never mapped
+    if (f === 'partial') return !it.hasGPS && (it.holes || 0) > 0;     // some holes, not all 18
+    if (f === 'rate') return !it.hasRS;                               // missing rating/slope
+    if (f === 'targets') return it.hasGPS && it.fwcCount === 0;        // mapped, no fairway centers
+    return true;                                                      // all
+  };
   let filt;
   if (f === 'skip') filt = scopeItems.filter(isSkip);
-  else if (q) filt = base;                         // search surfaces all (non-skipped) matches
-  else filt = base.filter(it => {
-    if (f === 'map') return !it.hasGPS;          // anything lacking full 18-hole GPS
-    if (f === 'rate') return it.hasGPS && !it.hasRS; // mapped, just needs rating/slope
-    return true;                                  // all
-  });
+  else filt = base.filter(matchFilter);
+  // A–Z lines duplicates right next to each other so Kevin can spot/merge them;
+  // 'worklist' keeps the incomplete-first order from buildAdminWorklist.
+  if (_adminSort === 'az') {
+    filt = filt.slice().sort((a, b) => a.name.localeCompare(b.name) || (a.st || '').localeCompare(b.st || ''));
+  }
+  // Count normalized names across the filtered list so duplicate entries get a ⚠ tag.
+  const nameCount = {};
+  filt.forEach(it => { const k = (it.name || '').trim().toLowerCase(); nameCount[k] = (nameCount[k] || 0) + 1; });
   const lbl = { both: 'Needs GPS + ratings', gps: 'Needs GPS', rs: 'Needs ratings', done: '✓ Complete' };
   _adminOrder = filt.map(it => it.id);   // so the detail screen's Next/Skip can sweep this state in order
   if (!filt.length) {
@@ -5700,8 +5729,8 @@ function renderAdminWorklist() {
       // Clean tappable card — the whole card opens the course detail screen
       // (all edit/map tools live there now, instead of a row of buttons per card).
       return '<div class="adm-card" data-open="' + ea(it.id) + '" style="cursor:pointer">'
-      + '<div class="adm-name" title="' + ea(it.name) + '">' + esc(it.name) + (isSkip(it) ? ' <span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + '</div>'
-      + '<div class="adm-badges">' + gpsPill + badge + '</div>'
+      + '<div class="adm-name" title="' + ea(it.name) + '">' + esc(it.name) + (isSkip(it) ? ' <span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + ((nameCount[(it.name || '').trim().toLowerCase()] || 0) > 1 ? ' <span class="adm-flag" style="background:#b3261e">⚠ duplicate</span>' : '') + '</div>'
+      + '<div class="adm-badges">' + gpsPill + (it.hasGPS && it.fwcCount === 0 ? '<span class="adm-flag" style="background:#7a5cc0">No targets</span>' : '') + badge + '</div>'
       + '<div class="loc">' + esc(loc(it)) + ' <span style="color:var(--accent);font-weight:600;white-space:nowrap">· tap to edit ›</span></div>'
       + '</div>';
     }).join('')
@@ -5798,6 +5827,7 @@ async function renderAdmin() {
     const t = e.target.closest('button'); if (!t) return;
     if (t.dataset.mergedupes) { try { if (typeof openRosterCleanup === 'function') openRosterCleanup(); } catch (e2) {} return; }
     if (t.dataset.filter) { _adminFilter = t.dataset.filter; _adminShow = 0; renderAdminWorklist(); return; }
+    if (t.dataset.sort) { _adminSort = t.dataset.sort; _adminShow = 0; renderAdminWorklist(); return; }
     if (t.dataset.showmore) { _adminShow = parseInt(t.dataset.showmore, 10) || 0; renderAdminWorklist(); return; }
     if (t.dataset.open) { openCourseDetail(t.dataset.open); return; }
     if (t.dataset.skip) { _adminSkipped.add(t.dataset.skip); _adminShow = 0; renderAdminWorklist(); persistCourseSkipped(); showToast('Skipped — parked in the Skipped bucket'); return; }
