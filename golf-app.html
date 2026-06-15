@@ -5260,7 +5260,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.09';
+const BG_BUILD = 'v2026.11.10';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -7706,7 +7706,10 @@ async function getCourseLibraryAdditions() {
 
 async function saveCourseLibraryAdditions(list) {
   try { invalidateCourseLibraryCache(); } catch (e) {} // any write must force a fresh load
-  return await safeSet(KEY_COURSE_LIBRARY, JSON.stringify(list), true);
+  // Defensive de-dupe so a race can never PERSIST two entries with the same id.
+  let out = list;
+  try { const seen = new Set(); out = (list || []).filter(c => { if (!c || !c.id) return false; if (seen.has(c.id)) return false; seen.add(c.id); return true; }); } catch (e) { out = list; }
+  return await safeSet(KEY_COURSE_LIBRARY, JSON.stringify(out), true);
 }
 
 // Add a user-contributed course to the shared library. Refuses duplicates
@@ -7717,21 +7720,25 @@ async function addCourseToLibrary(name, city, note, extra) {
   const trimmedCity = (city || '').trim();
   if (!trimmed) return null;
 
-  const existingMatch = COURSE_LIBRARY.find(c =>
-    c.name.toLowerCase() === trimmed.toLowerCase() &&
-    (c.city || '').toLowerCase() === trimmedCity.toLowerCase()
-  );
-  if (existingMatch) return existingMatch;
+  // Re-read the SHARED additions store so we dedupe against the latest state,
+  // not just this device's in-memory copy — this is the "saved → added 3x" bug:
+  // the in-memory library lagged the store, so repeats slipped past the check.
+  const additions = await getCourseLibraryAdditions();
+  const sameNameCity = c => c && c.name && c.name.trim().toLowerCase() === trimmed.toLowerCase() && (c.city || '').trim().toLowerCase() === trimmedCity.toLowerCase();
+  const existingMatch = COURSE_LIBRARY.find(sameNameCity) || additions.find(sameNameCity);
+  if (existingMatch) {
+    if (!COURSE_LIBRARY.some(c => c.id === existingMatch.id)) COURSE_LIBRARY.push(existingMatch);
+    return existingMatch;
+  }
 
-  // Generate a slug-style id from the name
-  const baseId = trimmed.toLowerCase()
+  // Generate a slug-style id; disambiguate against BOTH the library and the store.
+  const baseId = (trimmed.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 48);
-  // Disambiguate if the id already exists
+    .slice(0, 48)) || 'course';
   let id = baseId;
   let n = 1;
-  while (COURSE_LIBRARY.some(c => c.id === id)) {
+  while (COURSE_LIBRARY.some(c => c.id === id) || additions.some(c => c.id === id)) {
     n++;
     id = baseId + '-' + n;
   }
@@ -7746,7 +7753,6 @@ async function addCourseToLibrary(name, city, note, extra) {
   if (note && note.trim()) newCourse.note = note.trim();
   if (extra && typeof extra === 'object') Object.assign(newCourse, extra);
 
-  const additions = await getCourseLibraryAdditions();
   additions.push(newCourse);
   await saveCourseLibraryAdditions(additions);
 
@@ -7884,6 +7890,10 @@ function openCourseDetail(id) {
   const gpsPill = it.hasGPS ? '<span class="adm-flag" style="background:var(--money-pos)">GPS mapped</span>'
     : (it.holes > 0 ? '<span class="adm-flag" style="background:#d98a2b">GPS ' + it.holes + '/18</span>' : '<span class="adm-flag" style="background:var(--text-muted)">No GPS</span>');
   const rsPill = it.hasRS ? '<span class="adm-flag" style="background:var(--money-pos)">Rating set</span>' : '<span class="adm-flag gps">No rating</span>';
+  // Duplicate siblings = OTHER library courses with the same name and the same
+  // city OR state. Lets the admin purge accidental copies, keeping THIS one.
+  const _norm = x => (x || '').trim().toLowerCase();
+  const dupSibs = (COURSE_LIBRARY || []).filter(c => c && c.id !== id && _norm(c.name) === _norm(it.name) && (_norm(c.city) === _norm(it.city) || (c.st && it.st && _norm(c.st) === _norm(it.st))));
   // Position in the current state sweep — drives Next/Skip so the admin never
   // has to bounce back to the list while cleaning up a whole state.
   const order = _adminOrder || [];
@@ -7906,7 +7916,8 @@ function openCourseDetail(id) {
     + '<div style="min-width:0"><div style="font-weight:800;font-size:19px;line-height:1.2">' + esc(it.name) + '</div>'
     + '<div class="small-text" style="color:var(--text-muted);margin-top:3px">' + esc(loc) + '</div></div>'
     + '<button id="acd-x" style="flex:0 0 auto;background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:6px 12px;font-size:16px;cursor:pointer">✕</button></div>'
-    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 6px">' + gpsPill + rsPill + (skipped ? '<span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 6px">' + gpsPill + rsPill + (skipped ? '<span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + (dupSibs.length ? '<span class="adm-flag" style="background:#b3261e">⚠ ' + dupSibs.length + ' duplicate' + (dupSibs.length === 1 ? '' : 's') + '</span>' : '') + '</div>'
+    + (dupSibs.length ? btn('dedupe', '🧹 Remove ' + dupSibs.length + ' duplicate' + (dupSibs.length === 1 ? '' : 's') + ' — keep this one', true) : '')
     + btn('remapfull', '🗺 Remap full course (greens + fairways)')
     + btn('fwc', '🎯 Mark fairway centers only')
     + btn('rate', '📋 Course rating &amp; slope')
@@ -7924,6 +7935,16 @@ function openCourseDetail(id) {
   card.querySelectorAll('button[data-act]').forEach(b => b.onclick = async () => {
     const act = b.dataset.act;
     if (act === 'list') { closeOv(); renderAdminWorklist(); return; }
+    if (act === 'dedupe') {
+      if (!dupSibs.length) return;
+      if (window.confirm('Remove ' + dupSibs.length + ' duplicate copy(ies) of "' + (it.name || 'this course') + '" and KEEP this one? This deletes the extra copies for everyone. Cannot be undone.')) {
+        let removed = 0;
+        for (const sib of dupSibs) { try { const ok = await deleteCourse(sib.id); if (ok) removed++; } catch (e) {} }
+        showToast('Removed ' + removed + ' duplicate' + (removed === 1 ? '' : 's'));
+        closeOv(); renderAdmin();
+      }
+      return;
+    }
     if (act === 'next') { if (nextId) advance(); return; }
     if (act === 'remapfull') { closeOv(); adminRemapFull(id); return; }
     if (act === 'fwc') { closeOv(); adminFwcCourse(id); return; }
