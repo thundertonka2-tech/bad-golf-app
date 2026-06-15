@@ -5260,7 +5260,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.07';
+const BG_BUILD = 'v2026.11.09';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -5666,7 +5666,8 @@ function renderAdminWorklist() {
   // narrows it — pick a state or search a course. Keeps the Admin screen fast
   // with a big library. The Skipped bucket is small, so it always renders.
   if (!scoped && f !== 'skip') {
-    el.innerHTML = chipsHtml + '<div class="help-text" style="padding:12px 0;line-height:1.5">Pick a <strong>state</strong> above or <strong>search a course</strong> to load the list.<br><span class="small-text" style="color:var(--text-muted)">' + _adminWork.length + ' courses in the library — kept hidden until you narrow it so this screen stays fast.</span></div>';
+    const libN = (typeof COURSE_LIBRARY !== 'undefined' && COURSE_LIBRARY) ? COURSE_LIBRARY.length : _adminWork.length;
+    el.innerHTML = '<div class="help-text" style="padding:12px 0;line-height:1.5">Pick a <strong>state</strong> above or <strong>search a course</strong> to load the list.<br><span class="small-text" style="color:var(--text-muted)">' + libN + ' courses in the library — loaded only once you narrow it so this screen stays fast.</span></div>';
     return;
   }
 
@@ -5737,6 +5738,23 @@ function renderAdminWorklist() {
     + moreBtn;
 }
 
+let _adminDataReady = false;
+let _adminUsersLoaded = false;
+// Lazy course-data loader for the Admin screen: pulls scorecards + GPS hole
+// counts + recent rounds ONCE, the first time the admin narrows to a state or
+// search. Guarded so repeat calls are free.
+async function ensureAdminData() {
+  if (_adminDataReady) return;
+  const [saves, mapped, recent] = await Promise.all([
+    getCourseSaves().catch(() => ({})),
+    getMappedCourseIdSet().catch(() => new Map()),
+    getRecent().catch(() => [])
+  ]);
+  const playCount = {};
+  try { (recent || []).forEach(r => { const nm = (r.course || '').trim().toLowerCase(); if (nm) playCount[nm] = (playCount[nm] || 0) + 1; }); } catch (e) {}
+  _adminWork = buildAdminWorklist(saves, mapped, playCount);
+  _adminDataReady = true;
+}
 async function renderAdmin() {
   const guard = document.getElementById('admin-guard');
   const body = document.getElementById('admin-body');
@@ -5744,38 +5762,27 @@ async function renderAdmin() {
   if (!(typeof isAdmin === 'function' && isAdmin())) { if (guard) guard.style.display = 'block'; body.innerHTML = ''; return; }
   if (guard) guard.style.display = 'none';
   body.innerHTML = '<div class="help-text" style="margin:6px 0">Loading…</div>';
-  // Fetch every independent data source in PARALLEL instead of one-await-at-a-time
-  // — the admin page was waiting on five sequential round-trips before it drew.
-  const [saves, mapped, recent, users, rosterForDupes, skipped] = await Promise.all([
-    getCourseSaves().catch(() => ({})),
-    getMappedCourseIdSet().catch(() => new Set()),
-    getRecent().catch(() => []),
-    getAdminUsers().catch(() => []),
-    getPlayerRoster().catch(() => []),
-    getCourseSkipped().catch(() => [])
-  ]);
-  _adminSkipped = new Set(skipped || []);
-  // Popularity = how many times each course shows up in recent rounds.
-  const playCount = {};
-  try { (recent || []).forEach(r => { const nm = (r.course || '').trim().toLowerCase(); if (nm) playCount[nm] = (playCount[nm] || 0) + 1; }); } catch (e) {}
-  _adminWork = buildAdminWorklist(saves, mapped, playCount);
-  const counts = { gps: 0, both: 0, rs: 0 };
-  _adminWork.forEach(it => counts[it.flag]++);
+  // PERF: only the tiny skipped-list read happens up front. The heavy data —
+  // every scorecard, all GPS hole-counts, recent rounds, and the user list —
+  // is NOT fetched on open. Course data loads the first time a state/search is
+  // chosen (ensureAdminData); the user list loads only when expanded. Keeps the
+  // Admin screen instant even with a big library.
+  _adminSkipped = new Set(await getCourseSkipped().catch(() => []));
+  _adminDataReady = false;
+  _adminUsersLoaded = false;
   const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
   const ea = (typeof escAttr === 'function') ? escAttr : (x => x);
-
-  const fbtn = (key, label, n) => '<button class="adm-filter' + (_adminFilter === key ? ' active' : '') + '" data-filter="' + key + '">' + label + (n != null ? ' (' + n + ')' : '') + '</button>';
+  const stateNames = (typeof US_STATE_NAMES !== 'undefined') ? US_STATE_NAMES : {};
 
   let html = '';
   // ---- Course worklist ----
   html += '<h3 style="margin:4px 0 2px">🗺 Course worklist</h3>';
-  html += '<div class="help-text" style="margin-bottom:8px">By default this lists courses missing GPS mapping and/or tee rating/slope. <strong>Search any course name (or a state) to pull up the full library</strong> — every course can be re-mapped, re-rated, or edited. <span class="adm-flag gps" style="margin:0 2px">Needs GPS</span> · <span class="adm-flag both" style="margin:0 2px">both</span> · <span class="adm-flag rs" style="margin:0 2px">ratings</span> · ✓ Complete.</div>';
+  html += '<div class="help-text" style="margin-bottom:8px">Pick a <strong>state</strong> or <strong>search a course</strong> to load the list — every course can be re-mapped, re-rated, or edited. <span class="adm-flag gps" style="margin:0 2px">Needs GPS</span> · <span class="adm-flag both" style="margin:0 2px">both</span> · <span class="adm-flag rs" style="margin:0 2px">ratings</span> · ✓ Complete.</div>';
   html += '<button class="adm-act map" data-newcourse="1" style="width:100%;margin-bottom:10px;padding:11px">➕ Create new course</button>';
-  // (Filter chips render inside #adm-list so their counts reflect the chosen
-  // state + search scope.)
-  // State sorter — lets the crew work the worklist one state at a time.
-  const stateNames = (typeof US_STATE_NAMES !== 'undefined') ? US_STATE_NAMES : {};
-  const states = [...new Set(_adminWork.map(it => it.st).filter(Boolean))]
+  // State list comes straight from the library (no network) so the dropdown is
+  // instant; the per-course data loads only once a state is picked.
+  const stCode = c => c.st || (typeof courseStateCode === 'function' ? courseStateCode(c) : '') || '';
+  const states = [...new Set((COURSE_LIBRARY || []).map(stCode).filter(Boolean))]
     .sort((a, b) => (stateNames[a] || a).localeCompare(stateNames[b] || b));
   if (states.length) {
     html += '<select id="adm-state" style="width:100%;margin-bottom:8px"><option value="">All states</option>'
@@ -5785,40 +5792,69 @@ async function renderAdmin() {
   html += '<input id="adm-search" type="text" placeholder="Search ANY course (or state)…" value="' + ea(_adminSearch) + '" style="width:100%;margin-bottom:10px;padding:13px 14px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">';
   html += '<div id="adm-list"></div>';
 
-  // ---- Duplicate players (auto-suggested merges) ----
-  let dupes = [];
-  try { dupes = findRosterDuplicates(rosterForDupes || []); } catch (e) {}
-  if (dupes.length) {
-    html += '<div style="margin:16px 0 0;background:var(--warn-light);border:1px solid var(--warn);border-radius:10px;padding:12px 13px">'
-      + '<div style="font-weight:700;color:var(--warn);margin-bottom:4px">⚠ ' + dupes.length + ' possible duplicate player' + (dupes.length === 1 ? '' : 's') + '</div>'
-      + '<div class="help-text" style="margin-bottom:8px">These look like the same person under two names — merging combines their rounds &amp; stats.</div>'
-      + dupes.slice(0, 6).map(d => '<div class="small-text" style="margin:2px 0">• ' + esc(d.candidates.map(c => (typeof displayFull === 'function' ? displayFull(c) : c.name) || c.firstName).join(' = ')) + '</div>').join('')
-      + '<button class="adm-act map" data-mergedupes="1" style="margin-top:10px">🧹 Review &amp; merge</button>'
-      + '</div>';
-  }
-
-  // ---- Users ----
-  _adminUsers = (users || []).slice().sort((a, b) => String(a.display_name || '').localeCompare(String(b.display_name || '')));
-  html += '<h3 style="margin:18px 0 6px;border-top:1px solid var(--border);padding-top:14px">👥 Users (' + _adminUsers.length + ')</h3>';
-  if (!_adminUsers.length) {
-    html += '<div class="help-text">No user accounts found (or offline).</div>';
-  } else {
-    html += '<input id="adm-user-search" type="text" placeholder="Search users…" value="' + ea(_adminUserSearch) + '" style="width:100%;margin-bottom:10px;padding:13px 14px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">';
-    html += '<div id="adm-users-list"></div>';
-    html += '<div class="help-text" style="margin-top:8px">Removing a player from the shared roster lives on the Stats tab (admin "Delete player"). Account ↔ player linking happens automatically when a user signs in and claims their name.</div>';
-  }
+  // ---- Users & players (collapsed + lazy — was fetching every account on open) ----
+  html += '<h3 style="margin:18px 0 6px;border-top:1px solid var(--border);padding-top:14px">👥 Users &amp; players</h3>';
+  html += '<button id="adm-users-toggle" class="adm-act" style="width:100%;padding:11px">Show users &amp; duplicate players ▾</button>';
+  html += '<div id="adm-users-wrap" style="display:none;margin-top:10px"></div>';
 
   body.innerHTML = html;
-  renderAdminWorklist();
-  renderAdminUserList();
+  renderAdminWorklist();   // draws the "pick a state" prompt — no data needed yet
+  // If a state/search is already active (e.g. this is a refresh after an edit),
+  // reload the course data so the list comes right back instead of the prompt.
+  if (_adminStateFilter || _adminSearch) { ensureAdminData().then(() => renderAdminWorklist()); }
 
-  // Wire interactions (delegation).
+  // Wire interactions (delegation). Heavy course data loads lazily on first
+  // state/search; the user list loads only when its section is expanded.
   const si = document.getElementById('adm-search');
-  if (si) si.oninput = () => { _adminSearch = si.value || ''; _adminShow = 0; renderAdminWorklist(); };
+  if (si) si.oninput = async () => {
+    _adminSearch = si.value || ''; _adminShow = 0;
+    if (_adminSearch && !_adminDataReady) { const l = document.getElementById('adm-list'); if (l) l.innerHTML = '<div class="help-text" style="padding:10px 0">Loading courses…</div>'; await ensureAdminData(); }
+    renderAdminWorklist();
+  };
   const stSel = document.getElementById('adm-state');
-  if (stSel) stSel.onchange = () => { _adminStateFilter = stSel.value || ''; _adminShow = 0; renderAdminWorklist(); };
-  const us = document.getElementById('adm-user-search');
-  if (us) us.oninput = () => { _adminUserSearch = us.value || ''; renderAdminUserList(); };
+  if (stSel) stSel.onchange = async () => {
+    _adminStateFilter = stSel.value || ''; _adminShow = 0;
+    if (_adminStateFilter && !_adminDataReady) { const l = document.getElementById('adm-list'); if (l) l.innerHTML = '<div class="help-text" style="padding:10px 0">Loading courses…</div>'; await ensureAdminData(); }
+    renderAdminWorklist();
+  };
+  const ut = document.getElementById('adm-users-toggle');
+  if (ut) ut.onclick = async () => {
+    const wrap = document.getElementById('adm-users-wrap');
+    if (!wrap) return;
+    if (wrap.style.display !== 'none') { wrap.style.display = 'none'; ut.textContent = 'Show users & duplicate players ▾'; return; }
+    wrap.style.display = 'block'; ut.textContent = 'Hide users & duplicate players ▴';
+    if (_adminUsersLoaded) return;
+    wrap.innerHTML = '<div class="help-text" style="padding:8px 0">Loading…</div>';
+    const [users, rosterForDupes] = await Promise.all([
+      getAdminUsers().catch(() => []),
+      getPlayerRoster().catch(() => [])
+    ]);
+    _adminUsers = (users || []).slice().sort((a, b) => String(a.display_name || '').localeCompare(String(b.display_name || '')));
+    _adminUsersLoaded = true;
+    let uh = '';
+    let dupes = [];
+    try { dupes = findRosterDuplicates(rosterForDupes || []); } catch (e) {}
+    if (dupes.length) {
+      uh += '<div style="margin:0 0 14px;background:var(--warn-light);border:1px solid var(--warn);border-radius:10px;padding:12px 13px">'
+        + '<div style="font-weight:700;color:var(--warn);margin-bottom:4px">⚠ ' + dupes.length + ' possible duplicate player' + (dupes.length === 1 ? '' : 's') + '</div>'
+        + '<div class="help-text" style="margin-bottom:8px">These look like the same person under two names — merging combines their rounds &amp; stats.</div>'
+        + dupes.slice(0, 6).map(d => '<div class="small-text" style="margin:2px 0">• ' + esc(d.candidates.map(c => (typeof displayFull === 'function' ? displayFull(c) : c.name) || c.firstName).join(' = ')) + '</div>').join('')
+        + '<button class="adm-act map" data-mergedupes="1" style="margin-top:10px">🧹 Review &amp; merge</button>'
+        + '</div>';
+    }
+    uh += '<div style="font-weight:700;margin-bottom:6px">Accounts (' + _adminUsers.length + ')</div>';
+    if (!_adminUsers.length) {
+      uh += '<div class="help-text">No user accounts found (or offline).</div>';
+    } else {
+      uh += '<input id="adm-user-search" type="text" placeholder="Search users…" value="' + ea(_adminUserSearch) + '" style="width:100%;margin-bottom:10px;padding:13px 14px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">';
+      uh += '<div id="adm-users-list"></div>';
+      uh += '<div class="help-text" style="margin-top:8px">Removing a player from the shared roster lives on the Stats tab (admin "Delete player"). Account ↔ player linking happens automatically when a user signs in and claims their name.</div>';
+    }
+    wrap.innerHTML = uh;
+    renderAdminUserList();
+    const us = document.getElementById('adm-user-search');
+    if (us) us.oninput = () => { _adminUserSearch = us.value || ''; renderAdminUserList(); };
+  };
   body.onclick = async (e) => {
     // The course rows are tappable DIVs (data-open), not buttons — match them
     // first, before the button-only guard below.
@@ -5826,8 +5862,8 @@ async function renderAdmin() {
     if (openCard) { openCourseDetail(openCard.dataset.open); return; }
     const t = e.target.closest('button'); if (!t) return;
     if (t.dataset.mergedupes) { try { if (typeof openRosterCleanup === 'function') openRosterCleanup(); } catch (e2) {} return; }
-    if (t.dataset.filter) { _adminFilter = t.dataset.filter; _adminShow = 0; renderAdminWorklist(); return; }
-    if (t.dataset.sort) { _adminSort = t.dataset.sort; _adminShow = 0; renderAdminWorklist(); return; }
+    if (t.dataset.filter) { _adminFilter = t.dataset.filter; _adminShow = 0; await ensureAdminData(); renderAdminWorklist(); return; }
+    if (t.dataset.sort) { _adminSort = t.dataset.sort; _adminShow = 0; await ensureAdminData(); renderAdminWorklist(); return; }
     if (t.dataset.showmore) { _adminShow = parseInt(t.dataset.showmore, 10) || 0; renderAdminWorklist(); return; }
     if (t.dataset.open) { openCourseDetail(t.dataset.open); return; }
     if (t.dataset.skip) { _adminSkipped.add(t.dataset.skip); _adminShow = 0; renderAdminWorklist(); persistCourseSkipped(); showToast('Skipped — parked in the Skipped bucket'); return; }
@@ -28679,7 +28715,8 @@ const gpsView = (() => {
         let id = slugifyCourseName(name), n = 1;
         while (batchIds.has(id) || COURSE_LIBRARY.some(x => x.id === id)) { n++; id = slugifyCourseName(name) + '-' + n; }
         batchIds.add(id);
-        batch.push({ id, name, city, lat: c.lat, lng: c.lon, st, userAdded: true, src: 'osm-state', addedAt: Date.now() });
+        const phone = (e.tags.phone || e.tags['contact:phone'] || e.tags['contact:mobile'] || '').trim();
+        batch.push({ id, name, city, lat: c.lat, lng: c.lon, st, phone, userAdded: true, src: 'osm-state', addedAt: Date.now() });
       });
 
       log(batch.length + ' new courses to add, ' + skipped + ' already in the library (skipped).');
@@ -29883,14 +29920,23 @@ window.bgCourseCheck = st => courseCoverageReport(st);
 }
 
 // ---------- junk cleanup (?coursecleanup=ST) -------------------------------
-// Removes non-golf "courses" the OSM import drags in: par-3 / pitch-and-putt,
-// driving ranges & practice/dome facilities, mini-golf / putt-putt / disc golf,
-// and closed/defunct/abandoned courses. Matches on the course NAME only.
+// Removes non-golf "courses" the OSM import drags in. Two tiers, NAME-based:
+//   HARD junk  — par-3 / pitch-and-putt, driving ranges & practice/dome,
+//                mini-golf / putt-putt / disc golf, closed/defunct. Always
+//                removed when the course has no real rating/slope.
+//   QUESTIONABLE — foot golf / putting green, academy / lessons / simulator,
+//                bare "Clubhouse"/"Pro Shop", and bare "Resort/Hotel/Park" with
+//                no golf word. These are removed ONLY when the course is also
+//                (a) not on USGA (no tee rating/slope) AND (b) has no findable
+//                phone number — a real operating course usually has one, so a
+//                phone spares it from the questionable sweep.
 // SAFETY: previews everything and waits for your click before deleting; never
 // removes a course that already has a real tee rating/slope (treated as a true
-// course even if the name has a trigger word). Uses the same synced deleteCourse()
-// path as the Admin delete button, so removals stick across devices/reload.
-// Run it per state AFTER you finish that state's rating/slope import.
+// course even if the name has a trigger word — that's our "listed on USGA"
+// proxy, since we can't query usga.org per-course in bulk). Uses the same synced
+// deleteCourse() path as the Admin delete button, so removals stick across
+// devices/reload. Run it per state AFTER you finish that state's rating/slope
+// import (so genuinely-rated courses are protected before the sweep).
 // URL: ?coursecleanup=MI   ·  console: bgCourseCleanup('MI')  (omit/"1" = all states)
 const CLEANUP_RULES = [
   ['par-3 / pitch&putt', /\bpar[\s-]?3\b|\bpar[\s-]?three\b|pitch\s*(?:and|&|-)\s*putt/i],
@@ -29902,6 +29948,22 @@ function classifyJunk(name) {
   const n = String(name || '');
   for (const [label, re] of CLEANUP_RULES) { if (re.test(n)) return label; }
   return null;
+}
+// Softer "questionable" signals — only acted on when the course is ALSO off-USGA
+// (no rating/slope) AND has no findable phone (see candidate loop below).
+function classifyQuestionable(name) {
+  const n = String(name || '').trim();
+  if (/foot\s*golf|footgolf|putting\s+(?:green|course)/i.test(n)) return 'foot golf / putting green';
+  if (/\bacademy\b|instruction|\blessons?\b|golf\s*simulator|\bsimulator\b|indoor\s*golf|virtual\s*golf|golf\s*lounge/i.test(n)) return 'academy / lessons / sim';
+  if (/^(?:the\s+)?(?:club\s*house|pro\s*shop|golf\s*shop)\s*$/i.test(n)) return 'bare clubhouse / pro shop';
+  if (/\b(resort|hotel|motel|inn|park)\b/i.test(n) && !/golf|\bclub\b|\bcc\b|\bg\.?\s?c\.?\b|course|links|country club|fairway/i.test(n)) return 'resort / hotel / park (no golf word)';
+  return null;
+}
+// "Valid phone we can find" = at least 10 digits once non-digits are stripped
+// (US 10-digit; +1-prefixed numbers still clear the bar).
+function hasFindablePhone(c) {
+  const p = String((c && (c.phone || c.tel || c.contactPhone)) || '');
+  return (p.match(/\d/g) || []).length >= 10;
 }
 async function courseCleanup(stOverride) {
   let panel = document.getElementById('clean-panel');
@@ -29947,27 +30009,40 @@ async function courseCleanup(stOverride) {
     const hasRS = id => { const s = saves[id]; return !!(s && Array.isArray(s.tees) && s.tees.some(t => t && t.rating != null && t.slope != null)); };
 
     const candidates = [];   // {id,name,city,st,reason}
-    let protectedCount = 0;
+    let protectedCount = 0;   // kept: name matched but has real rating/slope (on USGA)
+    let sparedByPhone = 0;    // kept: questionable name + off-USGA, BUT has a phone
     COURSE_LIBRARY.forEach(c => {
       const st = stateOf(c);
       if (stFilter && st !== stFilter) return;
-      const reason = classifyJunk(c.name);
-      if (!reason) return;
-      if (hasRS(c.id)) { protectedCount++; return; } // real course (has rating/slope) — keep
+      const hard = classifyJunk(c.name);
+      const quest = hard ? null : classifyQuestionable(c.name);
+      if (!hard && !quest) return;
+      if (hasRS(c.id)) { protectedCount++; return; } // on USGA (real rating/slope) — keep
+      let reason;
+      if (hard) {
+        reason = hard;
+      } else {
+        // questionable: remove only if ALSO off-USGA (already true here) AND no
+        // findable phone. A phone number suggests a real operating course → spare it.
+        if (hasFindablePhone(c)) { sparedByPhone++; return; }
+        reason = quest + ' · not on USGA · no phone';
+      }
       candidates.push({ id: c.id, name: c.name, city: c.city || '', st, reason });
     });
 
     document.getElementById('clean-title').textContent = 'Junk cleanup' + (stFilter ? ' — ' + stFilter : ' — ALL STATES');
     if (!candidates.length) {
       log('No junk courses found' + (stFilter ? ' in ' + stFilter : '') + '. Nothing to remove. 🎉', '#8fd19e');
-      if (protectedCount) log(protectedCount + ' name-matched course(s) were kept because they have a real rating/slope.', '#9ad0ff');
+      if (protectedCount) log(protectedCount + ' name-matched course(s) were kept because they have a real rating/slope (on USGA).', '#9ad0ff');
+      if (sparedByPhone) log(sparedByPhone + ' questionable course(s) were kept because they have a phone number.', '#9ad0ff');
       return;
     }
     const byReason = {};
     candidates.forEach(c => { (byReason[c.reason] = byReason[c.reason] || []).push(c); });
     log('<b>Found ' + candidates.length + ' junk course(s)' + (stFilter ? ' in ' + stFilter : ' across all states') + ' to remove:</b>', '#ffd34d');
     Object.keys(byReason).forEach(r => log('• <b>' + byReason[r].length + '</b> — ' + r));
-    if (protectedCount) log(protectedCount + ' name-matched course(s) kept (they have a real rating/slope).', '#9ad0ff');
+    if (protectedCount) log(protectedCount + ' name-matched course(s) kept (real rating/slope — on USGA).', '#9ad0ff');
+    if (sparedByPhone) log(sparedByPhone + ' questionable course(s) kept (have a phone number).', '#9ad0ff');
     log('<br><u>Courses queued for removal:</u>');
     candidates.forEach(c => log('· ' + c.name + ' <span style="color:#9aa0a6">— ' + (c.city || c.st) + ' · ' + c.reason + '</span>'));
 
