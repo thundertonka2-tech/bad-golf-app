@@ -5300,7 +5300,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.16';
+const BG_BUILD = 'v2026.11.17';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -5630,7 +5630,8 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
     // renderAdminWorklist) until the admin searches or picks a state.
     const flag = complete ? 'done' : (hasGPS ? 'rs' : (hasRS ? 'gps' : 'both'));
     const st = lib.st || (typeof courseStateCode === 'function' ? courseStateCode(lib) : '') || '';
-    items.push({ id, name, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, fwcCount, needsTargets: hasGPS && fwcCount === 0, pop: playCount[name.toLowerCase()] || 0 });
+    items.push({ id, name, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, fwcCount, needsTargets: hasGPS && fwcCount === 0, pop: playCount[name.toLowerCase()] || 0,
+      lat: (typeof lib.lat === 'number' ? lib.lat : null), lng: (typeof lib.lng === 'number' ? lib.lng : null) });
   });
   // Partially-mapped courses first (closest to done — quickest to finish), most
   // holes already done first; then popularity, then name.
@@ -5648,6 +5649,87 @@ async function getAdminUsers() {
   return [];
 }
 
+// ---- Admin map ------------------------------------------------------------
+// A live map of the courses currently in scope (state filter + search) so Kevin
+// can see them geographically — spot duplicates sitting on top of each other,
+// catch a pin dropped in the wrong city/state, and tap a pin to jump straight
+// into that course's record to edit. Only courses with coordinates (OSM-imported)
+// appear; seed courses without a GPS point are listed but not plotted.
+const ADM_STREET_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';
+let _admMap = null, _admMarkers = [], _admPopup = null;
+function adminMapScope() {
+  // Don't plot the whole 12k-course library — only once a state or search narrows it.
+  if (!_adminStateFilter && !(_adminSearch || '').trim()) return [];
+  const stateNames = (typeof US_STATE_NAMES !== 'undefined') ? US_STATE_NAMES : {};
+  const terms = (_adminSearch || '').toLowerCase().split(/\s+/).filter(Boolean);
+  return (_adminWork || []).filter(it => {
+    if (it.lat == null || it.lng == null) return false;
+    if (_adminStateFilter && it.st !== _adminStateFilter) return false;
+    if (terms.length) {
+      const stName = (stateNames[it.st] || '').toLowerCase();
+      const hay = (it.name + ' ' + (it.city || '') + ' ' + (it.st || '') + ' ' + stName + ' ' + (it.id || '')).toLowerCase();
+      if (!terms.every(t => hay.includes(t))) return false;
+    }
+    return true;
+  });
+}
+function renderAdminMap() {
+  const wrap = document.getElementById('adm-map-wrap');
+  if (!wrap || wrap.style.display === 'none') return;
+  const legend = document.getElementById('adm-map-legend');
+  if (typeof maplibregl === 'undefined') { if (legend) legend.textContent = 'Map unavailable on this build.'; return; }
+  const pts = adminMapScope();
+  const nameKey = it => (it.name || '').trim().toLowerCase();
+  const nameCount = {}; pts.forEach(it => { nameCount[nameKey(it)] = (nameCount[nameKey(it)] || 0) + 1; });
+  if (!_admMap) {
+    _admMap = new maplibregl.Map({
+      container: 'adm-map',
+      style: { version: 8, sources: { st: { type: 'raster', tiles: [ADM_STREET_TILES], tileSize: 256, maxzoom: 19, attribution: 'Tiles © Esri' } }, layers: [{ id: 'st', type: 'raster', source: 'st' }] },
+      center: [-96.8, 32.8], zoom: 7
+    });
+    try { _admMap.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right'); } catch (e) {}
+  }
+  _admMarkers.forEach(m => { try { m.remove(); } catch (e) {} }); _admMarkers = [];
+  if (_admPopup) { try { _admPopup.remove(); } catch (e) {} _admPopup = null; }
+  const CAP = 600;
+  const show = pts.slice(0, CAP);
+  const bounds = new maplibregl.LngLatBounds();
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+  show.forEach(it => {
+    const dupe = nameCount[nameKey(it)] > 1;
+    const color = dupe ? '#b3261e' : (it.complete ? '#2e9e4f' : (it.hasGPS ? '#7a5cc0' : (it.holes > 0 ? '#d98a2b' : '#9aa0a6')));
+    const el = document.createElement('div');
+    el.style.cssText = 'width:18px;height:18px;border-radius:50%;background:' + color + ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5);cursor:pointer';
+    el.title = it.name + (dupe ? ' (possible duplicate)' : '');
+    const mk = new maplibregl.Marker({ element: el }).setLngLat([it.lng, it.lat]).addTo(_admMap);
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const loc = (it.city || '') + (it.city && it.st ? ', ' : '') + (it.st || '');
+      const html = '<div style="font-weight:700;font-size:14px;margin-bottom:2px;color:#1a1a1a">' + esc(it.name) + '</div>'
+        + '<div style="font-size:12px;color:#555;margin-bottom:8px">' + esc(loc || 'No location set') + (dupe ? ' · <b style="color:#b3261e">possible duplicate</b>' : '') + '</div>'
+        + '<button id="adm-map-edit" style="width:100%;padding:9px;border:none;border-radius:8px;background:#185fa5;color:#fff;font-weight:700;cursor:pointer">✏️ Open &amp; edit</button>';
+      if (_admPopup) { try { _admPopup.remove(); } catch (e) {} }
+      _admPopup = new maplibregl.Popup({ offset: 14 }).setLngLat([it.lng, it.lat]).setHTML(html).addTo(_admMap);
+      setTimeout(() => { const b = document.getElementById('adm-map-edit'); if (b) b.onclick = () => { try { _admPopup.remove(); } catch (e) {} openCourseDetail(it.id); }; }, 0);
+    };
+    _admMarkers.push(mk);
+    bounds.extend([it.lng, it.lat]);
+  });
+  if (show.length) { try { _admMap.fitBounds(bounds, { padding: 40, maxZoom: 14, duration: 0 }); } catch (e) {} }
+  setTimeout(() => { try { _admMap.resize(); } catch (e) {} }, 60);
+  if (legend) {
+    const dupeNames = Object.values(nameCount).filter(n => n > 1).length;
+    if (!pts.length) {
+      legend.textContent = (_adminStateFilter || (_adminSearch || '').trim())
+        ? 'No courses with a map point in scope yet (seed courses have no GPS coordinates).'
+        : 'Pick a state or search to plot courses.';
+    } else {
+      legend.innerHTML = '🟢 complete · 🟣 mapped (needs targets) · 🟠 partial · ⚪ no GPS · 🔴 possible duplicate<br>'
+        + show.length + ' course' + (show.length === 1 ? '' : 's') + ' shown' + (pts.length > CAP ? ' (capped — narrow the search/state)' : '')
+        + (dupeNames ? ' · ' + dupeNames + ' name(s) duplicated' : '');
+    }
+  }
+}
 function renderAdminWorklist() {
   const el = document.getElementById('adm-list');
   if (!el) return;
@@ -5819,6 +5901,10 @@ async function renderAdmin() {
   _adminSkipped = new Set(await getCourseSkipped().catch(() => []));
   _adminDataReady = false;
   _adminUsersLoaded = false;
+  // The admin body is rebuilt below, which destroys the old map container — drop
+  // the stale map instance so the toggle re-creates a fresh one.
+  try { if (_admMap) _admMap.remove(); } catch (e) {}
+  _admMap = null; _admMarkers = [];
   const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
   const ea = (typeof escAttr === 'function') ? escAttr : (x => x);
   const stateNames = (typeof US_STATE_NAMES !== 'undefined') ? US_STATE_NAMES : {};
@@ -5838,7 +5924,14 @@ async function renderAdmin() {
       + states.map(s => '<option value="' + ea(s) + '"' + (_adminStateFilter === s ? ' selected' : '') + '>' + esc(stateNames[s] || s) + '</option>').join('')
       + '</select>';
   }
-  html += '<input id="adm-search" type="text" placeholder="Search ANY course (or state)…" value="' + ea(_adminSearch) + '" style="width:100%;margin-bottom:10px;padding:13px 14px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">';
+  html += '<input id="adm-search" type="text" placeholder="Search ANY course (or state)…" value="' + ea(_adminSearch) + '" style="width:100%;margin-bottom:8px;padding:13px 14px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">';
+  // Map view — plots the in-scope courses so duplicates / mislabeled locations
+  // are obvious; tap a pin to open that course. Collapsed by default for speed.
+  html += '<button id="adm-map-toggle" class="adm-act map" style="width:100%;margin-bottom:8px;padding:11px">🗺 Show map view</button>';
+  html += '<div id="adm-map-wrap" style="display:none;margin-bottom:12px">'
+    + '<div id="adm-map" style="width:100%;height:380px;border-radius:12px;overflow:hidden;border:1px solid var(--border)"></div>'
+    + '<div class="small-text" id="adm-map-legend" style="margin-top:6px;color:var(--text-muted);line-height:1.5"></div>'
+    + '</div>';
   html += '<div id="adm-list"></div>';
 
   // ---- Users & players (collapsed + lazy — was fetching every account on open) ----
@@ -5859,12 +5952,24 @@ async function renderAdmin() {
     _adminSearch = si.value || ''; _adminShow = 0;
     if (_adminSearch && !_adminDataReady) { const l = document.getElementById('adm-list'); if (l) l.innerHTML = '<div class="bg-inline-load"><span class="sp"></span>Loading courses…</div>'; await ensureAdminData(); }
     renderAdminWorklist();
+    renderAdminMap();   // keep the map in sync with the search
   };
   const stSel = document.getElementById('adm-state');
   if (stSel) stSel.onchange = async () => {
     _adminStateFilter = stSel.value || ''; _adminShow = 0;
     if (_adminStateFilter && !_adminDataReady) { const l = document.getElementById('adm-list'); if (l) l.innerHTML = '<div class="bg-inline-load"><span class="sp"></span>Loading courses…</div>'; await ensureAdminData(); }
     renderAdminWorklist();
+    renderAdminMap();   // keep the map in sync with the chosen state
+  };
+  const mt = document.getElementById('adm-map-toggle');
+  if (mt) mt.onclick = async () => {
+    const w = document.getElementById('adm-map-wrap');
+    if (!w) return;
+    if (w.style.display !== 'none') { w.style.display = 'none'; mt.textContent = '🗺 Show map view'; return; }
+    w.style.display = 'block'; mt.textContent = '🗺 Hide map view';
+    // Make sure course data is loaded so there are pins to plot.
+    if (!_adminDataReady) { const lg = document.getElementById('adm-map-legend'); if (lg) lg.innerHTML = '<span class="bg-inline-load"><span class="sp"></span>Loading courses…</span>'; try { await ensureAdminData(); } catch (e) {} }
+    renderAdminMap();
   };
   const ut = document.getElementById('adm-users-toggle');
   if (ut) ut.onclick = async () => {
