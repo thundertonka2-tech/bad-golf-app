@@ -5260,7 +5260,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.06';
+const BG_BUILD = 'v2026.11.07';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -5497,6 +5497,7 @@ let _adminStateFilter = ''; // '' = all states
 let _adminShow = 0;         // how many worklist rows to show (0 = the default page); "Show more" raises it
 let _adminSkipped = new Set(); // course ids parked "skip for later" (synced overlay; their own bucket)
 let _adminWork = [];
+let _adminOrder = [];   // ids in current worklist display order — drives Next/Skip sweep in the detail screen
 let _adminUsers = [];
 let _adminUserSearch = '';
 
@@ -5661,6 +5662,7 @@ function renderAdminWorklist() {
     return true;                                  // all
   });
   const lbl = { both: 'Needs GPS + ratings', gps: 'Needs GPS', rs: 'Needs ratings', done: '✓ Complete' };
+  _adminOrder = filt.map(it => it.id);   // so the detail screen's Next/Skip can sweep this state in order
   if (!filt.length) {
     const emptyMsg = f === 'skip'
       ? ('No skipped courses' + (_adminStateFilter ? ' in this state' : '') + ' — nothing parked for later.')
@@ -5695,24 +5697,13 @@ function renderAdminWorklist() {
       const mapLabel = it.hasGPS ? '🗺 Re-map course'
         : (it.holes > 0 ? '🗺 Map ' + left + ' more hole' + (left === 1 ? '' : 's') : '🗺 Map this course');
       const badge = '<span class="adm-flag ' + it.flag + '"' + (it.flag === 'done' ? ' style="background:var(--money-pos)"' : '') + '>' + lbl[it.flag] + '</span>';
-      return '<div class="adm-card">'
-      + '<div class="adm-name" title="' + ea(it.name) + '">' + esc(it.name) + '</div>'
+      // Clean tappable card — the whole card opens the course detail screen
+      // (all edit/map tools live there now, instead of a row of buttons per card).
+      return '<div class="adm-card" data-open="' + ea(it.id) + '" style="cursor:pointer">'
+      + '<div class="adm-name" title="' + ea(it.name) + '">' + esc(it.name) + (isSkip(it) ? ' <span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + '</div>'
       + '<div class="adm-badges">' + gpsPill + badge + '</div>'
-      + '<div class="loc">' + esc(loc(it)) + '</div>'
-      // Admins can do ANYTHING to ANY course: (re)map, mark fairway centers, and
-      // add/edit rating & slope are ALWAYS available — not just when missing.
-      + '<div class="adm-actions" style="flex-direction:column;gap:6px">'
-      + '<button class="adm-act map" data-map="' + ea(it.id) + '">' + mapLabel + '</button>'
-      + (it.hasGPS ? '<button class="adm-act map" data-fwc="' + ea(it.id) + '">🎯 Mark fairway centers</button>' : '')
-      + '<button class="adm-act rate" data-rate="' + ea(it.id) + '">' + (it.hasRS ? '📋 Edit rating &amp; slope' : '📋 Add rating &amp; slope') + '</button>'
-      + '</div>'
-      // Secondary — scorecard pars, rename, delete.
-      + '<div class="adm-actions" style="margin-top:6px">'
-      + '<button class="adm-act" data-pars="' + ea(it.id) + '">📝 Card</button>'
-      + '<button class="adm-act" data-edit="' + ea(it.id) + '">✏️ Edit info</button>'
-      + (isSkip(it) ? '<button class="adm-act" data-unskip="' + ea(it.id) + '">↩ Unskip</button>' : '<button class="adm-act" data-skip="' + ea(it.id) + '">⏭ Skip</button>')
-      + '<button class="adm-act del" data-del="' + ea(it.id) + '">🗑 Delete</button>'
-      + '</div></div>';
+      + '<div class="loc">' + esc(loc(it)) + ' <span style="color:var(--accent);font-weight:600;white-space:nowrap">· tap to edit ›</span></div>'
+      + '</div>';
     }).join('')
     + moreBtn;
 }
@@ -5804,6 +5795,7 @@ async function renderAdmin() {
     if (t.dataset.mergedupes) { try { if (typeof openRosterCleanup === 'function') openRosterCleanup(); } catch (e2) {} return; }
     if (t.dataset.filter) { _adminFilter = t.dataset.filter; _adminShow = 0; renderAdminWorklist(); return; }
     if (t.dataset.showmore) { _adminShow = parseInt(t.dataset.showmore, 10) || 0; renderAdminWorklist(); return; }
+    if (t.dataset.open) { openCourseDetail(t.dataset.open); return; }
     if (t.dataset.skip) { _adminSkipped.add(t.dataset.skip); _adminShow = 0; renderAdminWorklist(); persistCourseSkipped(); showToast('Skipped — parked in the Skipped bucket'); return; }
     if (t.dataset.unskip) { _adminSkipped.delete(t.dataset.unskip); renderAdminWorklist(); persistCourseSkipped(); return; }
     if (t.dataset.edit) { const ok = await editCourseDetails(t.dataset.edit); if (ok) { showToast('Course updated'); renderAdmin(); } return; }
@@ -5878,19 +5870,19 @@ async function adminAddRatings(courseId, onSaved) {
   let sc = null; try { sc = await getCourseScorecard(courseId); } catch (e) {}
   const t0 = (sc && Array.isArray(sc.tees) && sc.tees[0]) || null;
   // Tee box (e.g. Blue / White / Championship) + its rating & slope.
-  const tee = window.prompt('Tee box name (e.g. Blue, White, Championship):', (t0 && t0.label) || 'Back');
-  if (tee === null) return;
-  const label = (tee || '').trim() || 'Back';
-  const rStr = window.prompt(label + ' tee RATING for ' + lib.name + ' (e.g. 71.2):', t0 && t0.rating != null ? String(t0.rating) : '');
-  if (rStr === null) return;
-  const rating = parseFloat(rStr);
+  const fvals = await adminFormModal('Rating & slope — ' + lib.name, [
+    { key: 'tee', label: 'Tee box name (e.g. Blue, White, Championship)', value: (t0 && t0.label) || 'Back' },
+    { key: 'rating', label: 'Course RATING (e.g. 71.2)', value: (t0 && t0.rating != null ? String(t0.rating) : ''), type: 'number', inputmode: 'decimal' },
+    { key: 'slope', label: 'SLOPE (55-155, e.g. 125)', value: (t0 && t0.slope != null ? String(t0.slope) : ''), type: 'number', inputmode: 'numeric' },
+    { key: 'yards', label: 'Total YARDS (optional, e.g. 6800)', value: (t0 && t0.yards != null ? String(t0.yards) : ''), type: 'number', inputmode: 'numeric' }
+  ]);
+  if (!fvals) return;
+  const label = (fvals.tee || '').trim() || 'Back';
+  const rating = parseFloat(fvals.rating);
   if (!(rating > 40 && rating < 90)) { showToast('Enter a valid rating (e.g. 71.2)'); return; }
-  const sStr = window.prompt(label + ' tee SLOPE (55–155, e.g. 125):', t0 && t0.slope != null ? String(t0.slope) : '');
-  if (sStr === null) return;
-  const slope = parseInt(sStr, 10);
-  if (!(slope >= 55 && slope <= 155)) { showToast('Slope must be 55–155'); return; }
-  const yStr = window.prompt(label + ' tee total YARDS (optional, e.g. 6800):', t0 && t0.yards != null ? String(t0.yards) : '');
-  const yards = yStr != null && yStr.trim() ? (parseInt(yStr, 10) || null) : null;
+  const slope = parseInt(fvals.slope, 10);
+  if (!(slope >= 55 && slope <= 155)) { showToast('Slope must be 55-155'); return; }
+  const yards = (fvals.yards != null && String(fvals.yards).trim()) ? (parseInt(fvals.yards, 10) || null) : null;
   const pars = (sc && Array.isArray(sc.pars) && sc.pars.length === 18) ? sc.pars.slice() : new Array(18).fill(4);
   const sis = (sc && Array.isArray(sc.sis) && sc.sis.length === 18) ? sc.sis.slice()
     : (typeof DEFAULT_SI !== 'undefined' ? DEFAULT_SI.slice() : pars.map((_, i) => i + 1));
@@ -7751,14 +7743,47 @@ async function getCourseDetailOverrides() {
   if (!v) return {};
   try { return JSON.parse(v) || {}; } catch (e) { return {}; }
 }
+// Reusable admin edit form. Replaces stacked window.prompt() calls (mobile
+// browsers SUPPRESS the 2nd+ consecutive prompt — that is why city/state/rating/
+// slope could not be entered). One in-app form with all fields + Save.
+function adminFormModal(title, fields) {
+  return new Promise(resolve => {
+    const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+    const ea = (typeof escAttr === 'function') ? escAttr : (x => x);
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.5);display:flex;align-items:flex-start;justify-content:center;padding:8vh 16px 16px;overflow:auto';
+    const card = document.createElement('div');
+    card.style.cssText = 'background:var(--surface,#fbfaf7);color:var(--text,#1a1a1a);border-radius:14px;padding:18px;max-width:420px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.45)';
+    let html = '<h3 style="margin:0 0 6px;font-size:17px">' + esc(title) + '</h3>';
+    fields.forEach(f => {
+      html += '<label style="display:block;font-size:13px;font-weight:600;margin:10px 0 4px">' + esc(f.label) + '</label>'
+        + '<input data-k="' + ea(f.key) + '" type="' + (f.type || 'text') + '"'
+        + (f.inputmode ? ' inputmode="' + f.inputmode + '"' : '')
+        + ' value="' + ea(f.value != null ? String(f.value) : '') + '"'
+        + ' style="width:100%;padding:12px;font-size:16px;background:var(--surface-2,#fff);color:var(--text,#1a1a1a);border:1px solid var(--border,#d8d4cc);border-radius:8px;box-sizing:border-box">';
+    });
+    html += '<div style="display:flex;gap:8px;margin-top:18px">'
+      + '<button id="afm-cancel" style="flex:1;padding:12px;border-radius:10px;border:1px solid var(--border,#d8d4cc);background:transparent;color:var(--text);font-weight:600">Cancel</button>'
+      + '<button id="afm-save" style="flex:1;padding:12px;border-radius:10px;border:none;background:var(--accent,#185fa5);color:#fff;font-weight:700">Save</button></div>';
+    card.innerHTML = html;
+    ov.appendChild(card); document.body.appendChild(ov);
+    const done = (val) => { try { ov.remove(); } catch (e) {} resolve(val); };
+    card.querySelector('#afm-cancel').onclick = () => done(null);
+    card.querySelector('#afm-save').onclick = () => { const vals = {}; card.querySelectorAll('input[data-k]').forEach(i => { vals[i.dataset.k] = i.value; }); done(vals); };
+    ov.onclick = (e) => { if (e.target === ov) done(null); };
+  });
+}
 async function editCourseDetails(id) {
   if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can edit courses'); return false; }
   const c = (COURSE_LIBRARY || []).find(x => x.id === id) || { id };
-  const name = window.prompt('Course name:', c.name || ''); if (name === null) return false;
-  const city = window.prompt('City:', c.city || ''); if (city === null) return false;
-  const st = window.prompt('State (2-letter code, e.g. TX):', (c.st || '').toUpperCase()); if (st === null) return false;
+  const vals = await adminFormModal('Edit course info', [
+    { key: 'name', label: 'Course name', value: c.name || '' },
+    { key: 'city', label: 'City', value: c.city || '' },
+    { key: 'st', label: 'State (2-letter code, e.g. TX)', value: (c.st || '').toUpperCase() }
+  ]);
+  if (!vals) return false;
   const ov = await getCourseDetailOverrides();
-  ov[id] = { name: (name || '').trim(), city: (city || '').trim(), st: (st || '').trim().toUpperCase() };
+  ov[id] = { name: (vals.name || '').trim(), city: (vals.city || '').trim(), st: (vals.st || '').trim().toUpperCase() };
   try { invalidateCourseLibraryCache(); } catch (e) {}
   await safeSet(KEY_COURSE_DETAIL_OVERRIDES, JSON.stringify(ov), true);
   // Apply to the in-memory library immediately.
@@ -7774,6 +7799,83 @@ async function editCourseDetails(id) {
   try { if (supa && supaOnline) await supa.from('course_gps').update({ name: ov[id].name, city: ov[id].city }).eq('course_id', id); } catch (e) {}
   try { audit('edit_course', id, JSON.stringify(ov[id])); } catch (e) {}
   return true;
+}
+
+// Course detail screen — opened by tapping a worklist card. All admin tools for
+// one course in one clean place (replaces the per-card button row).
+function openCourseDetail(id) {
+  const it = (_adminWork || []).find(x => x.id === id);
+  if (!it) { showToast('Course not found'); return; }
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+  const ea = (typeof escAttr === 'function') ? escAttr : (x => x);
+  const skipped = (typeof _adminSkipped !== 'undefined') && _adminSkipped.has(id);
+  const cityStr = (it.city || '').trim(), stStr = (it.st || '').trim();
+  const loc = (cityStr && stStr && !cityStr.toUpperCase().includes(stStr.toUpperCase())) ? (cityStr + ', ' + stStr) : (cityStr || stStr || 'No location set');
+  const gpsPill = it.hasGPS ? '<span class="adm-flag" style="background:var(--money-pos)">GPS mapped</span>'
+    : (it.holes > 0 ? '<span class="adm-flag" style="background:#d98a2b">GPS ' + it.holes + '/18</span>' : '<span class="adm-flag" style="background:var(--text-muted)">No GPS</span>');
+  const rsPill = it.hasRS ? '<span class="adm-flag" style="background:var(--money-pos)">Rating set</span>' : '<span class="adm-flag gps">No rating</span>';
+  // Position in the current state sweep — drives Next/Skip so the admin never
+  // has to bounce back to the list while cleaning up a whole state.
+  const order = _adminOrder || [];
+  const idx = order.indexOf(id);
+  const nextId = (idx >= 0 && idx + 1 < order.length) ? order[idx + 1] : null;
+  const posLabel = (idx >= 0) ? (idx + 1) + ' of ' + order.length : '';
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.55);display:flex;align-items:flex-start;justify-content:center;padding:5vh 14px 16px;overflow:auto';
+  const card = document.createElement('div');
+  card.style.cssText = 'background:var(--surface,#fbfaf7);color:var(--text,#1a1a1a);border-radius:16px;padding:18px;max-width:440px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.45)';
+  const btn = (act, label, danger) => '<button data-act="' + act + '" style="width:100%;text-align:left;padding:14px 16px;margin-top:8px;border-radius:11px;border:1px solid var(--border,#d8d4cc);background:' + (danger ? 'var(--danger,#a52a2a)' : 'var(--surface-2,#fff)') + ';color:' + (danger ? '#fff' : 'var(--text,#1a1a1a)') + ';font-size:15px;font-weight:600;cursor:pointer">' + label + '</button>';
+  // Top sweep bar: back to list + position + Next (jumps straight to the next course).
+  const navBar = '<div style="display:flex;align-items:center;gap:8px;margin:14px 0 4px">'
+    + '<button data-act="list" style="flex:0 0 auto;padding:9px 12px;border-radius:9px;border:1px solid var(--border,#d8d4cc);background:transparent;color:var(--text);font-weight:600;cursor:pointer">‹ List</button>'
+    + '<div style="flex:1;text-align:center;font-size:12px;color:var(--text-muted)">' + esc(posLabel) + '</div>'
+    + '<button data-act="next"' + (nextId ? '' : ' disabled') + ' style="flex:0 0 auto;padding:9px 14px;border-radius:9px;border:none;background:' + (nextId ? 'var(--accent,#185fa5)' : 'var(--text-muted,#999)') + ';color:#fff;font-weight:700;cursor:' + (nextId ? 'pointer' : 'default') + ';opacity:' + (nextId ? '1' : '0.5') + '">Next ›</button>'
+    + '</div>';
+  card.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
+    + '<div style="min-width:0"><div style="font-weight:800;font-size:19px;line-height:1.2">' + esc(it.name) + '</div>'
+    + '<div class="small-text" style="color:var(--text-muted);margin-top:3px">' + esc(loc) + '</div></div>'
+    + '<button id="acd-x" style="flex:0 0 auto;background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:6px 12px;font-size:16px;cursor:pointer">✕</button></div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 6px">' + gpsPill + rsPill + (skipped ? '<span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + '</div>'
+    + btn('remapfull', '🗺 Remap full course (greens + fairways)')
+    + btn('fwc', '🎯 Mark fairway centers only')
+    + btn('rate', '📋 Course rating &amp; slope')
+    + btn('pars', '📝 Pars &amp; stroke index')
+    + btn('edit', '✏️ Edit name / city / state')
+    + btn(skipped ? 'unskip' : 'skip', skipped ? '↩ Unskip — back to the list' : '⏭ Skip & next ›')
+    + btn('del', '🗑 Delete course', true)
+    + navBar;
+  ov.appendChild(card); document.body.appendChild(ov);
+  const closeOv = () => { try { ov.remove(); } catch (e) {} };
+  // Jump straight to the next course in the sweep (or finish if we are at the end).
+  const advance = () => { closeOv(); if (nextId) { openCourseDetail(nextId); } else { renderAdminWorklist(); showToast('That was the last one in this list 🎉'); } };
+  ov.onclick = (e) => { if (e.target === ov) closeOv(); };
+  card.querySelector('#acd-x').onclick = closeOv;
+  card.querySelectorAll('button[data-act]').forEach(b => b.onclick = async () => {
+    const act = b.dataset.act;
+    if (act === 'list') { closeOv(); renderAdminWorklist(); return; }
+    if (act === 'next') { if (nextId) advance(); return; }
+    if (act === 'remapfull') { closeOv(); adminRemapFull(id); return; }
+    if (act === 'fwc') { closeOv(); adminFwcCourse(id); return; }
+    // After rate / pars / edit, re-open this same detail so the admin can keep
+    // working it or tap Next — no bouncing back to the list.
+    if (act === 'rate') { closeOv(); await adminAddRatings(id); openCourseDetail(id); return; }
+    if (act === 'pars') { closeOv(); await adminEditPars(id); openCourseDetail(id); return; }
+    if (act === 'edit') { closeOv(); const ok = await editCourseDetails(id); if (ok) { showToast('Course updated'); } openCourseDetail(id); return; }
+    if (act === 'skip') { _adminSkipped.add(id); persistCourseSkipped(); showToast('Skipped — parked in the Skipped bucket'); advance(); return; }
+    if (act === 'unskip') { _adminSkipped.delete(id); persistCourseSkipped(); closeOv(); renderAdminWorklist(); return; }
+    if (act === 'del') {
+      const nm = it.name || 'this course';
+      if (window.confirm('Delete "' + nm + '" from the library for everyone? Removes its scorecard + GPS. Cannot be undone.')) { const ok = await deleteCourse(id); if (ok) { showToast('Course deleted'); advance(); } }
+      return;
+    }
+  });
+}
+// "Remap full course" — runs the 3-tap green mapper, then chains straight into
+// fairway-center marking (a flag the GPS close() reads to re-open in fwc mode).
+function adminRemapFull(courseId) {
+  try { state._thenFwcCourseId = courseId; } catch (e) {}
+  adminMapCourse(courseId);
 }
 
 const KEY_COURSE_DELETES = 'golf:course-deletes';
@@ -26891,11 +26993,17 @@ const gpsView = (() => {
     // Restore state after an admin "map this course" session (it used a
     // throwaway in-memory game just to drive the mapper).
     if (state && state._mapSession) {
+      const wasFwc = state._fwcSession;
+      const chainId = state._thenFwcCourseId;
       state._mapSession = false;
       state._fwcSession = false;
       state.game = state._preMapGame || null;
       state.currentHole = state._preMapHole || 1;
       state.viewOnlyMode = !!state._preMapView;
+      state._thenFwcCourseId = null;
+      // "Remap full course": after the green-mapping pass closes, chain straight
+      // into fairway-center marking for the same course.
+      if (chainId && !wasFwc) { el('gps-overlay').classList.remove('fwc-only'); setTimeout(() => { try { adminFwcCourse(chainId); } catch (e) {} }, 300); }
     }
     el('gps-overlay').classList.remove('fwc-only');
   }
