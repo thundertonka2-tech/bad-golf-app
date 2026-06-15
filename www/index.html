@@ -2213,6 +2213,7 @@
         <p class="help-text" style="margin:0 0 6px">Crew rounds in progress — tap one to watch live.</p>
         <div id="home-live"><div class="help-text">Checking for live rounds…</div></div>
         <div id="home-highlights"></div>
+        <div id="home-open-bets"></div>
       </div>
 
       <!-- Spacer so the sticky Play Now button never covers content -->
@@ -3991,6 +3992,9 @@
           <div id="crew-live"><div class="help-text">Loading…</div></div>
         </div>
 
+        <!-- Open bets friends can accept -->
+        <div id="crew-open-bets" style="margin-bottom:16px"></div>
+
         <!-- Leaderboard with sort filter -->
         <div class="card" style="margin-bottom:16px">
           <h3 style="margin:0 0 10px">🏆 Leaderboard</h3>
@@ -4038,6 +4042,7 @@
       <div id="wager-content" style="display:none">
         <!-- LIST VIEW: pick a live round to wager on -->
         <div id="wager-list-view">
+          <div id="wager-open-bets"></div>
           <div class="card">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
               <h2 style="margin:0">🎲 Live rounds</h2>
@@ -5305,7 +5310,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.19';
+const BG_BUILD = 'v2026.11.20';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -19275,6 +19280,8 @@ async function renderHomeLive() {
     }
     notifyMyReactions(); // toast me about new reactions on my highlights
   }
+  // Surface joinable open bets from friends' live rounds (hidden if none).
+  try { renderOpenBets('home-open-bets', { hideWhenEmpty: true }); } catch (e) {}
 }
 
 // Update the fixed bottom bar showing the active round, if any.
@@ -21186,6 +21193,7 @@ async function renderCrew() {
   renderCrewLeaderboard();
   renderCrewRecent();
   renderCrewLive();
+  try { renderOpenBets('crew-open-bets', { hideWhenEmpty: true }); } catch (e) {}
 }
 
 function wireCrewControls() {
@@ -22511,6 +22519,91 @@ function renderWagerTab() {
   }
 }
 
+// Friends-only live rounds (me or an accepted friend is a player), last 3h.
+// Shared by the Wager list, the Open-bets cards, etc. Uses the same proven
+// games query as renderWagerLive — so the data always populates.
+async function getFriendLiveRounds() {
+  const friendNames = new Set();
+  try {
+    const meId = _authUser && _authUser.id;
+    const me = await getMeName();
+    if (me) friendNames.add(normalizeNameSegment(me));
+    const [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]);
+    const byId = {}; profiles.forEach(pr => { byId[pr.id] = pr; });
+    edges.filter(e2 => e2.status === 'accepted' && (e2.requester === meId || e2.addressee === meId))
+      .forEach(e2 => { const fp = byId[e2.requester === meId ? e2.addressee : e2.requester]; const nm = fp && fp.my_player; if (nm) friendNames.add(normalizeNameSegment(nm)); });
+  } catch (e) { console.warn('getFriendLiveRounds names', e); }
+  let rows = [];
+  try {
+    if (!supaReady) await initSupabase();
+    if (supa && supaOnline) {
+      const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', 'shared:%').order('updated_at', { ascending: false }).limit(40);
+      rows = data || [];
+    }
+  } catch (e) { console.warn('getFriendLiveRounds fetch', e); }
+  const cutoff = Date.now() - 3 * 60 * 60 * 1000;
+  return rows.map(row => ({ code: row.code, g: row.data, t: row.updated_at }))
+    .filter(x => x.g && Array.isArray(x.g.players) && x.g.players.length > 0 && !x.g.finishedAt)
+    .filter(x => { const ts = x.t ? Date.parse(x.t) : (x.g.updatedAt || 0); return ts >= cutoff; })
+    .filter(x => { if (!friendNames.size) return false; try { return x.g.players.some(p => friendNames.has(normalizeNameSegment(p && p.name))); } catch (e) { return false; } });
+}
+
+// Render joinable OPEN bets from friends' live rounds into a container. One-tap:
+// single-sided bets (h2h/ou/team/match) take the other side; win pools open the
+// round to pick. Used on the Wager tab, Home highlights, and the Crew tab so a
+// new bet is easy to find and accept from anywhere. Safe + silent on any error.
+async function renderOpenBets(containerId, opts) {
+  opts = opts || {};
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (typeof isSignedIn === 'function' && !isSignedIn()) { el.innerHTML = ''; return; }
+  let live = [];
+  try { live = await getFriendLiveRounds(); } catch (e) { live = []; }
+  const meId = _authUser && _authUser.id;
+  let perRound = [];
+  try {
+    perRound = await Promise.all(live.map(async x => {
+      let w = []; try { w = await wFetchForRound(x.code); } catch (e) {}
+      return { x, wagers: (w || []).filter(ww => ww && ww.status === 'open' && (!meId || ww.creator_id !== meId)) };
+    }));
+  } catch (e) { perRound = []; }
+  const items = [];
+  perRound.forEach(pr => pr.wagers.forEach(w => items.push({ w: w, g: pr.x.g, code: pr.x.code })));
+  if (!items.length) {
+    el.innerHTML = opts.hideWhenEmpty ? '' :
+      '<div class="card"><div style="font-weight:700;margin-bottom:4px">🎲 Open bets to accept</div><div class="help-text" style="margin:0">No open bets from friends right now. Propose one from a live round.</div></div>';
+    return;
+  }
+  const nameOf = (g, pid) => { const p = (g.players || []).find(pp => pp.id === pid); return p ? displayFirst(p) : 'Player'; };
+  const rows = items.map((it, i) => {
+    const w = it.w, g = it.g;
+    const single = (w.bet_type === 'h2h' || w.bet_type === 'ou' || w.bet_type === 'team' || w.bet_type === 'match');
+    const desc = wagerShortDesc(w, (pid) => nameOf(g, pid));
+    return '<div style="display:flex;align-items:center;gap:8px;padding:9px 0;border-top:' + (i ? '1px solid var(--border)' : 'none') + '">' +
+      '<div style="flex:1;min-width:0;font-size:13px">🎲 ' + desc + ' · ' + escapeHtml(w.creator_name || 'A friend') + ' · $' + (w.amount || 1) +
+      ' <span class="small-text" style="color:var(--text-muted)">· ' + escapeHtml(g.course || 'round') + '</span></div>' +
+      '<button class="open-bet-btn small primary" data-id="' + escAttr(w.id) + '" data-code="' + escAttr(it.code) + '" data-single="' + (single ? '1' : '0') + '" style="flex:0 0 auto">' + (single ? 'Take other side' : 'Join pool') + '</button>' +
+      '</div>';
+  }).join('');
+  el.innerHTML = '<div class="card"><div style="font-weight:700;margin-bottom:2px">🎲 Open bets to accept</div>' +
+    '<div class="small-text" style="color:var(--text-muted);margin-bottom:6px">Friendly bets on friends\' live rounds — tap to take a side. Settles from the final scores.</div>' + rows + '</div>';
+  el.querySelectorAll('.open-bet-btn').forEach(b => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      if (b.dataset.single === '1') {
+        const item = items.find(z => z.w.id === b.dataset.id);
+        if (!item) return;
+        b.disabled = true; b.textContent = '…';
+        const r = await wTakeH2H(item.w);
+        if (r) { showToast('You took the other side 🎲'); renderOpenBets(containerId, opts); }
+        else { b.disabled = false; b.textContent = 'Take other side'; }
+      } else {
+        openWagerScreen(b.dataset.code);
+      }
+    };
+  });
+}
+
 // Friends-only live round list — same source/filters as renderCrewLive, but
 // scoped to rounds that include the signed-in user or one of their friends.
 async function renderWagerLive() {
@@ -22588,6 +22681,7 @@ async function renderWagerLive() {
   el.querySelectorAll('.wager-open-btn').forEach(b => {
     b.onclick = (e) => { e.stopPropagation(); openWagerScreen(b.dataset.code); };
   });
+  try { renderOpenBets('wager-open-bets'); } catch (e) {}
 }
 
 // ---- round screen ----
