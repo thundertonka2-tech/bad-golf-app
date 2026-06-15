@@ -18788,12 +18788,13 @@ async function renderHomeLive() {
       rows = data || [];
     }
   } catch (e) { console.warn('home live fetch failed:', e); }
-  const names = new Set();
-  try {
-    (await getPlayerRoster()).forEach(p => { if (p && p.name) names.add(normalizeNameSegment(p.name)); });
-    const me = await getMeName();
-    if (me) names.add(normalizeNameSegment(me));
-  } catch (e) {}
+  // Friends-only: the Home "Live now" + "Crew highlights" feeds must include
+  // ONLY rounds with YOU or an accepted friend — NOT the whole shared roster,
+  // which leaked every user's live rounds & highlights to anyone (a tester saw
+  // everyone's even though he was only friends with one person). friendNameSet()
+  // = me + accepted friends' linked player names.
+  let names = new Set();
+  try { names = await friendNameSet(); } catch (e) {}
   const thruOf = g => {
     let thru = 0;
     try {
@@ -21149,13 +21150,17 @@ async function renderCrewLive() {
     }
   } catch (e) { console.warn('crew live fetch failed', e); }
   const cutoff = Date.now() - 8 * 60 * 60 * 1000; // last 8 hours
+  // Friends-only: only surface in-progress rounds that include YOU or an
+  // accepted friend (was showing every live round to everyone).
+  const allowed = await friendNameSet();
   const live = rows
     .map(row => ({ code: row.code, g: row.data, t: row.updated_at }))
     .filter(x => x.g && Array.isArray(x.g.players) && x.g.players.length > 0 && !x.g.finishedAt)
     .filter(x => {
       const ts = x.t ? Date.parse(x.t) : (x.g.updatedAt || 0);
       return ts >= cutoff;
-    });
+    })
+    .filter(x => allowed && allowed.size && x.g.players.some(p => p && p.name && allowed.has(normalizeNameSegment(p.name))));
   if (live.length === 0) { el.innerHTML = '<div class="help-text">No rounds in progress right now.</div>'; return; }
   el.innerHTML = live.map((x, i) => {
     const g = x.g;
@@ -28093,6 +28098,17 @@ const gpsView = (() => {
     }
     wizardBanner();
   }
+  // Admin can set EXACTLY which hole number they're mapping — so a course whose
+  // holes were saved under the wrong numbers can be corrected: map the green in
+  // front of you and assign its real hole number. Resets any in-progress taps.
+  function wizSetHole(n) {
+    n = Math.min(18, Math.max(1, parseInt(n, 10) || 1));
+    while (tapMks.length) { const m = tapMks.pop(); if (m) m.remove(); }
+    wizStep = 0; wizPts = {};
+    state.currentHole = n;
+    showHole(n);
+    wizardBanner();
+  }
   function wizardBanner() {
     const b = el('gps-banner');
     const steps = [
@@ -28100,9 +28116,20 @@ const gpsView = (() => {
       ['Now tap the <b>FRONT of the green</b>', 'The edge closest to the fairway'],
       ['Now tap the <b>BACK of the green</b>', 'Mid green is computed automatically']
     ];
-    b.innerHTML = steps[wizStep][0] + '<small>' + steps[wizStep][1] + '</small>' +
+    let opts = '';
+    for (let n = 1; n <= 18; n++) opts += '<option value="' + n + '"' + (n === hole ? ' selected' : '') + '>Hole ' + n + '</option>';
+    const picker = '<div style="display:flex;align-items:center;gap:8px;justify-content:center;margin-bottom:8px">'
+      + '<button id="gps-wiz-hprev" type="button" style="padding:4px 13px">◀</button>'
+      + '<select id="gps-wiz-hsel" style="font-size:15px;padding:5px 8px;border-radius:6px">' + opts + '</select>'
+      + '<button id="gps-wiz-hnext" type="button" style="padding:4px 13px">▶</button>'
+      + '</div>';
+    b.innerHTML = picker + steps[wizStep][0] + '<small>' + steps[wizStep][1] + '</small>' +
       '<div class="row"><button id="gps-wiz-undo">↩ Undo</button><button id="gps-wiz-cancel">Cancel</button></div>';
     b.style.display = 'block';
+    { const hp = el('gps-wiz-hprev'), hn = el('gps-wiz-hnext'), hs = el('gps-wiz-hsel');
+      if (hp) hp.onclick = () => wizSetHole(hole - 1);
+      if (hn) hn.onclick = () => wizSetHole(hole + 1);
+      if (hs) hs.onchange = () => wizSetHole(hs.value); }
     el('gps-wiz-undo').onclick = wizardUndo;
     el('gps-wiz-cancel').onclick = () => { hideBanner(); showHole(hole); };
   }
@@ -28715,8 +28742,7 @@ const gpsView = (() => {
         let id = slugifyCourseName(name), n = 1;
         while (batchIds.has(id) || COURSE_LIBRARY.some(x => x.id === id)) { n++; id = slugifyCourseName(name) + '-' + n; }
         batchIds.add(id);
-        const phone = (e.tags.phone || e.tags['contact:phone'] || e.tags['contact:mobile'] || '').trim();
-        batch.push({ id, name, city, lat: c.lat, lng: c.lon, st, phone, userAdded: true, src: 'osm-state', addedAt: Date.now() });
+        batch.push({ id, name, city, lat: c.lat, lng: c.lon, st, userAdded: true, src: 'osm-state', addedAt: Date.now() });
       });
 
       log(batch.length + ' new courses to add, ' + skipped + ' already in the library (skipped).');
@@ -29920,23 +29946,14 @@ window.bgCourseCheck = st => courseCoverageReport(st);
 }
 
 // ---------- junk cleanup (?coursecleanup=ST) -------------------------------
-// Removes non-golf "courses" the OSM import drags in. Two tiers, NAME-based:
-//   HARD junk  — par-3 / pitch-and-putt, driving ranges & practice/dome,
-//                mini-golf / putt-putt / disc golf, closed/defunct. Always
-//                removed when the course has no real rating/slope.
-//   QUESTIONABLE — foot golf / putting green, academy / lessons / simulator,
-//                bare "Clubhouse"/"Pro Shop", and bare "Resort/Hotel/Park" with
-//                no golf word. These are removed ONLY when the course is also
-//                (a) not on USGA (no tee rating/slope) AND (b) has no findable
-//                phone number — a real operating course usually has one, so a
-//                phone spares it from the questionable sweep.
+// Removes non-golf "courses" the OSM import drags in: par-3 / pitch-and-putt,
+// driving ranges & practice/dome facilities, mini-golf / putt-putt / disc golf,
+// and closed/defunct/abandoned courses. Matches on the course NAME only.
 // SAFETY: previews everything and waits for your click before deleting; never
 // removes a course that already has a real tee rating/slope (treated as a true
-// course even if the name has a trigger word — that's our "listed on USGA"
-// proxy, since we can't query usga.org per-course in bulk). Uses the same synced
-// deleteCourse() path as the Admin delete button, so removals stick across
-// devices/reload. Run it per state AFTER you finish that state's rating/slope
-// import (so genuinely-rated courses are protected before the sweep).
+// course even if the name has a trigger word). Uses the same synced deleteCourse()
+// path as the Admin delete button, so removals stick across devices/reload.
+// Run it per state AFTER you finish that state's rating/slope import.
 // URL: ?coursecleanup=MI   ·  console: bgCourseCleanup('MI')  (omit/"1" = all states)
 const CLEANUP_RULES = [
   ['par-3 / pitch&putt', /\bpar[\s-]?3\b|\bpar[\s-]?three\b|pitch\s*(?:and|&|-)\s*putt/i],
@@ -29948,22 +29965,6 @@ function classifyJunk(name) {
   const n = String(name || '');
   for (const [label, re] of CLEANUP_RULES) { if (re.test(n)) return label; }
   return null;
-}
-// Softer "questionable" signals — only acted on when the course is ALSO off-USGA
-// (no rating/slope) AND has no findable phone (see candidate loop below).
-function classifyQuestionable(name) {
-  const n = String(name || '').trim();
-  if (/foot\s*golf|footgolf|putting\s+(?:green|course)/i.test(n)) return 'foot golf / putting green';
-  if (/\bacademy\b|instruction|\blessons?\b|golf\s*simulator|\bsimulator\b|indoor\s*golf|virtual\s*golf|golf\s*lounge/i.test(n)) return 'academy / lessons / sim';
-  if (/^(?:the\s+)?(?:club\s*house|pro\s*shop|golf\s*shop)\s*$/i.test(n)) return 'bare clubhouse / pro shop';
-  if (/\b(resort|hotel|motel|inn|park)\b/i.test(n) && !/golf|\bclub\b|\bcc\b|\bg\.?\s?c\.?\b|course|links|country club|fairway/i.test(n)) return 'resort / hotel / park (no golf word)';
-  return null;
-}
-// "Valid phone we can find" = at least 10 digits once non-digits are stripped
-// (US 10-digit; +1-prefixed numbers still clear the bar).
-function hasFindablePhone(c) {
-  const p = String((c && (c.phone || c.tel || c.contactPhone)) || '');
-  return (p.match(/\d/g) || []).length >= 10;
 }
 async function courseCleanup(stOverride) {
   let panel = document.getElementById('clean-panel');
@@ -30009,40 +30010,27 @@ async function courseCleanup(stOverride) {
     const hasRS = id => { const s = saves[id]; return !!(s && Array.isArray(s.tees) && s.tees.some(t => t && t.rating != null && t.slope != null)); };
 
     const candidates = [];   // {id,name,city,st,reason}
-    let protectedCount = 0;   // kept: name matched but has real rating/slope (on USGA)
-    let sparedByPhone = 0;    // kept: questionable name + off-USGA, BUT has a phone
+    let protectedCount = 0;
     COURSE_LIBRARY.forEach(c => {
       const st = stateOf(c);
       if (stFilter && st !== stFilter) return;
-      const hard = classifyJunk(c.name);
-      const quest = hard ? null : classifyQuestionable(c.name);
-      if (!hard && !quest) return;
-      if (hasRS(c.id)) { protectedCount++; return; } // on USGA (real rating/slope) — keep
-      let reason;
-      if (hard) {
-        reason = hard;
-      } else {
-        // questionable: remove only if ALSO off-USGA (already true here) AND no
-        // findable phone. A phone number suggests a real operating course → spare it.
-        if (hasFindablePhone(c)) { sparedByPhone++; return; }
-        reason = quest + ' · not on USGA · no phone';
-      }
+      const reason = classifyJunk(c.name);
+      if (!reason) return;
+      if (hasRS(c.id)) { protectedCount++; return; } // real course (has rating/slope) — keep
       candidates.push({ id: c.id, name: c.name, city: c.city || '', st, reason });
     });
 
     document.getElementById('clean-title').textContent = 'Junk cleanup' + (stFilter ? ' — ' + stFilter : ' — ALL STATES');
     if (!candidates.length) {
       log('No junk courses found' + (stFilter ? ' in ' + stFilter : '') + '. Nothing to remove. 🎉', '#8fd19e');
-      if (protectedCount) log(protectedCount + ' name-matched course(s) were kept because they have a real rating/slope (on USGA).', '#9ad0ff');
-      if (sparedByPhone) log(sparedByPhone + ' questionable course(s) were kept because they have a phone number.', '#9ad0ff');
+      if (protectedCount) log(protectedCount + ' name-matched course(s) were kept because they have a real rating/slope.', '#9ad0ff');
       return;
     }
     const byReason = {};
     candidates.forEach(c => { (byReason[c.reason] = byReason[c.reason] || []).push(c); });
     log('<b>Found ' + candidates.length + ' junk course(s)' + (stFilter ? ' in ' + stFilter : ' across all states') + ' to remove:</b>', '#ffd34d');
     Object.keys(byReason).forEach(r => log('• <b>' + byReason[r].length + '</b> — ' + r));
-    if (protectedCount) log(protectedCount + ' name-matched course(s) kept (real rating/slope — on USGA).', '#9ad0ff');
-    if (sparedByPhone) log(sparedByPhone + ' questionable course(s) kept (have a phone number).', '#9ad0ff');
+    if (protectedCount) log(protectedCount + ' name-matched course(s) kept (they have a real rating/slope).', '#9ad0ff');
     log('<br><u>Courses queued for removal:</u>');
     candidates.forEach(c => log('· ' + c.name + ' <span style="color:#9aa0a6">— ' + (c.city || c.st) + ' · ' + c.reason + '</span>'));
 
