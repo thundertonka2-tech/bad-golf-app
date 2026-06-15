@@ -1730,9 +1730,14 @@
   .gps-hole-card .fmb-top .lbl { font-size: 9px; color: rgba(255,255,255,0.75); font-weight: 700; letter-spacing: 0.04em; }
   .gps-hole-card .fmb-top .val { font-size: 15px; font-weight: 800; line-height: 1.1; }
   .gps-hole-card .fmb-top .cell.mid .val { font-size: 21px; }
-  /* Par 3s: keep the Front/Mid/Back numbers green so the bar reads consistently
-     across the app (one-shot holes always show the green-distance color). */
-  .gps-hole-card .fmb-top.par3 .val { color: #46e06b; }
+  /* Par 3s: the Front/Mid/Back bar fills GREEN with WHITE lettering (easy to read).
+     When you move the target (distances now measured from your aim point) the bar
+     drops back to normal and the NUMBERS turn green as the cue — never green-on-green. */
+  .gps-hole-card .fmb-top.par3 { background: #2e9e4f; border-radius: 10px; padding: 3px 10px; }
+  .gps-hole-card .fmb-top.par3 .lbl, .gps-hole-card .fmb-top.par3 .val { color: #fff; }
+  .gps-hole-card .fmb-top.par3.target-moved { background: transparent; }
+  .gps-hole-card .fmb-top.par3.target-moved .lbl { color: rgba(255,255,255,0.75); }
+  .gps-hole-card .fmb-top.par3.target-moved .val { color: #46e06b; }
   .gps-hole-card .navbtn {
     background: rgba(255,255,255,0.22); border: none; color: #fff; border-radius: 9px;
     width: 30px; height: 34px; font-size: 17px; cursor: pointer;
@@ -5295,7 +5300,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.12';
+const BG_BUILD = 'v2026.11.15';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -6923,10 +6928,23 @@ async function getCourseSaves() {
 
 // Player roster — names + handicaps remembered between rounds (personal/local)
 async function getPlayerRoster() {
+  // Capture locally-cached avatars BEFORE the cloud read — readSharedSingleton
+  // overwrites the local cache with the cloud row, and avatars (heavy data URLs)
+  // may not have made it to that row. Re-applying them below stops a later roster
+  // save (e.g. after deleting a round) from wiping the player's profile photo.
+  const _localAvatars = {};
+  try {
+    const lv = localStorage.getItem(KEY_PLAYER_ROSTER);
+    if (lv) (JSON.parse(lv) || []).forEach(p => { if (p && p.avatar) _localAvatars[(p.name || '').trim().toLowerCase()] = p.avatar; });
+  } catch (e) {}
   const v = await safeGet(KEY_PLAYER_ROSTER, false);
   if (!v) return [];
   try {
     const roster = JSON.parse(v);
+    // Heal any avatar the cloud row is missing, from the local cache (additive —
+    // never removes), so profile photos survive roster-mutating saves.
+    let avatarHealed = false;
+    roster.forEach(p => { if (p && !p.avatar) { const a = _localAvatars[(p.name || '').trim().toLowerCase()]; if (a) { p.avatar = a; avatarHealed = true; } } });
     // Auto-migrate legacy entries that only have `name` field to also have
     // structured firstName/lastName. Idempotent — re-running on already-migrated
     // entries is a no-op. Display code uses these structured fields; internal
@@ -6947,8 +6965,9 @@ async function getPlayerRoster() {
         migrated = true;
       }
     });
-    if (migrated) {
-      // Fire-and-forget save so we don't block reads
+    if (migrated || avatarHealed) {
+      // Fire-and-forget save so we don't block reads (also heals the cloud row's
+      // missing avatars back up).
       safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false).catch(() => {});
     }
     return roster;
@@ -7912,6 +7931,77 @@ async function editCourseDetails(id) {
   return true;
 }
 
+// Duplicate compare — shows every copy of a course (same name + matching city or
+// state) side by side with what each ACTUALLY has (GPS holes, rating, targets,
+// location), recommends the most complete one, and lets the admin tap "Keep this
+// one" on whichever they want — the rest are removed. Friendlier than blindly
+// keeping the card that happened to be open.
+function openDuplicateCompare(id) {
+  const _norm = x => (x || '').trim().toLowerCase();
+  const cur = (COURSE_LIBRARY || []).find(c => c && c.id === id);
+  if (!cur) { showToast('Course not found'); return; }
+  const group = (COURSE_LIBRARY || []).filter(c => c && _norm(c.name) === _norm(cur.name) &&
+    (_norm(c.city) === _norm(cur.city) || (c.st && cur.st && _norm(c.st) === _norm(cur.st))));
+  if (group.length < 2) { showToast('No duplicates to compare'); return; }
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+  const work = _adminWork || [];
+  const stat = cid => work.find(x => x.id === cid) || {};
+  const score = c => { const s = stat(c.id); return (s.holes || 0) + (s.hasRS ? 100 : 0) + (s.fwcCount || 0); };
+  // Recommend the most complete copy (most GPS holes + rating + targets).
+  let best = group[0]; group.forEach(c => { if (score(c) > score(best)) best = c; });
+
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.55);display:flex;align-items:flex-start;justify-content:center;padding:5vh 14px 16px;overflow:auto';
+  const card = document.createElement('div');
+  card.style.cssText = 'background:var(--surface,#fbfaf7);color:var(--text,#1a1a1a);border-radius:16px;padding:18px;max-width:460px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.45)';
+
+  const copyCard = (c) => {
+    const s = stat(c.id);
+    const cityStr = (c.city || '').trim(), stStr = (c.st || '').trim();
+    const loc = (cityStr && stStr && !cityStr.toUpperCase().includes(stStr.toUpperCase())) ? (cityStr + ', ' + stStr) : (cityStr || stStr || 'No location set');
+    const holes = s.holes || 0;
+    const gps = s.hasGPS ? '✅ GPS 18/18' : (holes > 0 ? '🟠 GPS ' + holes + '/18' : '⚪ No GPS');
+    const rating = s.hasRS ? '✅ Rating set' : '⚪ No rating';
+    const targets = (s.fwcCount || 0) > 0 ? ('🎯 ' + s.fwcCount + ' targets') : '⚪ No targets';
+    const isBest = c.id === best.id;
+    return '<div style="border:2px solid ' + (isBest ? 'var(--money-pos,#2e9e4f)' : 'var(--border,#d8d4cc)') + ';border-radius:12px;padding:12px;margin-bottom:10px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">'
+      +   '<div style="font-weight:700">' + esc(loc) + '</div>'
+      +   (isBest ? '<span class="adm-flag" style="background:var(--money-pos)">Most complete</span>' : '')
+      + '</div>'
+      + '<div class="small-text" style="color:var(--text-muted);line-height:1.8">' + gps + ' &nbsp; ' + rating + ' &nbsp; ' + targets + '<br><span style="opacity:0.6;font-size:11px">id: ' + esc(c.id) + '</span></div>'
+      + '<button data-keep="' + esc(c.id) + '" style="width:100%;margin-top:10px;padding:12px;border-radius:10px;border:none;background:var(--money-pos,#2e9e4f);color:#fff;font-weight:700;font-size:14px;cursor:pointer">✓ Keep this one — remove the other' + (group.length > 2 ? 's' : '') + '</button>'
+      + '</div>';
+  };
+
+  card.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
+    + '<div style="font-weight:800;font-size:18px;line-height:1.25">' + group.length + ' copies of<br>' + esc(cur.name) + '</div>'
+    + '<button id="dc-x" style="flex:0 0 auto;background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:6px 12px;font-size:16px;cursor:pointer">✕</button></div>'
+    + '<div class="small-text" style="color:var(--text-muted);margin:8px 0 14px">Pick the copy to <b>keep</b> — the other' + (group.length > 2 ? 's' : '') + ' will be removed for everyone. The green one usually has the most mapped already.</div>'
+    + group.map(copyCard).join('')
+    + '<button id="dc-cancel" style="width:100%;margin-top:4px;padding:12px;border-radius:10px;border:1px solid var(--border,#d8d4cc);background:transparent;color:var(--text);font-weight:600;cursor:pointer">Cancel — keep all</button>';
+  ov.appendChild(card); document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  card.querySelector('#dc-x').onclick = close;
+  card.querySelector('#dc-cancel').onclick = close;
+  card.querySelectorAll('button[data-keep]').forEach(b => b.onclick = async () => {
+    const keepId = b.dataset.keep;
+    const removeList = group.filter(c => c.id !== keepId);
+    const keepC = group.find(c => c.id === keepId);
+    if (!removeList.length) { close(); return; }
+    const keepLoc = (keepC && (keepC.city || keepC.st)) ? (keepC.city || keepC.st) : 'selected';
+    if (!window.confirm('Keep the "' + keepLoc + '" copy and remove ' + removeList.length + ' other' + (removeList.length === 1 ? '' : 's') + ' of "' + (cur.name || 'this course') + '"?\n\nThis deletes the other copy(ies) for everyone. Cannot be undone.')) return;
+    b.textContent = 'Removing…'; b.disabled = true;
+    let removed = 0;
+    for (const c of removeList) { try { const ok = await deleteCourse(c.id); if (ok) removed++; } catch (e) {} }
+    showToast('Kept 1 copy · removed ' + removed);
+    close();
+    _adminDataReady = false; renderAdmin();
+  });
+}
+
 // Course detail screen — opened by tapping a worklist card. All admin tools for
 // one course in one clean place (replaces the per-card button row).
 function openCourseDetail(id) {
@@ -7952,7 +8042,7 @@ function openCourseDetail(id) {
     + '<div class="small-text" style="color:var(--text-muted);margin-top:3px">' + esc(loc) + '</div></div>'
     + '<button id="acd-x" style="flex:0 0 auto;background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:6px 12px;font-size:16px;cursor:pointer">✕</button></div>'
     + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 6px">' + gpsPill + rsPill + (skipped ? '<span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + (dupSibs.length ? '<span class="adm-flag" style="background:#b3261e">⚠ ' + dupSibs.length + ' duplicate' + (dupSibs.length === 1 ? '' : 's') + '</span>' : '') + '</div>'
-    + (dupSibs.length ? btn('dedupe', '🧹 Remove ' + dupSibs.length + ' duplicate' + (dupSibs.length === 1 ? '' : 's') + ' — keep this one', true) : '')
+    + (dupSibs.length ? btn('dedupe', '⚖️ Compare ' + (dupSibs.length + 1) + ' copies — pick which to keep', true) : '')
     + btn('remapfull', '🗺 Remap full course (greens + fairways)')
     + btn('fwc', '🎯 Mark fairway centers only')
     + btn('clearmap', '🧽 Clear all Course Mapping', true)
@@ -7971,16 +8061,7 @@ function openCourseDetail(id) {
   card.querySelectorAll('button[data-act]').forEach(b => b.onclick = async () => {
     const act = b.dataset.act;
     if (act === 'list') { closeOv(); renderAdminWorklist(); return; }
-    if (act === 'dedupe') {
-      if (!dupSibs.length) return;
-      if (window.confirm('Remove ' + dupSibs.length + ' duplicate copy(ies) of "' + (it.name || 'this course') + '" and KEEP this one? This deletes the extra copies for everyone. Cannot be undone.')) {
-        let removed = 0;
-        for (const sib of dupSibs) { try { const ok = await deleteCourse(sib.id); if (ok) removed++; } catch (e) {} }
-        showToast('Removed ' + removed + ' duplicate' + (removed === 1 ? '' : 's'));
-        closeOv(); renderAdmin();
-      }
-      return;
-    }
+    if (act === 'dedupe') { closeOv(); openDuplicateCompare(id); return; }
     if (act === 'next') { if (nextId) advance(); return; }
     if (act === 'remapfull') { closeOv(); adminRemapFull(id); return; }
     if (act === 'fwc') { closeOv(); adminFwcCourse(id); return; }
@@ -20481,7 +20562,12 @@ async function reconcileMyScoreHistory() {
       const recent = await getRecent();
       if (Array.isArray(recent) && recent.length < 50) {
         const liveCodes = new Set((recent || []).map(r => r && r.code).filter(Boolean));
-        entry.scoreHistory = entry.scoreHistory.filter(s => s && (s.gameCode == null || liveCodes.has(s.gameCode)));
+        // Keep a stats round ONLY if it matches a round in your list (by code) or
+        // is a manually-added past round (intentional, code 'manual-…'). Everything
+        // else is an orphan — a deleted round, or an old entry saved before rounds
+        // carried a code (gameCode null) — and is dropped. Keeping null-code entries
+        // was the leak that let the profile count exceed the Rounds tab.
+        entry.scoreHistory = entry.scoreHistory.filter(s => s && (s.manual || (s.gameCode != null && liveCodes.has(s.gameCode))));
       }
     } catch (e) {}
     if (entry.scoreHistory.length !== before) await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
@@ -20792,6 +20878,9 @@ async function deleteRecentGame(code) {
   if (v) try { recent = JSON.parse(v); } catch (e) {}
   recent = recent.filter(g => g.code !== code);
   await safeSet(KEY_RECENT, JSON.stringify(recent), true);
+  // Also hide on THIS device so a late realtime echo or autosave that re-adds the
+  // round to the shared list can't make it reappear in the Rounds tab here.
+  try { const h = getHiddenRounds(); if (!h.includes(code)) { h.push(code); setHiddenRounds(h); } } catch (e) {}
 
   // Remove the underlying game data — both Supabase and local cache
   try {
@@ -26234,18 +26323,18 @@ async function init() {
         const everyone = await uiConfirm(
           'Delete this round for ALL players?\n\n“Delete for all” permanently removes the round and its stats from everyone (use this for test data — it can’t be undone).\n\n“Just my list” only removes it from your own Rounds.',
           { title: 'Delete round (admin)', okLabel: 'Delete for all', cancelLabel: 'Just my list' });
+        // Tear the active round DOWN FIRST (clears state.game + unsubscribes the
+        // realtime channel) so an autosave or realtime echo can't re-save the game
+        // and re-add it to the Rounds list right after we remove it.
+        try { await discardActiveRound(); } catch (e) {}
         if (everyone) {
           try { await deleteRecentGame(code); } catch (e) {}
-          try { await discardActiveRound(); } catch (e) {}
           showToast('Round deleted for all players');
-          try { await loadRounds(); } catch (e) {}
-          switchTab('home');
-          return;
+        } else {
+          let hcpA = false;
+          try { hcpA = await removeRoundForMe(code); } catch (e) {}
+          showToast(hcpA ? 'Removed from your list — handicap recalculated' : 'Round removed from your list');
         }
-        let hcpA = false;
-        try { hcpA = await removeRoundForMe(code); } catch (e) {}
-        try { await discardActiveRound(); } catch (e) {}
-        showToast(hcpA ? 'Removed from your list — handicap recalculated' : 'Round removed from your list');
         try { await loadRounds(); } catch (e) {}
         switchTab('home');
         return;
@@ -26254,9 +26343,10 @@ async function init() {
         'Delete this round from YOUR list?\n\nEveryone else in the round keeps it and their stats. If it counted toward your handicap, it’ll be removed and your handicap recalculated. This only affects you.',
         { title: 'Delete round?', okLabel: 'Delete' });
       if (!ok) return;
+      // Tear down FIRST (see note above) so the round can't re-add itself.
+      try { await discardActiveRound(); } catch (e) {}
       let hcpAffected = false;
       try { hcpAffected = await removeRoundForMe(code); } catch (e) {}
-      try { await discardActiveRound(); } catch (e) {} // clear from THIS device only
       showToast(hcpAffected ? 'Removed — your handicap was recalculated' : 'Round removed from your list');
       try { await loadRounds(); } catch (e) {}
       switchTab('home');
@@ -27216,8 +27306,8 @@ const gpsView = (() => {
     el('gps-hole-num').textContent = hole;
     const pars = state.game && state.game.pars;
     el('gps-par').textContent = (pars && pars[hole-1]) ? pars[hole-1] : '—';
-    // Par 3s show the Front/Mid/Back bar in green (see .fmb-top.par3 CSS).
-    try { const _fb = document.querySelector('.fmb-top'); if (_fb) _fb.classList.toggle('par3', Number(pars && pars[hole-1]) === 3); } catch (e) {}
+    // Par 3s show the Front/Mid/Back bar as a green pill (see .fmb-top.par3 CSS).
+    try { const _fb = document.querySelector('.fmb-top'); if (_fb) { _fb.classList.toggle('par3', Number(pars && pars[hole-1]) === 3); _fb.classList.remove('target-moved'); } } catch (e) {}
     // #7 Strokes box: how many strokes the signed-in player gets on this hole.
     try {
       const g = state.game; const sb = el('gps-strokes'), sn = el('gps-strokes-num');
@@ -27569,6 +27659,9 @@ const gpsView = (() => {
     el('gps-f').textContent = ydsBetween(fbmFrom, hd.front);
     el('gps-m').textContent = ydsBetween(fbmFrom, hd.mid);
     el('gps-b').textContent = ydsBetween(fbmFrom, hd.back);
+    // Par-3 cue: when F/M/B is measured from the moved target, drop the green bar
+    // and turn the numbers green instead (never green text on a green bar).
+    try { const _fb = document.querySelector('.fmb-top'); if (_fb) _fb.classList.toggle('target-moved', fbmFrom === target); } catch (e) {}
     applyPlays();
     positionPills();
   }
