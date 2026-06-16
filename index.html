@@ -5307,7 +5307,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.23';
+const BG_BUILD = 'v2026.11.25';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -5569,6 +5569,7 @@ function openAvatarZoom(url) {
 // what the player did that round for that stat, and a "View round" button that
 // shows that round's scorecard. Same modal for both places.
 let _statRoundsCache = [];
+let _statRoundsIsMe = false;   // true when the open stat sheet is the signed-in user's own player
 const STAT_DEFS = {
   putts:   { title: 'Putts / Round', hdr: 'Rounds counted for putts' },
   gir:     { title: 'GIR %',         hdr: 'Rounds counted for greens in regulation' },
@@ -5592,6 +5593,7 @@ async function openStatRounds(name, key) {
   else rounds = history.filter(s => s.complete && typeof s.fairways === 'number' && s.fairwayHoles > 0);
   rounds = rounds.sort((a, b) => (b.date || 0) - (a.date || 0));
   _statRoundsCache = rounds;
+  try { const _mn = await getMeName(); _statRoundsIsMe = !!(player && _mn && normalizeNameSegment(player.name) === normalizeNameSegment(_mn)); } catch (e) { _statRoundsIsMe = false; }
   const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
   let headline = 'NA';
   if (key === 'putts') { const h = rounds.reduce((a, b) => a + b.puttHoles, 0), p = rounds.reduce((a, b) => a + b.putts, 0); if (h > 0) headline = (p / h * 18).toFixed(1) + ' / round'; }
@@ -5671,9 +5673,36 @@ function openRoundCard(idx) {
     + '</div>'
     + '<div>' + (chipHtml || '<span class="help-text">No detailed stats stored for this round.</span>') + '</div>'
     + grid
+    + (_statRoundsIsMe ? '<button onclick="removeMyStatRound(' + idx + ')" class="small" style="margin-top:14px;width:100%;padding:11px;background:var(--danger);border:none;color:#fff;font-weight:700;border-radius:8px">🗑 Remove this round from my stats</button>' : '')
     + '</div>';
   ov.onclick = () => { try { ov.remove(); } catch (e) {} };
   document.body.appendChild(ov);
+}
+// Remove a single round from the signed-in user's stats history (handicap + stat
+// tiles). Used to clear phantom/old records that linger in scoreHistory but are no
+// longer in the Rounds list. Only offered on YOUR own stat sheet.
+async function removeMyStatRound(idx) {
+  const s = (_statRoundsCache || [])[idx];
+  if (!s) return;
+  const label = (s.course || 'this round') + (s.date ? ' · ' + new Date(s.date).toLocaleDateString() : '');
+  if (!window.confirm('Remove ' + label + ' from your stats?\n\nThis drops it from your handicap and the Putts/GIR/Fairway tiles. It can\'t be undone.')) return;
+  try {
+    const me = await getMeName();
+    const roster = await getPlayerRoster();
+    const mine = findMyRosterPlayer(roster, me);
+    if (!mine || !Array.isArray(mine.scoreHistory)) { try { showToast('Could not find your player'); } catch (e) {} return; }
+    const sameRound = (a, b) => (a.gameCode && b.gameCode) ? a.gameCode === b.gameCode : (a.date === b.date && a.course === b.course && a.gross === b.gross);
+    const before = mine.scoreHistory.length;
+    mine.scoreHistory = mine.scoreHistory.filter(x => !sameRound(x, s));
+    // Also blacklist its code so a cloud/recent sync can't resurrect it.
+    if (s.gameCode) { try { const h = getHiddenRounds(); if (!h.includes(s.gameCode)) { h.push(s.gameCode); setHiddenRounds(h); } } catch (e) {} }
+    if (mine.scoreHistory.length !== before) { await savePlayerRoster(roster); try { showToast('Removed from your stats'); } catch (e) {} }
+    else { try { showToast('Round not found in your stats'); } catch (e) {} }
+    const rc = document.getElementById('round-card-ov'); if (rc) rc.remove();
+    const sr = document.getElementById('stat-rounds-ov'); if (sr) sr.remove();
+    try { renderHome(); } catch (e) {}
+    try { renderStats(); } catch (e) {}
+  } catch (e) { console.warn('removeMyStatRound', e); try { showToast('Could not remove the round'); } catch (e2) {} }
 }
 
 // ===========================================================================
@@ -6016,6 +6045,7 @@ function renderAdminUserList() {
 async function getMappedCourseIdSet() {
   const counts = new Map();
   counts.fwc = new Map();   // course_id → # holes that have a fairway-center (target) marked
+  counts.center = new Map(); // course_id → {lng,lat} representative point (admin-map pin)
   // .has(id) → true only when a course is FULLY mapped (18 holes); otherwise it
   // still needs mapping. (We keep the name .has so callers read naturally.)
   counts.has = function (id) { return (this.get(id) || 0) >= 18; };
@@ -6030,8 +6060,17 @@ async function getMappedCourseIdSet() {
           if (!r || !r.course_id) return;
           const hs = r.holes || {};
           counts.set(r.course_id, Object.keys(hs).length);
-          let fc = 0; for (const k in hs) { const h = hs[k]; if (h && Array.isArray(h.fwc) && h.fwc.length === 2) fc++; }
+          let fc = 0; let cen = null;
+          for (const k in hs) {
+            const h = hs[k]; if (!h) continue;
+            if (Array.isArray(h.fwc) && h.fwc.length === 2) fc++;
+            // Grab a point [lng,lat] so the admin map can pin a GPS-mapped course
+            // even when its library entry has no center coord (seed/manual adds
+            // like Buffalo Creek — mapped & playable but no lat/lng on record).
+            if (!cen) { const p = h.mid || h.tee || h.front || h.back; if (Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number') cen = { lng: p[0], lat: p[1] }; }
+          }
           counts.fwc.set(r.course_id, fc);
+          if (cen) counts.center.set(r.course_id, cen);
         });
         if (data.length < page) break;
         from += page;
@@ -6066,8 +6105,9 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
     // renderAdminWorklist) until the admin searches or picks a state.
     const flag = complete ? 'done' : (hasGPS ? 'rs' : (hasRS ? 'gps' : 'both'));
     const st = lib.st || (typeof courseStateCode === 'function' ? courseStateCode(lib) : '') || '';
+    const _cen = (mappedSet && mappedSet.center && typeof mappedSet.center.get === 'function') ? mappedSet.center.get(id) : null;
     items.push({ id, name, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, fwcCount, needsTargets: hasGPS && fwcCount === 0, pop: playCount[name.toLowerCase()] || 0,
-      lat: (typeof lib.lat === 'number' ? lib.lat : null), lng: (typeof lib.lng === 'number' ? lib.lng : null) });
+      lat: (typeof lib.lat === 'number' ? lib.lat : (_cen ? _cen.lat : null)), lng: (typeof lib.lng === 'number' ? lib.lng : (_cen ? _cen.lng : null)) });
   });
   // Partially-mapped courses first (closest to done — quickest to finish), most
   // holes already done first; then popularity, then name.
@@ -7054,7 +7094,12 @@ const SHARED_SINGLETONS = ['golf:courses', 'golf:recent-games', 'golf:tourneys',
   // Course library additions + the 48-state import queue MUST sync — without
   // these entries safeGet/safeSet silently fall back to localStorage and
   // user-added courses never reach anyone else's device.
-  'golf:course-library-additions', 'golf:state-import-progress'];
+  'golf:course-library-additions', 'golf:state-import-progress',
+  // Admin course-library overlays — deletes + renames + location fixes MUST sync
+  // too, or a course Kevin deletes/renames on one device reappears for everyone
+  // else (and re-syncs back). The deletes list is the authoritative "never show
+  // this course again" record, so it has to be shared like the additions.
+  'golf:course-deletes', 'golf:course-name-overrides', 'golf:course-detail-overrides'];
 function singletonRowCode(key) { return 'shared:' + key.replace(/^golf:/, ''); }
 
 // Track online/offline so the sync indicator can reflect reality
@@ -7343,7 +7388,8 @@ function updateSyncIndicator(justSynced) {
   }
 }
 
-async function saveGame(game) {
+async function saveGame(game, opts) {
+  opts = opts || {};
   game.updatedAt = Date.now();
   // Audit trail: if this round was reopened from a finished state, every save
   // after that records editedAt so we can show "edited on..." in the UI and
@@ -7354,7 +7400,10 @@ async function saveGame(game) {
   const ok = await safeSet('game:' + game.code, JSON.stringify(game), true);
   if (ok) {
     await safeSet(KEY_LAST, game.code, false);
-    await addToRecent(game);
+    // deferRecent: skip the Rounds-list update (a cloud read + write) on the hot
+    // start path — the caller runs addToRecent() in the background so the round
+    // can open the instant the game is saved. The list is play-irrelevant.
+    if (!opts.deferRecent) await addToRecent(game);
   }
   return ok;
 }
@@ -7561,7 +7610,7 @@ async function getPlayerRoster() {
   const _localAvatars = {};
   try {
     const lv = localStorage.getItem(KEY_PLAYER_ROSTER);
-    if (lv) (JSON.parse(lv) || []).forEach(p => { if (p && p.avatar) _localAvatars[(p.name || '').trim().toLowerCase()] = p.avatar; });
+    if (lv) (JSON.parse(lv) || []).forEach(p => { if (p && p.avatar) _localAvatars[normalizeNameSegment(p.name || '')] = p.avatar; });
   } catch (e) {}
   const v = await safeGet(KEY_PLAYER_ROSTER, false);
   if (!v) return [];
@@ -7570,7 +7619,7 @@ async function getPlayerRoster() {
     // Heal any avatar the cloud row is missing, from the local cache (additive —
     // never removes), so profile photos survive roster-mutating saves.
     let avatarHealed = false;
-    roster.forEach(p => { if (p && !p.avatar) { const a = _localAvatars[(p.name || '').trim().toLowerCase()]; if (a) { p.avatar = a; avatarHealed = true; } } });
+    roster.forEach(p => { if (p && !p.avatar) { const a = _localAvatars[normalizeNameSegment(p.name || '')]; if (a) { p.avatar = a; avatarHealed = true; } } });
     // Auto-migrate legacy entries that only have `name` field to also have
     // structured firstName/lastName. Idempotent — re-running on already-migrated
     // entries is a no-op. Display code uses these structured fields; internal
@@ -20060,6 +20109,21 @@ const KEY_ME = 'golf:me-name';
 // collides with another friend's "me". Guests fall back to localStorage.
 async function getMeName() {
   if (isSignedIn() && supa && _authUser) {
+    // Fast path: serve the cached link instantly, refresh in the background.
+    // getMeName sits on the hot "start a round" path and was doing a Supabase
+    // round-trip on EVERY call (several per start). my_player almost never changes
+    // mid-session, setMeName keeps the cache current when it does, and the async
+    // refresh below self-heals if it was changed on another device.
+    let cached = null;
+    try { cached = localStorage.getItem(KEY_ME) || null; } catch (e) {}
+    if (cached) {
+      try {
+        supa.from('profiles').select('my_player').eq('id', _authUser.id).maybeSingle()
+          .then(function (r) { var mp = r && r.data && r.data.my_player; if (mp && mp !== cached) { try { localStorage.setItem(KEY_ME, mp); } catch (e) {} } })
+          .catch(function () {});
+      } catch (e) {}
+      return cached;
+    }
     try {
       const { data } = await supa.from('profiles')
         .select('my_player').eq('id', _authUser.id).maybeSingle();
@@ -26715,7 +26779,7 @@ async function init() {
     state.game = game;
     state.currentHole = 1;
     state.viewOnlyMode = false; // brand-new round you created — never spectator/read-only
-    const ok = await saveGame(game);
+    const ok = await saveGame(game, { deferRecent: true });
     if (!ok) { hideRoundLoading(_rl, true); showToast('Save failed'); return; }
 
     // Capture the tourney id before the slow work moves to the background.
@@ -26740,6 +26804,9 @@ async function init() {
     // linked-player pings, and tourney-live marking. Failures here never affect
     // the round that's already underway.
     (async () => {
+      // Deferred from saveGame above (deferRecent): update the Rounds list now —
+      // a cloud read + write that play doesn't need to wait on.
+      try { await addToRecent(game); } catch (e) {}
       try { if (courseId) await persistCourseScorecard(courseId, setup.course, setup.pars, setup.sis, setup.tees); } catch (e) {}
       try {
         await Promise.all(setup.players.map(p => upsertPlayerInRoster(
