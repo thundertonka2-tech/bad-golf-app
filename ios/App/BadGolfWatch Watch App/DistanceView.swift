@@ -40,6 +40,16 @@ struct DistanceView: View {
         return pl != c
     }
 
+    // Yardage the club suggestion is based on: plays-as when enabled & different, else center.
+    private var clubYards: Int? {
+        if store.watchPlaysAs, showPlaysLike, let pl = playsLike { return pl }
+        return distances?.center
+    }
+    private var suggestedClub: String? {
+        guard let y = clubYards else { return nil }
+        return store.suggestedClub(for: y)
+    }
+
     var body: some View {
         ZStack {
             Color.badGolfNavy.ignoresSafeArea()
@@ -78,10 +88,16 @@ struct DistanceView: View {
 
             content
 
-            if showPlaysLike, let pl = playsLike {
-                Text("plays \(pl)")
+            // Plays-as line (only when the phone toggle is on) + suggested club.
+            if store.watchPlaysAs, showPlaysLike, let pl = playsLike {
+                Text("plays \(pl)" + (suggestedClub.map { " · " + $0 } ?? ""))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.badGolfAmber)
+                    .padding(.top, 1)
+            } else if let c = suggestedClub {
+                Text(c)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.badGolfBlue)
                     .padding(.top, 1)
             }
 
@@ -128,9 +144,6 @@ struct DistanceView: View {
             }
             .font(.system(size: 18, weight: .semibold))
             .foregroundStyle(Color.white.opacity(0.7))
-            if !(store.hole?.verified ?? true) {
-                Text("community").font(.system(size: 11)).foregroundStyle(.orange)
-            }
         }
     }
 

@@ -58,6 +58,15 @@ struct HoleScore: Codable, Equatable {
     var updatedAt: Date = Date()
 }
 
+// One club from the player's bag, with its yardage range. Handed over from the
+// phone so the watch can suggest a club for the (plays-as) yardage.
+struct Club: Codable, Equatable {
+    var label: String
+    var min: Int
+    var max: Int
+    var mid: Int { (min + max) / 2 }
+}
+
 // The active round handed over from the phone (or fetched from `games`).
 struct Round: Codable, Equatable {
     var id: String                 // games.id

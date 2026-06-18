@@ -13,6 +13,8 @@ final class RoundStore: ObservableObject {
     @Published var currentHole: Int = 1
     @Published var syncState: SyncState = .idle
     @Published var signedIn: Bool = SessionStore.shared.isSignedIn
+    @Published var clubs: [Club] = []          // player's bag (for the suggested-club readout)
+    @Published var watchPlaysAs: Bool = true   // show plays-as vs plain GPS yardage
 
     enum SyncState: Equatable { case idle, queued(Int), syncing, synced, error(String) }
 
@@ -102,8 +104,22 @@ final class RoundStore: ObservableObject {
            let c = CourseParser.parse(row: courseRow) {
             self.course = c
         }
+        if let cl = payload["clubs"] as? [[String: Any]] {
+            self.clubs = cl.compactMap { d in
+                guard let label = d["label"] as? String else { return nil }
+                return Club(label: label, min: (d["min"] as? Int) ?? 0, max: (d["max"] as? Int) ?? 0)
+            }
+        }
+        if let pa = payload["playsAs"] as? Bool { self.watchPlaysAs = pa }
         signedIn = SessionStore.shared.isSignedIn
         saveCache()
+    }
+
+    /// Best club for a yardage: the one whose range contains it, else nearest by mid.
+    func suggestedClub(for yards: Int) -> String? {
+        guard !clubs.isEmpty else { return nil }
+        if let c = clubs.first(where: { $0.min <= yards && yards <= $0.max }) { return c.label }
+        return clubs.min(by: { abs($0.mid - yards) < abs($1.mid - yards) })?.label
     }
 
     // MARK: Direct fetch (when no handoff, watch has network)

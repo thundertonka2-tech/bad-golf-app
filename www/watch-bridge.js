@@ -57,7 +57,13 @@
         token: sess.access_token,
         playerId: playerId,
         round: round,     // null or a RoundParser-shaped row
-        course: course    // null or a CourseParser-shaped row
+        course: course,   // null or a CourseParser-shaped row
+        // Watch setting: show plays-as (wind/slope-adjusted) vs plain GPS yardage.
+        playsAs: (function () { try { return localStorage.getItem('bg_watch_playsas') !== '0'; } catch (e) { return true; } })(),
+        // The player's bag, so the watch can suggest a club for the plays-like yardage.
+        clubs: (window._myClubs || [])
+          .map(function (c) { return { label: c.label, min: Number(c.min) || 0, max: Number(c.max) || 0 }; })
+          .filter(function (c) { return c.label && (c.min > 0 || c.max > 0); })
       })
     };
   }
@@ -112,6 +118,9 @@
   };
 
   function addDiagButton() {
+    // Hidden for normal users now that the watch works. Admins/devs can re-enable
+    // it by running localStorage.setItem('bg_watch_diag','1') and reopening the app.
+    try { if (localStorage.getItem('bg_watch_diag') !== '1') return; } catch (e) { return; }
     if (document.getElementById('bg-watch-diag')) return;
     var b = document.createElement('button');
     b.id = 'bg-watch-diag';
