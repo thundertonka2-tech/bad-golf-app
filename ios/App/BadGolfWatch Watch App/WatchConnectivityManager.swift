@@ -33,9 +33,13 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
     }
 
     private func handle(payload: [String: Any]) {
+        // The phone sends `handoff` as a JSON string (UTF-8 Data) carrying
+        // token + optional round + optional course. Parse it loosely and let
+        // RoundStore apply it via the tolerant parsers (avoids strict Codable
+        // pitfalls with Int-keyed dicts / Date / Data).
         guard let data = payload["handoff"] as? Data,
-              let handoff = try? JSONDecoder().decode(RoundHandoff.self, from: data) else { return }
-        Task { @MainActor in self.store?.apply(handoff: handoff) }
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        Task { @MainActor in self.store?.applyPayload(dict) }
     }
 
     /// Ask the phone to send the current round (e.g. on watch app launch).

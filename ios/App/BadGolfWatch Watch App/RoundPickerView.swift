@@ -15,7 +15,7 @@ struct RoundPickerView: View {
                 Image(systemName: "figure.golf").font(.system(size: 30)).foregroundStyle(Color.badGolfBlue)
                 Text("Bad Golf").font(.headline).foregroundStyle(.white)
 
-                if !SessionStore.shared.isSignedIn {
+                if !store.signedIn {
                     Text("Open Bad Golf on your phone to sign in.")
                         .font(.system(size: 13)).multilineTextAlignment(.center)
                         .foregroundStyle(Color.white.opacity(0.7))

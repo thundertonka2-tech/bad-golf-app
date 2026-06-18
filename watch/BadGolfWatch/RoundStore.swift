@@ -12,6 +12,7 @@ final class RoundStore: ObservableObject {
     @Published var course: Course?
     @Published var currentHole: Int = 1
     @Published var syncState: SyncState = .idle
+    @Published var signedIn: Bool = SessionStore.shared.isSignedIn
 
     enum SyncState: Equatable { case idle, queued(Int), syncing, synced, error(String) }
 
@@ -77,6 +78,31 @@ final class RoundStore: ObservableObject {
             self.course = c
         }
         SessionStore.shared.playerId = handoff.round.playerId
+        signedIn = SessionStore.shared.isSignedIn
+        saveCache()
+    }
+
+    // MARK: Tolerant hand-off from the phone (token + optional round + course)
+    // Sent over WCSession as loose JSON; parsed with the same tolerant parsers
+    // used for the Supabase path. The token alone is enough to flip the watch
+    // out of the "sign in on your phone" state.
+    func applyPayload(_ payload: [String: Any]) {
+        if let token = payload["token"] as? String, !token.isEmpty {
+            SessionStore.shared.accessToken = token
+        }
+        if let pid = payload["playerId"] as? String, !pid.isEmpty {
+            SessionStore.shared.playerId = pid
+        }
+        if let roundRow = payload["round"] as? [String: Any],
+           let r = RoundParser.parse(row: roundRow) {
+            self.round = r
+            self.currentHole = r.currentHole
+        }
+        if let courseRow = payload["course"] as? [String: Any],
+           let c = CourseParser.parse(row: courseRow) {
+            self.course = c
+        }
+        signedIn = SessionStore.shared.isSignedIn
         saveCache()
     }
 
