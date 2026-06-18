@@ -20,4 +20,9 @@ public class WatchBridgePlugin: CAPPlugin {
         PhoneWCSession.shared.sync(token: token, playerId: playerId, handoffData: handoffData)
         call.resolve(["ok": true])
     }
+
+    // Diagnostic: report the WCSession link state to the web app's ⌚? button.
+    @objc func watchStatus(_ call: CAPPluginCall) {
+        call.resolve(PhoneWCSession.shared.status())
+    }
 }

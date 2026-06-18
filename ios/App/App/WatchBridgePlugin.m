@@ -6,4 +6,5 @@
 
 CAP_PLUGIN(WatchBridgePlugin, "WatchBridge",
     CAP_PLUGIN_METHOD(syncSession, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(watchStatus, CAPPluginReturnPromise);
 )
