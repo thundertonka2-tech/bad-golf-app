@@ -108,7 +108,7 @@
       lines.push('watchStatus: n/a (old build?)');
     }
 
-    alert('WATCH DIAG (v2026.11.41)\n\n' + lines.join('\n'));
+    alert('WATCH DIAG (v2026.11.42)\n\n' + lines.join('\n'));
   };
 
   function addDiagButton() {
