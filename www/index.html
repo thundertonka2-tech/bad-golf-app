@@ -5417,7 +5417,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.60';
+const BG_BUILD = 'v2026.11.61';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -6988,7 +6988,7 @@ async function adminPrepCourse(courseId, name) {
   // GPS half: auto-import greens from OpenStreetMap. The batch importer shows its own
   // progress panel — that IS the "prepping the course" screen — and syncs to the cloud.
   try {
-    if (typeof gpsView !== 'undefined' && gpsView.batchImport) { showToast('Prepping ' + (name || 'the course') + ' — searching OpenStreetMap for GPS…'); await gpsView.batchImport({ ids: [courseId], force: true }); }
+    if (typeof gpsView !== 'undefined' && gpsView.batchImport) { showToast('Prepping ' + (name || 'the course') + ' — searching OpenStreetMap for GPS…'); await gpsView.batchImport({ ids: [courseId] }); }
     else { showToast('Map view not ready — open the course once, then try Prep'); }
   } catch (e) { showToast('GPS prep failed — you can still map by hand'); }
   openCourseDetail(courseId);   // back to the hub with refreshed greens + rating links
@@ -23246,6 +23246,25 @@ window.openSpectateGps = openSpectateGps;
 
 // Profile photo: center-crop + downscale to a small square JPEG data URL,
 // then store it on the signed-in user's roster player so the crew sees it.
+// Persist MY profile photo to the cloud ACCOUNT (profiles.avatar) so it survives
+// rebuilds, cache clears, and another device overwriting the shared roster blob.
+async function saveMyAvatarToCloud(dataUrl) {
+  try { if (!supaReady) await initSupabase(); if (supa && supaOnline && _authUser && _authUser.id) { await supa.from('profiles').update({ avatar: dataUrl }).eq('id', _authUser.id); } } catch (e) {}
+}
+// On boot: if my roster record lost its photo but my cloud account still has one,
+// restore it into the roster so a wiped/blank avatar self-heals.
+async function healMyAvatarFromCloud() {
+  try {
+    if (!isSignedIn() || !supa || !supaOnline || !_authUser || !_authUser.id) return;
+    const me = await getMeName(); if (!me) return;
+    const roster = await getPlayerRoster();
+    const p = findMyRosterPlayer(roster, me);
+    if (!p || p.avatar) return;            // already have it — nothing to heal
+    const { data } = await supa.from('profiles').select('avatar').eq('id', _authUser.id).maybeSingle();
+    const av = data && data.avatar;
+    if (av) { p.avatar = av; try { await savePlayerRoster(roster); } catch (e) {} try { if (typeof renderHome === 'function') renderHome(); } catch (e) {} }
+  } catch (e) {}
+}
 async function handleCrewPhoto(e) {
   const file = e.target.files && e.target.files[0];
   e.target.value = '';
@@ -23259,6 +23278,7 @@ async function handleCrewPhoto(e) {
     if (!p) { showToast("Your player isn't in the roster yet"); return; }
     p.avatar = dataUrl;
     await savePlayerRoster(roster);
+    try { await saveMyAvatarToCloud(dataUrl); } catch (e) {}   // durable: also store on my cloud account
     showToast('Photo updated');
     renderCrewMyProfile();
     renderCrewLeaderboard();
@@ -28763,6 +28783,7 @@ async function init() {
       try { if (isSignedIn() && supa && _authUser) supa.from('profiles').select('stats_visibility').eq('id', _authUser.id).maybeSingle().then(r => { const v = r && r.data && r.data.stats_visibility; if (v) { try { localStorage.setItem('golf:stats-visibility', v); } catch (e) {} sv2.value = v; } }).catch(() => {}); } catch (e) {}
       sv2.onchange = () => { setStatsVisibility(sv2.value).then(() => { try { renderStats(); } catch (e) {} }); };
       if (!window._statsSyncedOnce) { window._statsSyncedOnce = true; try { syncMyStatsToCloud(); } catch (e) {} }
+      if (!window._avatarHealedOnce) { window._avatarHealedOnce = true; try { healMyAvatarFromCloud(); } catch (e) {} }
     } }
 
   // Wire empty-state CTAs: Rounds + Stats → switch to Setup tab
@@ -30289,9 +30310,16 @@ const gpsView = (() => {
       const pars = [];
       for (let hr = 1; hr <= 18; hr++) pars.push(have[hr] && have[hr].par ? have[hr].par : null);
       if (!pars.every(p2 => p2 != null)) return false;
+      // NEVER overwrite a card the group/admin has entered. Read the FRESH cloud
+      // card (not the cache) and bail if it has ANY hand-entered data — tees, a
+      // userEdited flag, or a full par set. Also skip entirely when offline so a
+      // failed/empty read can't be mistaken for "blank" and clobber a real card.
+      if (!supaReady || !supa || !supaOnline) return false;
+      try { invalidateCourseSavesCache(); } catch (e) {}
       const existing = await getCourseScorecard(cid);
-      // Already has a full 18-hole par card? Nothing to do.
-      if (existing && Array.isArray(existing.pars) && existing.pars.filter(p2 => p2 != null).length >= 18) return false;
+      if (existing && (existing.userEdited
+        || (Array.isArray(existing.tees) && existing.tees.length)
+        || (Array.isArray(existing.pars) && existing.pars.filter(p2 => p2 != null).length >= 18))) return false;
       // Otherwise fill pars — but PRESERVE an existing card's tees (rating/slope)
       // and stroke index. This makes the order independent: ratings can be
       // imported first and a later GPS crawl still adds the pars on top.
