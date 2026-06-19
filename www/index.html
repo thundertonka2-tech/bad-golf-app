@@ -4158,6 +4158,7 @@
         <button id="btn-share-hcp" title="Share this player's handicap & recent rounds">📤 Share handicap</button>
         <button id="btn-add-past-round" title="Log a round you played outside the app">➕ Add past round</button>
         <button id="btn-recalc-hcp" title="Re-derive every saved round's differential from each course's CURRENT rating/slope">♻️ Recalculate handicap</button>
+        <button id="btn-restore-rounds" title="Restore rounds from your per-account cloud backup if any went missing">↩️ Restore rounds</button>
       </div>
       <!-- Hidden photo input for the profile editor (relocated from the old Profile card). -->
       <input type="file" id="crew-photo-input" accept="image/*" style="display:none">
@@ -5424,7 +5425,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.68';
+const BG_BUILD = 'v2026.11.69';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -10262,6 +10263,31 @@ async function recalcMyDifferentials() {
     try { renderHome(); } catch (e) {}
     showToast(changed > 0 ? ('Updated ' + changed + ' round' + (changed === 1 ? '' : 's') + ' — handicap recalculated') : 'All rounds already match current ratings ✓');
   } catch (e) { console.warn('recalc differentials failed', e); showToast('Recalculation failed — try again'); }
+}
+
+// Recover rounds from the per-user cloud stats mirror (player_stats) — a safety net
+// for when the shared roster blob got overwritten by another device and dropped
+// rounds. Additive only (merges by gameCode, else date+course); never deletes.
+async function restoreRoundsFromCloud() {
+  if (typeof isSignedIn === 'function' && !isSignedIn()) { showToast('Sign in to restore your rounds'); return; }
+  if (!supa || !_authUser) { showToast('Cloud not connected — try again in a moment'); return; }
+  showToast('Checking your cloud backup…');
+  try {
+    const me = await getMeName();
+    const roster = await getPlayerRoster();
+    const p = findMyRosterPlayer(roster, me);
+    if (!p) { showToast('Link your player first (Stats → Account)'); return; }
+    if (!Array.isArray(p.scoreHistory)) p.scoreHistory = [];
+    const { data } = await supa.from('player_stats').select('stats').eq('user_id', _authUser.id).maybeSingle();
+    const cloud = (data && Array.isArray(data.stats)) ? data.stats : [];
+    if (!cloud.length) { showToast('No cloud backup found for your account'); return; }
+    const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+    const have = new Set(p.scoreHistory.map(keyOf));
+    let added = 0;
+    cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k)) { p.scoreHistory.push(s); have.add(k); added++; } });
+    if (added > 0) { p.lastUsed = Date.now(); await savePlayerRoster(roster); try { renderStats(); } catch (e) {} try { renderHome(); } catch (e) {} }
+    showToast(added > 0 ? ('Restored ' + added + ' round' + (added === 1 ? '' : 's') + ' from cloud ✓') : 'Cloud backup matches your rounds — nothing to restore');
+  } catch (e) { console.warn('restore rounds failed', e); showToast('Restore failed — try again'); }
 }
 
 // Format a handicap index or course handicap for display. Better-than-scratch
@@ -21082,10 +21108,24 @@ async function syncMyStatsToCloud(roster, visOverride){
     if (!roster) { try { roster = await getPlayerRoster(); } catch (e) { roster = []; } }
     const meNm = await getMeName();
     const me = findMyRosterPlayer(roster || [], meNm);
+    let stats = (me && Array.isArray(me.scoreHistory)) ? me.scoreHistory.slice() : [];
+    // Never SHRINK the per-user backup: union in any rounds the cloud copy already
+    // has that our local roster is missing. This stops a shared-blob overwrite (or
+    // an app reopen with a diminished roster) from wiping the backup, and keeps
+    // player_stats a durable superset we can restore from.
+    try {
+      const { data } = await supa.from('player_stats').select('stats').eq('user_id', _authUser.id).maybeSingle();
+      const cloud = (data && Array.isArray(data.stats)) ? data.stats : [];
+      if (cloud.length) {
+        const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+        const have = new Set(stats.map(keyOf));
+        cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k)) { stats.push(s); have.add(k); } });
+      }
+    } catch (e) {}
     await supa.from('player_stats').upsert({
       user_id: _authUser.id,
       player_name: meNm || (me && me.name) || null,
-      stats: (me && Array.isArray(me.scoreHistory)) ? me.scoreHistory : [],
+      stats,
       visibility: visOverride || statsVisibilityLocal(),
       updated_at: new Date().toISOString()
     }, { onConflict: 'user_id' });
@@ -21553,6 +21593,7 @@ async function savePastRound() {
   player.scoreHistory.push(record);
   player.lastUsed = Date.now();
   await savePlayerRoster(roster);
+  try { await syncMyStatsToCloud(roster); } catch (e) {}   // durable per-user mirror so a shared-blob overwrite can't lose this round
   $('past-round-modal').classList.remove('show');
   showToast('Round added for ' + name);
   await renderStats();
@@ -27537,6 +27578,7 @@ async function init() {
   { const _ap = document.getElementById('btn-add-past-round'); if (_ap) _ap.onclick = () => openPastRoundModal(); }
   { const _sh = document.getElementById('btn-share-hcp'); if (_sh) _sh.onclick = () => shareHandicap(); }
   { const _rc = document.getElementById('btn-recalc-hcp'); if (_rc) _rc.onclick = () => recalcMyDifferentials(); }
+  { const _rr = document.getElementById('btn-restore-rounds'); if (_rr) _rr.onclick = () => restoreRoundsFromCloud(); }
 
   // Stats tab: danger-zone full reset (button removed from the UI — guard it).
   { const _rb = document.getElementById('btn-reset-all-stats'); if (_rb) _rb.onclick = () => resetAllData(); }
