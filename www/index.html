@@ -4157,6 +4157,7 @@
       <div class="actions" id="stats-top-actions" style="margin-bottom:16px">
         <button id="btn-share-hcp" title="Share this player's handicap & recent rounds">📤 Share handicap</button>
         <button id="btn-add-past-round" title="Log a round you played outside the app">➕ Add past round</button>
+        <button id="btn-recalc-hcp" title="Re-derive every saved round's differential from each course's CURRENT rating/slope">♻️ Recalculate handicap</button>
       </div>
       <!-- Hidden photo input for the profile editor (relocated from the old Profile card). -->
       <input type="file" id="crew-photo-input" accept="image/*" style="display:none">
@@ -5423,7 +5424,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.67';
+const BG_BUILD = 'v2026.11.68';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -10216,6 +10217,51 @@ function calcHandicapIndex(scoreHistory) {
   // provisional so it's not mistaken for an established handicap.
   if (n < 5) basis = 'provisional · ' + basis;
   return { index, n, basis };
+}
+
+// Re-derive every saved round's differential from each course's CURRENT rating/slope.
+// Use after correcting bad imported ratings: a round's differential is frozen at save
+// time, so fixing the course later doesn't update old rounds — this does. Skips
+// hand-entered ("Add past round") rounds and any round whose course/tee can't be
+// matched to a current rating, leaving those untouched.
+async function recalcMyDifferentials() {
+  if (typeof isSignedIn === 'function' && !isSignedIn()) { showToast('Sign in to recalculate your handicap'); return; }
+  let me = null; try { me = await getMeName(); } catch (e) {}
+  if (!me) { showToast('Link your player first (Stats → Account)'); return; }
+  showToast('Recalculating from current course ratings…');
+  try {
+    const roster = await getPlayerRoster();
+    const p = findMyRosterPlayer(roster, me);
+    if (!p || !Array.isArray(p.scoreHistory) || !p.scoreHistory.length) { showToast('No saved rounds to recalculate'); return; }
+    let changed = 0; const scCache = {};
+    for (const s of p.scoreHistory) {
+      if (!s || s.manual) continue;                                   // respect hand-entered rounds
+      if (s.gross == null || !s.complete || !s.teeLabel) continue;
+      let cid = s.courseId || '';
+      if (!cid && s.course && typeof COURSE_LIBRARY !== 'undefined') {
+        const lc = COURSE_LIBRARY.find(c => c && String(c.name || '').trim().toLowerCase() === String(s.course).trim().toLowerCase());
+        if (lc) cid = lc.id;
+      }
+      if (!cid) continue;
+      let sc = scCache[cid];
+      if (sc === undefined) { try { sc = await getCourseScorecard(cid); } catch (e) { sc = null; } scCache[cid] = sc; }
+      const tees = (sc && Array.isArray(sc.tees)) ? sc.tees : null;
+      if (!tees) continue;
+      const tee = tees.find(t => t && String(t.label || '').toLowerCase() === String(s.teeLabel).toLowerCase());
+      if (!tee || tee.rating == null || tee.slope == null) continue;
+      const newDiff = calcDifferential(s.gross, tee.rating, tee.slope);
+      if (newDiff != null && (newDiff !== s.differential || tee.rating !== s.rating || tee.slope !== s.slope)) {
+        s.differential = newDiff; s.rating = tee.rating; s.slope = tee.slope; changed++;
+      }
+    }
+    if (changed > 0) {
+      try { await savePlayerRoster(roster); } catch (e) {}
+      try { await syncMyStatsToCloud(roster); } catch (e) {}
+    }
+    try { renderStats(); } catch (e) {}
+    try { renderHome(); } catch (e) {}
+    showToast(changed > 0 ? ('Updated ' + changed + ' round' + (changed === 1 ? '' : 's') + ' — handicap recalculated') : 'All rounds already match current ratings ✓');
+  } catch (e) { console.warn('recalc differentials failed', e); showToast('Recalculation failed — try again'); }
 }
 
 // Format a handicap index or course handicap for display. Better-than-scratch
@@ -27490,6 +27536,7 @@ async function init() {
 
   { const _ap = document.getElementById('btn-add-past-round'); if (_ap) _ap.onclick = () => openPastRoundModal(); }
   { const _sh = document.getElementById('btn-share-hcp'); if (_sh) _sh.onclick = () => shareHandicap(); }
+  { const _rc = document.getElementById('btn-recalc-hcp'); if (_rc) _rc.onclick = () => recalcMyDifferentials(); }
 
   // Stats tab: danger-zone full reset (button removed from the UI — guard it).
   { const _rb = document.getElementById('btn-reset-all-stats'); if (_rb) _rb.onclick = () => resetAllData(); }
