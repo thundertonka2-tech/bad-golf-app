@@ -4290,6 +4290,14 @@
             <span style="font-weight:500">🎙️ Smack talk voice<br><span class="small-text" style="color:var(--text-muted);font-weight:400">Pick the trash-talk voice — your phone's system voices. Add more in iOS Settings › Accessibility › Spoken Content › Voices.</span></span>
             <select id="pref-smack-voice" style="flex:0 0 auto;max-width:45%;padding:7px 6px;font-size:13px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px"><option value="">Default</option></select>
           </label>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;margin-top:10px">
+            <span style="font-weight:500">👁️ Who can see my stats<br><span class="small-text" style="color:var(--text-muted);font-weight:400">Your handicap &amp; round history — share with Everyone, just Friends, or keep them private (Just me).</span></span>
+            <select id="pref-stats-vis" style="flex:0 0 auto;max-width:45%;padding:7px 6px;font-size:13px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px">
+              <option value="everyone">Everyone</option>
+              <option value="friends">Friends</option>
+              <option value="just-me">Just me</option>
+            </select>
+          </label>
         </div>
       </details>
 
@@ -5403,7 +5411,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.49';
+const BG_BUILD = 'v2026.11.50';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8657,6 +8665,7 @@ async function archiveScoresFromRound(g) {
     roster.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
     await savePlayerRoster(roster);
   }
+  try { await syncMyStatsToCloud(roster); } catch (e) {}   // mirror MY stats to the RLS-protected store
 }
 
 // One-time-per-boot backfill: walks every saved round in the recent-games
@@ -20750,22 +20759,76 @@ function findMyRosterPlayer(roster, me) {
 // accepted friends' linked players. Falls back to the full list for guests, when
 // offline, or before you've added any friends — so it never locks you out of
 // your own stats.
+
+// ---- Per-user stats privacy (Everyone / Friends / Just me) ----------------
+// Each user's choice lives on their profile (profiles.stats_visibility, readable
+// by all so other phones can honor it) AND their stats sync to an RLS-protected
+// player_stats row (the hard backstop). Default 'friends'.
+function statsVisibilityLocal(){ try { const v = localStorage.getItem('golf:stats-visibility'); return (v === 'everyone' || v === 'just-me') ? v : 'friends'; } catch (e) { return 'friends'; } }
+async function setStatsVisibility(v){
+  v = (v === 'everyone' || v === 'just-me') ? v : 'friends';
+  try { localStorage.setItem('golf:stats-visibility', v); } catch (e) {}
+  try {
+    if (isSignedIn() && supa && _authUser) {
+      try { await supa.from('profiles').update({ stats_visibility: v }).eq('id', _authUser.id); } catch (e) {}
+      await syncMyStatsToCloud(null, v);
+    }
+  } catch (e) {}
+  if (typeof showToast === 'function') showToast('Stats visible to: ' + (v === 'everyone' ? 'Everyone' : v === 'just-me' ? 'Just me' : 'Friends'));
+}
+// Upsert MY stats + visibility into the RLS-protected player_stats table (own row only).
+async function syncMyStatsToCloud(roster, visOverride){
+  try {
+    if (!(isSignedIn() && supa && _authUser)) return;
+    if (!roster) { try { roster = await getPlayerRoster(); } catch (e) { roster = []; } }
+    const meNm = await getMeName();
+    const me = findMyRosterPlayer(roster || [], meNm);
+    await supa.from('player_stats').upsert({
+      user_id: _authUser.id,
+      player_name: meNm || (me && me.name) || null,
+      stats: (me && Array.isArray(me.scoreHistory)) ? me.scoreHistory : [],
+      visibility: visOverride || statsVisibilityLocal(),
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'user_id' });
+  } catch (e) { console.warn('syncMyStatsToCloud failed', e); }
+}
+
+// Given the sorted local roster, return the players THIS user is allowed to see in
+// Stats, honoring each player's stats_visibility. Always includes YOU; 'everyone'
+// shows to all; 'just-me' hides from others; 'friends'/guests stay friends-only.
+// Failsafe: any error (or the column missing) → the prior friends-only behavior.
 async function visiblePlayersForStats(list, meName) {
   try {
     if (!(isSignedIn() && supa && _authUser)) return list;
     const meId = _authUser.id;
     const [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]);
     const byId = {}; profiles.forEach(pr => { byId[pr.id] = pr; });
-    const allowed = new Set();
-    if (meName) allowed.add(normalizeNameSegment(meName));
+    const meNorm = meName ? normalizeNameSegment(meName) : '';
+    const friendNames = new Set();
     edges.filter(e => e.status === 'accepted' && (e.requester === meId || e.addressee === meId))
       .map(e => byId[e.requester === meId ? e.addressee : e.requester])
       .filter(Boolean)
-      .forEach(pr => { if (pr.my_player) allowed.add(normalizeNameSegment(pr.my_player)); });
-    if (!allowed.size) return list;                 // not linked & no friends yet
-    const filtered = list.filter(p => allowed.has(normalizeNameSegment(p.name)));
-    return filtered.length ? filtered : list;       // safety: never show an empty picker
-  } catch (e) { return list; }                       // offline → fall back to local roster
+      .forEach(pr => { if (pr.my_player) friendNames.add(normalizeNameSegment(pr.my_player)); });
+    let visByName = null; const accountNames = new Set();
+    try {
+      const { data: vp, error } = await supa.from('profiles').select('my_player,stats_visibility');
+      if (!error && vp) { visByName = {}; vp.forEach(pr => { if (pr && pr.my_player) { const n = normalizeNameSegment(pr.my_player); accountNames.add(n); visByName[n] = pr.stats_visibility || 'friends'; } }); }
+    } catch (e) { visByName = null; }
+    if (!friendNames.size && !meNorm && !visByName) return list;
+    const canSee = (p) => {
+      const n = normalizeNameSegment(p.name);
+      if (meNorm && n === meNorm) return true;
+      if (visByName && accountNames.has(n)) {
+        const vis = visByName[n] || 'friends';
+        if (vis === 'everyone') return true;
+        if (vis === 'just-me') return false;
+        return friendNames.has(n);   // 'friends'
+      }
+      return friendNames.has(n);     // guest / no visibility data → friends-only
+    };
+    const filtered = list.filter(canSee);
+    return filtered.length ? filtered : list;
+  } catch (e) { return list; }
 }
 
 async function renderStats(forceMe) {
@@ -28420,6 +28483,15 @@ async function init() {
       try { populateSmackVoices(); } catch (e) {}
       try { if ('speechSynthesis' in window) window.speechSynthesis.onvoiceschanged = () => { try { populateSmackVoices(); } catch (e) {} }; } catch (e) {}
       sv.onchange = () => { setSmackVoice(sv.value); try { speakSmack("This is your smack talk voice. Bring it."); } catch (e) {} };
+    } }
+
+  // "Who can see my stats" — per-user visibility (everyone / friends / just-me).
+  { const sv2 = document.getElementById('pref-stats-vis');
+    if (sv2) {
+      try { sv2.value = statsVisibilityLocal(); } catch (e) {}
+      try { if (isSignedIn() && supa && _authUser) supa.from('profiles').select('stats_visibility').eq('id', _authUser.id).maybeSingle().then(r => { const v = r && r.data && r.data.stats_visibility; if (v) { try { localStorage.setItem('golf:stats-visibility', v); } catch (e) {} sv2.value = v; } }).catch(() => {}); } catch (e) {}
+      sv2.onchange = () => { setStatsVisibility(sv2.value).then(() => { try { renderStats(); } catch (e) {} }); };
+      if (!window._statsSyncedOnce) { window._statsSyncedOnce = true; try { syncMyStatsToCloud(); } catch (e) {} }
     } }
 
   // Wire empty-state CTAs: Rounds + Stats → switch to Setup tab
