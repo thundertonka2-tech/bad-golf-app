@@ -5629,7 +5629,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.114';
+const BG_BUILD = 'v2026.11.115';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -21874,6 +21874,35 @@ async function syncMyStatsToCloud(roster, visOverride){
   } catch (e) { console.warn('syncMyStatsToCloud failed', e); }
 }
 
+// Read ANOTHER player's round history from the per-user cloud backup (player_stats,
+// keyed by user_id, with player_name). The shared roster blob can be empty/stale
+// for someone who played on their OWN device — their real rounds live here. RLS
+// only returns rows the viewer is allowed to see (own / friends / everyone).
+async function fetchPlayerCloudStats(name) {
+  try {
+    if (!(isSignedIn() && supa && _authUser) || !name) return null;
+    const nm = normalizeNameSegment(name);
+    const { data, error } = await supa.from('player_stats').select('stats,player_name');
+    if (error || !Array.isArray(data)) return null;
+    const row = data.find(r => r && r.player_name && normalizeNameSegment(r.player_name) === nm);
+    return (row && Array.isArray(row.stats)) ? row.stats : null;
+  } catch (e) { return null; }
+}
+// Merge a roster player's local scoreHistory with their cloud backup (union by
+// round key, never shrinks) → returns the richer history.
+async function mergedPlayerHistory(player) {
+  let hist = (player && Array.isArray(player.scoreHistory)) ? player.scoreHistory.slice() : [];
+  try {
+    const cloud = await fetchPlayerCloudStats(player && player.name);
+    if (cloud && cloud.length) {
+      const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+      const have = new Set(hist.map(keyOf));
+      cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k)) { hist.push(s); have.add(k); } });
+    }
+  } catch (e) {}
+  return hist;
+}
+
 // Given the sorted local roster, return the players THIS user is allowed to see in
 // Stats, honoring each player's stats_visibility. Always includes YOU; 'everyone'
 // shows to all; 'just-me' hides from others; 'friends'/guests stay friends-only.
@@ -22011,12 +22040,14 @@ async function renderCrewPlayerStats() {
   }).join('');
   if (prev && visible.find(p => p.name === prev)) sel.value = prev;
   else { const myP = findMyRosterPlayer(visible, meName); sel.value = myP ? myP.name : visible[0].name; }
-  const fill = () => {
+  const fill = async () => {
     const src = visible.find(x => x.name === sel.value);
     if (!src) { box.innerHTML = ''; return; }
     // Shallow copy so attaching the avatar never mutates (and re-saves) the roster.
     const p = Object.assign({}, src);
     if (!p.avatar) p.avatar = avatarByName[normalizeNameSegment(p.name)] || '';
+    // Pull their real rounds from the per-user cloud backup (shared blob can be stale).
+    try { p.scoreHistory = await mergedPlayerHistory(src); } catch (e) {}
     box.innerHTML = computePlayerKpiHtml(p);
   };
   sel.onchange = fill;
@@ -24087,8 +24118,11 @@ async function renderCrewLeaderboard() {
 
 async function openCrewProfile(name) {
   const roster = await getPlayerRoster();
-  const p = roster.find(x => x.name === name);
-  if (!p) { showToast('Player not found'); return; }
+  const base = roster.find(x => x.name === name);
+  if (!base) { showToast('Player not found'); return; }
+  // Pull the player's real rounds from their per-user cloud backup — fixes a friend
+  // who played on their own device showing 0 because the shared roster blob is stale.
+  const p = Object.assign({}, base, { scoreHistory: await mergedPlayerHistory(base) });
   const s = crewPlayerStats(p);
   const hist = (Array.isArray(p.scoreHistory) ? p.scoreHistory : [])
     .slice().sort((a, b) => (b.date || 0) - (a.date || 0)).slice(0, 10);
