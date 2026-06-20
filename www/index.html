@@ -5496,7 +5496,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.90';
+const BG_BUILD = 'v2026.11.91';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -25599,6 +25599,62 @@ async function t2SetGroupCode(groupId, code) {
   try { const { error } = await supa.from('tournament_groups').update({ game_code: code }).eq('id', groupId); return !error; }
   catch (e) { return false; }
 }
+// Per-group staggered tee time (needs the tee_time column — Add_group_tee_time.sql).
+// Guarded so a missing column can NEVER break group creation/start.
+async function t2SetGroupTeeTime(groupId, time) {
+  try { const { error } = await supa.from('tournament_groups').update({ tee_time: time || null }).eq('id', groupId); return !error; }
+  catch (e) { return false; }
+}
+// "8:00 AM" / "8:00" / "13:05" -> minutes since midnight (null if unparseable).
+function t2ParseClock(s) {
+  const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10), min = parseInt(m[2], 10);
+  const ap = (m[3] || '').toLowerCase();
+  if (ap === 'pm' && h < 12) h += 12;
+  if (ap === 'am' && h === 12) h = 0;
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+function t2FmtClock(mins) {
+  mins = ((mins % 1440) + 1440) % 1440;
+  let h = Math.floor(mins / 60); const m = mins % 60;
+  const ap = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12; if (h12 === 0) h12 = 12;
+  return h12 + ':' + String(m).padStart(2, '0') + ' ' + ap;
+}
+// Stagger tee times across a day's groups from a first time + interval, then refresh.
+async function t2StaggerTeeTimes(dayId) {
+  try {
+    const groups = await t2GetGroups(dayId);
+    if (!groups.length) { showToast('Build the groups first, then set tee times'); return; }
+    const firstRaw = window.prompt('First group tee time? (e.g. 8:00 AM)', groups[0] && groups[0].tee_time ? groups[0].tee_time : '8:00 AM');
+    if (firstRaw == null) return;
+    const base = t2ParseClock(firstRaw);
+    if (base == null) { showToast('Couldn’t read that time — use a format like 8:00 AM'); return; }
+    const gapRaw = window.prompt('Minutes between groups?', '10');
+    if (gapRaw == null) return;
+    const gap = parseInt(gapRaw, 10);
+    if (!isFinite(gap) || gap < 0) { showToast('Enter the minutes between groups (e.g. 10)'); return; }
+    let ok = true;
+    for (let i = 0; i < groups.length; i++) {
+      const r = await t2SetGroupTeeTime(groups[i].id, t2FmtClock(base + i * gap));
+      if (!r) ok = false;
+    }
+    showToast(ok ? 'Tee times staggered ✓' : 'Saved on screen, but the tee_time column may be missing — run Add_group_tee_time.sql');
+    try { await renderT2Home(); } catch (e) {}
+  } catch (e) { showToast('Could not set tee times'); }
+}
+// Edit a single group's tee time (tweak after an auto-stagger).
+async function t2EditGroupTeeTime(groupId, current) {
+  const raw = window.prompt('Tee time for this group? (e.g. 8:10 AM)', current || '');
+  if (raw == null) return;
+  const t = raw.trim();
+  if (t && t2ParseClock(t) == null) { showToast('Couldn’t read that time — use a format like 8:10 AM'); return; }
+  const ok = await t2SetGroupTeeTime(groupId, t || null);
+  showToast(ok ? 'Tee time updated ✓' : 'Couldn’t save — run Add_group_tee_time.sql');
+  try { await renderT2Home(); } catch (e) {}
+}
 async function t2SetDayStatus(dayId, status) {
   try { const { error } = await supa.from('tournament_days').update({ status: status }).eq('id', dayId); return !error; }
   catch (e) { return false; }
@@ -26891,8 +26947,10 @@ async function renderT2Home() {
         });
         namesHtml = t2esc(names.join(od ? ', ' : ' '));
       }
+      const _tt = (g2 && g2.tee_time) ? g2.tee_time : '';
       html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">' +
-        '<div style="flex:1;min-width:0;' + (canSwap ? '' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis') + '">G' + g2.group_number + ': ' + namesHtml + '</div>' +
+        '<div style="flex:1;min-width:0;' + (canSwap ? '' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis') + '">G' + g2.group_number + (_tt ? ' · ⏱ ' + t2esc(_tt) : '') + ': ' + namesHtml + '</div>' +
+        ((amCommish && !started) ? '<button class="small t2-edit-teetime" data-gid="' + g2.id + '" data-tt="' + t2esc(_tt) + '" style="padding:2px 6px;font-size:11px;color:var(--text-muted)" title="Set this group&#39;s tee time">⏱</button>' : '') +
         (canSwap ? '<button class="small t2-move-here" data-gid="' + g2.id + '" data-day="' + i + '" data-fmt="' + (d.format || 'stroke') + '" style="padding:2px 6px;font-size:11px;color:var(--text-muted)" title="Move the selected player to this group">⤵ here</button>' : '') +
         (g2.game_code ? '<button class="small t2-open-round" data-code="' + t2esc(g2.game_code) + '">▶ Open</button>' : '') +
         '</div>';
@@ -26917,6 +26975,7 @@ async function renderT2Home() {
         html += '<div class="actions" style="margin:4px 0 2px">' +
           '<button class="small t2-build-groups" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1">' + (gs.length ? '🔀 Reshuffle' : '⚡ Build groups') + '</button>' +
           '<button class="small t2-build-hcp" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1">⚖️ By handicap</button>' +
+          (gs.length ? '<button class="small t2-stagger-tees" data-dayid="' + d.id + '" style="flex:1">⏱ Tee times</button>' : '') +
           (gs.length ? '<button class="small t2-start-day" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1;background:var(--accent);color:#fff;border-color:var(--accent)">▶ Start day</button>' : '') +
           '</div>';
       } else if (started) {
@@ -27019,6 +27078,8 @@ async function renderT2Home() {
   if (amCommish) {
     body.querySelectorAll('.t2-build-groups').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
   body.querySelectorAll('.t2-build-hcp').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10), true));
+  body.querySelectorAll('.t2-stagger-tees').forEach(b => b.onclick = () => t2StaggerTeeTimes(b.dataset.dayid));
+  body.querySelectorAll('.t2-edit-teetime').forEach(b => b.onclick = () => t2EditGroupTeeTime(b.dataset.gid, b.dataset.tt));
   body.querySelectorAll('.t2-move-here').forEach(b => b.onclick = () => t2MoveHere(b));
   body.querySelectorAll('.t2-logo-btn').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
   const invBtn2 = document.getElementById('t2-invite-friends-btn');
@@ -30998,6 +31059,10 @@ const gpsView = (() => {
       // the live "view" mode should follow your position. Stops your real
       // location (far from the course) from disturbing the mapping view.
       if (mode !== 'view') return;
+      // Spectating: the WATCHED player's broadcast position (applySpectatePos) drives
+      // the ball — our own phone's GPS must NOT, or distances read from US (e.g. 1388y
+      // from home) instead of from the player on the course.
+      if (spectate) return;
       if (hd && distM(p, hd.mid) > 3000) {
         if (!farWarned) { farWarned = true; gToast("You're too far from this hole — showing from the tee"); }
         return;
