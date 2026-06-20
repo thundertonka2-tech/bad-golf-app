@@ -1,7 +1,9 @@
 // Bad Golf Watch — Location
 // Live GPS from the WATCH's own receiver (not the phone), so distances work
-// when the phone is in the bag. Battery-aware: high accuracy only during an
-// active round, backs off when the screen isn't active.
+// when the phone is in the bag. The watch is the PRIMARY rangefinder, so its GPS
+// must stay live: a watchdog hard-restarts updates if fixes stop arriving (the
+// watchOS equivalent of the phone-side stale-GPS auto-restart). Battery-aware:
+// high accuracy only during an active round.
 
 import Foundation
 import CoreLocation
@@ -15,6 +17,8 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 
     private let manager = CLLocationManager()
     private var active = false
+    private var lastFixAt: Date?                    // when the most recent fix arrived
+    private var watchdog: Timer?                    // restarts a stalled watch GPS
 
     override init() {
         super.init()
@@ -32,14 +36,36 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     func startUpdating() {
         active = true
         acquiring = true
+        manager.requestWhenInUseAuthorization()      // idempotent — make sure we're authorized
         manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.distanceFilter = 3
         manager.startUpdatingLocation()
+        startWatchdog()
     }
 
     /// Call when no round is active, or to save battery while wrist-down.
     func stopUpdating() {
         active = false
         manager.stopUpdatingLocation()
+        watchdog?.invalidate(); watchdog = nil
+    }
+
+    // The watch is the primary rangefinder, so its GPS must never silently stall.
+    // If no fresh fix has arrived for ~15s during a round, hard-restart updates so
+    // the yardage keeps moving instead of showing a frozen last-known position
+    // (what looked like "the watch is using the phone's location").
+    private func startWatchdog() {
+        watchdog?.invalidate()
+        watchdog = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self = self, self.active else { return }
+            let stale = (self.lastFixAt == nil) || (Date().timeIntervalSince(self.lastFixAt!) > 15)
+            guard stale else { return }
+            if self.location == nil { self.acquiring = true }
+            self.manager.stopUpdatingLocation()
+            self.manager.desiredAccuracy = kCLLocationAccuracyBest
+            self.manager.distanceFilter = 3
+            self.manager.startUpdatingLocation()
+        }
     }
 
     /// Lower-power mode for Always-On / wrist-down.
@@ -70,6 +96,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         // Ignore wildly inaccurate fixes.
         guard loc.horizontalAccuracy >= 0 else { return }
         location = loc
+        lastFixAt = Date()
         accuracyGood = loc.horizontalAccuracy <= 12   // ~within 12 m
         acquiring = false
     }
