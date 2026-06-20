@@ -4189,11 +4189,12 @@
       <div class="card" id="stats-hcp-card" style="margin-bottom:12px">
         <div id="stats-my-hcp"><div class="help-text">Loading…</div></div>
       </div>
-      <div class="actions" id="stats-top-actions" style="margin-bottom:16px">
-        <button id="btn-share-hcp" title="Share this player's handicap & recent rounds">📤 Share handicap</button>
-        <button id="btn-add-past-round" title="Log a round you played outside the app">➕ Add past round</button>
-        <button id="btn-recalc-hcp" title="Re-derive each saved round's differential from the course's CURRENT rating/slope (fixes your index after a course's rating was corrected)">♻️ Recalculate handicap</button>
-        <button id="btn-restore-rounds" title="Recover rounds — and your profile — from your private cloud backup if any went missing">↩️ Restore rounds</button>
+      <!-- 2×2 grid so all four labels fit on a phone (a single flex row clipped the text). -->
+      <div id="stats-top-actions" style="margin-bottom:16px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button id="btn-share-hcp" style="white-space:normal;line-height:1.2;min-height:48px" title="Share this player's handicap & recent rounds">📤 Share handicap</button>
+        <button id="btn-add-past-round" style="white-space:normal;line-height:1.2;min-height:48px" title="Log a round you played outside the app">➕ Add past round</button>
+        <button id="btn-recalc-hcp" style="white-space:normal;line-height:1.2;min-height:48px" title="Re-derive each saved round's differential from the course's CURRENT rating/slope (fixes your index after a course's rating was corrected)">♻️ Recalculate handicap</button>
+        <button id="btn-restore-rounds" style="white-space:normal;line-height:1.2;min-height:48px" title="Recover rounds — and your profile — from your private cloud backup if any went missing">↩️ Restore rounds</button>
       </div>
       <!-- Hidden photo input for the profile editor (relocated from the old Profile card). -->
       <input type="file" id="crew-photo-input" accept="image/*" style="display:none">
@@ -25607,6 +25608,62 @@ async function t2SetGroupCode(groupId, code) {
   try { const { error } = await supa.from('tournament_groups').update({ game_code: code }).eq('id', groupId); return !error; }
   catch (e) { return false; }
 }
+// Per-group staggered tee time (needs the tee_time column — Add_group_tee_time.sql).
+// Guarded so a missing column can NEVER break group creation/start.
+async function t2SetGroupTeeTime(groupId, time) {
+  try { const { error } = await supa.from('tournament_groups').update({ tee_time: time || null }).eq('id', groupId); return !error; }
+  catch (e) { return false; }
+}
+// "8:00 AM" / "8:00" / "13:05" -> minutes since midnight (null if unparseable).
+function t2ParseClock(s) {
+  const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10), min = parseInt(m[2], 10);
+  const ap = (m[3] || '').toLowerCase();
+  if (ap === 'pm' && h < 12) h += 12;
+  if (ap === 'am' && h === 12) h = 0;
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+function t2FmtClock(mins) {
+  mins = ((mins % 1440) + 1440) % 1440;
+  let h = Math.floor(mins / 60); const m = mins % 60;
+  const ap = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12; if (h12 === 0) h12 = 12;
+  return h12 + ':' + String(m).padStart(2, '0') + ' ' + ap;
+}
+// Stagger tee times across a day's groups from a first time + interval, then refresh.
+async function t2StaggerTeeTimes(dayId) {
+  try {
+    const groups = await t2GetGroups(dayId);
+    if (!groups.length) { showToast('Build the groups first, then set tee times'); return; }
+    const firstRaw = window.prompt('First group tee time? (e.g. 8:00 AM)', groups[0] && groups[0].tee_time ? groups[0].tee_time : '8:00 AM');
+    if (firstRaw == null) return;
+    const base = t2ParseClock(firstRaw);
+    if (base == null) { showToast('Couldn’t read that time — use a format like 8:00 AM'); return; }
+    const gapRaw = window.prompt('Minutes between groups?', '10');
+    if (gapRaw == null) return;
+    const gap = parseInt(gapRaw, 10);
+    if (!isFinite(gap) || gap < 0) { showToast('Enter the minutes between groups (e.g. 10)'); return; }
+    let ok = true;
+    for (let i = 0; i < groups.length; i++) {
+      const r = await t2SetGroupTeeTime(groups[i].id, t2FmtClock(base + i * gap));
+      if (!r) ok = false;
+    }
+    showToast(ok ? 'Tee times staggered ✓' : 'Saved on screen, but the tee_time column may be missing — run Add_group_tee_time.sql');
+    try { await renderT2Home(); } catch (e) {}
+  } catch (e) { showToast('Could not set tee times'); }
+}
+// Edit a single group's tee time (tweak after an auto-stagger).
+async function t2EditGroupTeeTime(groupId, current) {
+  const raw = window.prompt('Tee time for this group? (e.g. 8:10 AM)', current || '');
+  if (raw == null) return;
+  const t = raw.trim();
+  if (t && t2ParseClock(t) == null) { showToast('Couldn’t read that time — use a format like 8:10 AM'); return; }
+  const ok = await t2SetGroupTeeTime(groupId, t || null);
+  showToast(ok ? 'Tee time updated ✓' : 'Couldn’t save — run Add_group_tee_time.sql');
+  try { await renderT2Home(); } catch (e) {}
+}
 async function t2SetDayStatus(dayId, status) {
   try { const { error } = await supa.from('tournament_days').update({ status: status }).eq('id', dayId); return !error; }
   catch (e) { return false; }
@@ -26899,8 +26956,10 @@ async function renderT2Home() {
         });
         namesHtml = t2esc(names.join(od ? ', ' : ' '));
       }
+      const _tt = (g2 && g2.tee_time) ? g2.tee_time : '';
       html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">' +
-        '<div style="flex:1;min-width:0;' + (canSwap ? '' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis') + '">G' + g2.group_number + ': ' + namesHtml + '</div>' +
+        '<div style="flex:1;min-width:0;' + (canSwap ? '' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis') + '">G' + g2.group_number + (_tt ? ' · ⏱ ' + t2esc(_tt) : '') + ': ' + namesHtml + '</div>' +
+        ((amCommish && !started) ? '<button class="small t2-edit-teetime" data-gid="' + g2.id + '" data-tt="' + t2esc(_tt) + '" style="padding:2px 6px;font-size:11px;color:var(--text-muted)" title="Set this group&#39;s tee time">⏱</button>' : '') +
         (canSwap ? '<button class="small t2-move-here" data-gid="' + g2.id + '" data-day="' + i + '" data-fmt="' + (d.format || 'stroke') + '" style="padding:2px 6px;font-size:11px;color:var(--text-muted)" title="Move the selected player to this group">⤵ here</button>' : '') +
         (g2.game_code ? '<button class="small t2-open-round" data-code="' + t2esc(g2.game_code) + '">▶ Open</button>' : '') +
         '</div>';
@@ -26925,6 +26984,7 @@ async function renderT2Home() {
         html += '<div class="actions" style="margin:4px 0 2px">' +
           '<button class="small t2-build-groups" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1">' + (gs.length ? '🔀 Reshuffle' : '⚡ Build groups') + '</button>' +
           '<button class="small t2-build-hcp" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1">⚖️ By handicap</button>' +
+          (gs.length ? '<button class="small t2-stagger-tees" data-dayid="' + d.id + '" style="flex:1">⏱ Tee times</button>' : '') +
           (gs.length ? '<button class="small t2-start-day" data-dayid="' + d.id + '" data-day="' + i + '" style="flex:1;background:var(--accent);color:#fff;border-color:var(--accent)">▶ Start day</button>' : '') +
           '</div>';
       } else if (started) {
@@ -27385,8 +27445,9 @@ async function renderTourneyList() {
     if (!t) return false;
     const createdByMe = !!_meKeyT && !!t.createdBy && _normT(t.createdBy) === _meKeyT;
     if (t.isTemplate) return createdByMe || !t.createdBy;        // templates I created (legacy w/o creator stays visible)
-    if ((t.status || 'scheduled') !== 'scheduled') return false; // hide live/complete
-    if (schedExpired(t)) return false;                           // hide past-its-time
+    const _st = t.status || 'scheduled';
+    if (_st === 'complete') return false;                        // hide ONLY completed events — a LIVE event must stay visible so players can find + join it (was hiding live, so Kevin's started tournament vanished from Events)
+    if (_st !== 'live' && schedExpired(t)) return false;         // hide past-its-time, but keep in-progress live rounds visible
     if (createdByMe) return true;
     const _ps = (t.players ? String(t.players).split(',') : []).map(_normT).filter(Boolean);
     return !!_meKeyT && _ps.includes(_meKeyT);                   // I'm a listed player
