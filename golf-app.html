@@ -4186,6 +4186,8 @@
       <div class="actions" id="stats-top-actions" style="margin-bottom:16px">
         <button id="btn-share-hcp" title="Share this player's handicap & recent rounds">📤 Share handicap</button>
         <button id="btn-add-past-round" title="Log a round you played outside the app">➕ Add past round</button>
+        <button id="btn-recalc-hcp" title="Re-derive each saved round's differential from the course's CURRENT rating/slope (fixes your index after a course's rating was corrected)">♻️ Recalculate handicap</button>
+        <button id="btn-restore-rounds" title="Recover rounds — and your profile — from your private cloud backup if any went missing">↩️ Restore rounds</button>
       </div>
       <!-- Hidden photo input for the profile editor (relocated from the old Profile card). -->
       <input type="file" id="crew-photo-input" accept="image/*" style="display:none">
@@ -4788,6 +4790,7 @@
     <p class="help-text" style="margin-bottom:14px" id="new-round-confirm-text">You already have a round in progress. What do you want to do?</p>
     <div style="display:flex;flex-direction:column;gap:8px">
       <button class="primary" id="nrc-continue" style="font-weight:600">⛳ Continue scoring this round</button>
+      <button id="nrc-invite" style="font-weight:600;border:1px solid var(--accent);color:var(--accent)">📤 Invite players to this round</button>
       <button id="nrc-save-and-new" style="font-weight:600">💾 Save current round &amp; start new</button>
       <button class="danger" id="nrc-discard-and-new" style="font-weight:600">🗑️ Discard current round &amp; start new</button>
       <button id="nrc-edit-settings">✏️ Edit current round's settings</button>
@@ -5476,7 +5479,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.87';
+const BG_BUILD = 'v2026.11.88';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -19082,12 +19085,20 @@ function computeAllGameMoney(g) {
 
 // ---- Live money + match chips on the GPS view (lower-left) ----------------
 // Resolve which player in this round is "me" (cached name → roster match).
+// Per-round cache of the confident match, so a momentary EMPTY cached name (e.g.
+// right after a sync/reload, before getMeName repopulates it) can't flip the view
+// to another player. This was the "I saw Kevin's score, not mine" bug: the old
+// code fell back to g.players[0] — the round CREATOR — whenever the name was blank.
+const _gpsMyIdCache = {};   // game code -> resolved player id
 function gpsResolveMyId(g) {
   try {
+    if (!g || !Array.isArray(g.players) || !g.players.length) return null;
+    const code = g.code || '';
     let me = '';
     try { me = (localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
-    if (!Array.isArray(g.players) || !g.players.length) return null;
-    if (!me) return g.players[0].id;
+    // Name not known yet → DON'T guess players[0] (that showed the creator's score
+    // as yours). Reuse a prior confident match for this round if we have one.
+    if (!me) return (code && _gpsMyIdCache[code]) || null;
     const norm = s => normalizeNameSegment(String(s || ''));
     const meParts = me.split(/\s+/); const meFull = norm(me), meFirst = norm(meParts[0]);
     const hit = g.players.find(p => {
@@ -19097,7 +19108,9 @@ function gpsResolveMyId(g) {
       if (pp.length === 1 || meParts.length === 1) return norm(pp[0]) === meFirst;
       return false;
     });
-    return hit ? hit.id : null;
+    if (hit) { if (code) _gpsMyIdCache[code] = hit.id; return hit.id; }
+    // Name is set but matches no one here (e.g. spectating) → neutral, never players[0].
+    return (code && _gpsMyIdCache[code]) || null;
   } catch (e) { return null; }
 }
 // All of MY live heads-up statuses for the GPS boxes: one per Match-play match
@@ -27626,6 +27639,20 @@ window.switchTab = function(name) {
 async function enterEditLiveRoundMode() {
   const g = state.game;
   if (!g) return;
+  // #13: once a round has started, only its CREATOR may change the settings (bets,
+  // players, handicaps). Everyone else is sent back to scoring with a note. Legacy
+  // rounds with no recorded creator stay editable by anyone (can't lock them out).
+  try {
+    if (g.createdBy) {
+      const meNm = await getMeName();
+      const norm = s => normalizeNameSegment(String(s || ''));
+      if (!meNm || norm(meNm) !== norm(g.createdBy)) {
+        showToast('Only ' + g.createdBy + ' set up this round — only they can change the settings');
+        try { switchTab('score'); } catch (e) {}
+        return;
+      }
+    }
+  } catch (e) {}
   state.editingLiveRound = true;
 
   // Hide the no-game pickers, show the with-game form
@@ -27982,6 +28009,14 @@ async function init() {
     if (state.game) { switchTab('score'); }
   };
 
+  // New-round confirm modal: Invite players — always available mid-round so anyone
+  // can pull a buddy into the live round from the Settings tab (#10). Inviting is
+  // not "editing settings", so it's NOT gated to the creator.
+  { const _ni = $('nrc-invite'); if (_ni) _ni.onclick = () => {
+      $('new-round-confirm-modal').classList.remove('show');
+      try { shareGameInvite(); } catch (e) {}
+    }; }
+
   // New-round confirm modal: Edit settings — open edit-live mode for the round.
   // (We're already on the Setup tab, so just build the edit form — no switchTab,
   // which would re-trigger this prompt.)
@@ -28135,6 +28170,8 @@ async function init() {
 
   { const _ap = document.getElementById('btn-add-past-round'); if (_ap) _ap.onclick = () => openPastRoundModal(); }
   { const _sh = document.getElementById('btn-share-hcp'); if (_sh) _sh.onclick = () => shareHandicap(); }
+  { const _rc = document.getElementById('btn-recalc-hcp'); if (_rc) _rc.onclick = () => { try { recalcMyDifferentials(); } catch (e) {} }; }
+  { const _rr = document.getElementById('btn-restore-rounds'); if (_rr) _rr.onclick = () => { try { restoreRoundsFromCloud(); } catch (e) {} }; }
 
   // Stats tab: danger-zone full reset (button removed from the UI — guard it).
   { const _rb = document.getElementById('btn-reset-all-stats'); if (_rb) _rb.onclick = () => resetAllData(); }
