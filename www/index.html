@@ -4601,6 +4601,15 @@
     </div>
 
     <div class="field" style="margin-top:14px">
+      <label>Gender (for handicap rating/slope)</label>
+      <select id="edit-profile-gender" style="width:100%;padding:9px 8px;border-radius:8px">
+        <option value="M">Male</option>
+        <option value="F">Female</option>
+      </select>
+      <p class="help-text" style="margin-top:4px">Picks the men's or women's course rating &amp; slope for your handicap. Defaults to Male.</p>
+    </div>
+
+    <div class="field" style="margin-top:14px">
       <label>Email</label>
       <input type="email" id="edit-profile-emailinput" placeholder="you@example.com">
       <button class="full" id="edit-profile-email-save" style="margin-top:6px">Update email</button>
@@ -5183,6 +5192,7 @@
     <button class="primary-act" id="gps-do-wizard">✏️ Map this hole — 3 quick taps</button>
     <button class="second-act" id="gps-do-import">⬇ Or try auto-import from OpenStreetMap</button>
     <button class="second-act" id="gps-do-fwc" style="display:none">🎯 Set the fairway center for this hole</button>
+    <button class="second-act" id="gps-do-reverse" style="display:none">🔄 Reverse nines (flip front ↔ back)</button>
     <button class="second-act" id="gps-do-clearhole" style="display:none;color:var(--danger);border-color:var(--danger)">🗑 Clear this hole's GPS (re-map just this one)</button>
     <div class="status" id="gps-setup-status"></div>
     <button id="gps-setup-expand">⤢ Show options</button>
@@ -5467,7 +5477,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.80';
+const BG_BUILD = 'v2026.11.81';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8630,6 +8640,11 @@ async function archiveScoresFromRound(g) {
   let iDeletedThisRound = false;
   try { iDeletedThisRound = !!(meName && getHiddenRounds().includes(g.code)); } catch (e) {}
 
+  // Resolve each player's gender from the roster so women get their tee's women's
+  // rating/slope for the handicap differential. Default Male (unset) → unchanged.
+  let _genderByName = {};
+  try { const _roster = await getPlayerRoster(); (_roster || []).forEach(rp => { if (rp && rp.name) _genderByName[normalizeNameSegment(rp.name)] = playerGender(rp); }); } catch (e) {}
+
   g.players.forEach(p => {
     const arr = g.scores[p.id] || [];
     const holesScored = arr.filter(s => s != null).length;
@@ -8710,8 +8725,10 @@ async function archiveScoresFromRound(g) {
 
     // Use this player's tee — silently skip handicap part if missing
     const tee = p.teeLabel ? teeMap[p.teeLabel] : (Object.values(teeMap)[0]);
-    const rating = tee ? tee.rating : null;
-    const slope = tee ? tee.slope : null;
+    const _pg = _genderByName[normalizeNameSegment(p.name || '')] || playerGender(p);
+    const _rs = pickTeeRS(tee, _pg);
+    const rating = _rs.rating;
+    const slope = _rs.slope;
     // Unranked rounds (started without a course/tee/stroke index) never
     // contribute a handicap differential, even if tee data is present.
     const differential = (isComplete && rating != null && slope != null && !g.unranked)
@@ -10315,6 +10332,28 @@ function calcDifferential(gross, rating, slope) {
   return Math.round((113 / slope) * (gross - rating) * 10) / 10;
 }
 
+// A tee can carry separate MEN'S (rating/slope) and WOMEN'S (ratingW/slopeW) numbers.
+// Pick the right pair for a player given their gender. Default = men's (an unset gender
+// is treated as Male, so existing players are unchanged). Falls back to whichever set
+// exists so a women-only or men-only tee still computes a differential.
+function pickTeeRS(tee, gender) {
+  if (!tee) return { rating: null, slope: null };
+  const wantW = (gender === 'F' || gender === 'W' || gender === 'f' || gender === 'w');
+  const hasM = (tee.rating != null && tee.slope != null);
+  const hasW = (tee.ratingW != null && tee.slopeW != null);
+  if (wantW && hasW) return { rating: tee.ratingW, slope: tee.slopeW };
+  if (!wantW && hasM) return { rating: tee.rating, slope: tee.slope };
+  if (hasM) return { rating: tee.rating, slope: tee.slope };
+  if (hasW) return { rating: tee.ratingW, slope: tee.slopeW };
+  return { rating: tee.rating != null ? tee.rating : null, slope: tee.slope != null ? tee.slope : null };
+}
+// A roster/game player's gender → 'F' or 'M' (default Male so existing players never
+// change). Reads an explicit `gender` field if one is set.
+function playerGender(p) {
+  try { const g = (p && p.gender ? String(p.gender) : '').trim().toUpperCase(); if (g === 'F' || g === 'W' || g.indexOf('FEMALE') === 0 || g.indexOf('WOMAN') === 0 || g.indexOf('WOMEN') === 0 || g.indexOf('LAD') === 0) return 'F'; } catch (e) {}
+  return 'M';
+}
+
 // WHS-table handicap index from a player's score history.
 // Walks the simplified table:
 //   3 rounds: lowest 1 minus 2.0
@@ -10380,6 +10419,7 @@ async function recalcMyDifferentials() {
     const roster = await getPlayerRoster();
     const p = findMyRosterPlayer(roster, me);
     if (!p || !Array.isArray(p.scoreHistory) || !p.scoreHistory.length) { showToast('No saved rounds to recalculate'); return; }
+    const _myG = playerGender(p);
     let changed = 0; const scCache = {};
     for (const s of p.scoreHistory) {
       if (!s || s.manual) continue;                                   // respect hand-entered rounds
@@ -10395,10 +10435,12 @@ async function recalcMyDifferentials() {
       const tees = (sc && Array.isArray(sc.tees)) ? sc.tees : null;
       if (!tees) continue;
       const tee = tees.find(t => t && String(t.label || '').toLowerCase() === String(s.teeLabel).toLowerCase());
-      if (!tee || tee.rating == null || tee.slope == null) continue;
-      const newDiff = calcDifferential(s.gross, tee.rating, tee.slope);
-      if (newDiff != null && (newDiff !== s.differential || tee.rating !== s.rating || tee.slope !== s.slope)) {
-        s.differential = newDiff; s.rating = tee.rating; s.slope = tee.slope; changed++;
+      if (!tee) continue;
+      const _rs = pickTeeRS(tee, _myG);
+      if (_rs.rating == null || _rs.slope == null) continue;
+      const newDiff = calcDifferential(s.gross, _rs.rating, _rs.slope);
+      if (newDiff != null && (newDiff !== s.differential || _rs.rating !== s.rating || _rs.slope !== s.slope)) {
+        s.differential = newDiff; s.rating = _rs.rating; s.slope = _rs.slope; changed++;
       }
     }
     if (changed > 0) {
@@ -23099,6 +23141,8 @@ async function openEditProfile() {
       if (p && p.avatar) { av.style.backgroundImage = "url('" + p.avatar + "')"; av.textContent = ''; }
       else { av.style.backgroundImage = 'none'; av.textContent = p ? displayInitials(p) : '?'; }
     }
+    const genSel = document.getElementById('edit-profile-gender');
+    if (genSel) { genSel.value = (p && playerGender(p) === 'F') ? 'F' : 'M'; genSel.onchange = () => saveMyGender(genSel.value); }
     // Prefill email from auth.
     const emailInput = document.getElementById('edit-profile-emailinput');
     if (emailInput) emailInput.value = (typeof currentUserEmail === 'function' && currentUserEmail()) || '';
@@ -23117,6 +23161,22 @@ async function openEditProfile() {
     if (pwInput) pwInput.value = '';
     document.getElementById('edit-profile-modal').classList.add('show');
   } catch (e) { console.warn('openEditProfile', e); }
+}
+
+// Save the signed-in user's gender onto their roster player (drives men's vs women's
+// course rating/slope in the handicap math). Stored on the roster (synced) — no extra
+// Supabase column needed. Default Male, so unset players are never affected.
+async function saveMyGender(g) {
+  g = (g === 'F') ? 'F' : 'M';
+  try {
+    const me = await getMeName();
+    const roster = await getPlayerRoster();
+    const p = findMyRosterPlayer(roster, me);
+    if (!p) { showToast('Link your player first (Stats → Account)'); return; }
+    p.gender = g;
+    await savePlayerRoster(roster);
+    showToast('Saved — your handicap will use ' + (g === 'F' ? "women's" : "men's") + ' rating/slope.');
+  } catch (e) { showToast('Could not save gender'); }
 }
 
 // Format a phone number with dashes as you type / on load (US-style 3-3-4).
@@ -29573,7 +29633,17 @@ const gpsView = (() => {
       map.addSource('gps-track', { type: 'geojson', data: trackLineData() });
       map.addLayer({ id: 'gps-track', type: 'line', source: 'gps-track',
         paint: { 'line-color': '#ffd34d', 'line-width': 2.5, 'line-dasharray': [2, 1.5], 'line-opacity': 0.95 } });
+      collapseAttrib();
     });
+    // MapLibre v4.7 opens the COMPACT imagery credit BY DEFAULT — it adds `open` + the
+    // `maplibregl-compact-show` class immediately, which kept the "Imagery ©…" text
+    // expanded no matter what CSS we tried (our "show when compact-show" rule won). Force
+    // it back to just the ⓘ after load; tapping the ⓘ still reveals the credit.
+    function collapseAttrib() {
+      try { const a = el('gps-map').querySelector('.maplibregl-ctrl-attrib'); if (a) { a.classList.remove('maplibregl-compact-show'); a.removeAttribute('open'); } } catch (e) {}
+    }
+    map.once('idle', collapseAttrib);
+    setTimeout(collapseAttrib, 600); setTimeout(collapseAttrib, 1600);
     map.on('move', () => { if (mode === 'view') positionPills(); });
     map.on('rotate', renderWind);
     map.on('click', e => { if (mode === 'wizard') wizardTap([e.lngLat.lng, e.lngLat.lat]); else if (mode === 'fwc') fwcTap([e.lngLat.lng, e.lngLat.lat]); });
@@ -29798,6 +29868,7 @@ const gpsView = (() => {
         : 'One person maps it once — then every Bad Golf player gets GPS distances here forever.');
     el('gps-do-import').style.display = (c && c.osmTried) ? 'none' : 'block';
     { const _ch = el('gps-do-clearhole'); if (_ch) _ch.style.display = (state._mapSession && hd) ? 'block' : 'none'; }
+    { const _rv = el('gps-do-reverse'); if (_rv) _rv.style.display = state._mapSession ? 'block' : 'none'; }
     // Admin map session: let the admin set/move this hole's fairway center right here
     // (par 4/5, already-mapped holes). Tapping enters the live view and starts the
     // drag-the-crosshair Save flow for just this hole.
@@ -31150,12 +31221,40 @@ const gpsView = (() => {
     if (!state._mapSession || !map) return;
     const c = courseGps && courseGps[courseId];
     if (!c || !c.holes) return;
-    const pin = (pt, num, isTee) => {
+    // Editable (draggable) only when NOT actively tapping in the wizard/fwc flows —
+    // otherwise a pin under the tap would steal it. In the normal setup view the admin
+    // can grab any numbered pin and drag the tee or green to a new spot.
+    const editable = (mode === 'setup');
+    const pin = (pt, key, isTee) => {
       if (!Array.isArray(pt) || pt.length !== 2) return;
       const d = document.createElement('div');
-      d.textContent = num;
-      d.style.cssText = 'width:22px;height:22px;border-radius:' + (isTee ? '5px' : '50%') + ';background:' + (isTee ? '#1565c0' : '#0a7d3b') + ';color:#fff;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.55);opacity:0.92;pointer-events:none';
-      try { admHoleMks.push(new maplibregl.Marker({ element: d }).setLngLat(pt).addTo(map)); } catch (e) {}
+      d.textContent = key;
+      d.style.cssText = 'width:' + (editable ? '26px' : '22px') + ';height:' + (editable ? '26px' : '22px') + ';border-radius:' + (isTee ? '5px' : '50%') + ';background:' + (isTee ? '#1565c0' : '#0a7d3b') + ';color:#fff;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.55);opacity:0.95;' + (editable ? 'cursor:grab' : 'pointer-events:none');
+      try {
+        const mk = new maplibregl.Marker({ element: d, draggable: editable }).setLngLat(pt).addTo(map);
+        if (editable) {
+          mk.on('dragend', async () => {
+            try {
+              const ll = mk.getLngLat(); const np = [ll.lng, ll.lat];
+              const hd2 = c.holes[key]; if (!hd2) return;
+              if (isTee) { hd2.tee = np; }
+              else {
+                // Move the green: translate front/back/mid together so the green keeps
+                // its size/shape, just relocated.
+                const old = hd2.mid || ((hd2.front && hd2.back) ? midOf(hd2.front, hd2.back) : null);
+                if (old && hd2.front && hd2.back) { const dx = np[0] - old[0], dy = np[1] - old[1]; hd2.front = [hd2.front[0] + dx, hd2.front[1] + dy]; hd2.back = [hd2.back[0] + dx, hd2.back[1] + dy]; hd2.mid = [old[0] + dx, old[1] + dy]; }
+                else { hd2.mid = np; }
+              }
+              hd2.updatedAt = Date.now(); c.updatedAt = Date.now();
+              await saveStore();
+              gToast('Hole ' + key + ' ' + (isTee ? 'tee' : 'green') + ' moved ✓');
+              renderAdmHoleMks();
+              if (mode === 'setup' && String(hole) === String(key)) { try { showHole(hole); } catch (e) {} }
+            } catch (e) {}
+          });
+        }
+        admHoleMks.push(mk);
+      } catch (e) {}
     };
     Object.keys(c.holes).forEach(k => {
       const hd2 = c.holes[k]; if (!hd2) return;
@@ -31163,6 +31262,36 @@ const gpsView = (() => {
       const g = hd2.mid || ((hd2.front && hd2.back) ? midOf(hd2.front, hd2.back) : null);
       if (g) pin(g, k, false);
     });
+  }
+  // Reverse the nines: swap the front and back nine (hole 1↔10, 2↔11 … 9↔18). Keeps
+  // every hole's GPS, only re-numbers them — for courses that flipped their nines.
+  // Optionally also flips the scorecard (pars + stroke index) to match.
+  async function reverseNines() {
+    if (!courseId) return;
+    if (!window.confirm('Reverse the nines for this course?\n\nSwaps the front and back nine — hole 1↔10, 2↔11 … 9↔18. The GPS for each hole is kept; only the hole NUMBERS change.')) return;
+    const alsoCard = window.confirm('Also flip the SCORECARD (pars & stroke index) to match?\n\nOK = yes, flip the scorecard too.\nCancel = no, flip the GPS hole numbers only.');
+    try {
+      const c = courseGps[courseId];
+      if (c && c.holes) {
+        const nh = {};
+        Object.keys(c.holes).forEach(k => { const h = parseInt(k, 10); const tgt = (h >= 1 && h <= 9) ? (h + 9) : ((h >= 10 && h <= 18) ? (h - 9) : h); nh[tgt] = c.holes[k]; });
+        c.holes = nh; c.updatedAt = Date.now();
+        await saveStore();
+      }
+      if (alsoCard) {
+        let sc = null; try { sc = await getCourseScorecard(courseId); } catch (e) {}
+        const swap = arr => (Array.isArray(arr) && arr.length === 18) ? arr.map((_, i) => arr[i < 9 ? i + 9 : i - 9]) : arr;
+        const pars = swap(sc && sc.pars);
+        const sis = swap(sc && sc.sis);
+        const tees = (sc && sc.tees) || [];
+        const nm = (state.game && state.game.course) || (sc && sc.name) || '';
+        try { await persistCourseScorecard(courseId, nm, pars, sis, tees); } catch (e) {}
+        try { if (state.game && Array.isArray(pars) && pars.length === 18) state.game.pars = pars.slice(); } catch (e) {}
+      }
+      gToast('Nines reversed ✓' + (alsoCard ? ' (scorecard too)' : ''));
+      try { renderAdmHoleMks(); } catch (e) {}
+      try { showHole(state.currentHole || hole || 1); } catch (e) {}
+    } catch (e) { gToast('Reverse failed'); }
   }
   // Does hole h still need its green mapped? (no tee/front/back yet)
   function holeNeedsGreen(h) {
@@ -31619,6 +31748,7 @@ const gpsView = (() => {
     el('gps-do-wizard').onclick = wizardStart;
     { const _ch = el('gps-do-clearhole'); if (_ch) _ch.onclick = clearHole; }
     { const _fw = el('gps-do-fwc'); if (_fw) _fw.onclick = () => { try { enterView(); } catch (e) {} fwcStart(); }; }
+    { const _rv = el('gps-do-reverse'); if (_rv) _rv.onclick = reverseNines; }
     { const _mn = el('gps-setup-min'); if (_mn) _mn.onclick = () => { const p = el('gps-setup-panel'); if (p) p.classList.add('collapsed'); }; }
     { const _ex = el('gps-setup-expand'); if (_ex) _ex.onclick = () => { const p = el('gps-setup-panel'); if (p) p.classList.remove('collapsed'); }; }
     // (Imagery toggle removed — Google is the imagery, Esri is silent fallback.)
