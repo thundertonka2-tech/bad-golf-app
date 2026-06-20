@@ -5474,7 +5474,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.83';
+const BG_BUILD = 'v2026.11.84';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -29526,26 +29526,39 @@ const gpsView = (() => {
       }
     } catch (e) {}
   }
+  // Returns true if the change is safely persisted (cloud write OK, or offline so the
+  // local cache is the best we can do), false if a cloud write was attempted and FAILED
+  // — callers surface that so a "saved ✓" is never shown for a write that didn't land.
   async function saveCourseRow(cid) {
-    if (!cid || !courseGps[cid]) return;
-    gpsCacheSet(cid, JSON.stringify(courseGps[cid]));
+    if (!cid || !courseGps[cid]) return false;
+    try { gpsCacheSet(cid, JSON.stringify(courseGps[cid])); } catch (e) { console.warn('gps cache write failed:', e); }
     if (await ensureSupa()) {
-      try {
-        const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === cid) : null;
-        await supa.from('course_gps').upsert({
-          course_id: cid,
-          name: lib ? lib.name : cid,
-          city: lib ? (lib.city || '') : '',
-          holes: courseGps[cid].holes || {},
-          source: courseGps[cid].source || 'manual',
-          updated_at: new Date().toISOString()
-        });
-      } catch (e) { console.warn('course_gps write failed:', e); }
+      const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === cid) : null;
+      const payload = {
+        course_id: cid,
+        name: lib ? lib.name : cid,
+        city: lib ? (lib.city || '') : '',
+        holes: courseGps[cid].holes || {},
+        source: courseGps[cid].source || 'manual',
+        updated_at: new Date().toISOString()
+      };
+      // Retry the cloud write a few times — a single dropped request (spotty course
+      // wifi) was leaving the hole saved only on the phone, so it "didn't save".
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const { error } = await supa.from('course_gps').upsert(payload);
+          if (!error) return true;
+          console.warn('course_gps write failed (attempt ' + (attempt + 1) + '):', error);
+        } catch (e) { console.warn('course_gps write threw (attempt ' + (attempt + 1) + '):', e); }
+        await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+      }
+      return false;
     }
+    return true; // offline — local cache saved; not a failure to surface
   }
   // Aliases used throughout this module (always scoped to the open course)
   async function loadStore() { await loadCourse(courseId); }
-  async function saveStore() { await saveCourseRow(courseId); }
+  async function saveStore() { return await saveCourseRow(courseId); }
   // Admin: wipe ALL GPS for just the CURRENT hole (tee/green/fairway target) so one
   // bad hole can be re-mapped without redoing the whole course. Persists to the
   // shared cloud row; the rest of the course is untouched.
@@ -29583,7 +29596,7 @@ const gpsView = (() => {
     courseGps[courseId].holes[h] = data;
     courseGps[courseId].updatedAt = Date.now();
     if (source && courseGps[courseId].source !== source) courseGps[courseId].source = 'mixed';
-    await saveStore();
+    return await saveStore();
   }
 
   // Per-hole "fairway center" (ideal landing area). MERGES into the existing hole
@@ -31135,11 +31148,12 @@ const gpsView = (() => {
     // hole's fairway center. Par 3s store it too but never use it in play (the aim is
     // always the green there), so it's harmless.
     if (Array.isArray(wizPts.target) && wizPts.target.length === 2) _hole.fwc = wizPts.target;
-    await saveHole(physHole(hole), _hole, 'manual');
+    const _saved = await saveHole(physHole(hole), _hole, 'manual');
     // Remember this green so mapping the NEXT hole starts zoomed in right here
     // (the next tee is usually beside it) instead of resetting to a wide view.
     try { _wizLastGreen = (Array.isArray(mid) ? mid.slice() : null); _wizLastMappedHole = hole; } catch (e) {}
-    gToast('Hole ' + hole + ' mapped — saved for the whole crew ✓');
+    if (_saved === false) { gToast('⚠️ Hole ' + hole + ' saved on this phone but the CLOUD save FAILED (connection or permission). It may not stick — try again when back online.', 5500); }
+    else { gToast('Hole ' + hole + ' mapped — saved for the whole crew ✓'); }
     if (state._mapSession && !state._fwcSession && state._mapMissingOnly) {
       const nx = nextNeedsGreen(hole);   // this hole now has a green → find the next gap
       if (nx) { showHole(nx); }          // showHole auto-starts the wizard for it
