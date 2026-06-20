@@ -5496,7 +5496,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.94';
+const BG_BUILD = 'v2026.11.95';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -23785,18 +23785,32 @@ async function renderCrewLive() {
       rows = data || [];
     }
   } catch (e) { console.warn('crew live fetch failed', e); }
-  const cutoff = Date.now() - 8 * 60 * 60 * 1000; // last 8 hours
-  // Friends-only: only surface in-progress rounds that include YOU or an
-  // accepted friend (was showing every live round to everyone).
+  const cutoff = Date.now() - 3 * 60 * 60 * 1000; // ~3h actively-playing window (8h kept abandoned rounds around)
+  // Auto-finish abandoned casual rounds (>6h, has scores, NOT a tournament/event) —
+  // same rule as the Home feed, so the Crew tab also cleans them up.
+  try {
+    const sixH = Date.now() - 6 * 60 * 60 * 1000;
+    rows.forEach(r => {
+      const g = r.data; if (!g || g.finishedAt) return;
+      if (g.t2 || g.tourneyId) return;
+      const upd = r.updated_at ? Date.parse(r.updated_at) : (g.updatedAt || 0);
+      if (!upd || upd >= sixH) return;
+      const hasScore = Array.isArray(g.players) && g.players.some(p => g.scores && Array.isArray(g.scores[p.id]) && g.scores[p.id].some(s => s != null));
+      if (!hasScore) return;
+      g.finishedAt = upd;
+      try { saveGame(g); } catch (e) {}
+    });
+  } catch (e) {}
+  // Friends-only: only surface in-progress rounds that include YOU or an accepted friend.
   const allowed = await friendNameSet();
+  const thruOf = g => { let thru = 0; try { for (let h = 0; h < 18; h++) { if (g.players.some(p => g.scores && g.scores[p.id] && g.scores[p.id][h] != null)) thru = h + 1; } } catch (e) {} return thru; };
   const live = rows
-    .map(row => ({ code: row.code, g: row.data, t: row.updated_at }))
+    .map(row => ({ code: row.code, g: row.data, t: row.updated_at ? Date.parse(row.updated_at) : ((row.data && row.data.updatedAt) || 0) }))
     .filter(x => x.g && Array.isArray(x.g.players) && x.g.players.length > 0 && !x.g.finishedAt)
-    .filter(x => {
-      const ts = x.t ? Date.parse(x.t) : (x.g.updatedAt || 0);
-      return ts >= cutoff;
-    })
-    .filter(x => allowed && allowed.size && x.g.players.some(p => p && p.name && allowed.has(normalizeNameSegment(p.name))));
+    .filter(x => x.t >= cutoff)
+    .filter(x => allowed && allowed.size && x.g.players.some(p => p && p.name && allowed.has(normalizeNameSegment(p.name))))
+    .map(x => ({ ...x, thru: thruOf(x.g) }))
+    .filter(x => x.thru > 0); // only rounds actually teed off (no "thru 0" = not started)
   if (live.length === 0) { el.innerHTML = '<div class="help-text">No rounds in progress right now.</div>'; return; }
   el.innerHTML = live.map((x, i) => {
     const g = x.g;
@@ -25697,6 +25711,71 @@ async function t2EditGroupTeeTime(groupId, current) {
   showToast(ok ? 'Tee time updated ✓' : 'Couldn’t save — run Add_group_tee_time.sql');
   try { await renderT2Home(); } catch (e) {}
 }
+// Group captain / scorekeeper (needs the captain column — Add_group_captain.sql).
+// Guarded so a missing column can never break group creation/start.
+async function t2SetGroupCaptain(groupId, name) {
+  try { const { error } = await supa.from('tournament_groups').update({ captain: name || null }).eq('id', groupId); return !error; }
+  catch (e) { return false; }
+}
+// Admin picks which group member keeps score. members = [{name}], current = name.
+async function t2PickGroupCaptain(groupId, members, current) {
+  const list = (members || []).filter(Boolean);
+  if (!list.length) { showToast('Build the group first'); return; }
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show';
+  ov.style.cssText = 'z-index:100060';
+  const btns = list.map(nm => '<button class="full t2-capopt" data-nm="' + escAttr(nm) + '" style="margin-bottom:6px;font-weight:600' + (normalizeNameSegment(nm) === normalizeNameSegment(current || '') ? ';border:1px solid var(--accent);color:var(--accent)' : '') + '">👑 ' + escapeHtml(nm) + (normalizeNameSegment(nm) === normalizeNameSegment(current || '') ? ' (current)' : '') + '</button>').join('');
+  ov.innerHTML = '<div class="modal"><h2 style="margin-bottom:8px">👑 Group scorekeeper</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">Pick who keeps score for this group. They get a reminder + a join link when the round starts.</p>' +
+    btns +
+    (current ? '<button class="full t2-capclear" style="margin-bottom:6px;color:var(--danger);border-color:var(--danger)">Clear scorekeeper</button>' : '') +
+    '<div class="actions" style="margin-top:6px"><button id="t2-capcancel" style="flex:1">Cancel</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector('#t2-capcancel').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelectorAll('.t2-capopt').forEach(b => b.onclick = async () => { const ok = await t2SetGroupCaptain(groupId, b.dataset.nm); close(); showToast(ok ? '👑 Scorekeeper set ✓' : 'Couldn’t save — run Add_group_captain.sql'); try { await renderT2Home(); } catch (e) {} });
+  const clr = ov.querySelector('.t2-capclear'); if (clr) clr.onclick = async () => { await t2SetGroupCaptain(groupId, null); close(); showToast('Scorekeeper cleared'); try { await renderT2Home(); } catch (e) {} };
+}
+// If I'm the scorekeeper for a live group round, nudge me once (per session) with a
+// reminder + a join link. Fired when the tournament home renders.
+async function checkCaptainReminder(t) {
+  try {
+    if (!t || !t.id) return;
+    const meNm = await getMeName(); if (!meNm) return;
+    const nmn = normalizeNameSegment(meNm);
+    const days = await t2GetDays(t.id);
+    for (const d of days) {
+      if ((d.status || '') !== 'active') continue;             // only a started/live day
+      const groups = await t2GetGroups(d.id);
+      for (const g of groups) {
+        if (!g || !g.captain || !g.game_code) continue;
+        if (normalizeNameSegment(g.captain) !== nmn) continue; // I'm the scorekeeper
+        if (!window._capRemShown) window._capRemShown = {};
+        const key = 'cap_' + g.id;
+        if (window._capRemShown[key]) continue;
+        window._capRemShown[key] = true;
+        showCaptainReminder(t, g);
+        return; // one at a time
+      }
+    }
+  } catch (e) {}
+}
+function showCaptainReminder(t, g) {
+  try {
+    if (document.getElementById('cap-reminder')) return;
+    const ov = document.createElement('div');
+    ov.id = 'cap-reminder';
+    ov.style.cssText = 'position:fixed;left:12px;right:12px;bottom:16px;z-index:100070;background:linear-gradient(135deg,#1d6fd6,#1456a8);color:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,.35)';
+    ov.innerHTML = '<button id="cap-rem-x" aria-label="Close" style="position:absolute;top:6px;right:9px;background:transparent;border:none;color:#fff;font-size:20px;line-height:1;cursor:pointer">✕</button>' +
+      '<div style="font-weight:800;font-size:15px;margin-bottom:2px;padding-right:20px">👑 You\'re the scorekeeper — Group ' + (g.group_number || '') + '</div>' +
+      '<div style="font-size:12.5px;opacity:.93;margin-bottom:10px;line-height:1.3">Keep score for your group' + (t.name ? ' in ' + escapeHtml(t.name) : '') + '. Tap below to jump into the round.</div>' +
+      '<button id="cap-rem-join" style="width:100%;background:#fff;color:#1456a8;font-weight:800;border:none;border-radius:8px;padding:10px">⛳ Join round now</button>';
+    document.body.appendChild(ov);
+    const x = document.getElementById('cap-rem-x'); if (x) x.onclick = () => ov.remove();
+    const j = document.getElementById('cap-rem-join'); if (j) j.onclick = () => { ov.remove(); try { openT2Round(g.game_code); } catch (e) {} };
+  } catch (e) {}
+}
 async function t2SetDayStatus(dayId, status) {
   try { const { error } = await supa.from('tournament_days').update({ status: status }).eq('id', dayId); return !error; }
   catch (e) { return false; }
@@ -26990,8 +27069,11 @@ async function renderT2Home() {
         namesHtml = t2esc(names.join(od ? ', ' : ' '));
       }
       const _tt = (g2 && g2.tee_time) ? g2.tee_time : '';
+      const _cap = (g2 && g2.captain) ? g2.captain : '';
+      const _memNames = mem.map(m => { const p = pById[m.tournament_player_id]; return p ? p.display_name : ''; }).filter(Boolean);
       html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">' +
-        '<div style="flex:1;min-width:0;' + (canSwap ? '' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis') + '">G' + g2.group_number + (_tt ? ' · ⏱ ' + t2esc(_tt) : '') + ': ' + namesHtml + '</div>' +
+        '<div style="flex:1;min-width:0;' + (canSwap ? '' : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis') + '">G' + g2.group_number + (_tt ? ' · ⏱ ' + t2esc(_tt) : '') + (_cap ? ' · 👑 ' + t2esc(String(_cap).split(/\s+/)[0]) : '') + ': ' + namesHtml + '</div>' +
+        (amCommish ? '<button class="small t2-pick-captain" data-gid="' + g2.id + '" data-cap="' + t2esc(_cap) + '" data-mem="' + t2esc(_memNames.join('|')) + '" style="padding:2px 6px;font-size:11px;color:var(--text-muted)" title="Set the group scorekeeper">👑</button>' : '') +
         ((amCommish && !started) ? '<button class="small t2-edit-teetime" data-gid="' + g2.id + '" data-tt="' + t2esc(_tt) + '" style="padding:2px 6px;font-size:11px;color:var(--text-muted)" title="Set this group&#39;s tee time">⏱</button>' : '') +
         (canSwap ? '<button class="small t2-move-here" data-gid="' + g2.id + '" data-day="' + i + '" data-fmt="' + (d.format || 'stroke') + '" style="padding:2px 6px;font-size:11px;color:var(--text-muted)" title="Move the selected player to this group">⤵ here</button>' : '') +
         (g2.game_code ? '<button class="small t2-open-round" data-code="' + t2esc(g2.game_code) + '">▶ Open</button>' : '') +
@@ -27122,6 +27204,8 @@ async function renderT2Home() {
   body.querySelectorAll('.t2-build-hcp').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10), true));
   body.querySelectorAll('.t2-stagger-tees').forEach(b => b.onclick = () => t2StaggerTeeTimes(b.dataset.dayid));
   body.querySelectorAll('.t2-edit-teetime').forEach(b => b.onclick = () => t2EditGroupTeeTime(b.dataset.gid, b.dataset.tt));
+  body.querySelectorAll('.t2-pick-captain').forEach(b => b.onclick = () => t2PickGroupCaptain(b.dataset.gid, (b.dataset.mem || '').split('|').filter(Boolean), b.dataset.cap || ''));
+  try { checkCaptainReminder(_t2Current); } catch (e) {}
   body.querySelectorAll('.t2-move-here').forEach(b => b.onclick = () => t2MoveHere(b));
   body.querySelectorAll('.t2-logo-btn').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
   const invBtn2 = document.getElementById('t2-invite-friends-btn');
