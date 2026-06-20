@@ -4978,6 +4978,7 @@
     <h2 id="tam-name">Game</h2>
     <div id="tam-meta" class="small-text" style="margin-bottom:14px"></div>
     <div id="tam-creator-note" class="small-text" style="display:none;margin:-6px 0 12px;color:var(--text-muted)"></div>
+    <div id="tam-detail" style="margin-bottom:14px"></div>
     <div id="tam-ctp" class="small-text" style="display:none;margin:-6px 0 14px;padding:10px;background:var(--surface-2);border-radius:10px"></div>
     <div style="display:flex;flex-direction:column;gap:8px">
       <button class="primary full" id="tam-start">▶ Start round now</button>
@@ -5496,7 +5497,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.97';
+const BG_BUILD = 'v2026.11.98';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -9456,6 +9457,37 @@ async function adminMappingChecklist(courseId) {
 // Auto-fill a course's tees (men's + women's rating/slope), pars and stroke index
 // from BlueGolf via the bluegolf-lookup Edge Function. This is the ONLY tool allowed
 // to OVERWRITE existing rating/slope/par data — and it WARNS first when data exists.
+// Show a BlueGolf error that STAYS on screen (blocking) so the admin can read or
+// screenshot it — a transient toast vanishes before you can capture it.
+async function blueGolfErr(msg) {
+  try { if (typeof uiConfirm === 'function') { await uiConfirm(msg, { title: 'BlueGolf lookup error', okLabel: 'OK' }); return; } } catch (e) {}
+  try { window.alert(msg); return; } catch (e) {}
+  try { showToast(msg, 15000); } catch (e) {}
+}
+
+// The Edge Function may be deployed under either the intended name OR Supabase's
+// default placeholder name ("super-function") if it was created from the dashboard
+// without renaming. Try each in turn so the lookup works regardless. Returns
+// {data} on success, or {error} (the last error) if none responded.
+const BG_BLUEGOLF_FNS = ['bluegolf-lookup', 'super-function'];
+async function invokeBlueGolf(body) {
+  let lastErr = null;
+  for (const fn of BG_BLUEGOLF_FNS) {
+    try {
+      const r = await supa.functions.invoke(fn, { body });
+      if (!r.error) return { data: r.data, fn };
+      lastErr = r.error;
+      // A missing function reads as 404 / "failed to send" — try the next name.
+      // Any other error is a real failure from a function that DID respond → stop.
+      const msg = String((r.error && r.error.message) || '').toLowerCase();
+      const status = r.error && r.error.context && r.error.context.status;
+      const notFound = status === 404 || msg.includes('not found') || msg.includes('failed to send') || msg.includes('failed to fetch');
+      if (!notFound) return { error: r.error, fn };
+    } catch (e) { lastErr = e; }
+  }
+  return { error: lastErr };
+}
+
 async function adminBlueGolfLookup(courseId, courseName) {
   if (typeof supa === 'undefined' || !supa) { showToast('Sign in to use BlueGolf lookup'); return; }
   const _lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c && c.id === courseId) : null;
@@ -9464,11 +9496,18 @@ async function adminBlueGolfLookup(courseId, courseName) {
   // picks the right course (by state) and returns its scorecard — no link to paste.
   showToast('Searching BlueGolf for “' + (_nm || 'this course') + '”…');
   let data = null;
-  try {
-    const r = await supa.functions.invoke('bluegolf-lookup', { body: { name: _nm, city: (_lib && _lib.city) || '', state: (_lib && _lib.st) || '' } });
-    if (r.error) { showToast('BlueGolf error: ' + ((r.error && r.error.message) || 'request blocked') + '. If it persists, open the function → Settings → turn OFF “Verify JWT”.', 8000); return; }
-    data = r.data;
-  } catch (e) { showToast('BlueGolf lookup failed — ' + ((e && e.message) || 'network error')); return; }
+  {
+    const res = await invokeBlueGolf({ name: _nm, city: (_lib && _lib.city) || '', state: (_lib && _lib.st) || '' });
+    if (res.error) {
+      let detail = (res.error && res.error.message) || 'request blocked';
+      let body = '';
+      try { if (res.error.context && typeof res.error.context.text === 'function') body = await res.error.context.text(); } catch (e) {}
+      try { if (!body && res.error.context && res.error.context.status != null) body = 'HTTP ' + res.error.context.status; } catch (e) {}
+      await blueGolfErr('BlueGolf lookup failed.\n\nError: ' + detail + (body ? '\n\nServer said:\n' + String(body).slice(0, 600) : '') + '\n\nChecked function names: ' + BG_BLUEGOLF_FNS.join(', ') + '.\nMake sure one of those Edge Functions exists and has “Verify JWT” turned OFF (function → Settings).');
+      return;
+    }
+    data = res.data;
+  }
   // Couldn't auto-find it → offer the paste-a-link fallback.
   if (!data || !data.ok) {
     if (!window.confirm((data && data.error ? data.error : "Couldn't auto-find that course on BlueGolf.") + '\n\nPaste the BlueGolf link instead?')) return;
@@ -9476,11 +9515,11 @@ async function adminBlueGolfLookup(courseId, courseName) {
     if (url === null) return;
     if (!/bluegolf\.com/i.test(url)) { showToast("That doesn't look like a BlueGolf link"); return; }
     showToast('Looking up on BlueGolf…');
-    try {
-      const r2 = await supa.functions.invoke('bluegolf-lookup', { body: { url: String(url).trim() } });
-      if (r2.error) { showToast('Lookup failed'); return; }
-      data = r2.data;
-    } catch (e) { showToast('Lookup failed'); return; }
+    {
+      const res2 = await invokeBlueGolf({ url: String(url).trim() });
+      if (res2.error) { await blueGolfErr('Lookup failed: ' + ((res2.error && res2.error.message) || 'request blocked')); return; }
+      data = res2.data;
+    }
     if (!data || !data.ok) { showToast((data && data.error) || 'Could not read that course'); return; }
   }
   const tees = Array.isArray(data.tees) ? data.tees.filter(t => t && t.label && ((t.rating != null && t.slope != null) || (t.ratingW != null && t.slopeW != null))) : [];
@@ -27603,7 +27642,25 @@ async function renderTourneyList() {
     const _ps = (t.players ? String(t.players).split(',') : []).map(_normT).filter(Boolean);
     return !!_meKeyT && _ps.includes(_meKeyT);                   // I'm a listed player
   });
-  if (tourneys.length === 0) {
+  // Parity with the Rounds tab: ALSO surface scheduled (not-yet-started) games
+  // the user is in. A round Kevin scheduled and invited me to lives in my recent
+  // cache as a game (code, no scores yet) — it should appear in Events too, not
+  // only on the Rounds tab. Deduped against any live tourney card (by activeCode).
+  let schedGames = [];
+  try {
+    const rec = await getRecent();
+    const hidden = (typeof getHiddenRounds === 'function') ? getHiddenRounds() : [];
+    const tourneyCodes = new Set(tourneys.map(t => t.activeCode).filter(Boolean));
+    schedGames = (rec || []).filter(r => {
+      if (!r || !r.code || r.finishedAt) return false;
+      if (hidden.includes(r.code)) return false;
+      if (r.scoreLine && String(r.scoreLine).trim()) return false;   // started → not a scheduled round
+      if (tourneyCodes.has(r.code)) return false;                    // already shown as a tourney card
+      return recentRowHasName(r, _meT);                              // I'm in it
+    }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  } catch (e) {}
+
+  if (tourneys.length === 0 && schedGames.length === 0) {
     list.innerHTML = `
       <div class="empty" style="text-align:center;padding:24px 16px">
         <div style="font-size:42px;margin-bottom:4px">🏆</div>
@@ -27624,6 +27681,28 @@ async function renderTourneyList() {
   tourneys.sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'));
   list.innerHTML = '';
   tourneys.forEach(t => list.appendChild(renderTourneyCard(t)));
+  schedGames.forEach(r => list.appendChild(renderScheduledGameCard(r)));
+}
+
+// A simple Events-tab card for a scheduled (not-yet-started) round that lives in
+// the recent-games cache (a round you were invited to). Tap or "Join now" opens it.
+function renderScheduledGameCard(r) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.style.cssText = 'margin-top:10px;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:12px';
+  const date = r.createdAt ? new Date(r.createdAt).toLocaleDateString() : '';
+  const who = r.players ? ' · ' + shortNameList(r.players) : '';
+  card.innerHTML =
+    '<div style="flex:1;min-width:0;cursor:pointer" class="esg-tap">' +
+      '<div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(r.course || 'Round') + '</div>' +
+      '<div style="font-size:12px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+        '<span style="display:inline-block;background:#e8f0fe;color:#1456a8;font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">SCHEDULED</span>' +
+        escapeHtml(date + who) + '</div>' +
+    '</div>' +
+    '<button class="small primary esg-join" style="flex:0 0 auto">Join now</button>';
+  card.querySelector('.esg-tap').onclick = () => openRecent(r);
+  card.querySelector('.esg-join').onclick = (e) => { e.stopPropagation(); openRecent(r); };
+  return card;
 }
 
 // Combine Closest-to-Pin entries across every group (game) linked to this
@@ -27920,6 +27999,39 @@ async function openEventLeaderboard(t) {
   } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
 }
 
+// Plain-English list of the games / side bets saved on an event (for the landing page).
+function eventSideBetLines(sc) {
+  if (!sc || !sc.games) return [];
+  const L = { skins:'Skins', stroke:'Stroke play', stableford:'Stableford', quota:'Quota', nassau:'Nassau', match:'Match play', teamMatch:'Team match play', teamLowball:'Team low-ball', teamQuota:'Team quota', bestBall:'Best ball', bestball:'Best ball', junk:'Junk (greenies, sandies…)', p3greenie:'Greenies — par 3s', ctp:'Closest to the pin', wolf:'Wolf', banker:'Banker', sixes:'Sixes', splixSixes:'Split sixes', vegas:'Vegas', dvegas:'Daytona Vegas', bingoBangoBongo:'Bingo Bango Bongo', birdiePool:'Birdie pool', snake:'Snake', ryderCup:'Ryder Cup', scramble:'Scramble' };
+  const out = [];
+  Object.keys(sc.games).forEach(k => {
+    const cfg = sc.games[k];
+    if (!cfg || cfg.enabled === false) return;
+    const label = L[k] || k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
+    const amt = (cfg.value != null && cfg.value !== '') ? cfg.value : (cfg.buyin != null ? cfg.buyin : (cfg.amount != null ? cfg.amount : null));
+    out.push(label + (amt != null && Number(amt) > 0 ? ' · $' + amt : ''));
+  });
+  return out;
+}
+
+// Every cart-group round linked to an event (by tourneyId or t2 tournamentId).
+// Returns [{code, players[names], started, finished, teeTime}] for the landing page.
+async function loadTourneyGroups(t) {
+  try {
+    if (!supaReady) await initSupabase();
+    if (!supa || !supaOnline) return null;
+    const { data, error } = await supa.from('games').select('data').or('data->>tourneyId.eq.' + t.id + ',data->t2->>tournamentId.eq.' + t.id).limit(100);
+    if (error || !Array.isArray(data) || !data.length) return null;
+    return data.map(row => {
+      const g = row.data; if (!g || !g.code) return null;
+      const players = Array.isArray(g.players) ? g.players.map(p => p.firstName || (p.name || '').split(/\s+/)[0]).filter(Boolean) : [];
+      let scored = false;
+      if (g.scores) { for (const pid in g.scores) { const arr = g.scores[pid]; if (Array.isArray(arr) && arr.some(v => v != null)) { scored = true; break; } } }
+      return { code: g.code, players, finished: !!g.finishedAt, started: scored, teeTime: (g.t2 && g.t2.teeTime) || g.teeTime || '' };
+    }).filter(Boolean);
+  } catch (e) { return null; }
+}
+
 function openTourneyActions(t) {
   state.activeTourneyForActions = t;
   $('tam-name').textContent = t.name;
@@ -28016,6 +28128,53 @@ function openTourneyActions(t) {
       const editBtn = $('tam-edit'); if (editBtn) editBtn.style.display = mine ? '' : 'none';
       const noteEl = $('tam-creator-note');
       if (noteEl) { noteEl.style.display = mine ? 'none' : 'block'; noteEl.textContent = t.createdBy ? ('Scheduled by ' + t.createdBy + ' — only they can edit the settings.') : ''; }
+    } catch (e) {}
+  })();
+  // Landing-page detail: players, special rules, side bets, and the group breakdown
+  // (each group gets its own Join now). The groups load async from the linked rounds.
+  (function () {
+    try {
+      const dEl = $('tam-detail'); if (!dEl) return;
+      dEl.innerHTML = '';
+      const sc = t.savedConfig || null;
+      const playerNames = (sc && Array.isArray(sc.players) && sc.players.length)
+        ? sc.players.map(p => p.name || p).filter(Boolean)
+        : (t.players ? t.players.split(',').map(s => s.trim()).filter(Boolean) : []);
+      let html = '';
+      if (playerNames.length) {
+        html += '<div style="margin-bottom:12px"><div style="font-weight:700;font-size:13px;margin-bottom:6px">👥 Players (' + playerNames.length + ')</div>'
+          + '<div style="display:flex;flex-wrap:wrap;gap:6px">'
+          + playerNames.map(n => '<span style="background:var(--surface-2,#eee);border-radius:999px;padding:3px 10px;font-size:12px">' + escapeHtml(shortNameList(n)) + '</span>').join('')
+          + '</div></div>';
+      }
+      if (t.notes && String(t.notes).trim()) {
+        html += '<div style="margin-bottom:12px"><div style="font-weight:700;font-size:13px;margin-bottom:4px">📋 Special rules</div>'
+          + '<div class="small-text" style="white-space:pre-wrap">' + escapeHtml(String(t.notes).trim()) + '</div></div>';
+      }
+      const bets = eventSideBetLines(sc);
+      if (bets.length) {
+        html += '<div style="margin-bottom:12px"><div style="font-weight:700;font-size:13px;margin-bottom:6px">🎲 Games &amp; side bets</div>'
+          + '<div style="display:flex;flex-wrap:wrap;gap:6px">'
+          + bets.map(b => '<span style="background:#eef4ff;color:#1456a8;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600">' + escapeHtml(b) + '</span>').join('')
+          + '</div></div>';
+      }
+      dEl.innerHTML = html;
+      const grpWrap = document.createElement('div');
+      dEl.appendChild(grpWrap);
+      loadTourneyGroups(t).then(groups => {
+        if (!groups || !groups.length) return;
+        let gh = '<div style="font-weight:700;font-size:13px;margin:4px 0 6px">⛳ Groups</div>';
+        groups.forEach((gr, i) => {
+          const status = gr.finished ? '✓ done' : (gr.started ? '🔴 live' : 'not started');
+          gh += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;border:1px solid var(--border);border-radius:10px">'
+            + '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px">Group ' + (i + 1) + (gr.teeTime ? ' · ' + escapeHtml(gr.teeTime) : '') + '</div>'
+            + '<div class="small-text" style="color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(gr.players.join(', ')) + ' · ' + status + '</div></div>'
+            + '<button class="small primary tam-grp-join" data-code="' + escAttr(gr.code) + '" style="flex:0 0 auto">Join now</button>'
+            + '</div>';
+        });
+        grpWrap.innerHTML = gh;
+        grpWrap.querySelectorAll('.tam-grp-join').forEach(b => b.onclick = () => { $('tourney-actions-modal').classList.remove('show'); openRecent({ code: b.dataset.code }); });
+      }).catch(() => {});
     } catch (e) {}
   })();
   $('tourney-actions-modal').classList.add('show');
