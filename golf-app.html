@@ -7930,6 +7930,7 @@ async function addToRecent(game) {
   let recent = [];
   const v = await safeGet(KEY_RECENT, true);
   if (v) try { recent = JSON.parse(v); } catch (e) {}
+  const prevEntry = recent.find(g => g.code === game.code);
   recent = recent.filter(g => g.code !== game.code);
   // Per-player gross for the Rounds list description (e.g. "Tyler 79 · Steve 82").
   // First names only so it fits a mobile row; players with no holes entered yet
@@ -7951,6 +7952,10 @@ async function addToRecent(game) {
     players: game.players.map(p => p.name).join(', '),
     scoreLine: scoreLine,
     createdBy: game.createdBy || null,
+    // Stable "played on" date for the Rounds list. updatedAt bumps on every save
+    // (which made a re-touched round's date crawl forward to "today"); createdAt is
+    // fixed at round creation. Preserve a prior entry's date so older rounds settle.
+    createdAt: game.createdAt || (prevEntry && (prevEntry.createdAt || prevEntry.updatedAt)) || game.updatedAt,
     updatedAt: game.updatedAt,
     finishedAt: game.finishedAt || null // lets the Rounds tab show LIVE vs complete
   });
@@ -22931,10 +22936,17 @@ async function loadRounds() {
   const list = $('rounds-list');
   list.innerHTML = '';
 
-  recent.forEach(r => {
+  // Sort for display: LIVE/unfinished rounds first, then by the fixed PLAY date
+  // (newest first). Avoids a re-touched old round jumping to the top by updatedAt.
+  const recentSorted = recent.slice().sort((a, b) => {
+    const aLive = !a.finishedAt && !isRoundStale(a), bLive = !b.finishedAt && !isRoundStale(b);
+    if (aLive !== bLive) return aLive ? -1 : 1;
+    return (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0);
+  });
+  recentSorted.forEach(r => {
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:12px 0;border-bottom:1px solid var(--border)';
-    const date = new Date(r.updatedAt).toLocaleDateString();
+    const date = new Date(r.createdAt || r.updatedAt).toLocaleDateString();
     const desc = r.scoreLine || r.players || '';   // gross scores when available, else names
     const playersStr = desc ? ` · ${desc}` : '';
     // LIVE = unfinished AND touched recently. Unfinished-but-stale rounds (left
@@ -23121,7 +23133,10 @@ async function openRecent(r) {
   } catch (e) {}
   state.game = g;
   state.viewOnlyMode = !!g.finishedAt;
-  await safeSet(KEY_LAST, r.code, false);
+  // Only a LIVE round you're actually playing should become the "active/last" round.
+  // Viewing a FINISHED round must NOT hijack KEY_LAST — that's what made a past
+  // (rogue) round reopen as the active round and get edited in Settings.
+  if (!g.finishedAt) await safeSet(KEY_LAST, r.code, false);
   enableGameTabs(true);
   if (state.viewOnlyMode) {
     switchTab('board');
@@ -30370,29 +30385,23 @@ const gpsView = (() => {
   }
 
   function frameHole(animate) {
-    const aim = target || hd.mid;                    // the marker we pin up top
-    const brg = brgBetween(ball, hd.mid);            // keep the hole pointing "up"
-    const mapEl = el('gps-map');
-    const vh = mapEl.clientHeight || window.innerHeight;
-    // Anchor the target just BELOW the FRONT/MID/BACK bar (measured so it works
-    // on any phone), fully clear of it, with the player's dot near the bottom —
-    // the hole reads top (target) → bottom (you) and the bar never covers it.
-    let barBottom = vh * 0.16;
     try {
-      const bar = document.querySelector('#gps-overlay .gps-topbar');
-      if (bar) { const r = bar.getBoundingClientRect(), mr = mapEl.getBoundingClientRect(); barBottom = r.bottom - mr.top; }
+      if (!map || !Array.isArray(ball) || !hd || !hd.mid) return;
+      // ALWAYS keep BOTH the player and the GREEN on screen until they're on the
+      // green (Tyler: we kept losing the player or the green when a layup target
+      // was close). Fit the player + green + any target(s) into view, hole pointing
+      // "up", leaving room for the FRONT/MID/BACK bar on top and controls below.
+      const brg = brgBetween(ball, hd.mid);
+      const b = new maplibregl.LngLatBounds(ball, ball);
+      b.extend(hd.mid);                                                   // the green — never drops off
+      if (Array.isArray(target) && target.length === 2) b.extend(target); // current aim / layup
+      map.fitBounds(b, {
+        bearing: brg,
+        padding: { top: 120, bottom: 150, left: 52, right: 52 },
+        maxZoom: maxZoomClamp || 17.4,                                    // don't over-zoom when you're on/near the green
+        duration: animate ? 650 : 0
+      });
     } catch (e) {}
-    const targetY = barBottom + 56;                  // 56px below the bar clears the 70px marker
-    const ballY = vh * 0.86;                          // player dot near the bottom
-    const spanPx = Math.max(ballY - targetY, vh * 0.25);
-    const d = Math.max(distM(ball, aim), 25);
-    const mpp = d / spanPx;
-    const zoom = Math.log2(156543.03392 * Math.cos(toRad(aim[1])) / mpp);
-    // Render the target (the camera center) at targetY instead of the container
-    // centre — offset is measured from container centre, +y is down.
-    const cam = { center: aim, bearing: brg, zoom: Math.min(zoom, maxZoomClamp), pitch: 0, offset: [0, targetY - vh / 2] };
-    if (animate) map.easeTo(Object.assign({ duration: 650 }, cam));
-    else map.jumpTo(cam);
   }
 
   // On arriving at a hole, open PULLED BACK so you see the whole hole (tee →
@@ -30843,10 +30852,20 @@ const gpsView = (() => {
       ball = p; if (ballMk) ballMk.setLngLat(ball);
       try { maybeEstimateDrive(p); } catch (e) {}
       // The target walks with the player: re-aim per the smart rules unless
-      // they've placed it by hand on this hole.
-      if (mode === 'view' && hd && !targetManual && targetMk) {
-        target = smartTargetPos();
-        targetMk.setLngLat(target);
+      // they've placed it by hand on this hole. A HAND-PLACED target that the
+      // player has now reached or walked PAST (it sits closer to the tee / farther
+      // from the green than they are) must never stay behind them — drop back to
+      // the smart auto-target ahead so there's always a target in front.
+      if (mode === 'view' && hd && targetMk) {
+        if (targetManual && Array.isArray(target) && target.length === 2 && hd.mid) {
+          const reachedM = distM(ball, target) * YD < 12;                       // within ~12y → reached it
+          const behind   = distM(target, hd.mid) > distM(ball, hd.mid) + 5;     // target farther from green than you → behind you
+          if (reachedM || behind) targetManual = false;
+        }
+        if (!targetManual) {
+          target = smartTargetPos();
+          targetMk.setLngLat(target);
+        }
       }
       const mg2 = el('gps-mygps');
       if (mg2) { mg2.textContent = '🟢'; mg2.classList.add('live'); }
