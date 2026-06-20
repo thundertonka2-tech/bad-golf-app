@@ -5496,7 +5496,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.91';
+const BG_BUILD = 'v2026.11.92';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -21073,6 +21073,11 @@ async function renderHomeLive() {
   // = me + accepted friends' linked player names.
   let names = new Set();
   try { names = await friendNameSet(); } catch (e) {}
+  // Admins can follow ANY live round (same rule as spectating "follow anyone"), so
+  // the friends-only feed never hides a round from an admin — fixes Kevin (admin)
+  // not seeing Pat's live round even though Tyler could.
+  let _amAdmin = false;
+  try { _amAdmin = (typeof isAdmin === 'function' && isAdmin()); } catch (e) {}
   const thruOf = g => {
     let thru = 0;
     try {
@@ -21092,11 +21097,11 @@ async function renderHomeLive() {
     .map(r => ({ code: r.code, g: r.data, t: r.updated_at ? Date.parse(r.updated_at) : ((r.data && r.data.updatedAt) || 0) }))
     .filter(x => x.g && Array.isArray(x.g.players) && x.g.players.length > 0 && !x.g.finishedAt)
     .filter(x => x.t >= cutoff)
-    .filter(x => _scope === 'everyone' || isCrewGame(x.g))
+    .filter(x => _scope === 'everyone' || _amAdmin || isCrewGame(x.g))
     .map(x => ({ ...x, thru: thruOf(x.g) }))
     .filter(x => x.thru > 0);
   if (!live.length) {
-    el.innerHTML = '<div class="help-text">' + (_scope === 'everyone' ? 'No rounds in progress right now.' : 'No crew rounds in progress right now.') + '</div>';
+    el.innerHTML = '<div class="help-text">' + ((_scope === 'everyone' || _amAdmin) ? 'No rounds in progress right now.' : 'No crew rounds in progress right now.') + '</div>';
   } else {
     el.innerHTML = live.map((x, i) => {
       const g = x.g;
@@ -21126,14 +21131,14 @@ async function renderHomeLive() {
     try { const _mn = await getMeName(); meNorm = _mn ? normalizeNameSegment(_mn) : ''; } catch (e) {}
     rows
       .map(r => ({ g: r.data, t: r.updated_at ? Date.parse(r.updated_at) : 0, code: r.code }))
-      .filter(x => x.g && Array.isArray(x.g.players) && x.t >= hlCut && (_scope === 'everyone' || isCrewGame(x.g)))
+      .filter(x => x.g && Array.isArray(x.g.players) && x.t >= hlCut && (_scope === 'everyone' || _amAdmin || isCrewGame(x.g)))
       .forEach(x => {
         const g = x.g;
         const course = g.course || 'a round';
         const gc = x.code || g.code || 'g'; // stable game id for reaction keys
         g.players.forEach(p => {
           if (!p || !p.name) return;
-          if (_scope !== 'everyone' && !names.has(normalizeNameSegment(p.name))) return;
+          if (_scope !== 'everyone' && !_amAdmin && !names.has(normalizeNameSegment(p.name))) return;
           const sc = g.scores && g.scores[p.id];
           if (!sc || !Array.isArray(g.pars)) return;
           for (let h = 0; h < 18; h++) {
@@ -27496,6 +27501,105 @@ async function loadTourneyCtp(t) {
   } catch (e) { return null; }
 }
 
+// #26 Phase 1 — tournament-wide leaderboard: combine EVERY group's round (by
+// tourneyId) into one field-wide standings so the score summary shows everyone in
+// the event, not just one cart group. Read-only aggregation (same pattern as CTP);
+// each player plays in exactly one group, so there's nothing to reconcile.
+async function loadTourneyScores(t) {
+  try {
+    if (!supaReady) await initSupabase();
+    if (!supa || !supaOnline) return null;
+    const { data, error } = await supa.from('games').select('data').eq('data->>tourneyId', t.id).limit(100);
+    if (error || !Array.isArray(data) || !data.length) return null;
+    const nm = s => normalizeNameSegment(String(s || ''));
+    const byName = {};
+    data.forEach(row => {
+      const g = row.data;
+      if (!g || !Array.isArray(g.players)) return;
+      const pars = Array.isArray(g.pars) ? g.pars : null;
+      g.players.forEach(p => {
+        if (!p || !p.name) return;
+        const sc = (g.scores && g.scores[p.id]) || [];
+        let gross = 0, thru = 0, parThru = 0;
+        for (let h = 0; h < 18; h++) {
+          const s = sc[h];
+          if (s == null) continue;
+          gross += s; thru++;
+          if (pars && pars[h] != null) parThru += pars[h];
+        }
+        if (thru === 0) return;
+        const k = nm(p.name);
+        if (!byName[k] || thru > byName[k].thru) {
+          byName[k] = {
+            name: p.name,
+            first: (typeof displayFirst === 'function' ? displayFirst(p) : (p.firstName || p.name)),
+            gross, thru, toPar: (pars ? gross - parThru : null)
+          };
+        }
+      });
+    });
+    const list = Object.values(byName);
+    if (!list.length) return null;
+    list.sort((a, b) => {
+      const ap = a.toPar == null ? 9999 : a.toPar, bp = b.toPar == null ? 9999 : b.toPar;
+      if (ap !== bp) return ap - bp;
+      return a.gross - b.gross;
+    });
+    return list;
+  } catch (e) { return null; }
+}
+
+// #26 Phase 1b — combine the FIELD side bets across every group into ONE event-wide
+// pool (Tyler's "GIRs tracked per group, combined into a giant pool"). We build a
+// virtual game = the whole field (players keyed by name, since each group's round
+// has its own ids), merge every group's per-hole bet data, set each field game's
+// participants to the WHOLE field, then run the normal money engine on it. Only the
+// pool-style games are included; head-to-head/team games are intentionally skipped
+// here (those are Phase 2). Read-only — the real per-group payouts are untouched.
+const TOURNEY_FIELD_GAMES = ['skins', 'stroke', 'stableford', 'quota', 'p3greenie', 'ctp', 'junk', 'birdiePool'];
+async function loadTourneyMoney(t) {
+  try {
+    if (!supaReady) await initSupabase();
+    if (!supa || !supaOnline) return null;
+    const { data, error } = await supa.from('games').select('data').eq('data->>tourneyId', t.id).limit(100);
+    if (error || !Array.isArray(data) || !data.length) return null;
+    const rounds = data.map(r => r.data).filter(g => g && Array.isArray(g.players) && g.players.length);
+    if (!rounds.length) return null;
+    const nm = s => normalizeNameSegment(String(s || ''));
+    // One canonical event player per name.
+    const canonOf = {}, canonPlayer = {};
+    rounds.forEach(g => g.players.forEach(p => {
+      if (!p || !p.name) return;
+      const k = nm(p.name); if (!k) return;
+      if (!canonOf[k]) { const id = 'tw_' + k.replace(/[^a-z0-9]/g, '') + '_' + Object.keys(canonPlayer).length; canonOf[k] = id; canonPlayer[id] = { id, name: p.name, firstName: p.firstName, lastName: p.lastName, hcp: p.hcp, rawHcp: p.rawHcp, playsGross: p.playsGross, teeLabel: p.teeLabel }; }
+    }));
+    const allIds = Object.keys(canonPlayer);
+    if (allIds.length < 2) return null;
+    const base = rounds.find(g => Array.isArray(g.pars)) || rounds[0];
+    // Field games (union across groups' configs), participants = the whole field.
+    const games = {};
+    rounds.forEach(g => { if (g.games) TOURNEY_FIELD_GAMES.forEach(key => { if (g.games[key] && !games[key]) games[key] = Object.assign({}, g.games[key], { participants: allIds.slice() }); }); });
+    if (!Object.keys(games).length) return null; // no field side bets in this event
+    const vg = { code: 'tw_' + t.id, course: base.course, pars: base.pars, sis: base.sis, hcpRules: base.hcpRules, players: Object.values(canonPlayer), scores: {}, junkData: {}, p3greenieData: {}, ctpData: {}, games };
+    rounds.forEach(g => {
+      const map = {}; g.players.forEach(p => { if (p && p.name) map[p.id] = canonOf[nm(p.name)]; });
+      if (g.scores) Object.keys(g.scores).forEach(pid => { const c = map[pid]; if (c && !vg.scores[c]) vg.scores[c] = g.scores[pid]; });
+      if (g.junkData) Object.keys(g.junkData).forEach(h => { const hd = g.junkData[h]; if (!hd) return; vg.junkData[h] = vg.junkData[h] || {}; Object.keys(hd).forEach(tp => { const arr = Array.isArray(hd[tp]) ? hd[tp] : []; vg.junkData[h][tp] = (vg.junkData[h][tp] || []).concat(arr.map(pid => map[pid]).filter(Boolean)); }); });
+      if (g.p3greenieData) Object.keys(g.p3greenieData).forEach(h => { const hd = g.p3greenieData[h]; if (!hd) return; const cur = vg.p3greenieData[h] = vg.p3greenieData[h] || { winners: [], threePutts: [] }; (hd.winners || []).forEach(pid => { const c = map[pid]; if (c) cur.winners.push(c); }); (hd.threePutts || []).forEach(pid => { const c = map[pid]; if (c) cur.threePutts.push(c); }); });
+      if (g.ctpData) Object.keys(g.ctpData).forEach(h => { const e = g.ctpData[h]; if (!e || e.pid == null || e.ft == null) return; const c = map[e.pid]; if (!c) return; const inch = e.ft * 12 + (e.in || 0); const cur = vg.ctpData[h]; const ci = cur ? cur.ft * 12 + (cur.in || 0) : Infinity; if (!cur || inch < ci) vg.ctpData[h] = { pid: c, ft: e.ft, in: e.in }; });
+    });
+    let res = null; try { res = computeAllGameMoney(vg); } catch (e) { return null; }
+    if (!res || !res.combined) return null;
+    const rows = Object.values(canonPlayer).map(p => ({
+      name: p.name,
+      first: (typeof displayFirst === 'function' ? displayFirst(p) : (p.firstName || p.name)),
+      net: res.combined[p.id] || 0
+    })).filter(r => r.net !== 0);
+    rows.sort((a, b) => b.net - a.net);
+    return { rows, games: (res.byGame || []).map(b => b.label) };
+  } catch (e) { return null; }
+}
+
 function openTourneyActions(t) {
   state.activeTourneyForActions = t;
   $('tam-name').textContent = t.name;
@@ -27530,6 +27634,42 @@ function openTourneyActions(t) {
       ctpDiv.innerHTML = html; ctpDiv.style.display = 'block';
     }).catch(() => {});
   }
+  // #26 Phase 1 — whole-field leaderboard across all groups (injected above CTP).
+  (function () {
+    try {
+      let sd = document.getElementById('tam-scores');
+      if (!sd) {
+        sd = document.createElement('div');
+        sd.id = 'tam-scores';
+        sd.className = 'help-text';
+        sd.style.cssText = 'margin-top:10px';
+        const anchor = $('tam-ctp');
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(sd, anchor);
+        else if ($('tam-meta') && $('tam-meta').parentNode) $('tam-meta').parentNode.appendChild(sd);
+      }
+      sd.style.display = 'none'; sd.innerHTML = '';
+      const fmtTp = v => (v == null ? '' : (v === 0 ? 'E' : (v > 0 ? '+' + v : String(v))));
+      const fmtMoney = n => (n > 0 ? '+$' : (n < 0 ? '−$' : '$')) + Math.abs(Number.isInteger(n) ? n : Number(n.toFixed(2)));
+      Promise.all([loadTourneyScores(t), loadTourneyMoney(t)]).then(([list, money]) => {
+        let html = '';
+        if (list && list.length) {
+          html += '<strong>🏆 Leaderboard — whole field</strong>';
+          list.slice(0, 40).forEach((r, i) => {
+            html += '<br>' + (i + 1) + '. ' + escapeHtml(r.first || r.name) + ' — ' +
+              (r.toPar == null ? (r.gross + ' (thru ' + r.thru + ')') : (fmtTp(r.toPar) + ' · ' + r.gross + ' thru ' + r.thru));
+          });
+        }
+        if (money && money.rows && money.rows.length) {
+          html += (html ? '<br><br>' : '') + '<strong>💰 Side bets — whole field</strong>';
+          money.rows.forEach(r => {
+            html += '<br>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + fmtMoney(r.net) + '</strong>';
+          });
+          if (money.games && money.games.length) html += '<br><span class="small-text" style="color:var(--text-muted)">Field pools: ' + escapeHtml(money.games.join(', ')) + '</span>';
+        }
+        if (html) { sd.innerHTML = html; sd.style.display = 'block'; }
+      }).catch(() => {});
+    } catch (e) {}
+  })();
   // Creator-only editing: only the person who scheduled the round may change its
   // settings. Everyone else can still Start it and view it. (No createdBy =
   // legacy record → leave editable for backward-compat.)

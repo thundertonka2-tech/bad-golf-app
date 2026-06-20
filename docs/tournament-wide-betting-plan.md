@@ -50,4 +50,14 @@ Teams are assigned event-wide; sum/compare each side across every group.
 
 Per-group games (C) are intentionally left group-scoped.
 
-Status: plan agreed; Phase 1 to be implemented first. Tournament is Tuesday (time to build + test).
+## Status
+- **Phase 1 — DONE (v92).** `loadTourneyScores(t)` (whole-field leaderboard) + `loadTourneyMoney(t)`
+  (combined field side-bet pool across all groups) render in the tournament actions modal. Both are
+  read-only aggregations keyed by player name; the real per-group payouts are untouched.
+- **Phase 2 — next.** Cross-group head-to-head (match play / Nassau between two players in different
+  groups): needs a cross-group bet record + a resolver that reads each player's holes from their own
+  group round.
+- **Phase 3 — next.** Team field bets (teamMatch / teamLowball / teamQuota) combined across groups.
+- Per-group-bound games (banker, wolf, sixes, vegas, bbb) intentionally stay group-scoped.
+
+Tournament is Tuesday — time to build + test Phases 2–3.
