@@ -5496,7 +5496,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.95';
+const BG_BUILD = 'v2026.11.96';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -6619,11 +6619,27 @@ async function renderAdminSpectate() {
       rows = data || [];
     }
   } catch (e) { console.warn('admin spectate fetch failed', e); }
-  const cutoff = Date.now() - 8 * 60 * 60 * 1000; // last 8h
+  const cutoff = Date.now() - 3 * 60 * 60 * 1000; // ~3h actively-playing window (8h showed abandoned rounds)
+  // Auto-finish abandoned casual rounds (>6h, has scores, NOT a tournament/event).
+  try {
+    const sixH = Date.now() - 6 * 60 * 60 * 1000;
+    rows.forEach(r => {
+      const g = r.data; if (!g || g.finishedAt) return;
+      if (g.t2 || g.tourneyId) return;
+      const upd = r.updated_at ? Date.parse(r.updated_at) : (g.updatedAt || 0);
+      if (!upd || upd >= sixH) return;
+      const hasScore = Array.isArray(g.players) && g.players.some(p => g.scores && Array.isArray(g.scores[p.id]) && g.scores[p.id].some(s => s != null));
+      if (!hasScore) return;
+      g.finishedAt = upd;
+      try { saveGame(g); } catch (e) {}
+    });
+  } catch (e) {}
   const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
-  const live = rows.map(r => ({ code: r.code, g: r.data, t: r.updated_at }))
+  const thruOf = g => { let thru = 0; try { for (let h = 0; h < 18; h++) { if (g.players.some(p => g.scores && g.scores[p.id] && g.scores[p.id][h] != null)) thru = h + 1; } } catch (e) {} return thru; };
+  const live = rows.map(r => ({ code: r.code, g: r.data, t: r.updated_at ? Date.parse(r.updated_at) : ((r.data && r.data.updatedAt) || 0) }))
     .filter(x => x.g && Array.isArray(x.g.players) && x.g.players.length && !x.g.finishedAt)
-    .filter(x => { const ts = x.t ? Date.parse(x.t) : (x.g.updatedAt || 0); return ts >= cutoff; });
+    .filter(x => x.t >= cutoff)
+    .filter(x => thruOf(x.g) > 0); // only rounds actually teed off (no "thru 0")
   if (!live.length) { el.innerHTML = '<div class="help-text">No active rounds right now.</div>'; return; }
   const opts = live.map(x => {
     const g = x.g;
@@ -26993,6 +27009,7 @@ async function renderT2Home() {
     }
   }
 
+  html += '<button class="full" id="t2-evlb-btn" style="margin:6px 0 10px;font-weight:700;background:linear-gradient(135deg,#1d6fd6,#1456a8);color:#fff;border:none;border-radius:12px;padding:11px">🏆 Event Leaderboard — everyone, scorecards & side games</button>';
   html += '<h3 style="margin:10px 0 6px">' + (od ? 'Players' : 'Players & teams') + '</h3>';
   if (amCommish) {
     html += '<button class="full" id="t2-invite-friends-btn" style="margin-bottom:8px">👥 Invite friends — they get a ping & the event lands in their Events tab</button>' +
@@ -27205,6 +27222,7 @@ async function renderT2Home() {
   body.querySelectorAll('.t2-stagger-tees').forEach(b => b.onclick = () => t2StaggerTeeTimes(b.dataset.dayid));
   body.querySelectorAll('.t2-edit-teetime').forEach(b => b.onclick = () => t2EditGroupTeeTime(b.dataset.gid, b.dataset.tt));
   body.querySelectorAll('.t2-pick-captain').forEach(b => b.onclick = () => t2PickGroupCaptain(b.dataset.gid, (b.dataset.mem || '').split('|').filter(Boolean), b.dataset.cap || ''));
+  { const _ev = document.getElementById('t2-evlb-btn'); if (_ev) _ev.onclick = () => openEventLeaderboard(_t2Current); }
   try { checkCaptainReminder(_t2Current); } catch (e) {}
   body.querySelectorAll('.t2-move-here').forEach(b => b.onclick = () => t2MoveHere(b));
   body.querySelectorAll('.t2-logo-btn').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
@@ -27816,6 +27834,78 @@ async function openXBetCreator(t) {
   };
 }
 
+// #29 — comprehensive EVENT LEADERBOARD: one view with the whole field's standings,
+// the entire scorecard, who's winning each side game, and the cross-group matches.
+// Works for BOTH tournament systems (buildTourneyField queries tourneyId OR t2).
+function _evFmtTp(v) { return v == null ? '' : (v === 0 ? 'E' : (v > 0 ? '+' + v : String(v))); }
+function _evFmtMoney(n) { return (n > 0 ? '+$' : (n < 0 ? '−$' : '$')) + Math.abs(Number.isInteger(n) ? n : Number(n.toFixed(2))); }
+function buildEventScorecardHtml(field) {
+  const pars = field.pars || [], sis = field.sis || [];
+  const cell = 'padding:2px 5px;text-align:center;border-bottom:1px solid var(--border)';
+  const stick = 'position:sticky;left:0;background:var(--surface);text-align:left;padding:2px 6px;border-bottom:1px solid var(--border);z-index:1';
+  let h = '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="border-collapse:collapse;font-size:11px;white-space:nowrap;min-width:100%">';
+  h += '<tr><th style="' + stick + '">Hole</th>';
+  for (let i = 0; i < 18; i++) h += '<th style="' + cell + ';color:var(--text-muted)">' + (i + 1) + '</th>';
+  h += '<th style="' + cell + ';font-weight:700">Tot</th></tr>';
+  let parTot = 0;
+  h += '<tr><td style="' + stick + ';color:var(--text-muted)">Par</td>';
+  for (let i = 0; i < 18; i++) { const p = pars[i]; parTot += (p || 0); h += '<td style="' + cell + ';color:var(--text-muted)">' + (p != null ? p : '') + '</td>'; }
+  h += '<td style="' + cell + ';color:var(--text-muted)">' + parTot + '</td></tr>';
+  (field.players || []).forEach(p => {
+    const sc = field.scores[p.id] || [];
+    let tot = 0;
+    h += '<tr><td style="' + stick + ';font-weight:600">' + escapeHtml(p.firstName || p.name) + '</td>';
+    for (let i = 0; i < 18; i++) {
+      const s = sc[i], par = pars[i];
+      if (s != null) tot += s;
+      let color = '';
+      if (s != null && par != null) { const d = s - par; color = d < 0 ? ';color:#1f7a46;font-weight:700' : (d > 1 ? ';color:#b3261e' : ''); }
+      h += '<td style="' + cell + color + '">' + (s != null ? s : '') + '</td>';
+    }
+    h += '<td style="' + cell + ';font-weight:700">' + (tot || '') + '</td></tr>';
+  });
+  h += '</table></div>';
+  return h;
+}
+async function openEventLeaderboard(t) {
+  if (!t || !t.id) { showToast('Open an event first'); return; }
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show';
+  ov.style.cssText = 'z-index:100050;align-items:flex-start;overflow-y:auto';
+  ov.innerHTML = '<div class="modal" style="max-width:920px;width:96%;margin:12px auto">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h2 style="margin:0;font-size:18px">🏆 ' + escapeHtml(t.name || 'Event') + ' — Leaderboard</h2>' +
+    '<button id="evlb-x" aria-label="Close" style="background:transparent;border:none;font-size:22px;line-height:1;cursor:pointer">✕</button></div>' +
+    '<div id="evlb-body"><div class="help-text">Loading the field…</div></div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#evlb-x').onclick = () => ov.remove();
+  ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+  const body = ov.querySelector('#evlb-body');
+  try {
+    const [field, list, money, xbets] = await Promise.all([buildTourneyField(t), loadTourneyScores(t), loadTourneyMoney(t), loadTourneyXBetResults(t)]);
+    let html = '';
+    if (list && list.length) {
+      html += '<h3 style="margin:6px 0 4px">Standings — whole field</h3><div style="font-size:13px">';
+      list.forEach((r, i) => { html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:48px;text-align:right;font-weight:700">' + _evFmtTp(r.toPar) + '</span><span style="width:78px;text-align:right;color:var(--text-muted)">' + r.gross + ' (' + r.thru + ')</span></div>'; });
+      html += '</div>';
+    }
+    if (field && field.players && field.players.length && Array.isArray(field.pars)) {
+      html += '<h3 style="margin:14px 0 4px">Full scorecard</h3>' + buildEventScorecardHtml(field);
+    }
+    if (money && money.rows && money.rows.length) {
+      html += '<h3 style="margin:14px 0 4px">💰 Side bets — whole field</h3><div style="font-size:13px">';
+      money.rows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
+      if (money.games && money.games.length) html += '<div class="small-text" style="color:var(--text-muted)">Pools: ' + escapeHtml(money.games.join(', ')) + '</div>';
+      html += '</div>';
+    }
+    html += '<h3 style="margin:14px 0 4px">⚔️ Cross-group matches</h3>';
+    if (xbets && xbets.length) { html += '<div style="font-size:13px">'; xbets.forEach(x => { html += '<div>' + escapeHtml(String(x.aName || '').split(/\s+/)[0]) + ' vs ' + escapeHtml(String(x.bName || '').split(/\s+/)[0]) + ' — ' + escapeHtml(x.status || '') + (x.value ? (' ($' + x.value + ')') : '') + '</div>'; }); html += '</div>'; }
+    else html += '<div class="small-text" style="color:var(--text-muted)">None yet.</div>';
+    html += '<button class="primary small" id="evlb-addxb" style="margin-top:8px">➕ Add cross-group match</button>';
+    body.innerHTML = html || '<div class="help-text">No scores in this event yet.</div>';
+    const ab = body.querySelector('#evlb-addxb'); if (ab) ab.onclick = () => openXBetCreator(t);
+  } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
+}
+
 function openTourneyActions(t) {
   state.activeTourneyForActions = t;
   $('tam-name').textContent = t.name;
@@ -27867,7 +27957,7 @@ function openTourneyActions(t) {
       const fmtTp = v => (v == null ? '' : (v === 0 ? 'E' : (v > 0 ? '+' + v : String(v))));
       const fmtMoney = n => (n > 0 ? '+$' : (n < 0 ? '−$' : '$')) + Math.abs(Number.isInteger(n) ? n : Number(n.toFixed(2)));
       Promise.all([loadTourneyScores(t), loadTourneyMoney(t), loadTourneyXBetResults(t)]).then(([list, money, xbets]) => {
-        let html = '';
+        let html = '<button class="full" id="tam-evlb" style="margin-bottom:8px;font-weight:700;background:linear-gradient(135deg,#1d6fd6,#1456a8);color:#fff;border:none;border-radius:10px;padding:10px">🏆 Full scorecard &amp; leaderboard</button>';
         if (list && list.length) {
           html += '<strong>🏆 Leaderboard — whole field</strong>';
           list.slice(0, 40).forEach((r, i) => {
@@ -27895,6 +27985,7 @@ function openTourneyActions(t) {
         }
         html += '<br><button class="xb-add small primary" style="margin-top:6px">➕ Add cross-group match</button>';
         sd.innerHTML = html; sd.style.display = 'block';
+        const evB = sd.querySelector('#tam-evlb'); if (evB) evB.onclick = () => openEventLeaderboard(t);
         const addB = sd.querySelector('.xb-add'); if (addB) addB.onclick = () => openXBetCreator(t);
         sd.querySelectorAll('.xb-del').forEach(b => b.onclick = async () => { const bets = await getTourneyXBets(t.id); await saveTourneyXBets(t.id, bets.filter(x => x.id !== b.dataset.id)); openTourneyActions(t); });
       }).catch(() => {});
