@@ -126,24 +126,26 @@ Deno.serve(async (req: Request) => {
     if (!url && slug) url = detailedUrl(slug);
     if (!url && name) {
       const found = await searchSlug(name, city, state);
-      if (!found) return json({ ok: false, error: 'No matching course found on BlueGolf for "' + name + '"' + (state ? " in " + state : "") + "." }, 404);
+      if (!found) return json({ ok: false, error: 'No matching course found on BlueGolf for "' + name + '"' + (state ? " in " + state : "") + "." });
       url = detailedUrl(found);
     }
-    if (!url) return json({ ok: false, error: "Provide a BlueGolf course name (+state), url, or slug." }, 400);
+    if (!url) return json({ ok: false, error: "Provide a BlueGolf course name (+state), url, or slug." });
 
     // Normalise ANY bluegolf course URL to its detailed scorecard page.
     const ms = url.match(/course\/course\/([^\/]+)/);
     if (ms) url = detailedUrl(ms[1]);
-    if (!/(^|\.)bluegolf\.com\//.test(url)) return json({ ok: false, error: "Only bluegolf.com course URLs are allowed." }, 400);
+    if (!/(^|\.)bluegolf\.com\//.test(url)) return json({ ok: false, error: "Only bluegolf.com course URLs are allowed." });
     const usedSlug = (url.match(/course\/course\/([^\/]+)/) || [])[1] || "";
 
     const raw = await fetch(url, { headers: { "User-Agent": UA } }).then((r) => r.text());
     const parsed = parseBlueGolf(raw);
     if (!parsed.pars || parsed.pars.length !== 18) {
-      return json({ ok: false, error: "Found the course but couldn't read its scorecard (the page layout may have changed)." }, 422);
+      return json({ ok: false, error: "Found the course but couldn't read its scorecard (the page layout may have changed)." });
     }
     return json({ ok: true, url, slug: usedSlug, ...parsed });
   } catch (e) {
-    return json({ ok: false, error: String((e && (e as Error).message) || e) }, 500);
+    // Return 200 with ok:false so the app surfaces the real message instead of a
+    // generic "function error" (supa.functions.invoke flags any non-2xx as r.error).
+    return json({ ok: false, error: String((e && (e as Error).message) || e) });
   }
 });
