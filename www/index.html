@@ -21088,6 +21088,23 @@ async function renderHomeLive() {
     return thru;
   };
   const isCrewGame = g => names.size > 0 && g.players.some(p => p && p.name && names.has(normalizeNameSegment(p.name)));
+  // Auto-finish ABANDONED casual rounds: started, has scores, but no update in 6h.
+  // NEVER touches tournament/event rounds (g.t2 or g.tourneyId) — those can pause
+  // legitimately — and rounds with no scores (never really started). Scheduled rounds
+  // aren't games yet, so they're untouched. Sets finishedAt → drops off Live for all.
+  try {
+    const sixH = Date.now() - 6 * 60 * 60 * 1000;
+    rows.forEach(r => {
+      const g = r.data; if (!g || g.finishedAt) return;
+      if (g.t2 || g.tourneyId) return;                 // events/tournaments: leave alone
+      const upd = r.updated_at ? Date.parse(r.updated_at) : (g.updatedAt || 0);
+      if (!upd || upd >= sixH) return;                  // updated within 6h → still live
+      const hasScore = Array.isArray(g.players) && g.players.some(p => g.scores && Array.isArray(g.scores[p.id]) && g.scores[p.id].some(s => s != null));
+      if (!hasScore) return;                            // never started → don't finish
+      g.finishedAt = upd;                               // finished as of its last activity
+      try { saveGame(g); } catch (e) {}
+    });
+  } catch (e) {}
   const cutoff = Date.now() - 3 * 60 * 60 * 1000; // ~3h: actively-playing window
   // "Live" = unfinished crew round updated in the last ~3h that has at least one
   // real score on the card. During active play scores go in every few minutes,
@@ -21113,11 +21130,24 @@ async function renderHomeLive() {
         '<div style="display:flex;gap:8px;margin-top:8px">' +
           '<button class="home-spectate-btn small primary" data-code="' + escAttr(x.code || '') + '" style="flex:1">👀 Spectate</button>' +
           '<button class="home-wager-btn small" data-code="' + escAttr(x.code || '') + '" style="flex:1">🎲 Wager</button>' +
+          (_amAdmin ? '<button class="home-endlive-btn small" data-code="' + escAttr(x.code || '') + '" title="End this round for everyone (admin)" style="border-color:#b3261e;color:#b3261e">🏁 End</button>' : '') +
         '</div>' +
         '</div>';
     }).join('');
     el.querySelectorAll('.home-spectate-btn').forEach(b => { b.onclick = (e) => { e.stopPropagation(); openSpectateGps(b.dataset.code); }; });
     el.querySelectorAll('.home-wager-btn').forEach(b => { b.onclick = (e) => { e.stopPropagation(); openWagerScreen(b.dataset.code); }; });
+    // Admin: end a stuck/abandoned live round (no Finish tapped) so it drops off
+    // everyone's "Live now". Sets finishedAt → the realtime sync closes it for all.
+    el.querySelectorAll('.home-endlive-btn').forEach(b => { b.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm('End this round for everyone? It gets marked finished and drops off Live now.')) return;
+      try {
+        const g = await loadGame(b.dataset.code);
+        if (g && !g.finishedAt) { g.finishedAt = Date.now(); await saveGame(g); }
+        showToast('Round ended');
+      } catch (err) { showToast('Could not end the round'); }
+      try { renderHomeLive(); } catch (err) {}
+    }; });
     el.querySelectorAll('.home-live-row').forEach(r => { r.onclick = () => openCrewRound(r.dataset.code); });
   }
 
@@ -27480,7 +27510,7 @@ async function loadTourneyCtp(t) {
   try {
     if (!supaReady) await initSupabase();
     if (!supa || !supaOnline) return null;
-    const { data, error } = await supa.from('games').select('data').eq('data->>tourneyId', t.id).limit(100);
+    const { data, error } = await supa.from('games').select('data').or('data->>tourneyId.eq.' + t.id + ',data->t2->>tournamentId.eq.' + t.id).limit(100);
     if (error || !Array.isArray(data)) return null;
     const best = {};
     data.forEach(row => {
@@ -27509,7 +27539,7 @@ async function loadTourneyScores(t) {
   try {
     if (!supaReady) await initSupabase();
     if (!supa || !supaOnline) return null;
-    const { data, error } = await supa.from('games').select('data').eq('data->>tourneyId', t.id).limit(100);
+    const { data, error } = await supa.from('games').select('data').or('data->>tourneyId.eq.' + t.id + ',data->t2->>tournamentId.eq.' + t.id).limit(100);
     if (error || !Array.isArray(data) || !data.length) return null;
     const nm = s => normalizeNameSegment(String(s || ''));
     const byName = {};
@@ -27561,7 +27591,7 @@ async function loadTourneyMoney(t) {
   try {
     if (!supaReady) await initSupabase();
     if (!supa || !supaOnline) return null;
-    const { data, error } = await supa.from('games').select('data').eq('data->>tourneyId', t.id).limit(100);
+    const { data, error } = await supa.from('games').select('data').or('data->>tourneyId.eq.' + t.id + ',data->t2->>tournamentId.eq.' + t.id).limit(100);
     if (error || !Array.isArray(data) || !data.length) return null;
     const rounds = data.map(r => r.data).filter(g => g && Array.isArray(g.players) && g.players.length);
     if (!rounds.length) return null;
@@ -27618,7 +27648,7 @@ async function buildTourneyField(t) {
   try {
     if (!supaReady) await initSupabase();
     if (!supa || !supaOnline) return null;
-    const { data, error } = await supa.from('games').select('data').eq('data->>tourneyId', t.id).limit(100);
+    const { data, error } = await supa.from('games').select('data').or('data->>tourneyId.eq.' + t.id + ',data->t2->>tournamentId.eq.' + t.id).limit(100);
     if (error || !Array.isArray(data) || !data.length) return null;
     const rounds = data.map(r => r.data).filter(g => g && Array.isArray(g.players) && g.players.length);
     if (!rounds.length) return null;
