@@ -5496,7 +5496,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.92';
+const BG_BUILD = 'v2026.11.93';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -27600,6 +27600,101 @@ async function loadTourneyMoney(t) {
   } catch (e) { return null; }
 }
 
+// #26 Phase 2 — CROSS-GROUP head-to-head (Kevin in Group 1 vs Tyler in Group 2).
+// Cross-group bets live in a shared singleton per tournament (no new table), and
+// settle by reading each player's holes from whichever group round they're in.
+// ---------------------------------------------------------------------------
+function tourneyXBetsKey(tid) { return 'golf:xbets-' + tid; }
+async function getTourneyXBets(tid) {
+  try { const v = await readSharedSingleton(tourneyXBetsKey(tid)); const a = v ? JSON.parse(v) : []; return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+async function saveTourneyXBets(tid, arr) {
+  try { await writeSharedSingleton(tourneyXBetsKey(tid), JSON.stringify(Array.isArray(arr) ? arr : [])); } catch (e) {}
+}
+// Build the whole event field: one canonical player per name + their scores pulled
+// from whatever group round they played in. Shared by the cross-group resolver.
+async function buildTourneyField(t) {
+  try {
+    if (!supaReady) await initSupabase();
+    if (!supa || !supaOnline) return null;
+    const { data, error } = await supa.from('games').select('data').eq('data->>tourneyId', t.id).limit(100);
+    if (error || !Array.isArray(data) || !data.length) return null;
+    const rounds = data.map(r => r.data).filter(g => g && Array.isArray(g.players) && g.players.length);
+    if (!rounds.length) return null;
+    const nm = s => normalizeNameSegment(String(s || ''));
+    const canonOf = {}, canonPlayer = {};
+    rounds.forEach(g => g.players.forEach(p => {
+      if (!p || !p.name) return;
+      const k = nm(p.name); if (!k) return;
+      if (!canonOf[k]) { const id = 'tf_' + k.replace(/[^a-z0-9]/g, '') + '_' + Object.keys(canonPlayer).length; canonOf[k] = id; canonPlayer[id] = { id, name: p.name, firstName: p.firstName, lastName: p.lastName, hcp: p.hcp, rawHcp: p.rawHcp, playsGross: p.playsGross, teeLabel: p.teeLabel }; }
+    }));
+    const base = rounds.find(g => Array.isArray(g.pars)) || rounds[0];
+    const scores = {};
+    rounds.forEach(g => { const map = {}; g.players.forEach(p => { if (p && p.name) map[p.id] = canonOf[nm(p.name)]; }); if (g.scores) Object.keys(g.scores).forEach(pid => { const c = map[pid]; if (c && !scores[c]) scores[c] = g.scores[pid]; }); });
+    return { canonOf, canonPlayer, players: Object.values(canonPlayer), scores, pars: base.pars, sis: base.sis, hcpRules: base.hcpRules, course: base.course };
+  } catch (e) { return null; }
+}
+// Settle every cross-group match against the combined field. Match play only for now.
+async function loadTourneyXBetResults(t) {
+  const bets = await getTourneyXBets(t.id);
+  if (!bets.length) return [];
+  const field = await buildTourneyField(t);
+  if (!field) return bets.map(b => ({ id: b.id, aName: b.aName, bName: b.bName, value: b.value, status: 'waiting for scores' }));
+  const nm = s => normalizeNameSegment(String(s || ''));
+  return bets.map(bet => {
+    const aId = field.canonOf[nm(bet.aName)], bId = field.canonOf[nm(bet.bName)];
+    const row = { id: bet.id, aName: bet.aName, bName: bet.bName, value: bet.value, status: '', aMoney: 0, bMoney: 0 };
+    if (!aId || !bId) { row.status = 'waiting for scores'; return row; }
+    try {
+      const vg = { code: 'xb', players: field.players, scores: field.scores, pars: field.pars, sis: field.sis, hcpRules: field.hcpRules, games: { match: { instances: [{ value: bet.value, net: bet.net !== false, participants: [aId, bId] }] } } };
+      const r = calcMatch(vg);
+      const m = r && r.matches && r.matches[0];
+      row.aMoney = (r && r.money && r.money[aId]) || 0;
+      row.bMoney = (r && r.money && r.money[bId]) || 0;
+      if (m) {
+        if (m.complete) row.status = (m.winner === 'AS') ? 'All square' : (String(m.winner).split(/\s+/)[0] + ' won' + (m.closedScore ? (' ' + m.closedScore) : ''));
+        else { const up = m.finalUp; row.status = up > 0 ? (String(m.a).split(/\s+/)[0] + ' ' + up + ' up') : (up < 0 ? (String(m.b).split(/\s+/)[0] + ' ' + (-up) + ' up') : 'All square'); }
+      } else row.status = 'not started';
+    } catch (e) { row.status = '—'; }
+    return row;
+  });
+}
+// JS-built picker to create a cross-group match between any two event players.
+async function openXBetCreator(t) {
+  const field = await buildTourneyField(t);
+  if (!field || field.players.length < 2) { showToast('Need at least two players with scores in the event first'); return; }
+  const esc = (typeof escAttr === 'function') ? escAttr : (x => x);
+  const opts = field.players.map(p => '<option value="' + esc(p.name) + '">' + escapeHtml(p.firstName || p.name) + '</option>').join('');
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show';
+  ov.style.cssText = 'z-index:100060';
+  ov.innerHTML = '<div class="modal"><h2 style="margin-bottom:8px">⚔️ Cross-group match</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">Match play between any two players in the event — even in different groups. It settles from each player\'s own scorecard.</p>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Player A</label><select id="xb-a" style="width:100%;margin-bottom:8px">' + opts + '</select>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Player B</label><select id="xb-b" style="width:100%;margin-bottom:8px">' + opts + '</select>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">$ per match</label><input id="xb-val" type="number" inputmode="numeric" value="10" style="width:100%;margin-bottom:8px">' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Net or gross</label><select id="xb-net" style="width:100%;margin-bottom:12px"><option value="net">Net (handicaps)</option><option value="gross">Gross</option></select>' +
+    '<div class="actions"><button id="xb-cancel" style="flex:1">Cancel</button><button class="primary" id="xb-save" style="flex:1">Add match</button></div></div>';
+  document.body.appendChild(ov);
+  try { ov.querySelector('#xb-b').selectedIndex = 1; } catch (e) {}
+  const close = () => ov.remove();
+  ov.querySelector('#xb-cancel').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#xb-save').onclick = async () => {
+    const a = ov.querySelector('#xb-a').value, b = ov.querySelector('#xb-b').value;
+    if (normalizeNameSegment(a) === normalizeNameSegment(b)) { showToast('Pick two different players'); return; }
+    const val = parseFloat(ov.querySelector('#xb-val').value) || 0;
+    const net = ov.querySelector('#xb-net').value === 'net';
+    const bets = await getTourneyXBets(t.id);
+    bets.push({ id: 'xb' + Date.now(), type: 'match', aName: a, bName: b, value: val, net: net });
+    await saveTourneyXBets(t.id, bets);
+    close();
+    showToast('Cross-group match added ✓');
+    try { openTourneyActions(t); } catch (e) {}
+  };
+}
+
 function openTourneyActions(t) {
   state.activeTourneyForActions = t;
   $('tam-name').textContent = t.name;
@@ -27650,7 +27745,7 @@ function openTourneyActions(t) {
       sd.style.display = 'none'; sd.innerHTML = '';
       const fmtTp = v => (v == null ? '' : (v === 0 ? 'E' : (v > 0 ? '+' + v : String(v))));
       const fmtMoney = n => (n > 0 ? '+$' : (n < 0 ? '−$' : '$')) + Math.abs(Number.isInteger(n) ? n : Number(n.toFixed(2)));
-      Promise.all([loadTourneyScores(t), loadTourneyMoney(t)]).then(([list, money]) => {
+      Promise.all([loadTourneyScores(t), loadTourneyMoney(t), loadTourneyXBetResults(t)]).then(([list, money, xbets]) => {
         let html = '';
         if (list && list.length) {
           html += '<strong>🏆 Leaderboard — whole field</strong>';
@@ -27666,7 +27761,21 @@ function openTourneyActions(t) {
           });
           if (money.games && money.games.length) html += '<br><span class="small-text" style="color:var(--text-muted)">Field pools: ' + escapeHtml(money.games.join(', ')) + '</span>';
         }
-        if (html) { sd.innerHTML = html; sd.style.display = 'block'; }
+        // Cross-group head-to-head matches (Kevin G1 vs Tyler G2).
+        html += (html ? '<br><br>' : '') + '<strong>⚔️ Cross-group matches</strong>';
+        if (xbets && xbets.length) {
+          xbets.forEach(x => {
+            const aF = String(x.aName || '').split(/\s+/)[0], bF = String(x.bName || '').split(/\s+/)[0];
+            html += '<br>' + escapeHtml(aF) + ' vs ' + escapeHtml(bF) + ' — ' + escapeHtml(x.status || '') + (x.value ? ' ($' + x.value + ')' : '') +
+              ' <button class="small xb-del" data-id="' + escAttr(x.id) + '" style="padding:0 7px;color:#b3261e;border-color:#b3261e">✕</button>';
+          });
+        } else {
+          html += '<br><span class="small-text" style="color:var(--text-muted)">None yet.</span>';
+        }
+        html += '<br><button class="xb-add small primary" style="margin-top:6px">➕ Add cross-group match</button>';
+        sd.innerHTML = html; sd.style.display = 'block';
+        const addB = sd.querySelector('.xb-add'); if (addB) addB.onclick = () => openXBetCreator(t);
+        sd.querySelectorAll('.xb-del').forEach(b => b.onclick = async () => { const bets = await getTourneyXBets(t.id); await saveTourneyXBets(t.id, bets.filter(x => x.id !== b.dataset.id)); openTourneyActions(t); });
       }).catch(() => {});
     } catch (e) {}
   })();

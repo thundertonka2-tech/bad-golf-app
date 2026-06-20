@@ -54,9 +54,11 @@ Per-group games (C) are intentionally left group-scoped.
 - **Phase 1 — DONE (v92).** `loadTourneyScores(t)` (whole-field leaderboard) + `loadTourneyMoney(t)`
   (combined field side-bet pool across all groups) render in the tournament actions modal. Both are
   read-only aggregations keyed by player name; the real per-group payouts are untouched.
-- **Phase 2 — next.** Cross-group head-to-head (match play / Nassau between two players in different
-  groups): needs a cross-group bet record + a resolver that reads each player's holes from their own
-  group round.
+- **Phase 2a — DONE (v93).** Cross-group MATCH PLAY: `➕ Add cross-group match` on the tournament card
+  picks any two event players (different groups fine); settles from each player's own scorecard via
+  `calcMatch` on the combined field (`buildTourneyField`). Bets are stored in a per-tournament shared
+  singleton `golf:xbets-<tid>` — no new table. (`getTourneyXBets` / `loadTourneyXBetResults` / `openXBetCreator`.)
+- **Phase 2b — next.** Same for **Nassau** (wire `calcNassau` into the resolver).
 - **Phase 3 — next.** Team field bets (teamMatch / teamLowball / teamQuota) combined across groups.
 - Per-group-bound games (banker, wolf, sixes, vegas, bbb) intentionally stay group-scoped.
 
