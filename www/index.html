@@ -5479,7 +5479,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.85';
+const BG_BUILD = 'v2026.11.86';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -5882,7 +5882,7 @@ async function removeMyStatRound(idx) {
     mine.scoreHistory = mine.scoreHistory.filter(x => !sameRound(x, s));
     // Also blacklist its code so a cloud/recent sync can't resurrect it.
     if (s.gameCode) { try { const h = getHiddenRounds(); if (!h.includes(s.gameCode)) { h.push(s.gameCode); setHiddenRounds(h); } } catch (e) {} }
-    if (mine.scoreHistory.length !== before) { await savePlayerRoster(roster); try { showToast('Removed from your stats'); } catch (e) {} }
+    if (mine.scoreHistory.length !== before) { await savePlayerRoster(roster, { removals: { rounds: new Map([[rosterPlayerKey(mine), new Set([rosterRoundKey(s)])]]) } }); try { showToast('Removed from your stats'); } catch (e) {} }
     else { try { showToast('Round not found in your stats'); } catch (e) {} }
     const rc = document.getElementById('round-card-ov'); if (rc) rc.remove();
     const sr = document.getElementById('stat-rounds-ov'); if (sr) sr.remove();
@@ -8157,8 +8157,92 @@ function combineName(firstName, lastName) {
   return (f + ' ' + l).trim();
 }
 
-async function savePlayerRoster(roster) {
-  return await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
+// ----------------------------------------------------------------------------
+// ROSTER MERGE-ON-WRITE — the shared player roster (every player + their entire
+// scoreHistory) lives in ONE cloud row. The old code blind-overwrote that whole
+// blob on every save, so ANY device holding a stale copy (or this phone right
+// after a background cache refresh) could clobber the cloud and wipe everyone's
+// recent rounds — even drop a whole player entry. That is exactly what kept
+// eating Tyler's manually-added rounds and made his web profile disappear.
+//
+// Every roster save now MERGES with the freshest cloud copy first: it can only
+// ADD players and rounds, never silently drop them. Genuine deletes pass
+// explicit removal keys so they still work.
+// ----------------------------------------------------------------------------
+function rosterPlayerKey(p) {
+  if (!p) return '';
+  let f = p.firstName, l = p.lastName;
+  if ((f == null || f === '') && (l == null || l === '') && p.name) {
+    const parts = String(p.name).trim().split(/\s+/);
+    f = parts.shift() || ''; l = parts.join(' ');
+  }
+  return normalizeNameSegment(f) + '\x1f' + normalizeNameSegment(l);
+}
+function rosterRoundKey(s) {
+  if (!s) return '';
+  return s.gameCode || ((s.date || '') + '|' + (s.course || '') + '|' + (s.gross == null ? '' : s.gross));
+}
+// Additive union of two rosters. `removals` = { players:Set<key>, rounds:Map<playerKey,Set<roundKey>> }.
+function mergeRosters(base, incoming, removals) {
+  base = Array.isArray(base) ? base : [];
+  incoming = Array.isArray(incoming) ? incoming : [];
+  const map = new Map();
+  const addPlayer = (p, preferIncoming) => {
+    if (!p) return;
+    const k = rosterPlayerKey(p);
+    const ex = map.get(k);
+    if (!ex) { map.set(k, Object.assign({}, p, { scoreHistory: Array.isArray(p.scoreHistory) ? p.scoreHistory.slice() : [] })); return; }
+    // Union scoreHistory — never lose a round that either copy has.
+    const hist = Array.isArray(ex.scoreHistory) ? ex.scoreHistory : [];
+    const have = new Set(hist.map(rosterRoundKey));
+    (Array.isArray(p.scoreHistory) ? p.scoreHistory : []).forEach(s => { const rk = rosterRoundKey(s); if (s && !have.has(rk)) { hist.push(s); have.add(rk); } });
+    ex.scoreHistory = hist;
+    // Profile fields: the active edit (incoming) wins when it has a real value.
+    if (preferIncoming) {
+      ['firstName','lastName','name','hcp','gender','avatar','phone'].forEach(f => { if (p[f] !== undefined && p[f] !== null && p[f] !== '') ex[f] = p[f]; });
+    }
+    ex.lastUsed = Math.max(ex.lastUsed || 0, p.lastUsed || 0);
+  };
+  base.forEach(p => addPlayer(p, false));
+  incoming.forEach(p => addPlayer(p, true));
+  let result = Array.from(map.values());
+  if (removals) {
+    const rmP = removals.players, rmR = removals.rounds;
+    if (rmP && rmP.size) result = result.filter(p => !rmP.has(rosterPlayerKey(p)));
+    if (rmR && rmR.size) result.forEach(p => { const set = rmR.get(rosterPlayerKey(p)); if (set && set.size && Array.isArray(p.scoreHistory)) p.scoreHistory = p.scoreHistory.filter(s => !set.has(rosterRoundKey(s))); });
+  }
+  return result;
+}
+
+async function savePlayerRoster(roster, opts) {
+  opts = opts || {};
+  // Cache locally first (instant read-after-write; offline-safe).
+  try { localStorage.setItem(KEY_PLAYER_ROSTER, JSON.stringify(roster)); } catch (e) {}
+  if (!isSignedIn()) return true;
+  // Merge-on-write to the shared cloud row: read the freshest cloud roster,
+  // union in our players/rounds, apply any explicit deletions, then write the
+  // superset. A stale local copy can no longer wipe another device's data.
+  try {
+    if (!supaReady) await initSupabase();
+    if (supa && supaOnline) {
+      let cloud = [];
+      try {
+        const { data } = await supa.from('games').select('data').eq('code', singletonRowCode(KEY_PLAYER_ROSTER)).maybeSingle();
+        if (data && Array.isArray(data.data)) cloud = data.data;
+      } catch (e) {}
+      const merged = mergeRosters(cloud, roster, opts.removals);
+      const json = JSON.stringify(merged);
+      try { localStorage.setItem(KEY_PLAYER_ROSTER, json); } catch (e) {}
+      _singletonWroteAt[KEY_PLAYER_ROSTER] = Date.now();
+      await supa.from('games').upsert({ code: singletonRowCode(KEY_PLAYER_ROSTER), data: merged, updated_at: new Date().toISOString() });
+    } else {
+      await writeSharedSingleton(KEY_PLAYER_ROSTER, JSON.stringify(roster)); // offline: local cache only
+    }
+  } catch (e) {
+    console.warn('savePlayerRoster merge-write failed', e);
+    try { await writeSharedSingleton(KEY_PLAYER_ROSTER, JSON.stringify(roster)); } catch (e2) {}
+  }
+  return true;
 }
 
 // Add or update a player in the roster. Matches on firstName+lastName
@@ -8212,7 +8296,10 @@ async function deletePlayerFromRoster(firstName, lastName) {
     !((p.firstName || '').toLowerCase() === fLower &&
       (p.lastName || '').toLowerCase() === lLower)
   );
-  await savePlayerRoster(filtered);
+  // Explicit removal so the merge-on-write actually drops this player (the cloud
+  // copy would otherwise re-add them on union).
+  const rmKey = rosterPlayerKey({ firstName, lastName });
+  await savePlayerRoster(filtered, { removals: { players: new Set([rmKey]) } });
 }
 
 // ============================================================
@@ -8845,9 +8932,10 @@ async function archiveScoresFromRound(g) {
       entry.scoreHistory.push(record);
       changed = true;
     }
-    // Keep most recent 50 rounds per player
+    // Keep most recent 200 rounds per player (was 50 — too low; it silently
+    // truncated tail rounds, including old-dated manually-added past rounds).
     entry.scoreHistory.sort((a, b) => (b.date || 0) - (a.date || 0));
-    entry.scoreHistory = entry.scoreHistory.slice(0, 50);
+    entry.scoreHistory = entry.scoreHistory.slice(0, 200);
     entry.lastUsed = Date.now();
   });
 
@@ -10524,18 +10612,32 @@ async function restoreRoundsFromCloud() {
   try {
     const me = await getMeName();
     const roster = await getPlayerRoster();
-    const p = findMyRosterPlayer(roster, me);
-    if (!p) { showToast('Link your player first (Stats → Account)'); return; }
-    if (!Array.isArray(p.scoreHistory)) p.scoreHistory = [];
-    const { data } = await supa.from('player_stats').select('stats').eq('user_id', _authUser.id).maybeSingle();
+    const { data } = await supa.from('player_stats').select('stats,player_name').eq('user_id', _authUser.id).maybeSingle();
     const cloud = (data && Array.isArray(data.stats)) ? data.stats : [];
     if (!cloud.length) { showToast('No cloud backup found for your account'); return; }
+    let p = findMyRosterPlayer(roster, me);
+    let rebuilt = false;
+    if (!p) {
+      // The player entry itself was dropped from the shared roster (a stale-blob
+      // overwrite). Rebuild it from the per-user cloud mirror so BOTH the profile
+      // and the rounds come back in one tap.
+      const nm = (me || (data && data.player_name) || '').trim();
+      if (!nm) { showToast('Link your player first (Stats → Account)'); return; }
+      const parts = nm.split(/\s+/); const f = parts.shift() || nm; const l = parts.join(' ');
+      p = { firstName: f, lastName: l, name: nm, hcp: 0, lastUsed: Date.now(), scoreHistory: [] };
+      roster.push(p);
+      rebuilt = true;
+    }
+    if (!Array.isArray(p.scoreHistory)) p.scoreHistory = [];
     const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
     const have = new Set(p.scoreHistory.map(keyOf));
     let added = 0;
     cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k)) { p.scoreHistory.push(s); have.add(k); added++; } });
-    if (added > 0) { p.lastUsed = Date.now(); await savePlayerRoster(roster); try { renderStats(); } catch (e) {} try { renderHome(); } catch (e) {} }
-    showToast(added > 0 ? ('Restored ' + added + ' round' + (added === 1 ? '' : 's') + ' from cloud ✓') : 'Cloud backup matches your rounds — nothing to restore');
+    if (added > 0 || rebuilt) { p.lastUsed = Date.now(); await savePlayerRoster(roster); try { renderStats(); } catch (e) {} try { renderHome(); } catch (e) {} }
+    const msg = rebuilt
+      ? ('Profile restored + ' + added + ' round' + (added === 1 ? '' : 's') + ' recovered ✓')
+      : (added > 0 ? ('Restored ' + added + ' round' + (added === 1 ? '' : 's') + ' from cloud ✓') : 'Cloud backup matches your rounds — nothing to restore');
+    showToast(msg);
   } catch (e) { console.warn('restore rounds failed', e); showToast('Restore failed — try again'); }
 }
 
@@ -22836,7 +22938,7 @@ async function loadRounds() {
         const mine3 = findMyRosterPlayer(roster3, meName);
         if (mine3 && Array.isArray(mine3.scoreHistory)) {
           const idx = mine3.scoreHistory.findIndex(x => x && x.manual && x.gameCode === s.gameCode && x.date === s.date);
-          if (idx >= 0) { mine3.scoreHistory.splice(idx, 1); await savePlayerRoster(roster3); }
+          if (idx >= 0) { const removed = mine3.scoreHistory[idx]; mine3.scoreHistory.splice(idx, 1); await savePlayerRoster(roster3, { removals: { rounds: new Map([[rosterPlayerKey(mine3), new Set([rosterRoundKey(removed)])]]) } }); }
         }
       } catch (err) {}
       showToast('Past round removed');
