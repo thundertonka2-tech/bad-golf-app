@@ -1938,6 +1938,22 @@
   }
   #gps-wind-main { padding: 7px 11px; }
   #gps-wind #gps-temp { display: inline-block; margin-top: 8px; padding: 5px 12px; }
+  /* Estimated-drive bubble — lower-RIGHT, sitting at the SAME height as the
+     money/match chips on the lower-left (#gps-moneymatch, bottom +108px). Same
+     translucent-blue chrome as the wind/temp boxes. Tappable (Save / Brag). */
+  #gps-drive-bubble {
+    position: absolute; right: 10px;
+    bottom: calc(max(env(safe-area-inset-bottom), 8px) + 108px);
+    z-index: 22; display: none; text-align: center; color: #fff; cursor: pointer;
+    background: rgba(14,58,100,0.55); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.25); border-radius: 12px;
+    padding: 5px 11px; box-shadow: 0 3px 12px rgba(0,0,0,0.5);
+    text-shadow: 0 1px 4px rgba(0,0,0,0.55);
+  }
+  #gps-drive-bubble .lbl { font-size: var(--gps-lbl); font-weight: 800; letter-spacing: 0.08em; opacity: 0.92; }
+  #gps-drive-bubble .val { font-size: var(--gps-num); font-weight: 900; line-height: 1.05; }
+  /* Spectators don't get the drive bubble (it reads from the player's own GPS). */
+  #gps-overlay.spectating #gps-drive-bubble { display: none !important; }
 
   .gps-bottombar {
     position: absolute; left: 0; right: 0; bottom: calc(max(env(safe-area-inset-bottom), 8px) + 50px);
@@ -5318,6 +5334,13 @@
     <div class="gps-mm" id="gps-mm-money"></div>
   </div>
 
+  <!-- Estimated drive (lower-right, level with the money chips). JS shows it once
+       you've driven off the tee on a par 4/5; tap to Save the shot or Brag. -->
+  <div id="gps-drive-bubble" title="Tap to save or brag this drive">
+    <div class="lbl">Est. Drive</div>
+    <div class="val">—</div>
+  </div>
+
   <!-- Mini scorecard chip — bottom-right, just above the map's © info button. -->
   <button id="gps-scorecard" title="Scorecard" aria-label="Scorecard">
     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
@@ -5636,7 +5659,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.132';
+const BG_BUILD = 'v2026.11.133';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -31433,6 +31456,7 @@ const gpsView = (() => {
   let farWarned = false;                   // too-far toast shown once per hole
   let holeArrived = false;                  // GPS only takes over once you reach the tee
   let _driveShownHole = 0, _driveStableSince = 0, _driveLastPos = null; // drive-yardage estimate state (per hole)
+  let _holeStartPos = null;                 // actual GPS spot where this hole started (real tee / cart start) — basis for the Est. Drive bubble
   let _lastTrackYds = 0;                     // last Track Shot distance (for "Save to my shots")
   let spectate = null;                      // { pid } when watching someone else's live round (read-only)
   let ball = null, target = null;
@@ -32033,6 +32057,8 @@ const gpsView = (() => {
     ball = hd.tee.slice();
     holeArrived = false;
     _driveShownHole = 0; _driveStableSince = 0; _driveLastPos = null;  // reset drive-yardage estimate for the new hole
+    _holeStartPos = null;                                              // new hole → recapture the start point on the first real fix
+    try { const _db = el('gps-drive-bubble'); if (_db) _db.style.display = 'none'; } catch (e) {}
     targetManual = false;
     target = smartTargetPos();
     clearMarkers();
@@ -32176,42 +32202,46 @@ const gpsView = (() => {
       course: (state.game && state.game.course) ? state.game.course : ''
     };
   }
-  // Flash a small centered "Estimated drive — Xy" card (par 4s/5s, opt-in), with a
-  // Save button that opens the save-shot dialog (club defaulted from the yardage).
-  function showDriveEstimate(y) {
+  // ===== Estimated drive bubble (lower-right) =====
+  // Live "Est. Drive" readout: straight-line distance from where the player
+  // ACTUALLY started this hole (_holeStartPos — their first real GPS fix at/near
+  // the tee; works for a phone in the cart OR an Apple Watch at the tee box) to
+  // their current position. Deliberately NOT derived from the stored tee→green
+  // yardage. Shown on par 4s/5s once they've driven a meaningful distance, gated
+  // by the "Display drive yardage" toggle. Tap it to Save the shot or Brag.
+  // Replaces the old auto-popping centered card (wrong time / wrong distance).
+  function updateDriveBubble() {
+    const b = el('gps-drive-bubble');
+    if (!b) return;
+    const hide = () => { b.style.display = 'none'; };
     try {
-      let d = el('gps-drive-est');
-      if (!d) { d = document.createElement('div'); d.id = 'gps-drive-est'; el('gps-overlay').appendChild(d); }
-      // Informational yardage flash only — NO Save button. Saving a shot happens
-      // exclusively via Track Shot → "Save to my shots". The card is also
-      // pointer-events:none (see CSS) so it can never block map zoom or target drag.
-      d.innerHTML = '<div class="lbl">Estimated drive</div><div class="val">' + y + '<small>yds</small></div>';
-      d.classList.add('show');
-      clearTimeout(window._driveEstT);
-      window._driveEstT = setTimeout(() => { try { d.classList.remove('show'); } catch (e) {} }, 13000); // ~5s longer so there's time to tap Save
-    } catch (e) {}
-  }
-  // Estimate the drive once the player settles at their 2nd-shot spot: off the tee
-  // (>60y) and steady (<8y movement) for ~5s. Fires once per hole, par 4s/5s only,
-  // when the "Display drive yardage" toggle is on. Player only (not spectators).
-  function maybeEstimateDrive(p) {
-    try {
-      if (spectate) return;
-      if (typeof driveYardageEnabled === 'function' && !driveYardageEnabled()) return;
-      if (!hd || !hd.tee || _driveShownHole === hole) return;
+      if (spectate || mode !== 'view') return hide();
+      if (typeof driveYardageEnabled === 'function' && !driveYardageEnabled()) return hide();
+      if (!holeArrived || !_holeStartPos || !Array.isArray(ball)) return hide();
       const pars = state.game && state.game.pars;
       const par = pars ? (pars[hole - 1] || 4) : 4;
-      if (par !== 4 && par !== 5) return;
-      const dTee = ydsBetween(p, hd.tee);
-      if (dTee < 150) { _driveStableSince = 0; _driveLastPos = p; return; }  // <150y from tee → drive not registered yet
-      const moved = _driveLastPos ? ydsBetween(p, _driveLastPos) : 999;
-      _driveLastPos = p;
-      const now = Date.now();
-      if (moved > 8) { _driveStableSince = now; return; }                    // still walking → reset settle timer
-      if (!_driveStableSince) { _driveStableSince = now; return; }
-      if (now - _driveStableSince < 4000) return;                            // need ~4s settled at the ball
-      _driveShownHole = hole;
-      showDriveEstimate(Math.round(dTee));
+      if (par !== 4 && par !== 5) return hide();        // a "drive" only makes sense on par 4s / 5s
+      const yds = ydsBetween(_holeStartPos, ball);
+      if (yds < 50) return hide();                      // still on/near the tee — nothing meaningful yet
+      const v = b.querySelector('.val'); if (v) v.textContent = yds + 'y';
+      b.dataset.yds = yds;
+      b.style.display = 'block';
+    } catch (e) { hide(); }
+  }
+  // Tap the Est. Drive bubble → reuse the shot panel (Save to my shots / Brag-share).
+  function openDriveShot() {
+    try {
+      const b = el('gps-drive-bubble');
+      const yds = b ? (parseInt(b.dataset.yds, 10) || 0) : 0;
+      if (yds <= 0) return;
+      _lastTrackYds = yds;
+      el('gps-shot-yds').textContent = yds;
+      const g = state.game;
+      el('gps-shot-sub').textContent = 'Estimated drive · Hole ' + hole + (g && g.course ? ' · ' + g.course : '');
+      const quipEl = el('gps-shot-quip');
+      quipEl.textContent = '…';
+      shotPlayerName().then(n => { const q = shotQuip(n, yds); quipEl.textContent = q; quipEl.dataset.quip = q; }).catch(() => {});
+      el('gps-shot-panel').style.display = 'block';
     } catch (e) {}
   }
 
@@ -32405,6 +32435,7 @@ const gpsView = (() => {
     try { const _fb = document.querySelector('.fmb-top'); if (_fb) _fb.classList.toggle('target-moved', fbmFrom === target); } catch (e) {}
     applyPlays();
     positionPills();
+    try { updateDriveBubble(); } catch (e) {}
   }
 
   function positionPills() {
@@ -32750,8 +32781,11 @@ const gpsView = (() => {
       if (!holeArrived && hd && hd.tee && hd.mid &&
           distM(p, hd.tee) > 120 && distM(p, hd.tee) <= distM(p, hd.mid)) return;
       holeArrived = true;
+      // First real fix on this hole = where the player actually started it (the real
+      // tee box for a watch at address, or the cart's start spot). This — NOT the
+      // stored tee→green yardage — is the basis for the Est. Drive bubble.
+      if (!_holeStartPos) _holeStartPos = p.slice();
       ball = p; if (ballMk) ballMk.setLngLat(ball);
-      try { maybeEstimateDrive(p); } catch (e) {}
       // The target walks with the player: re-aim per the smart rules unless
       // they've placed it by hand on this hole. A HAND-PLACED target that the
       // player has now reached or walked PAST (it sits closer to the tee / farther
@@ -33814,6 +33848,7 @@ const gpsView = (() => {
     el('gps-pill-approach').onclick = () => openPlaysPanel('approach');
     el('pl-close').onclick = closePlaysPanel;
     el('gps-track').onclick = () => { track ? finishTrack() : startTrack(); };
+    { const _db = el('gps-drive-bubble'); if (_db) _db.onclick = openDriveShot; }
     el('gps-shot-share').onclick = shareShot;
     { const _ss = el('gps-shot-save'); if (_ss) _ss.onclick = () => { try { el('gps-shot-panel').style.display = 'none'; openSaveShotModal(_lastTrackYds, currentConditions()); } catch (e) {} }; }
     el('gps-shot-done').onclick = () => { el('gps-shot-panel').style.display = 'none'; };
