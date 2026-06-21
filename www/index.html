@@ -5793,7 +5793,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.152';
+const BG_BUILD = 'v2026.11.153';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -22024,9 +22024,11 @@ async function renderHomeLive() {
     let meNorm = '';
     try { const _mn = await getMeName(); meNorm = _mn ? normalizeNameSegment(_mn) : ''; } catch (e) {}
     rows
-      // Recency = a FINISHED round's actual finish time (stable), so a re-synced or
-      // edited old round can't resurface in "last 24h"; a LIVE round uses updated_at.
-      .map(r => { const g = r.data; const upd = r.updated_at ? Date.parse(r.updated_at) : 0; return { g, t: (g && g.finishedAt) ? g.finishedAt : upd, code: r.code }; })
+      // Recency = when the round was actually PLAYED (createdAt), set once at
+      // creation and never bumped. finishedAt/updated_at get bumped when an old
+      // round is re-opened or re-finished, which made rounds played DAYS ago
+      // resurface in "last 24h". createdAt keeps the window honest.
+      .map(r => { const g = r.data || {}; const upd = r.updated_at ? Date.parse(r.updated_at) : 0; const played = g.createdAt || g.firstScoreAt || (g.finishedAt || upd); return { g, t: played, code: r.code }; })
       .filter(x => x.g && Array.isArray(x.g.players) && x.t >= hlCut && (_scope === 'everyone' || _amAdmin || isCrewGame(x.g)))
       .forEach(x => {
         const g = x.g;
@@ -29416,6 +29418,48 @@ async function loadTourneyScores(t) {
   } catch (e) { return null; }
 }
 
+// Phase 4 — 4-man TEAM standings "vs the field": each group plays as one team
+// (Scramble / Best Ball / Team Quota in 4-man mode); rank every group's team
+// total against the rest of the field, per day. Read-only aggregation.
+async function loadTourneyTeamStandings(t) {
+  try {
+    if (!supaReady) await initSupabase();
+    if (!supa || !supaOnline) return null;
+    const { data, error } = await supa.from('games').select('data').or('data->>tourneyId.eq.' + t.id + ',data->t2->>tournamentId.eq.' + t.id).limit(100);
+    if (error || !Array.isArray(data) || !data.length) return null;
+    const byDay = {};
+    data.forEach(row => {
+      const g = row.data;
+      if (!g || !g.games || !Array.isArray(g.players)) return;
+      const day = (g.t2 && g.t2.day) || 1;
+      const grp = (g.t2 && g.t2.group) || '?';
+      let entry = null, label = '', points = false;
+      try {
+        if (g.games.scramble && g.games.scramble.teamMode === '4man' && typeof calcScramble4man === 'function') {
+          const r = calcScramble4man(g, g.games.scramble);
+          if (r && r.holesComplete > 0) { entry = { total: r.teamTotal, parTotal: r.parTotal, thru: r.holesComplete, name: r.teamName }; label = 'Scramble'; }
+        } else if (g.games.teamLowball && g.games.teamLowball.teamMode === '4man' && typeof calcTeamLowball4man === 'function') {
+          const r = calcTeamLowball4man(g, g.games.teamLowball);
+          if (r && r.result && r.result.played > 0) { entry = { total: r.result.teamTotal, parTotal: r.result.parTotal, thru: r.result.played, name: r.result.teamName }; label = 'Best Ball'; }
+        } else if (g.games.teamQuota && g.games.teamQuota.teamMode === '4man' && typeof calcTeamQuota4man === 'function') {
+          const r = calcTeamQuota4man(g, g.games.teamQuota);
+          if (r) { entry = { total: r.aTotal, parTotal: null, thru: null, name: g.players.map(p => displayFirst(p)).join(', ') }; label = 'Team Quota'; points = true; }
+        }
+      } catch (e) {}
+      if (!entry) return;
+      if (!byDay[day]) byDay[day] = { fmt: label, points: points, teams: [] };
+      byDay[day].teams.push(Object.assign({ group: grp }, entry));
+    });
+    const days = Object.keys(byDay).map(Number).sort((a, b) => a - b);
+    if (!days.length) return null;
+    days.forEach(d => {
+      const pts = byDay[d].points;
+      byDay[d].teams.sort((a, b) => pts ? (b.total - a.total) : (a.total - b.total));
+    });
+    return { byDay: byDay, days: days };
+  } catch (e) { return null; }
+}
+
 // #26 Phase 1b — combine the FIELD side bets across every group into ONE event-wide
 // pool (Tyler's "GIRs tracked per group, combined into a giant pool"). We build a
 // virtual game = the whole field (players keyed by name, since each group's round
@@ -29693,12 +29737,25 @@ async function openEventLeaderboard(t) {
   ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
   const body = ov.querySelector('#evlb-body');
   try {
-    const [field, list, money, xbets] = await Promise.all([buildTourneyField(t), loadTourneyScores(t), loadTourneyMoney(t), loadTourneyXBetResults(t)]);
+    const [field, list, money, xbets, teamStand] = await Promise.all([buildTourneyField(t), loadTourneyScores(t), loadTourneyMoney(t), loadTourneyXBetResults(t), loadTourneyTeamStandings(t)]);
     let html = '';
     if (list && list.length) {
       html += '<h3 style="margin:6px 0 4px">Standings — whole field</h3><div style="font-size:13px">';
       list.forEach((r, i) => { html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:48px;text-align:right;font-weight:700">' + _evFmtTp(r.toPar) + '</span><span style="width:78px;text-align:right;color:var(--text-muted)">' + r.gross + ' (' + r.thru + ')</span></div>'; });
       html += '</div>';
+    }
+    if (teamStand && teamStand.days && teamStand.days.length) {
+      teamStand.days.forEach(d => {
+        const ds = teamStand.byDay[d];
+        html += '<h3 style="margin:14px 0 4px">🤝 Team standings — Day ' + d + ' · ' + escapeHtml(ds.fmt) + ' <span class="small-text" style="color:var(--text-muted)">vs the field</span></h3><div style="font-size:13px">';
+        ds.teams.forEach((tm, i) => {
+          const score = ds.points
+            ? ((tm.total > 0 ? '+' : '') + tm.total + ' pts')
+            : (tm.total + (tm.parTotal != null ? ' (' + _evFmtTp(tm.total - tm.parTotal) + ')' : ''));
+          html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">G' + escapeHtml(String(tm.group)) + ' · ' + escapeHtml(tm.name || '') + '</span><span style="width:92px;text-align:right;font-weight:700">' + escapeHtml(score) + '</span>' + (tm.thru != null ? '<span style="width:40px;text-align:right;color:var(--text-muted)">(' + tm.thru + ')</span>' : '') + '</div>';
+        });
+        html += '</div>';
+      });
     }
     if (field && field.players && field.players.length && Array.isArray(field.pars)) {
       html += '<h3 style="margin:14px 0 4px">Full scorecard</h3>' + buildEventScorecardHtml(field);
