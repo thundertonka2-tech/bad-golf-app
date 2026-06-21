@@ -5628,7 +5628,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.119';
+const BG_BUILD = 'v2026.11.120';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -27089,8 +27089,11 @@ async function t2RenderCoursePicker(q) {
 
 async function t2StartDay(dayId, dayNumber) {
   _t2StartCtx = { dayId: dayId, dayNumber: dayNumber };
-  // Template default course? Skip the picker entirely — one less tap.
   const t = _t2Current;
+  // Per-day course chosen in the setup screen? Launch straight from it (no prompt).
+  const dc = (t && t.settings && t.settings.dayCourses) ? t.settings.dayCourses[dayNumber] : null;
+  if (dc && dc.id !== undefined && dc.id !== null) { showToast('Course: ' + (dc.name || 'course')); return t2LaunchDayRounds(dc.id); }
+  // Template default course? Skip the picker entirely — one less tap.
   const defId = t && t.settings ? t.settings.defaultCourseId : undefined;
   if (defId !== undefined && defId !== null) {
     const saves = await getCourseSaves();
@@ -27102,6 +27105,66 @@ async function t2StartDay(dayId, dayNumber) {
     }
   }
   t2OpenCoursePicker({ allowSkip: false, onPick: (cid) => t2LaunchDayRounds(cid) });
+}
+
+// Pick the COURSE for a specific day in the setup screen (stored on the
+// tournament so the day launches straight from it — no start-time prompt).
+function t2PickDayCourse(day) {
+  const t = _t2Current; if (!t) return;
+  const d = parseInt(day, 10);
+  t2OpenCoursePicker({ allowSkip: false, onPick: async (cid) => {
+    try { document.getElementById('t2-course-modal').classList.remove('show'); } catch (e) {}
+    let name = 'Standard Par 72';
+    if (cid) {
+      let saves = {}; try { saves = (await getCourseSaves()) || {}; } catch (e) {}
+      const libc = (typeof COURSE_LIBRARY !== 'undefined' && Array.isArray(COURSE_LIBRARY)) ? COURSE_LIBRARY.find(c => c.id === cid) : null;
+      name = (saves[cid] && saves[cid].name) || (libc && libc.name) || 'Course';
+    }
+    const settings = Object.assign({}, t.settings || {});
+    settings.dayCourses = Object.assign({}, settings.dayCourses || {});
+    settings.dayCourses[d] = { id: cid || '', name: name };
+    const ok = await t2Update(t.id, { settings });
+    if (!ok) { showToast('Could not save course'); return; }
+    t.settings = settings; if (_t2Current && _t2Current.id === t.id) _t2Current.settings = settings;
+    showToast('Day ' + d + ' · ' + name);
+    renderT2Home();
+  } });
+}
+
+// Commissioner assigns each player's TEE BOX for a day's course (used for
+// handicap strokes + GPS yardages). Stored per course id on the tournament.
+async function t2AssignDayTees(day, cid) {
+  const t = _t2Current; if (!t) return;
+  let tees = [];
+  if (cid) { try { const sc = await getCourseScorecard(cid); if (sc && Array.isArray(sc.tees)) tees = sc.tees; } catch (e) {} }
+  if (!tees.length) { showToast('No saved tees for that course — add them in the course editor, or players use the default.'); return; }
+  const players = await t2GetPlayers(t.id);
+  if (!players.length) { showToast('Add players first'); return; }
+  const pt = (t.settings && t.settings.playerTees && t.settings.playerTees[cid]) || {};
+  const teeOpt = (cur) => '<option value="">— tee —</option>' + tees.map(te => '<option value="' + t2esc(te.label) + '"' + (cur === te.label ? ' selected' : '') + '>' + escapeHtml(te.label) + (te.yards ? ' · ' + te.yards + 'y' : '') + '</option>').join('');
+  const rows = players.map(p => '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="flex:1;min-width:0">' + escapeHtml(p.display_name) + '</div><select class="ptee" data-pid="' + t2esc(p.id) + '" style="flex:0 0 auto;max-width:55%">' + teeOpt(pt[p.id]) + '</select></div>').join('');
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100060';
+  ov.innerHTML = '<div class="modal"><h2 style="margin-bottom:4px">⛳ Assign tees — Day ' + escapeHtml(String(day)) + '</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">Pick each player\'s tee box for this course. Used for handicap strokes and GPS yardages.</p>' +
+    rows +
+    '<div class="actions" style="margin-top:10px"><button id="pt-cancel" style="flex:1">Cancel</button><button class="primary" id="pt-save" style="flex:1">Save tees</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector('#pt-cancel').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#pt-save').onclick = async () => {
+    const map = {};
+    ov.querySelectorAll('.ptee').forEach(s => { if (s.value) map[s.dataset.pid] = s.value; });
+    const settings = Object.assign({}, t.settings || {});
+    settings.playerTees = Object.assign({}, settings.playerTees || {});
+    settings.playerTees[cid] = map;
+    const ok = await t2Update(t.id, { settings });
+    if (!ok) { showToast('Could not save tees'); return; }
+    t.settings = settings; if (_t2Current && _t2Current.id === t.id) _t2Current.settings = settings;
+    showToast('Tees saved ✓');
+    close();
+  };
 }
 
 // Create one normal Bad Golf round per group, pre-configured with the day's
@@ -27137,6 +27200,9 @@ async function t2LaunchDayRounds(courseId) {
   const groups = await t2GetGroups(ctx.dayId);
   const players = await t2GetPlayers(t.id);
   const pById = {}; players.forEach(p => pById[p.id] = p);
+  // Commissioner's per-player tee picks for this course (falls back to the
+  // course's only tee, or null when the course has several and none was set).
+  const dayTees = (t.settings && t.settings.playerTees && t.settings.playerTees[courseId || '']) || {};
   let made = 0;
   for (const grp of groups) {
     if (grp.game_code) continue; // already launched
@@ -27152,7 +27218,7 @@ async function t2LaunchDayRounds(courseId) {
         id: 't2p' + i + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
         firstName: first, lastName: last, name: combineName(first, last),
         hcp: h, rawHcp: h, playsGross: false,
-        teeLabel: tees.length === 1 ? tees[0].label : null,
+        teeLabel: dayTees[m.tournament_player_id] || (tees.length === 1 ? tees[0].label : null),
         _team: m.team
       };
     });
@@ -27706,6 +27772,12 @@ async function renderT2Home() {
       '</select></div>' +
       '<div class="field"><input type="date" class="t2-day-date" data-day="' + i + '" value="' + (d.play_date || '') + '"' + (amCommish ? '' : ' disabled') + '></div>' +
       '</div>';
+    // Per-day COURSE + tee assignment (chosen up front so the day can be scheduled).
+    const _dc = (t.settings && t.settings.dayCourses && t.settings.dayCourses[i]) || null;
+    html += '<div style="margin:0 0 8px 50px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
+      '<button class="small t2-day-course" data-day="' + i + '"' + (amCommish ? '' : ' disabled') + '>📍 ' + t2esc(_dc && _dc.name ? _dc.name : 'Pick course') + '</button>' +
+      ((_dc && amCommish) ? '<button class="small t2-day-tees" data-day="' + i + '" data-cid="' + t2esc(_dc.id || '') + '">⛳ Assign tees</button>' : '') +
+      '</div>';
     // Groups for this day (visible to every member; controls for the commissioner)
     const gs = groupsByDay[i] || [];
     const started = (d.status === 'active') || gs.some(g2 => g2.game_code);
@@ -27777,7 +27849,8 @@ async function renderT2Home() {
     html += '</div>';
   }
   if (amCommish) html += '<button class="full" id="t2-add-day" style="margin-top:6px">➕ Add day</button>';
-  if (amCommish) html += '<button class="primary full" id="t2-save-days" style="margin-top:6px">Save days</button>';
+  if (amCommish) html += '<button class="primary full" id="t2-save-days" style="margin-top:6px">💾 Schedule &amp; Save</button>';
+  if (amCommish) html += '<button class="full" id="t2-start-event" style="margin-top:8px;background:var(--accent);color:#fff;border:none;font-weight:700">🚀 Start Event</button>';
   if (amCommish) html += '<button class="full" id="t2-save-template" style="margin-top:8px">⭐ Save as template</button>';
   if (amCommish) html += '<button class="full" id="t2-delete" style="margin-top:14px;color:var(--danger);border-color:var(--danger)">Delete tournament</button>';
 
@@ -27851,12 +27924,21 @@ async function renderT2Home() {
       saveDays.disabled = false;
       saveDays.textContent = 'Save days';
       if (err) { showToast('Could not save days: ' + err); return; }
-      showToast('Days saved ✓');
+      if ((t.status || '') !== 'live') { try { await t2Update(t.id, { status: 'scheduled' }); t.status = 'scheduled'; if (_t2Current) _t2Current.status = 'scheduled'; } catch (e) {} }
+      showToast('Scheduled & saved ✓');
       // Re-render from the cloud so what you see is exactly what was saved.
       await renderT2Home();
     };
     const addDay = document.getElementById('t2-add-day');
     if (addDay) addDay.onclick = () => t2AddDay(t);
+    const startEvent = document.getElementById('t2-start-event');
+    if (startEvent) startEvent.onclick = async () => {
+      const ok = await t2Update(t.id, { status: 'live' });
+      if (!ok) { showToast('Could not start the event'); return; }
+      t.status = 'live'; if (_t2Current) _t2Current.status = 'live';
+      showToast('Event started — build each day\'s groups, then tap ▶ Start day');
+      await renderT2Home();
+    };
     const del = document.getElementById('t2-delete');
     if (del) del.onclick = async () => {
       if (!confirm('Delete "' + t.name + '"? This removes the tournament for everyone.')) return;
@@ -27893,7 +27975,9 @@ async function renderT2Home() {
   // Groups: open a group's round (any member); build/start/swap (commissioner).
   body.querySelectorAll('.t2-open-round').forEach(b => b.onclick = () => openT2Round(b.dataset.code));
   if (amCommish) {
-    body.querySelectorAll('.t2-build-groups').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
+    body.querySelectorAll('.t2-day-course').forEach(b => b.onclick = () => t2PickDayCourse(b.dataset.day));
+  body.querySelectorAll('.t2-day-tees').forEach(b => b.onclick = () => t2AssignDayTees(b.dataset.day, b.dataset.cid));
+  body.querySelectorAll('.t2-build-groups').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10)));
   body.querySelectorAll('.t2-build-hcp').forEach(b => b.onclick = () => t2BuildGroupsForDay(b.dataset.dayid, parseInt(b.dataset.day, 10), true));
   body.querySelectorAll('.t2-stagger-tees').forEach(b => b.onclick = () => t2StaggerTeeTimes(b.dataset.dayid));
   body.querySelectorAll('.t2-edit-teetime').forEach(b => b.onclick = () => t2EditGroupTeeTime(b.dataset.gid, b.dataset.tt));
