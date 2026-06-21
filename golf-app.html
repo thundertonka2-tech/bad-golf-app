@@ -36257,4 +36257,292 @@ async function courseDataImport(file, stateFilter) {
     const records = parseCsvRecords(text);
     if (!records.length) { log('No rows found in that CSV.', '#ff8a80'); return; }
 
-    const pick = (r, aliases) => { for (const a of aliases) { if (r[a] != null && r[a] !== '') ret
+    const pick = (r, aliases) => { for (const a of aliases) { if (r[a] != null && r[a] !== '') return r[a]; } return ''; };
+    const NAME = ['course', 'course_name', 'name', 'club', 'facility', 'course name', 'club name'];
+    const STATE = ['state', 'st', 'state_code', 'state code'];
+    const CITY = ['city', 'town'];
+    const TEE = ['tee', 'tee_label', 'tee name', 'tee_name', 'teename', 'set', 'color', 'tees'];
+    const RATING = ['rating', 'course_rating', 'course rating', 'cr', 'crating', 'men_rating', 'mens_rating', 'm_rating', 'mrating', 'men rating'];
+    const SLOPE = ['slope', 'slope_rating', 'slope rating', 'srating', 'men_slope', 'mens_slope', 'm_slope', 'mslope', 'men slope'];
+    // Women's rating/slope — for tees that carry separate women's numbers. Two CSV
+    // shapes are supported: (a) extra women's columns on the same row, or (b) a gender
+    // column where a row's rating/slope belong to women (rows merge by tee label).
+    const WRATING = ['women_rating', 'womens_rating', 'w_rating', 'wrating', 'rating_w', 'ladies_rating', 'women rating', 'womens rating', 'wcr'];
+    const WSLOPE = ['women_slope', 'womens_slope', 'w_slope', 'wslope', 'slope_w', 'ladies_slope', 'women slope', 'womens slope', 'wsr'];
+    const GENDER = ['gender', 'sex', 'tee_gender', 'tee gender', 'teegender', 'm/f', 'mf'];
+    const YARD = ['yardage', 'yards', 'length', 'distance', 'yds'];
+
+    // Guard against picking the wrong file. The unmatched export
+    // (course-import-unmatched.csv) has name/state/city but NO rating/slope,
+    // so a missing rating/slope header almost always means wrong file.
+    const headerKeys = Object.keys(records[0] || {});
+    const hasCol = aliases => aliases.some(a => headerKeys.includes(a));
+    if (!((hasCol(RATING) && hasCol(SLOPE)) || (hasCol(WRATING) && hasCol(WSLOPE)))) {
+      log('This CSV has no rating/slope columns — looks like the wrong file.', '#ff8a80');
+      log('Pick <b>course-ratings-import.csv</b> (not course-import-unmatched.csv).', '#ffd34d');
+      return;
+    }
+
+    const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const groups = {};
+    let teeRows = 0;
+    records.forEach(r => {
+      const name = pick(r, NAME); if (!name) return;
+      let state = (pick(r, STATE) || '').toUpperCase();
+      const city = pick(r, CITY);
+      if (!state) { const mm = (city || '').match(/,\s*([A-Za-z]{2})$/); if (mm) state = mm[1].toUpperCase(); }
+      let mRating = parseFloat(pick(r, RATING)), mSlope = parseInt(pick(r, SLOPE), 10);
+      let wRating = parseFloat(pick(r, WRATING)), wSlope = parseInt(pick(r, WSLOPE), 10);
+      // Gender-column shape: this row's rating/slope belong to women → move them over.
+      const gen = (pick(r, GENDER) || '').trim().toLowerCase();
+      if (gen && /^(w|f|women|woman|female|ladies|lady)/.test(gen) && isFinite(mRating) && isFinite(mSlope) && !isFinite(wRating)) {
+        wRating = mRating; wSlope = mSlope; mRating = NaN; mSlope = NaN;
+      }
+      const hasM = isFinite(mRating) && isFinite(mSlope);
+      const hasW = isFinite(wRating) && isFinite(wSlope);
+      if (!hasM && !hasW) return;
+      const tee = pick(r, TEE) || 'Back';
+      const yard = parseInt(pick(r, YARD), 10);
+      const key = norm(name) + '|' + state;
+      const g = groups[key] = groups[key] || { name, city, state, tees: [] };
+      // Merge by tee label so a men's row and a women's row for the SAME tee combine.
+      let t = g.tees.find(x => norm(x.label) === norm(tee));
+      if (!t) { t = { label: tee }; g.tees.push(t); }
+      if (hasM) { t.rating = mRating; t.slope = mSlope; }
+      if (hasW) { t.ratingW = wRating; t.slopeW = wSlope; }
+      if (isFinite(yard) && t.yardage == null) t.yardage = yard;
+      teeRows++;
+    });
+    let groupList = Object.values(groups);
+    // Scope to one state when the combined flow passes it — so we only match
+    // the state we just added instead of re-touching every state's scorecards.
+    const stF = (stateFilter || '').toUpperCase();
+    if (stF) {
+      groupList = groupList.filter(g => g.state === stF);
+      log('Scoped to ' + stF + ': ' + groupList.length + ' courses from the dataset.');
+    }
+    log('Parsed ' + records.length + ' rows → ' + groupList.length + ' courses, ' + teeRows + ' tees with rating/slope.');
+    if (!groupList.length) { log('No usable rows — check that the CSV has rating + slope columns.', '#ff8a80'); return; }
+
+    if (typeof loadCourseLibrary === 'function') await loadCourseLibrary();
+    const libState = c => (c.st || (((c.city || '') .match(/,\s*([A-Za-z]{2})$/) || [])[1]) || '').toUpperCase();
+    // "core" name = drop common golf-entity words so "Buffalo Creek Golf Club"
+    // matches "Buffalo Creek GC". Used only as a SECONDARY match, and only when
+    // exactly one library course shares that core in the state (no ambiguity) —
+    // so we never assign a rating to the wrong course.
+    // "core" = the distinctive words, with golf-entity + filler words dropped,
+    // so "Querbes Park Golf Course" and "Querbes Golf Course" both core to
+    // "querbes". coreSorted ignores word order (catches "Magnolia at Beau Chene"
+    // vs "Beau Chene - Magnolia"). Matching stays ambiguity-guarded throughout.
+    const STOP = new Set(['golf', 'club', 'course', 'country', 'links', 'the', 'at', 'and', 'of', 'gc', 'cc', 'inc', 'llc', 'g', 'c', 'park', 'municipal', 'memorial', 'racquet', 'recreation', 'public', 'sr', 'jr', 'driving', 'range']);
+    const coreToks = s => norm(s).split(' ').filter(w => w && !STOP.has(w));
+    const core = s => coreToks(s).join(' ');
+    const coreSorted = s => coreToks(s).slice().sort().join(' ');
+    const byNameState = {}, byName = {}, byCoreState = {}, byTokState = {}, coresByState = {};
+    COURSE_LIBRARY.forEach(c => {
+      const st = libState(c);
+      const n = norm(c.name);
+      byNameState[n + '|' + st] = c;
+      (byName[n] = byName[n] || []).push(c);
+      const cs = core(c.name);
+      (byCoreState[cs + '|' + st] = byCoreState[cs + '|' + st] || []).push(c);
+      (byTokState[coreSorted(c.name) + '|' + st] = byTokState[coreSorted(c.name) + '|' + st] || []).push(c);
+      if (cs) (coresByState[st] = coresByState[st] || []).push({ cs: cs, c: c });
+    });
+    // Tiny edit-distance for guarded typo/apostrophe matching (Oaak→Oak).
+    function lev(a, b) {
+      if (a === b) return 0;
+      if (Math.abs(a.length - b.length) > 2) return 9;
+      let prev = []; for (let j = 0; j <= b.length; j++) prev[j] = j;
+      for (let i = 1; i <= a.length; i++) {
+        const cur = [i];
+        for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] !== b[j - 1] ? 1 : 0));
+        prev = cur;
+      }
+      return prev[b.length];
+    }
+
+    const saves = await getCourseSaves();
+    let matched = 0, filledTees = 0, preserved = 0;
+    const unmatched = [['name', 'state', 'city', 'tees']];
+    const byStateMatched = {};
+    const usedLibIds = new Set(); // one library course can't be claimed twice
+    groupList.forEach(g => {
+      const n = norm(g.name);
+      let lib = byNameState[n + '|' + g.state];                       // 1. exact name + state
+      if (!lib) { const cand = byName[n]; if (cand && cand.length === 1) lib = cand[0]; } // 2. unique name anywhere
+      if (!lib) { const cs = core(g.name); if (cs.length >= 4) { const c2 = byCoreState[cs + '|' + g.state]; if (c2 && c2.length === 1) lib = c2[0]; } } // 3. core name + state
+      if (!lib) { const tk = coreSorted(g.name); if (tk.length >= 4) { const c3 = byTokState[tk + '|' + g.state]; if (c3 && c3.length === 1) lib = c3[0]; } } // 4. same words any order
+      if (!lib) {                                                     // 5. guarded fuzzy (typos)
+        const cs = core(g.name);
+        if (cs.length >= 5) {
+          const pool = coresByState[g.state] || [];
+          const near = pool.filter(x => Math.abs(x.cs.length - cs.length) <= 2 && lev(x.cs, cs) <= 2);
+          const uniq = Array.from(new Set(near.map(x => x.c)));
+          if (uniq.length === 1) lib = uniq[0];
+        }
+      }
+      if (!lib || usedLibIds.has(lib.id)) { unmatched.push([g.name, g.state, g.city || '', g.tees.length]); return; }
+      usedLibIds.add(lib.id);
+      const ex = saves[lib.id] || {};
+      // NEVER overwrite a course that already has rating/slope tees — those are
+      // either manually entered (correct) or filled by an earlier import. The
+      // import only FILLS gaps; clobbering here is what changed Buffalo Creek's
+      // tees on a card that was already right.
+      // RULE: never override a manually-edited course (userEdited) — Kevin's
+      // hand-entered ratings/tees/pars are sacred — or one that already has
+      // rating/slope. Imports only ever FILL gaps, never clobber manual inputs.
+      const exHasRS = Array.isArray(ex.tees) && ex.tees.some(t => t && t.rating != null && t.slope != null);
+      if (ex.userEdited || exHasRS) { preserved++; return; }
+      saves[lib.id] = {
+        name: lib.name,
+        pars: Array.isArray(ex.pars) ? ex.pars : [],
+        sis: (Array.isArray(ex.sis) && ex.sis.length) ? ex.sis : DEFAULT_SI_IMPORT.slice(),
+        tees: g.tees,
+        updatedAt: Date.now()
+      };
+      matched++; filledTees += g.tees.length;
+      byStateMatched[g.state] = (byStateMatched[g.state] || 0) + 1;
+    });
+
+    await saveCourseSaves(saves);
+    log('✅ Filled <b>' + matched + '</b> courses (' + filledTees + ' tees) with rating/slope. Synced to everyone.', '#8fd19e');
+    Object.keys(byStateMatched).sort().forEach(st => log('   ' + st + ': ' + byStateMatched[st] + ' courses'));
+    if (unmatched.length > 1) {
+      log('⚠️ ' + (unmatched.length - 1) + ' dataset courses had no library match (different name/state). CSV downloaded so you can reconcile or add them.', '#ffd34d');
+      const csv = unmatched.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'course-import-unmatched.csv';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+    log('<br>Pars stay from OSM; this only set tee rating/slope/yardage. Done — close this panel.');
+  } catch (e) {
+    log('Import failed: ' + (e && e.message ? e.message : 'error'), '#ff8a80');
+    console.error('courseDataImport crashed:', e);
+  }
+}
+
+// Show a real on-screen file picker. A file dialog can only open from a
+// genuine user click — triggering input.click() from a timer/confirm() is
+// blocked by the browser (the dialog flashes and nothing happens). So we
+// render a visible <input type="file"> the user clicks directly.
+window.bgImportCourseData = (stateFilter) => {
+  let panel = document.getElementById('cpick-panel');
+  if (panel) panel.remove();
+  panel = document.createElement('div');
+  panel.id = 'cpick-panel';
+  panel.style.cssText = 'position:fixed;left:50%;top:16%;transform:translateX(-50%);z-index:9500;background:#fff;color:#1a1a1a;border-radius:14px;padding:20px;width:min(440px,92%);box-shadow:0 12px 48px rgba(0,0,0,0.45);text-align:center;font-family:inherit';
+  panel.innerHTML =
+    '<div style="font-weight:700;font-size:17px;margin-bottom:6px">Import course rating / slope</div>' +
+    '<div style="font-size:13px;color:#555;line-height:1.5;margin-bottom:16px">Tap <b>Choose File</b> and pick <b>course-ratings-import.csv</b>.<br>Existing pars are kept; tee rating/slope get filled and synced to everyone.</div>' +
+    '<input id="cpick-input" type="file" accept=".csv,text/csv,text/plain" style="display:block;margin:0 auto 16px;font-size:14px;max-width:100%">' +
+    '<button id="cpick-cancel" style="background:#eee;border:none;border-radius:8px;padding:9px 20px;cursor:pointer;font-size:14px;font-weight:600">Cancel</button>';
+  document.body.appendChild(panel);
+  if (stateFilter) {
+    const sub = panel.querySelector('div[style*="color:#555"]');
+    if (sub) sub.innerHTML = 'Pick <b>course-ratings-import.csv</b> — only <b>' + stateFilter + '</b> courses will be filled this run.';
+  }
+  document.getElementById('cpick-cancel').onclick = () => panel.remove();
+  document.getElementById('cpick-input').onchange = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) { panel.remove(); courseDataImport(f, stateFilter); }
+  };
+};
+{
+  // Showing the picker panel from a timer is fine (no gesture needed to add
+  // DOM); the file dialog itself opens from the user's click on the input.
+  if (/[?&]courseimport=1/.test(location.search)) {
+    setTimeout(() => { window.bgImportCourseData(); }, 1200);
+  }
+}
+
+// ---------- ONE-LINK full import for the next state (?nextstate=1) ----------
+// Chains all three steps for the next un-done state: add courses → GPS holes +
+// pars (scoped to that state only) → ratings/slope file picker (scoped too).
+// GPS must run before ratings so pars land first; the picker appears when the
+// crawl finishes. Console: bgNextState().
+async function runNextStateFull() {
+  // 1. Add the next un-done state's courses (no prompts).
+  const res = await gpsView.stateImport(null, { auto: true });
+  if (!res || !res.state) return; // all 48 done, or nothing to do
+  const st = res.state;
+  // 2. GPS holes + pars — ONLY this state (no re-walking other states).
+  await gpsView.batchImport({ state: st });
+  // 3. Ratings/slope: show the CSV picker, scoped to this state.
+  window.bgImportCourseData(st);
+}
+window.bgNextState = () => runNextStateFull();
+{
+  if (/[?&]nextstate=1/.test(location.search)) {
+    setTimeout(() => {
+      if (confirm('Run the FULL import for the NEXT state in one go?\n\nIt adds the state, maps its GPS holes + pars (this part can take a while — keep the tab open), then pops up a file picker for course-ratings-import.csv. Only the new state is processed.')) {
+        runNextStateFull();
+      }
+    }, 1500);
+  }
+}
+
+// Admin one-shot: ?osmimport=1 maps GPS hole data for the whole library,
+// ?osmimport=force re-crawls incomplete courses, ?osmimport=CA maps just one
+// state. Reads from the query string OR the hash, so a "#?osmimport=CA" style
+// link still works.
+{
+  const src = (location.search || '') + ' ' + (location.hash || '');
+  const om = src.match(/[?&]osmimport=(force|1|[A-Za-z]{2})/i);
+  if (om) {
+    const val = om[1].toLowerCase();
+    const force = val === 'force';
+    const stateCode = /^[a-z]{2}$/.test(val) ? val.toUpperCase() : null;
+    setTimeout(() => {
+      if (stateCode) {
+        if (confirm('Map GPS hole data for ' + stateCode + ' courses from OpenStreetMap?\n\nCrawls one course at a time — keep this tab open. Already-mapped courses are skipped.')) {
+          gpsView.batchImport({ state: stateCode });
+        }
+      } else if (confirm('Bulk-import GPS hole data for ' + (force ? 'ALL courses, INCLUDING ones already attempted (force mode)' : 'ALL library courses') + ' from OpenStreetMap?\n\nTakes a while on a big library — keep this tab open. Existing mappings are never overwritten.')) {
+        window.bgImportAllCourses(force);
+      }
+    }, 4000);
+  }
+}
+
+// Boot the app. If anything throws, surface it on the loading screen so we
+// don't get stuck silently.
+(async () => {
+  try {
+    await init();
+  } catch (e) {
+    console.error('Init failed:', e);
+    const loading = document.getElementById('loading');
+    if (loading) {
+      loading.innerHTML = '<p style="color:#791f1f">Couldn\'t start the app: ' + (e && e.message ? e.message : 'unknown error') + '</p><p class="small-text">Open the browser console for details.</p>';
+    }
+  }
+})();
+</script>
+
+<!-- ===== Bottom navigation (Home · Events · [Play] · Crew · Board · More) ===== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="bn-home" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></symbol>
+  <symbol id="bn-cal" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18M8 3v4M16 3v4"/></symbol>
+  <symbol id="bn-crew" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M16 6a3 3 0 0 1 0 6M21 20a6 6 0 0 0-4-5.6"/></symbol>
+  <symbol id="bn-stats" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+  <symbol id="bn-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></symbol>
+  <symbol id="bn-score" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></symbol>
+  <symbol id="bn-board" viewBox="0 0 24 24"><path d="M12 2v20"/><path d="M17 6c0-2-2-3-5-3s-5 1-5 3 2 3 5 3 5 1 5 3-2 3-5 3-5-1-5-3"/></symbol>
+  <symbol id="bn-wager" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5h4M9.5 14.5h4"/></symbol>
+  <symbol id="bn-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="bn-admin" viewBox="0 0 24 24"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6l8-4Z"/></symbol>
+</svg>
+<nav class="bottom-nav" id="bottom-nav"></nav>
+<div class="bnav-scrim" id="bnav-scrim" style="display:none" onclick="bnavCloseMore()"></div>
+<div class="bnav-sheet" id="bnav-sheet" style="display:none">
+  <h4>More</h4>
+  <div class="bnav-sheet-grid" id="bnav-sheet-grid"></div>
+  <p style="margin:12px 2px 0;font-size:11px;color:var(--text-muted)">Round history &amp; tournaments live under the <b>Events</b> tab.</p>
+</div>
+
+</body>
+</html>
