@@ -5795,7 +5795,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.164';
+const BG_BUILD = 'v2026.11.165';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -26151,16 +26151,16 @@ async function t2RemoveDay(dayNumber) {
       try { await supa.from('tournament_days').delete().eq('id', target.id); } catch (e) {}
     }
     for (const d of days) { if (d.day_number > dn) { try { await supa.from('tournament_days').update({ day_number: d.day_number - 1 }).eq('id', d.id); } catch (e) {} } }
-    const settings = Object.assign({}, t.settings || {});
-    if (settings.dayCourses) {
-      const dcOld = settings.dayCourses, dcNew = {};
-      Object.keys(dcOld).forEach(k => { const ki = parseInt(k, 10); if (ki < dn) dcNew[ki] = dcOld[k]; else if (ki > dn) dcNew[ki - 1] = dcOld[k]; });
-      settings.dayCourses = dcNew;
-    }
     const n = (t.num_days || 1) - 1;
-    await t2Update(t.id, { num_days: n, settings });
-    t.num_days = n; t.settings = settings;
-    if (_t2Current && _t2Current.id === t.id) { _t2Current.num_days = n; _t2Current.settings = settings; }
+    await t2MergeSettings(t.id, s => {
+      const renum = (obj) => { if (!obj) return obj; const out = {}; Object.keys(obj).forEach(k => { const ki = parseInt(k, 10); if (ki < dn) out[ki] = obj[k]; else if (ki > dn) out[ki - 1] = obj[k]; }); return out; };
+      if (s.dayCourses) s.dayCourses = renum(s.dayCourses);
+      if (s.dayGames) s.dayGames = renum(s.dayGames);
+      if (s.dayHcpRules) s.dayHcpRules = renum(s.dayHcpRules);
+    });
+    await t2Update(t.id, { num_days: n });
+    t.num_days = n;
+    if (_t2Current && _t2Current.id === t.id) _t2Current.num_days = n;
     showToast('Day ' + dn + ' removed');
     await renderT2Home();
   } catch (e) { showToast('Could not remove the day'); }
@@ -27638,17 +27638,29 @@ async function openT2Home(id) {
 function t2WithdrawnSet(t) {
   return new Set((t && t.settings && Array.isArray(t.settings.withdrawn)) ? t.settings.withdrawn : []);
 }
+// SAFELY read-modify-write a tournament's settings jsonb: re-fetch the LATEST
+// settings from the cloud first, apply the change, write back — so concurrent
+// saves (day games, course, tees, withdraws) can never clobber each other's keys.
+// Keeps _t2Current.settings in sync. THE fix for "my settings reverted".
+async function t2MergeSettings(tId, mutate) {
+  let fresh = {};
+  try { const cur = await t2Get(tId); if (cur && cur.settings && typeof cur.settings === 'object' && !Array.isArray(cur.settings)) fresh = cur.settings; } catch (e) {}
+  try { mutate(fresh); } catch (e) {}
+  const ok = await t2Update(tId, { settings: fresh });
+  if (ok && _t2Current && _t2Current.id === tId) _t2Current.settings = fresh;
+  return ok;
+}
 async function t2ToggleWithdraw(pid) {
   const t = _t2Current; if (!t) return;
-  const settings = Object.assign({}, t.settings || {});
-  const list = Array.isArray(settings.withdrawn) ? settings.withdrawn.slice() : [];
-  const i = list.indexOf(pid);
-  if (i >= 0) list.splice(i, 1); else list.push(pid);
-  settings.withdrawn = list;
-  const ok = await t2Update(t.id, { settings: settings });
+  let added = false;
+  const ok = await t2MergeSettings(t.id, s => {
+    const list = Array.isArray(s.withdrawn) ? s.withdrawn.slice() : [];
+    const i = list.indexOf(pid);
+    if (i >= 0) { list.splice(i, 1); added = false; } else { list.push(pid); added = true; }
+    s.withdrawn = list;
+  });
   if (!ok) { showToast('Could not update'); return; }
-  _t2Current.settings = settings;
-  showToast(i >= 0 ? 'Back in — future matches count again' : 'Withdrawn — unfinished matches forfeit, finished ones stand');
+  showToast(added ? 'Withdrawn — unfinished matches forfeit, finished ones stand' : 'Back in — future matches count again');
   await renderT2Home();
 }
 
@@ -27998,12 +28010,11 @@ function t2PickDayCourse(day) {
       const libc = (typeof COURSE_LIBRARY !== 'undefined' && Array.isArray(COURSE_LIBRARY)) ? COURSE_LIBRARY.find(c => c.id === cid) : null;
       name = (saves[cid] && saves[cid].name) || (libc && libc.name) || 'Course';
     }
-    const settings = Object.assign({}, t.settings || {});
-    settings.dayCourses = Object.assign({}, settings.dayCourses || {});
-    settings.dayCourses[d] = { id: cid || '', name: name };
-    const ok = await t2Update(t.id, { settings });
+    const ok = await t2MergeSettings(t.id, s => {
+      s.dayCourses = s.dayCourses || {};
+      s.dayCourses[d] = { id: cid || '', name: name };
+    });
     if (!ok) { showToast('Could not save course'); return; }
-    t.settings = settings; if (_t2Current && _t2Current.id === t.id) _t2Current.settings = settings;
     // Preserve any day dates/formats typed but not yet saved before re-render.
     try {
       const _arr = [];
@@ -28044,12 +28055,11 @@ async function t2AssignDayTees(day, cid) {
   ov.querySelector('#pt-save').onclick = async () => {
     const map = {};
     ov.querySelectorAll('.ptee').forEach(s => { if (s.value) map[s.dataset.pid] = s.value; });
-    const settings = Object.assign({}, t.settings || {});
-    settings.playerTees = Object.assign({}, settings.playerTees || {});
-    settings.playerTees[cid] = map;
-    const ok = await t2Update(t.id, { settings });
+    const ok = await t2MergeSettings(t.id, s => {
+      s.playerTees = s.playerTees || {};
+      s.playerTees[cid] = map;
+    });
     if (!ok) { showToast('Could not save tees'); return; }
-    t.settings = settings; if (_t2Current && _t2Current.id === t.id) _t2Current.settings = settings;
     showToast('Tees saved ✓');
     close();
   };
@@ -28582,12 +28592,11 @@ function t2LogoHtml(logo, sizePx) {
 }
 async function t2SetTeamLogo(team, logo) {
   const t = _t2Current; if (!t) return;
-  const settings = Object.assign({}, t.settings || {});
-  if (logo) settings['logo' + team] = logo;
-  else delete settings['logo' + team];
-  const ok = await t2Update(t.id, { settings: settings });
+  const ok = await t2MergeSettings(t.id, s => {
+    if (logo) s['logo' + team] = logo;
+    else delete s['logo' + team];
+  });
   if (!ok) { showToast('Could not save the logo'); return; }
-  _t2Current.settings = settings;
   await renderT2Home();
 }
 function t2OpenLogoPicker(team) {
@@ -30993,15 +31002,13 @@ async function init() {
     const setup = gatherSetup(); if (!setup) return false;
     const t = _t2Current;
     if (!t || t.id !== cfg.tournamentId) { showToast('Lost the event — reopen and try again'); return false; }
-    t.settings = t.settings || {};
-    t.settings.dayGames = t.settings.dayGames || {};
-    t.settings.dayGames[cfg.dayNumber] = setup.games || {};
-    t.settings.dayHcpRules = t.settings.dayHcpRules || {};
-    t.settings.dayHcpRules[cfg.dayNumber] = setup.hcpRules || null;
     const _cid = ($('course-name') && $('course-name').dataset.courseId) || '';
     const _cnm = ($('course-name') && ($('course-name').value || '').trim()) || '';
-    if (_cnm) { t.settings.dayCourses = t.settings.dayCourses || {}; t.settings.dayCourses[cfg.dayNumber] = { id: _cid, name: _cnm }; }
-    const ok = await t2Update(t.id, { settings: t.settings });
+    const ok = await t2MergeSettings(t.id, s => {
+      s.dayGames = s.dayGames || {}; s.dayGames[cfg.dayNumber] = setup.games || {};
+      s.dayHcpRules = s.dayHcpRules || {}; s.dayHcpRules[cfg.dayNumber] = setup.hcpRules || null;
+      if (_cnm) { s.dayCourses = s.dayCourses || {}; s.dayCourses[cfg.dayNumber] = { id: _cid, name: _cnm }; }
+    });
     if (!ok) { showToast('Save failed — check connection and try again'); return false; }
     return true;
   }
