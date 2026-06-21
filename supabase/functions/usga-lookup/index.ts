@@ -70,15 +70,25 @@ const norm = (s: string) =>
 
 // Step 1 — landing page: anti-forgery token + cookie + the "United States" value.
 async function getSession() {
-  const res = await fetch(BASE + "/", { headers: { "User-Agent": UA } });
+  const res = await fetch(BASE + "/", {
+    headers: {
+      "User-Agent": UA,
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Referer": BASE + "/",
+    },
+    redirect: "follow",
+  });
   const html = await res.text();
   const cookie = cookiesFrom(res);
-  const tok = (html.match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/i) ||
-    [])[1] || "";
+  // Robust: grab the hidden anti-forgery input, then pull its value (any attr order, " or ').
+  let tok = "";
+  const tag = html.match(/<input[^>]*__RequestVerificationToken[^>]*>/i);
+  if (tag) tok = (tag[0].match(/value="([^"]*)"/i) || tag[0].match(/value='([^']*)'/i) || [])[1] || "";
   // The US <option> value (kept dynamic so a site change won't break it).
   const us = (html.match(/<option[^>]*value="([^"]*)"[^>]*>\s*\*?\s*United States of America/i) ||
     [])[1] || "";
-  return { cookie, tok, us };
+  return { cookie, tok, us, status: res.status, len: html.length, hasForm: /clubName/.test(html) };
 }
 
 // Step 2 — search. Returns candidate courses with their CourseID.
@@ -242,7 +252,13 @@ Deno.serve(async (req: Request) => {
 
     const sess = await getSession();
     if (!sess.tok) {
-      return json({ ok: false, error: "Couldn't start a USGA session (the site may have changed)." });
+      return json({
+        ok: false,
+        error: "Couldn't start a USGA session — NCRDB landing GET = HTTP " + sess.status + ", " +
+          sess.len + " bytes, search form present: " + sess.hasForm + ", token found: no. " +
+          "If status isn't 200, bytes are low, or form=false, USGA's firewall is blocking the server's IP.",
+        diag: { status: sess.status, len: sess.len, hasForm: sess.hasForm },
+      });
     }
 
     let id = courseId;
