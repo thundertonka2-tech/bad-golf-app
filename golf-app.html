@@ -9695,6 +9695,50 @@ async function adminBlueGolfLookup(courseId, courseName) {
   showToast('Filled from BlueGolf ✓');
 }
 
+// Auto-fill a course's tee RATING + SLOPE (men's + women's) from the USGA's
+// National Course Rating Database via the usga-lookup Edge Function. USGA is the
+// authoritative rating source; it does NOT publish per-hole pars/stroke index, so
+// those are left as-is (use BlueGolf or the pars editor for those). Same output
+// shape as the BlueGolf lookup, so it fills the exact same fields.
+async function adminUsgaLookup(courseId, courseName) {
+  if (typeof supa === 'undefined' || !supa) { showToast('Sign in to use USGA lookup'); return; }
+  const _lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c && c.id === courseId) : null;
+  const _nm = (courseName || (_lib && _lib.name) || '').trim();
+  const _st = (_lib && _lib.st) || '';
+  showToast('Searching USGA for “' + (_nm || 'this course') + '”…');
+  let data = null;
+  try {
+    const r = await supa.functions.invoke('usga-lookup', { body: { name: _nm, state: _st } });
+    if (r.error) {
+      let body = '';
+      try { if (r.error.context && typeof r.error.context.text === 'function') body = await r.error.context.text(); } catch (e) {}
+      await blueGolfErr('USGA lookup failed.\n\nError: ' + ((r.error && r.error.message) || 'request blocked') + (body ? '\n\nServer said:\n' + String(body).slice(0, 600) : '') + '\n\nMake sure the "usga-lookup" Edge Function exists and has “Verify JWT” turned OFF (function → Settings).');
+      return;
+    }
+    data = r.data;
+  } catch (e) { await blueGolfErr('USGA lookup failed: ' + ((e && e.message) || e)); return; }
+  if (!data || !data.ok) { showToast((data && data.error) || 'No USGA match for that course'); return; }
+  const tees = Array.isArray(data.tees) ? data.tees.filter(t => t && t.label && ((t.rating != null && t.slope != null) || (t.ratingW != null && t.slopeW != null))) : [];
+  const pars = (Array.isArray(data.pars) && data.pars.length === 18) ? data.pars : null;
+  const sis = (Array.isArray(data.sis) && data.sis.length === 18) ? data.sis : null;
+  if (!tees.length) { showToast('No tee ratings found for that course'); return; }
+  const teeLines = tees.map(t => '• ' + t.label + ': ' + (t.rating != null ? ('M ' + t.rating + '/' + t.slope) : '') + (t.ratingW != null ? ((t.rating != null ? ' · ' : '') + 'W ' + t.ratingW + '/' + t.slopeW) : '') + (t.yards ? (' · ' + t.yards + 'y') : '')).join('\n');
+  let existing = null; try { existing = await getCourseScorecard(courseId); } catch (e) {}
+  const hadRS = !!(existing && Array.isArray(existing.tees) && existing.tees.some(t => t && (t.rating != null || t.ratingW != null)));
+  let msg = 'Found on USGA' + (data.name ? (' — "' + data.name + '"') : '') + ':\n\nTEES (rating/slope):\n' + teeLines + '\n\n'
+    + (pars ? ('PARS: ' + pars.join(' ') + '\n\n') : '');
+  msg += hadRS ? '⚠️ This course ALREADY has ratings/tees. Saving will OVERWRITE them.\n\nOverwrite and save?' : 'Save these ratings to the course?';
+  if (!window.confirm(msg)) { showToast('Cancelled — nothing changed'); return; }
+  // USGA gives rating/slope (+ optional pars/SI). Keep existing pars/SI when USGA has none.
+  const finalPars = pars || (existing && existing.pars) || new Array(18).fill(4);
+  const finalSis = sis || (existing && existing.sis) || (typeof DEFAULT_SI !== 'undefined' ? DEFAULT_SI.slice() : finalPars.map((_, i) => i + 1));
+  let ok = false;
+  try { ok = await persistCourseScorecard(courseId, courseName || data.name || '', finalPars, finalSis, tees); } catch (e) {}
+  if (ok === false) { showToast('Save failed — check your connection'); return; }
+  try { audit('usga_fill', courseId, tees.length + ' tees'); } catch (e) {}
+  showToast('Filled rating/slope from USGA ✓');
+}
+
 // Course detail screen — the guided "verify" hub. Walk the steps (details →
 // rating/tees → pars → GPS hole-by-hole), then Verify (only once 100% complete).
 async function openCourseDetail(id) {
@@ -9777,7 +9821,8 @@ async function openCourseDetail(id) {
     + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 6px">' + verPill + (skipped ? '<span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + (dupSibs.length ? '<span class="adm-flag" style="background:#b3261e">⚠ ' + dupSibs.length + ' duplicate' + (dupSibs.length === 1 ? '' : 's') + '</span>' : '') + '</div>'
     + (dupSibs.length ? btn('dedupe', '⚖️ Compare ' + (dupSibs.length + 1) + ' copies — pick which to keep', true) : '')
     + '<button data-act="prep" style="width:100%;padding:13px;margin-top:8px;border-radius:11px;border:none;background:#0a7d3b;color:#fff;font-size:15px;font-weight:800;cursor:pointer">🔎 Research course — USGA · 18Birdies · BlueGolf</button>'
-    + '<button data-act="bluegolf" style="width:100%;padding:13px;margin-top:8px;border-radius:11px;border:none;background:#1565c0;color:#fff;font-size:15px;font-weight:800;cursor:pointer">🟦 Auto-fill from BlueGolf</button>'
+    + '<button data-act="usga" style="width:100%;padding:13px;margin-top:8px;border-radius:11px;border:none;background:#0b5394;color:#fff;font-size:15px;font-weight:800;cursor:pointer">⛳ Auto-fill rating/slope — USGA</button>'
+    + '<button data-act="bluegolf" style="width:100%;padding:13px;margin-top:8px;border-radius:11px;border:none;background:#1565c0;color:#fff;font-size:15px;font-weight:800;cursor:pointer">🟦 Auto-fill from BlueGolf (pars + SI)</button>'
     + '<div class="small-text" style="color:var(--text-muted);margin:8px 0 2px;text-transform:uppercase;letter-spacing:.04em;font-size:11px">Guided verify — finish each step</div>'
     + step(1, 'Name / city / state', true, 'edit', 'Edit')
     + step(2, 'Rating, slope &amp; tees', hasRSnow, 'rate', hasRSnow ? 'Edit' : 'Add')
@@ -9809,6 +9854,7 @@ async function openCourseDetail(id) {
     if (act === 'remapfull') { state._thenReopenDetailId = id; closeOv(); adminRemapFull(id); return; }
     if (act === 'fwc') { state._thenReopenDetailId = id; closeOv(); adminFwcCourse(id); return; }
     if (act === 'prep') { adminPrepCourse(id, it.name); return; }
+    if (act === 'usga') { closeOv(); try { await adminUsgaLookup(id, it.name); } catch (e) {} openCourseDetail(id); return; }
     if (act === 'bluegolf') { closeOv(); try { await adminBlueGolfLookup(id, it.name); } catch (e) {} openCourseDetail(id); return; }
     if (act === 'viewmap') { closeOv(); adminMappingChecklist(id); return; }
     if (act === 'gpsadmin') { state._thenReopenDetailId = id; closeOv(); adminMapCourse(id); return; }
