@@ -5795,7 +5795,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.160';
+const BG_BUILD = 'v2026.11.161';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -6201,6 +6201,7 @@ async function removeMyStatRound(idx) {
     mine.scoreHistory = mine.scoreHistory.filter(x => !sameRound(x, s));
     // Also blacklist its code so a cloud/recent sync can't resurrect it.
     if (s.gameCode) { try { const h = getHiddenRounds(); if (!h.includes(s.gameCode)) { h.push(s.gameCode); setHiddenRounds(h); } } catch (e) {} }
+    try { tombstoneRound(s); } catch (e) {}   // so the cloud backup can't resurrect it
     if (mine.scoreHistory.length !== before) { await savePlayerRoster(roster, { removals: { rounds: new Map([[rosterPlayerKey(mine), new Set([rosterRoundKey(s)])]]) } }); try { showToast('Removed from your stats'); } catch (e) {} }
     else { try { showToast('Round not found in your stats'); } catch (e) {} }
     const rc = document.getElementById('round-card-ov'); if (rc) rc.remove();
@@ -11084,9 +11085,10 @@ async function restoreRoundsFromCloud() {
     const norm = s => normalizeNameSegment(String(s || ''));
     const dayOf = d => { try { return new Date(d).toISOString().slice(0, 10); } catch (e) { return String(d || ''); } };
     const contentKey = s => s ? (norm(s.course) + '|' + dayOf(s.date) + '|' + (s.gross == null ? '' : s.gross) + '|' + (s.holesScored == null ? '' : s.holesScored)) : '';
+    const _del = getDeletedRoundKeys();                    // rounds I deleted → never restore them
     const originals = (p.scoreHistory || []).slice();      // snapshot (to compute what to drop)
     const byContent = new Map();
-    const consider = s => { if (!s) return; const k = contentKey(s); if (!k) return; if (!byContent.has(k)) byContent.set(k, s); };
+    const consider = s => { if (!s) return; if (_del.has(statsRoundKey(s))) return; const k = contentKey(s); if (!k) return; if (!byContent.has(k)) byContent.set(k, s); };
     originals.forEach(consider);                            // keep my existing copies first
     cloud.forEach(consider);                                // then fill any real gaps from the backup
     const finalRounds = Array.from(byContent.values());
@@ -22546,13 +22548,32 @@ async function setStatsVisibility(v){
   if (typeof showToast === 'function') showToast('Stats visible to: ' + (v === 'everyone' ? 'Everyone' : v === 'just-me' ? 'Just me' : 'Friends'));
 }
 // Upsert MY stats + visibility into the RLS-protected player_stats table (own row only).
+// Round-delete TOMBSTONES. The player_stats cloud backup deliberately never
+// SHRINKS (anti-data-loss), which meant a deleted round resurrected on the next
+// sync/merge. A delete now records the round's key here; sync/merge/restore skip
+// + drop tombstoned rounds, so a delete STICKS and the cloud backup shrinks to
+// match. Local list — once any device syncs, the round is removed from the cloud
+// backup too, so other devices stop re-adding it.
+const KEY_DELETED_ROUNDS = 'golf:deleted-rounds';
+function statsRoundKey(s) { return s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : ''; }
+function getDeletedRoundKeys() {
+  try { const a = JSON.parse(localStorage.getItem(KEY_DELETED_ROUNDS) || '[]'); return new Set(Array.isArray(a) ? a : []); } catch (e) { return new Set(); }
+}
+function tombstoneRound(roundOrKey) {
+  const k = (typeof roundOrKey === 'string') ? roundOrKey : statsRoundKey(roundOrKey);
+  if (!k) return;
+  try { const set = getDeletedRoundKeys(); if (!set.has(k)) { set.add(k); localStorage.setItem(KEY_DELETED_ROUNDS, JSON.stringify(Array.from(set).slice(-1000))); } } catch (e) {}
+}
+
 async function syncMyStatsToCloud(roster, visOverride){
   try {
     if (!(isSignedIn() && supa && _authUser)) return;
     if (!roster) { try { roster = await getPlayerRoster(); } catch (e) { roster = []; } }
     const meNm = await getMeName();
     const me = findMyRosterPlayer(roster || [], meNm);
+    const _deleted = getDeletedRoundKeys();
     let stats = (me && Array.isArray(me.scoreHistory)) ? me.scoreHistory.slice() : [];
+    stats = stats.filter(s => !_deleted.has(statsRoundKey(s)));   // never re-upload a deleted (tombstoned) round
     // Never SHRINK the per-user backup: union in any rounds the cloud copy already
     // has that our local roster is missing. This stops a shared-blob overwrite (or
     // an app reopen with a diminished roster) from wiping the backup, and keeps
@@ -22563,7 +22584,7 @@ async function syncMyStatsToCloud(roster, visOverride){
       if (cloud.length) {
         const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
         const have = new Set(stats.map(keyOf));
-        cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k)) { stats.push(s); have.add(k); } });
+        cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k) && !_deleted.has(k)) { stats.push(s); have.add(k); } });
       }
     } catch (e) {}
     await supa.from('player_stats').upsert({
@@ -22594,12 +22615,17 @@ async function fetchPlayerCloudStats(name) {
 // round key, never shrinks) → returns the richer history.
 async function mergedPlayerHistory(player) {
   let hist = (player && Array.isArray(player.scoreHistory)) ? player.scoreHistory.slice() : [];
+  // Apply MY round tombstones so a round I deleted can't reappear from the cloud
+  // backup (only mine — another player's history is left untouched).
+  let _del = new Set();
+  try { const _me = await getMeName(); if (_me && player && player.name && normalizeNameSegment(player.name) === normalizeNameSegment(_me)) _del = getDeletedRoundKeys(); } catch (e) {}
+  if (_del.size) hist = hist.filter(s => !_del.has(statsRoundKey(s)));
   try {
     const cloud = await fetchPlayerCloudStats(player && player.name);
     if (cloud && cloud.length) {
       const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
       const have = new Set(hist.map(keyOf));
-      cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k)) { hist.push(s); have.add(k); } });
+      cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k) && !_del.has(k)) { hist.push(s); have.add(k); } });
     }
   } catch (e) {}
   return hist;
@@ -24008,6 +24034,7 @@ async function removeRoundForMe(code) {
   const hidden = getHiddenRounds();
   if (!hidden.includes(code)) hidden.push(code);
   setHiddenRounds(hidden);
+  try { tombstoneRound(code); } catch (e) {}   // cloud-backup tombstone so it can't resurrect
   // Also physically drop it from YOUR recent list (per-user) so it can't resurface
   // in Saved rounds — hiding alone left a LIVE round you're in able to reappear.
   // Other players keep the round; this only touches your own recent cache.
@@ -24287,7 +24314,7 @@ async function loadRounds() {
         const mine3 = findMyRosterPlayer(roster3, meName);
         if (mine3 && Array.isArray(mine3.scoreHistory)) {
           const idx = mine3.scoreHistory.findIndex(x => x && x.manual && x.gameCode === s.gameCode && x.date === s.date);
-          if (idx >= 0) { const removed = mine3.scoreHistory[idx]; mine3.scoreHistory.splice(idx, 1); await savePlayerRoster(roster3, { removals: { rounds: new Map([[rosterPlayerKey(mine3), new Set([rosterRoundKey(removed)])]]) } }); }
+          if (idx >= 0) { const removed = mine3.scoreHistory[idx]; mine3.scoreHistory.splice(idx, 1); try { tombstoneRound(removed); } catch (e) {} await savePlayerRoster(roster3, { removals: { rounds: new Map([[rosterPlayerKey(mine3), new Set([rosterRoundKey(removed)])]]) } }); }
         }
       } catch (err) {}
       showToast('Past round removed');
