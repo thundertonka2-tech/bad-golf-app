@@ -182,9 +182,10 @@
     padding: 8px 4px calc(9px + env(safe-area-inset-bottom));
   }
   .bottom-nav .bnav-item {
-    /* Cap the width so items don't over-expand (and leave a big gap) when one is
-       hidden, e.g. Board on a no-bet round. Keeps the nav evenly spaced either way. */
-    flex: 1 1 0; min-width: 0; max-width: 84px; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    /* No max-width cap: items flex-grow to fill the bar equally, so spacing stays
+       even whether Board is shown or hidden. (A cap left the freed Board space
+       pooled as a visible gap between Crew and More.) */
+    flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px;
     color: var(--text-muted); font-size: 10px; font-weight: 600; cursor: pointer;
     position: relative; padding-top: 8px; background: none; border: none; font-family: inherit;
     white-space: nowrap;
@@ -197,6 +198,13 @@
   .bottom-nav .bnav-logo .circle { width: 58px; height: 58px; border-radius: 50%; border: 4px solid var(--bg, #eaf1fb); box-shadow: 0 6px 16px rgba(12,68,124,.40); overflow: hidden; background: #2b6cb8 url('BadGolfIcon.jpg') center/cover no-repeat; margin: 0 auto; display: block; }
   .bottom-nav .bnav-logo .lbl { display: block; font-size: 10px; color: var(--accent); font-weight: 700; margin-top: 3px; }
   body.gps-open .bottom-nav { display: none !important; }            /* hide behind the full-bleed map */
+  /* Tournament "Configure Day": reuse the normal setup form but grey out the
+     bits that don't apply to a tournament day (course + roster come from the
+     event, scheduling is per-event). */
+  body.t2-day-config #course-search,
+  body.t2-day-config #course-list,
+  body.t2-day-config #btn-add-player,
+  body.t2-day-config #btn-pick-roster { display: none !important; }
   #btn-play-now { display: none !important; }                        /* replaced by the center Play button */
   #active-round-bar { bottom: calc(70px + env(safe-area-inset-bottom)) !important; }  /* sit above the nav */
   .app { padding-bottom: calc(82px + env(safe-area-inset-bottom)); } /* clear the fixed nav */
@@ -3556,6 +3564,7 @@
           <button id="btn-save-tourney">📅 Schedule for later</button>
           <button class="primary" id="btn-start-round">▶ Start round now</button>
           <button class="primary" id="btn-save-edits" style="flex:2;display:none">💾 Save changes</button>
+          <button class="primary" id="btn-save-day" style="flex:2;display:none">💾 Save Day</button>
         </div>
 
         <!-- Invite players — moved to the BOTTOM of the setup page (was at the top). -->
@@ -5779,7 +5788,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.148';
+const BG_BUILD = 'v2026.11.149';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -27884,6 +27893,66 @@ async function t2AssignDayTees(day, cid) {
 // rounds are FULLY normal: each group can add Nassau, Match Play, greenies,
 // junk, etc. mid-round via Setup, exactly like any round — the tournament
 // only scores its own format game.
+// Configure a tournament DAY's games by reusing the normal round setup form.
+// Prefills the event's players + that day's course, lets the commissioner pick
+// games (incl. 2-man/4-man team formats) + side bets, and "Save Day N" stores
+// the games config to t.settings.dayGames[N] (t2LaunchDayRounds maps it onto
+// each group at launch). Additive: does not change the live launch path.
+async function openT2DayConfig(dayNumber) {
+  const t = _t2Current;
+  if (!t) return;
+  try {
+    showToast('Loading day setup…');
+    const players = await t2GetPlayers(t.id);
+    if (!players || !players.length) { showToast('Add players to the event first.'); return; }
+    const dc = (t.settings && t.settings.dayCourses && t.settings.dayCourses[dayNumber]) || null;
+    let pars = STANDARD_PARS.slice(), sis = DEFAULT_SI.slice(), tees = [], courseName = (dc && dc.name) ? dc.name : '';
+    if (dc && dc.id) {
+      try { const sc = await getCourseScorecard(dc.id); if (sc && sc.pars && sc.sis) { pars = sc.pars.slice(); sis = sc.sis.slice(); tees = (sc.tees || []).slice(); } } catch (e) {}
+    }
+    // Stable ids so applySavedConfig's per-game team/participant lookups resolve.
+    const formPlayers = players.map((p, i) => {
+      const parts = (p.display_name || 'Player').trim().split(/\s+/);
+      return { id: 't2cfg' + i, name: combineName(parts[0] || 'Player', parts.slice(1).join(' ') || ''), hcp: Math.round(parseFloat(p.handicap) || 0) };
+    });
+    const existing = (t.settings && t.settings.dayGames && t.settings.dayGames[dayNumber]) || {};
+    const hcpRules = { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false };
+    state._t2DayConfig = { tournamentId: t.id, dayNumber: dayNumber };
+    state.editingLiveRound = false;
+    document.getElementById('t2-home-modal').classList.remove('show');
+    try { t2UnsubscribeHome(); } catch (e) {}
+    switchTab('setup');
+    $('setup-no-game').style.display = 'none';
+    $('setup-with-game').style.display = 'block';
+    document.body.classList.add('t2-day-config');
+    await Promise.race([
+      setupNewGameForm({ course: courseName, pars: pars, sis: sis, tees: tees, players: formPlayers.map(p => ({ name: p.name, hcp: p.hcp })), games: existing, hcpRules: hcpRules }),
+      new Promise(res => setTimeout(res, 8000))
+    ]);
+    try {
+      applySavedConfig({ course: courseName, pars: pars, sis: sis, tees: tees, players: formPlayers.map(p => ({ id: p.id, name: p.name, hcp: p.hcp })), games: existing, hcpRules: hcpRules });
+    } catch (e) { console.error('day-config prefill failed', e); }
+    $('btn-start-round').style.display = 'none';
+    $('btn-save-tourney').style.display = 'none';
+    $('btn-save-edits').style.display = 'none';
+    const sd = $('btn-save-day');
+    if (sd) { sd.style.display = ''; sd.textContent = '💾 Save Day ' + dayNumber; }
+    $('btn-cancel-setup').textContent = 'Cancel';
+    setTimeout(updateSetupGates, 0);
+    showToast("Pick this day's games, then Save Day " + dayNumber);
+  } catch (e) { console.error('openT2DayConfig failed', e); showToast('Could not open day setup'); }
+}
+
+// Restore the setup form's action buttons after leaving day-config mode.
+function exitT2DayConfigButtons() {
+  $('btn-start-round').style.display = '';
+  $('btn-save-tourney').style.display = '';
+  $('btn-save-edits').style.display = 'none';
+  const sd = $('btn-save-day'); if (sd) sd.style.display = 'none';
+  $('btn-cancel-setup').textContent = 'Cancel';
+  document.body.classList.remove('t2-day-config');
+}
+
 async function t2LaunchDayRounds(courseId) {
   document.getElementById('t2-course-modal').classList.remove('show');
   const ctx = _t2StartCtx; _t2StartCtx = null;
@@ -28536,6 +28605,12 @@ async function renderT2Home() {
       '<div class="field"><input type="date" class="t2-day-date" data-day="' + i + '" value="' + (d.play_date || '') + '"' + (amCommish ? '' : ' disabled') + '></div>' +
       ((amCommish && t.num_days > 1) ? '<button class="small t2-day-remove" data-day="' + i + '" title="Remove this day" style="flex:0 0 auto;color:#b3261e;border-color:#b3261e">🗑</button>' : '') +
       '</div>';
+    // Configure this day's games (reuses the normal setup form). The format
+    // dropdown above stays as a quick fallback until the rebuild is complete.
+    if (amCommish) {
+      const _dgN = (t.settings && t.settings.dayGames && t.settings.dayGames[i]) ? Object.keys(t.settings.dayGames[i]).length : 0;
+      html += '<div style="margin:0 0 6px 50px"><button class="small t2-day-config-btn" data-day="' + i + '">⚙️ Configure Day ' + i + ' games' + (_dgN ? ' ✓' : '') + '</button></div>';
+    }
     // Per-day COURSE + tee assignment (chosen up front so the day can be scheduled).
     const _dc = (t.settings && t.settings.dayCourses && t.settings.dayCourses[i]) || null;
     html += '<div style="margin:0 0 8px 50px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
@@ -28713,6 +28788,7 @@ async function renderT2Home() {
       });
       try { await t2SetDays(t.id, arr); } catch (e) {}
     }));
+    document.querySelectorAll('.t2-day-config-btn').forEach(b => b.onclick = () => openT2DayConfig(parseInt(b.dataset.day, 10)));
     const del = document.getElementById('t2-delete');
     if (del) del.onclick = async () => {
       if (!confirm('Delete "' + t.name + '"? This removes the tournament for everyone.')) return;
@@ -30588,6 +30664,15 @@ async function init() {
   };
 
   $('btn-cancel-setup').onclick = () => {
+    if (state._t2DayConfig) {
+      const tid = state._t2DayConfig.tournamentId;
+      state._t2DayConfig = null;
+      exitT2DayConfigButtons();
+      $('setup-with-game').style.display = 'none';
+      $('setup-no-game').style.display = 'block';
+      try { openT2Home(tid); } catch (e) {}
+      return;
+    }
     if (state.editingLiveRound) {
       exitEditLiveRoundMode();
       if (!returnFromGps()) switchTab('score');
@@ -30598,6 +30683,26 @@ async function init() {
     state.editingTourneyId = null;
     state.pendingTourneySetup = null;
   };
+
+  // Save Day N: store the configured games to the tournament, then reopen it.
+  { const sd = $('btn-save-day'); if (sd) sd.onclick = async () => {
+    const cfg = state._t2DayConfig; if (!cfg) return;
+    const setup = gatherSetup(); if (!setup) return;
+    const t = _t2Current;
+    if (!t || t.id !== cfg.tournamentId) { showToast('Lost the event — reopen and try again'); return; }
+    t.settings = t.settings || {};
+    t.settings.dayGames = t.settings.dayGames || {};
+    t.settings.dayGames[cfg.dayNumber] = setup.games || {};
+    showToast('Saving Day ' + cfg.dayNumber + '…');
+    const ok = await t2Update(t.id, { settings: t.settings });
+    if (!ok) { showToast('Save failed — check connection and try again'); return; }
+    state._t2DayConfig = null;
+    exitT2DayConfigButtons();
+    $('setup-with-game').style.display = 'none';
+    $('setup-no-game').style.display = 'block';
+    showToast('Day ' + cfg.dayNumber + ' games saved');
+    try { await openT2Home(t.id); } catch (e) {}
+  }; }
 
   $('btn-add-player').onclick = () => openAddPlayerModal();
   $('btn-pick-roster').onclick = () => openRosterPicker();
