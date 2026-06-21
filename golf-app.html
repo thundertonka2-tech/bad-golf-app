@@ -5788,7 +5788,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.150';
+const BG_BUILD = 'v2026.11.151';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -27898,6 +27898,36 @@ async function t2AssignDayTees(day, cid) {
 // rounds are FULLY normal: each group can add Nassau, Match Play, greenies,
 // junk, etc. mid-round via Setup, exactly like any round — the tournament
 // only scores its own format game.
+// Map a stored per-day games config (from "Configure Day") onto ONE tournament
+// group: team games take the group's A/B split (or the whole group for 4-man),
+// a Match re-seats onto the group's first two, everything else applies to all
+// group players. Values/options/team-format are preserved.
+function t2RemapGamesToGroup(src, gp, Aids, Bids) {
+  const out = {};
+  const allIds = gp.map(p => p.id);
+  const TEAM_GAMES = ['scramble', 'teamMatch', 'teamLowball', 'teamQuota', 'ryderCup', 'vegas'];
+  for (const key in src) {
+    if (!src[key]) continue;
+    let cfg; try { cfg = JSON.parse(JSON.stringify(src[key])); } catch (e) { cfg = Object.assign({}, src[key]); }
+    if (TEAM_GAMES.indexOf(key) >= 0) {
+      if (cfg.teamMode === '4man') { cfg.teamA = allIds.slice(); cfg.teamB = []; }
+      else { cfg.teamA = Aids.slice(); cfg.teamB = Bids.slice(); }
+      out[key] = cfg;
+    } else if (key === 'match') {
+      if (gp.length >= 2) {
+        const inst = { value: cfg.value || 0, net: cfg.net !== false, pair: [gp[0].name, gp[1].name], participants: [gp[0].id, gp[1].id], participantNames: [gp[0].name, gp[1].name] };
+        out.match = Object.assign({}, inst, { instances: [inst] });
+      }
+    } else {
+      // Whole-group games (quota, skins, ctp, longPutt, junk, nassau, …): keep
+      // the options, drop any configured participant subset so it covers everyone.
+      delete cfg.participants; delete cfg.participantNames; delete cfg.pair; delete cfg.instances;
+      out[key] = cfg;
+    }
+  }
+  return out;
+}
+
 // Configure a tournament DAY's games by reusing the normal round setup form.
 // Prefills the event's players + that day's course, lets the commissioner pick
 // games (incl. 2-man/4-man team formats) + side bets, and "Save Day N" stores
@@ -27921,7 +27951,7 @@ async function openT2DayConfig(dayNumber) {
       return { id: 't2cfg' + i, name: combineName(parts[0] || 'Player', parts.slice(1).join(' ') || ''), hcp: Math.round(parseFloat(p.handicap) || 0) };
     });
     const existing = (t.settings && t.settings.dayGames && t.settings.dayGames[dayNumber]) || {};
-    const hcpRules = { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false };
+    const hcpRules = (t.settings && t.settings.dayHcpRules && t.settings.dayHcpRules[dayNumber]) || { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false };
     state._t2DayConfig = { tournamentId: t.id, dayNumber: dayNumber };
     state.editingLiveRound = false;
     document.getElementById('t2-home-modal').classList.remove('show');
@@ -28017,23 +28047,31 @@ async function t2LaunchDayRounds(courseId) {
     if (gp.length < 2) continue;
     const Aids = gp.filter(p => p._team === 'A').map(p => p.id);
     const Bids = gp.filter(p => p._team === 'B').map(p => p.id);
-    const games = {};
-    if (fmt === 'singles') {
-      const inst = { value: 0, net: true, pair: [gp[0].name, gp[1].name], participants: [gp[0].id, gp[1].id], participantNames: [gp[0].name, gp[1].name] };
-      games.match = Object.assign({}, inst, { instances: [inst] });
-    } else if (fmt === 'bestball') {
-      games.teamMatch = { value: 0, net: true, teamA: Aids, teamB: Bids };
-    } else if (fmt === 'scramble') {
-      games.scramble = { value: 0, scoring: 'match', teamA: Aids, teamB: Bids };
-    } else if (fmt === 'altshot') {
-      games.ryderCup = { value: 0, net: true, seg1: 'altshot', seg2: 'altshot', seg3: 'altshot', teamA: Aids, teamB: Bids };
-    } else if (fmt === 'rydercup') {
-      games.ryderCup = { value: 0, net: true, seg1: 'bestball', seg2: 'scramble', seg3: 'altshot', teamA: Aids, teamB: Bids };
-    } else if (fmt === 'quota') {
-      games.quota = { mode: 'pool', net: true, basis: 'auto', value: 0, buyin: 0, payout: 'winner' };
-    } else if (fmt === 'teamquota') {
-      games.teamQuota = { mode: 'perpoint', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids };
-    } // 'stroke' = leaderboard-only day: no game pre-configured
+    // Prefer the per-day games configured via "Configure Day" (mapped onto this
+    // group); fall back to the legacy single-format switch when none was saved.
+    let games;
+    const _dayGamesCfg = (t.settings && t.settings.dayGames && t.settings.dayGames[ctx.dayNumber]) || null;
+    if (_dayGamesCfg && Object.keys(_dayGamesCfg).length) {
+      games = t2RemapGamesToGroup(_dayGamesCfg, gp, Aids, Bids);
+    } else {
+      games = {};
+      if (fmt === 'singles') {
+        const inst = { value: 0, net: true, pair: [gp[0].name, gp[1].name], participants: [gp[0].id, gp[1].id], participantNames: [gp[0].name, gp[1].name] };
+        games.match = Object.assign({}, inst, { instances: [inst] });
+      } else if (fmt === 'bestball') {
+        games.teamMatch = { value: 0, net: true, teamA: Aids, teamB: Bids };
+      } else if (fmt === 'scramble') {
+        games.scramble = { value: 0, scoring: 'match', teamA: Aids, teamB: Bids };
+      } else if (fmt === 'altshot') {
+        games.ryderCup = { value: 0, net: true, seg1: 'altshot', seg2: 'altshot', seg3: 'altshot', teamA: Aids, teamB: Bids };
+      } else if (fmt === 'rydercup') {
+        games.ryderCup = { value: 0, net: true, seg1: 'bestball', seg2: 'scramble', seg3: 'altshot', teamA: Aids, teamB: Bids };
+      } else if (fmt === 'quota') {
+        games.quota = { mode: 'pool', net: true, basis: 'auto', value: 0, buyin: 0, payout: 'winner' };
+      } else if (fmt === 'teamquota') {
+        games.teamQuota = { mode: 'perpoint', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids };
+      } // 'stroke' = leaderboard-only day: no game pre-configured
+    }
     // Side games are PER-GROUP now: each group's scorekeeper adds their own money
     // games on the group's round (💰 Side games) — no tournament-wide forcing.
     const code = generateCode();
@@ -28044,7 +28082,7 @@ async function t2LaunchDayRounds(courseId) {
       pars: pars, sis: sis, tees: tees,
       players: gp.map(p => { const c2 = Object.assign({}, p); delete c2._team; return c2; }),
       games: games,
-      hcpRules: { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false },
+      hcpRules: (t.settings && t.settings.dayHcpRules && t.settings.dayHcpRules[ctx.dayNumber]) || { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false },
       unranked: false,
       scores: {},
       bankerData: { holes: {}, picks: {} },
@@ -30698,6 +30736,8 @@ async function init() {
     t.settings = t.settings || {};
     t.settings.dayGames = t.settings.dayGames || {};
     t.settings.dayGames[cfg.dayNumber] = setup.games || {};
+    t.settings.dayHcpRules = t.settings.dayHcpRules || {};
+    t.settings.dayHcpRules[cfg.dayNumber] = setup.hcpRules || null;
     showToast('Saving Day ' + cfg.dayNumber + '…');
     const ok = await t2Update(t.id, { settings: t.settings });
     if (!ok) { showToast('Save failed — check connection and try again'); return; }
