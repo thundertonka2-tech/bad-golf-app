@@ -5816,7 +5816,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.186';
+const BG_BUILD = 'v2026.11.187';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -30310,6 +30310,86 @@ async function loadTourneyScores(t) {
   } catch (e) { return null; }
 }
 
+// Raw group-round rows for a tournament (each row.data = one group's saved round).
+async function loadTourneyRawRounds(t) {
+  try {
+    if (!supaReady) await initSupabase();
+    if (!supa || !supaOnline) return [];
+    const { data, error } = await supa.from('games').select('data').or('data->>tourneyId.eq.' + t.id + ',data->t2->>tournamentId.eq.' + t.id).limit(100);
+    if (error || !Array.isArray(data)) return [];
+    return data;
+  } catch (e) { return []; }
+}
+
+// FIELD-WIDE TOURNAMENT SKINS — one pot per day, split by the number of skins won.
+// NET scoring; a tied hole is broken by handicap-hole countback (hardest hole first)
+// so every contested hole awards exactly one skin (no carries). cfg =
+// { on, mode:'buyin'|'total', value }. Pure given the raw rows → unit-tested math.
+function t2ComputeFieldSkins(rows, cfg) {
+  if (!cfg || !cfg.on || !Array.isArray(rows) || !rows.length) return null;
+  const nmk = s => normalizeNameSegment(String(s || ''));
+  const byDay = {};
+  rows.forEach(row => {
+    const g = row && row.data ? row.data : row;
+    if (!g || !Array.isArray(g.players)) return;
+    const day = (g.t2 && g.t2.day) || 1;
+    const pars = Array.isArray(g.pars) ? g.pars : null;
+    const sis = Array.isArray(g.sis) ? g.sis : null;
+    if (!sis) return;                       // need stroke index for net + countback
+    const rules = g.hcpRules || null;
+    byDay[day] = byDay[day] || { sis: sis, parts: {} };
+    g.players.forEach(p => {
+      if (!p || !p.name) return;
+      const sc = (g.scores && g.scores[p.id]) || [];
+      const net = new Array(18).fill(null); let thru = 0;
+      for (let h = 0; h < 18; h++) {
+        const s = sc[h]; if (s == null) continue;
+        const par = pars ? pars[h] : 4;
+        net[h] = netHoleScore(s, (p.hcp != null ? p.hcp : 0), sis[h], par, rules); thru++;
+      }
+      if (!thru) return;
+      const k = nmk(p.name); const cur = byDay[day].parts[k];
+      if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), hcp: (p.hcp != null ? p.hcp : 0), net: net, thru: thru };
+    });
+  });
+  const perDay = []; const totalsByName = {};
+  Object.keys(byDay).sort((a, b) => a - b).forEach(day => {
+    const sis = byDay[day].sis, players = Object.values(byDay[day].parts), N = players.length;
+    if (N < 2) return;
+    const holesBySi = sis.map((si, h) => ({ si: si, h: h })).sort((a, b) => a.si - b.si).map(x => x.h);
+    const skins = {}; players.forEach(p => skins[nmk(p.name)] = 0);
+    for (let h = 0; h < 18; h++) {
+      const c = players.filter(p => p.net[h] != null);
+      if (c.length < 2) continue;
+      let best = Infinity; c.forEach(p => { if (p.net[h] < best) best = p.net[h]; });
+      let tied = c.filter(p => p.net[h] === best); let winner = tied[0];
+      if (tied.length > 1) {
+        let resolved = null;
+        for (const hb of holesBySi) {
+          let mn = Infinity, who = [];
+          tied.forEach(p => { const v = (p.net[hb] == null ? Infinity : p.net[hb]); if (v < mn) { mn = v; who = [p]; } else if (v === mn) who.push(p); });
+          if (who.length === 1) { resolved = who[0]; break; }
+          tied = who.length ? who : tied;
+        }
+        winner = resolved || tied.slice().sort((a, b) => (a.hcp - b.hcp) || a.name.localeCompare(b.name))[0];
+      }
+      skins[nmk(winner.name)]++;
+    }
+    const totalSkins = Object.values(skins).reduce((s, x) => s + x, 0);
+    const pot = (cfg.mode === 'total') ? (Number(cfg.value) || 0) : ((Number(cfg.value) || 0) * N);
+    const skinValue = totalSkins > 0 ? pot / totalSkins : 0, contribution = N > 0 ? pot / N : 0;
+    const out = players.map(p => {
+      const s = skins[nmk(p.name)] || 0, payout = s * skinValue, net = payout - contribution;
+      const tk = nmk(p.name); totalsByName[tk] = totalsByName[tk] || { first: p.first, net: 0, skins: 0 };
+      totalsByName[tk].net += net; totalsByName[tk].skins += s;
+      return { name: p.name, first: p.first, skins: s, payout: payout, net: net };
+    }).sort((a, b) => (b.skins - a.skins) || (b.net - a.net));
+    perDay.push({ day: Number(day), N: N, totalSkins: totalSkins, skinValue: skinValue, pot: pot, rows: out });
+  });
+  if (!perDay.length) return null;
+  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), mode: cfg.mode, value: Number(cfg.value) || 0 };
+}
+
 // Phase 4 — 4-man TEAM standings "vs the field": each group plays as one team
 // (Scramble / Best Ball / Team Quota in 4-man mode); rank every group's team
 // total against the rest of the field, per day. Read-only aggregation.
@@ -30379,12 +30459,14 @@ async function loadTourneyMoney(t) {
     const allIds = Object.keys(canonPlayer);
     if (allIds.length < 2) return null;
     const base = rounds.find(g => Array.isArray(g.pars)) || rounds[0];
-    const net = {};            // canonical id -> total side-bet money
-    const labelSet = {};
-    const addCombined = (res) => {
+    // KEEP THE TWO POOLS SEPARATE — group side games vs cross-group tournament team
+    // bets are NEVER summed into one number (Tyler: list both, don't merge the math).
+    const groupNet = {}, tourneyNet = {};      // canonical id -> money, per pool
+    const groupLabels = {}, tourneyLabels = {};
+    const addCombined = (res, bucket, labels) => {
       if (!res || !res.combined) return;
-      Object.keys(res.combined).forEach(id => { net[id] = (net[id] || 0) + (res.combined[id] || 0); });
-      (res.byGame || []).forEach(b => { if (b && b.label) labelSet[b.label] = 1; });
+      Object.keys(res.combined).forEach(id => { bucket[id] = (bucket[id] || 0) + (res.combined[id] || 0); });
+      (res.byGame || []).forEach(b => { if (b && b.label) labels[b.label] = 1; });
     };
     // Build a settle-able vg from one or more rounds: scores + junk/greenie/ctp
     // remapped to canonical ids, settling `gamesObj` for `playerList`.
@@ -30412,7 +30494,7 @@ async function loadTourneyMoney(t) {
       const gIds = gpl.map(p => p.id);
       Object.keys(gi).forEach(k => { gi[k] = Object.assign({}, gi[k], { participants: gIds.slice() }); });
       let res = null; try { res = computeAllGameMoney(buildVg([g], gi, gpl)); } catch (e) {}
-      addCombined(res);
+      addCombined(res, groupNet, groupLabels);    // ← GROUP pool
     });
     // (2) CROSS-GROUP team money bets (teamMatch / teamLowball / teamQuota) — combine
     // each group's A/B into ONE event-wide A vs B and settle once across the field.
@@ -30443,16 +30525,16 @@ async function loadTourneyMoney(t) {
       const tGames = {};
       Object.keys(cfgByKey).forEach(key => { tGames[key] = Object.assign({}, cfgByKey[key], { teamA: aIds, teamB: bIds }); });
       let res = null; try { res = computeAllGameMoney(buildVg(rounds, tGames, Object.values(canonPlayer))); } catch (e) {}
-      addCombined(res);
+      addCombined(res, tourneyNet, tourneyLabels);   // ← TOURNAMENT pool (cross-group team bets)
     })();
-    const rows = Object.values(canonPlayer).map(p => ({
+    const mkRows = (bucket) => Object.values(canonPlayer).map(p => ({
       name: p.name,
       first: (typeof displayFirst === 'function' ? displayFirst(p) : (p.firstName || p.name)),
-      net: net[p.id] || 0
-    })).filter(r => r.net !== 0);
-    if (!rows.length) return null;
-    rows.sort((a, b) => b.net - a.net);
-    return { rows, games: Object.keys(labelSet) };
+      net: bucket[p.id] || 0
+    })).filter(r => r.net !== 0).sort((a, b) => b.net - a.net);
+    const groupRows = mkRows(groupNet), tourneyRows = mkRows(tourneyNet);
+    if (!groupRows.length && !tourneyRows.length) return null;
+    return { groupRows, tourneyRows, groupGames: Object.keys(groupLabels), tourneyGames: Object.keys(tourneyLabels) };
   } catch (e) { return null; }
 }
 
@@ -30652,10 +30734,18 @@ async function openEventLeaderboard(t) {
     if (field && field.players && field.players.length && Array.isArray(field.pars)) {
       html += '<h3 style="margin:14px 0 4px">Full scorecard</h3>' + buildEventScorecardHtml(field);
     }
-    if (money && money.rows && money.rows.length) {
-      html += '<h3 style="margin:14px 0 4px">💰 Side bets — whole field</h3><div style="font-size:13px">';
-      money.rows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
-      if (money.games && money.games.length) html += '<div class="small-text" style="color:var(--text-muted)">Pools: ' + escapeHtml(money.games.join(', ')) + '</div>';
+    // TWO SEPARATE POOLS — never merged. (1) each group's own side games, and
+    // (2) the cross-group tournament team bets. Listed as distinct sections.
+    if (money && money.groupRows && money.groupRows.length) {
+      html += '<h3 style="margin:14px 0 4px">💰 Group side bets <span class="small-text" style="font-weight:400;color:var(--text-muted)">(each group’s own games)</span></h3><div style="font-size:13px">';
+      money.groupRows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
+      if (money.groupGames && money.groupGames.length) html += '<div class="small-text" style="color:var(--text-muted)">Games: ' + escapeHtml(money.groupGames.join(', ')) + '</div>';
+      html += '</div>';
+    }
+    if (money && money.tourneyRows && money.tourneyRows.length) {
+      html += '<h3 style="margin:14px 0 4px">🏆 Tournament team bets <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3><div style="font-size:13px">';
+      money.tourneyRows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
+      if (money.tourneyGames && money.tourneyGames.length) html += '<div class="small-text" style="color:var(--text-muted)">Games: ' + escapeHtml(money.tourneyGames.join(', ')) + '</div>';
       html += '</div>';
     }
     // Long Drive — ONE field-wide individual winner per day, set by the commissioner.
@@ -30678,9 +30768,65 @@ async function openEventLeaderboard(t) {
       });
       html += '<div class="small-text" style="color:var(--text-muted)">The winner takes the per-player ante from everyone else in the field.</div></div>';
     }
+    // Tournament Skins — FIELD-WIDE pot (net, hardest-hole countback), a SEPARATE
+    // pool from any group's own skins. Commissioner sets the pot; results compute live.
+    {
+      const _ts = (t.settings && t.settings.tourneySkins) || null;
+      if (_amCommish || (_ts && _ts.on)) {
+        html += '<h3 style="margin:14px 0 4px">🎯 Tournament Skins <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3>';
+        if (_amCommish) html += '<button class="small evlb-skins-cfg" style="margin-bottom:6px">' + ((_ts && _ts.on) ? '⚙️ Edit Tournament Skins' : '➕ Set up Tournament Skins') + '</button>';
+        if (_ts && _ts.on) {
+          let _rawRounds = []; try { _rawRounds = await loadTourneyRawRounds(t); } catch (e) {}
+          const _sk = t2ComputeFieldSkins(_rawRounds, _ts);
+          if (_sk && _sk.perDay.length) {
+            html += '<div style="font-size:13px">';
+            _sk.perDay.forEach(dd => {
+              html += '<div style="font-weight:600;margin-top:4px">Day ' + dd.day + ' · pot $' + dd.pot.toFixed(0) + ' · ' + dd.totalSkins + ' skins @ $' + dd.skinValue.toFixed(2) + '</div>';
+              dd.rows.filter(r => r.skins > 0 || r.net !== 0).forEach(r => {
+                html += '<div>' + escapeHtml(r.first || r.name) + ': ' + r.skins + ' skin' + (r.skins === 1 ? '' : 's') + ' — <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + _evFmtMoney(r.net) + '</strong></div>';
+              });
+            });
+            html += '<div class="small-text" style="color:var(--text-muted)">Net low per hole; ties broken by hardest-hole countback. Pot ÷ skins won.</div></div>';
+          } else {
+            html += '<div class="small-text" style="color:var(--text-muted)">' + (_ts.mode === 'total' ? 'Total pot $' + _ts.value : '$' + _ts.value + '/player') + ' — results show once scores are in.</div>';
+          }
+        } else if (_amCommish) {
+          html += '<div class="small-text" style="color:var(--text-muted)">Not set up yet.</div>';
+        }
+      }
+    }
     body.innerHTML = html || '<div class="help-text">No scores in this event yet.</div>';
     body.querySelectorAll('.evlb-ld-set').forEach(b => b.onclick = () => openLongDriveWinnerPicker(t, parseInt(b.dataset.day, 10), evPlayers || [], () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
   } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
+}
+
+// Commissioner sets up the field-wide Tournament Skins pot. Stored in
+// t.settings.tourneySkins = { on, mode:'buyin'|'total', value }. Computed by
+// t2ComputeFieldSkins on the Event Leaderboard — a SEPARATE pool from group skins.
+function openTourneySkinsConfig(t, onDone) {
+  const cur = (t.settings && t.settings.tourneySkins) || { on: false, mode: 'buyin', value: '' };
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100065';
+  ov.innerHTML = '<div class="modal" style="max-width:420px"><h2 style="margin-bottom:6px">🎯 Tournament Skins</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">One field-wide skins pot — NET scoring, split by skins won, tied holes broken by hardest-hole countback. This is separate from any group’s own skins game.</p>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="tsk-on"' + (cur.on ? ' checked' : '') + ' style="width:auto;transform:scale(1.3)"> <span style="font-weight:600">Run Tournament Skins this event</span></label>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Pot</label>' +
+    '<select id="tsk-mode" style="width:100%;margin-bottom:8px"><option value="buyin"' + (cur.mode !== 'total' ? ' selected' : '') + '>Buy-in per player</option><option value="total"' + (cur.mode === 'total' ? ' selected' : '') + '>Total pot (whole field)</option></select>' +
+    '<div class="row" style="align-items:center;gap:8px;margin-bottom:12px"><span class="small-text">$</span><input type="number" id="tsk-val" inputmode="decimal" min="0" value="' + (cur.value != null ? cur.value : '') + '" style="flex:1" placeholder="0"></div>' +
+    '<div class="actions"><button id="tsk-cancel" style="flex:1">Cancel</button><button class="primary" id="tsk-save" style="flex:1">Save</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#tsk-cancel').onclick = close;
+  ov.querySelector('#tsk-save').onclick = async () => {
+    const on = ov.querySelector('#tsk-on').checked;
+    const mode = ov.querySelector('#tsk-mode').value;
+    const value = parseFloat(ov.querySelector('#tsk-val').value) || 0;
+    const ok = await t2MergeSettings(t.id, s => { s.tourneySkins = { on: on, mode: mode, value: value }; });
+    showToast(ok ? 'Tournament Skins saved ✓' : 'Couldn’t save — try again');
+    close(); if (typeof onDone === 'function') onDone();
+  };
 }
 
 // Commissioner picks the ONE field-wide Long Drive winner for a tournament day.
@@ -30802,12 +30948,17 @@ function openTourneyActions(t) {
               (r.toPar == null ? (r.gross + ' (thru ' + r.thru + ')') : (fmtTp(r.toPar) + ' · ' + r.gross + ' thru ' + r.thru));
           });
         }
-        if (money && money.rows && money.rows.length) {
-          html += (html ? '<br><br>' : '') + '<strong>💰 Side bets — whole field</strong>';
-          money.rows.forEach(r => {
+        if (money && money.groupRows && money.groupRows.length) {
+          html += (html ? '<br><br>' : '') + '<strong>💰 Group side bets</strong>';
+          money.groupRows.forEach(r => {
             html += '<br>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + fmtMoney(r.net) + '</strong>';
           });
-          if (money.games && money.games.length) html += '<br><span class="small-text" style="color:var(--text-muted)">Field pools: ' + escapeHtml(money.games.join(', ')) + '</span>';
+        }
+        if (money && money.tourneyRows && money.tourneyRows.length) {
+          html += (html ? '<br><br>' : '') + '<strong>🏆 Tournament team bets</strong>';
+          money.tourneyRows.forEach(r => {
+            html += '<br>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + fmtMoney(r.net) + '</strong>';
+          });
         }
         sd.innerHTML = html; sd.style.display = 'block';
         const evB = sd.querySelector('#tam-evlb'); if (evB) evB.onclick = () => openEventLeaderboard(t);
