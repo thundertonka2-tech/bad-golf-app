@@ -5844,7 +5844,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.207';
+const BG_BUILD = 'v2026.11.208';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -27522,6 +27522,13 @@ function t2PromptTime(label, default12) {
     setTimeout(() => { try { ov.querySelector('#t2pt-input').focus(); } catch (e) {} }, 50);
   });
 }
+// Friendly status label for the event cards. A built-and-saved event read "draft",
+// which looked unfinished even though it's ready to roll (its groups already show
+// "scheduled"). Map draft → scheduled; real in-progress / finished states pass through.
+function t2StatusLabel(s) {
+  if (!s || s === 'draft' || s === 'scheduled') return 'scheduled';
+  return s;
+}
 // Stagger tee times across a day's groups from a first time + interval, then refresh.
 async function t2StaggerTeeTimes(dayId) {
   try {
@@ -27789,7 +27796,7 @@ async function renderT2List() {
     return '<div class="card" style="margin-bottom:6px;padding:8px 10px">' +
       '<button class="full t2-row" data-id="' + t.id + '" style="text-align:left;display:flex;align-items:center;border:none;background:transparent;padding:2px 0">' + thumb +
         '<span style="min-width:0"><strong>' + t2esc(t.name) + '</strong> <span class="small-text" style="color:var(--text-muted)">· ' +
-        t.num_days + 'd · ' + t2esc(t.status) + '</span></span></button>' +
+        t.num_days + 'd · ' + t2esc(t2StatusLabel(t.status)) + '</span></span></button>' +
       '<div class="actions" style="margin-top:6px"><button class="small t2-row-details" data-id="' + t.id + '" style="flex:1">📋 Details</button><button class="small t2-row-lb" data-id="' + t.id + '" style="flex:1">🏆 Leaderboard</button></div>' +
       groupLine +
       '</div>';
@@ -28548,6 +28555,37 @@ async function t2AssignDayTees(day, cid) {
 // the render auto-build) were racing: one cleared groups while the other was mid-
 // create, producing DUPLICATE group numbers. The chain makes each build wait for
 // the previous to finish, so clear→create never interleaves.
+// Does this day use a 4-man team format (whole foursome = one team vs the field)?
+// Drives whether auto-built groups are whole-team (4-0) or split 2-from-each (2v2).
+function _t2DayIs4Man(t, dayNumber) {
+  try {
+    const dg = (t && t.settings && t.settings.dayGames && t.settings.dayGames[dayNumber]) || {};
+    for (const k of ['teamQuota', 'teamLowball', 'scramble', 'teamMatch', 'bestBall', 'vegas']) {
+      if (dg[k] && dg[k].teamMode === '4man') return true;
+    }
+  } catch (e) {}
+  return false;
+}
+// Build team-COHERENT foursomes so a group is NEVER split 3-1 by cup team.
+// 4-man format → whole-team groups of up to 4 (4-0). Otherwise → 2 from each team
+// per group (2 v 2). `teamGet(p)` returns 'A' / 'B'.
+function _t2CoherentGroups(ordered, teamGet, is4man) {
+  const A = ordered.filter(p => teamGet(p) === 'A');
+  const B = ordered.filter(p => teamGet(p) === 'B');
+  const groups = [];
+  if (is4man) {
+    for (let i = 0; i < A.length; i += 4) groups.push(A.slice(i, i + 4));
+    for (let i = 0; i < B.length; i += 4) groups.push(B.slice(i, i + 4));
+  } else {
+    let ai = 0, bi = 0;
+    while (ai < A.length || bi < B.length) {
+      const g = A.slice(ai, ai + 2).concat(B.slice(bi, bi + 2));
+      ai += 2; bi += 2;
+      if (g.length) groups.push(g);
+    }
+  }
+  return groups;
+}
 let _t2CartBuildChain = Promise.resolve();
 function t2BuildCartsOfTwo(dayId, dayNumber, byHcp) {
   const run = _t2CartBuildChain.then(() => _t2BuildCartsOfTwoImpl(dayId, dayNumber, byHcp));
@@ -28562,12 +28600,21 @@ async function _t2BuildCartsOfTwoImpl(dayId, dayNumber, byHcp) {
   if (!players.length) { showToast('Add players first'); return false; }
   const hcpOf = p => (p.handicap == null ? 999 : Number(p.handicap));
   const ordered = byHcp ? players.slice().sort((a, b) => hcpOf(a) - hcpOf(b)) : t2Shuffle(players.slice());
-  const n = ordered.length;
-  const numGroups = Math.max(1, Math.ceil(n / 4));      // as few groups as possible, max 4 each
-  const base = Math.floor(n / numGroups), rem = n % numGroups; // spread evenly: first `rem` groups get +1
-  const groups = [];
-  let idx = 0;
-  for (let i = 0; i < numGroups; i++) { const sz = base + (i < rem ? 1 : 0); groups.push(ordered.slice(idx, idx + sz)); idx += sz; }
+  // When two cup teams are assigned, keep every foursome team-COHERENT (never 3-1):
+  // 4-man format → whole-team groups (4-0); otherwise 2 from each team (2 v 2).
+  // No teams (individual event) → even split by handicap / shuffle as before.
+  const _A = ordered.filter(p => p.team === 'A'), _B = ordered.filter(p => p.team === 'B');
+  let groups;
+  if (_A.length && _B.length) {
+    groups = _t2CoherentGroups(ordered, p => p.team, _t2DayIs4Man(t, dayNumber));
+  } else {
+    groups = [];
+    const n = ordered.length;
+    const numGroups = Math.max(1, Math.ceil(n / 4));      // as few groups as possible, max 4 each
+    const base = Math.floor(n / numGroups), rem = n % numGroups; // spread evenly: first `rem` groups get +1
+    let idx = 0;
+    for (let i = 0; i < numGroups; i++) { const sz = base + (i < rem ? 1 : 0); groups.push(ordered.slice(idx, idx + sz)); idx += sz; }
+  }
   await t2ClearGroups(dayId);
   for (let gi = 0; gi < groups.length; gi++) {
     const g = await t2CreateGroup(dayId, { groupNumber: gi + 1, size: groups[gi].length });
@@ -29644,7 +29691,7 @@ async function renderT2Home() {
   let html = '<h2 style="margin:0 24px 2px 0">' + t2esc(t.name) + '</h2>';
   html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:12px">' +
     (od ? 'Individual event · ' : '') +
-    t.num_days + ' day' + (t.num_days === 1 ? '' : 's') + ' · ' + t2esc(t.status) + (amCommish ? ' · you are commissioner' : '') + '</div>';
+    t.num_days + ' day' + (t.num_days === 1 ? '' : 's') + ' · ' + t2esc(t2StatusLabel(t.status)) + (amCommish ? ' · you are commissioner' : '') + '</div>';
   // Event image banner (commissioner can set/change it).
   html += '<div id="t2-event-img"></div>';
   if (amCommish) html += '<button class="small" id="t2-set-img" style="margin:0 8px 4px 0">🖼 Event image</button>';
