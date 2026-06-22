@@ -5849,7 +5849,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.214';
+const BG_BUILD = 'v2026.11.215';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -34372,11 +34372,28 @@ const gpsView = (() => {
     try { gpsCacheSet(cid, JSON.stringify(courseGps[cid])); } catch (e) { console.warn('gps cache write failed:', e); }
     if (await ensureSupa()) {
       const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === cid) : null;
+      // MERGE-ON-WRITE (v215, Phase 2a): re-read the current cloud row and union our
+      // holes into it, so a second admin mapping the same course at the same time can't
+      // be overwritten. Our just-made edits win per hole; cloud-only holes are kept.
+      // Falls back to local-only on any read error (the prior behavior).
+      let _mergedHoles = (courseGps[cid] && courseGps[cid].holes) || {};
+      try {
+        const { data: _cloudRow } = await supa.from('course_gps').select('holes').eq('course_id', cid).maybeSingle();
+        if (_cloudRow && _cloudRow.holes && Object.keys(_cloudRow.holes).length) {
+          const _local = (courseGps[cid] && courseGps[cid].holes) || {};
+          const _m = Object.assign({}, _cloudRow.holes);
+          for (const _k of Object.keys(_local)) {
+            _m[_k] = Object.assign({}, _cloudRow.holes[_k] || {}, _local[_k] || {});
+          }
+          _mergedHoles = _m;
+          if (courseGps[cid]) courseGps[cid].holes = _m; // keep local in sync with the merged set
+        }
+      } catch (e) { console.warn('course_gps merge-read failed, writing local-only:', e); }
       const payload = {
         course_id: cid,
         name: lib ? lib.name : cid,
         city: lib ? (lib.city || '') : '',
-        holes: courseGps[cid].holes || {},
+        holes: _mergedHoles,
         source: courseGps[cid].source || 'manual',
         updated_at: new Date().toISOString()
       };
@@ -37407,6 +37424,76 @@ function renderMyShots() {
 // Standard fallback bag, parsed from CLUB_SLOTS (e.g. "230–260" → {min:230,max:260}).
 // Used to fill any club the player hasn't configured, and as the whole bag when
 // nothing is set — so the suggestion always reflects the distance.
+
+// ===================== FORM DRAFT AUTO-SAVE (v215, Phase 1) =====================
+// Safety net for "lost going screen to screen": as you type into any id'd field,
+// the value is stashed locally; if you leave the screen / get a call / the app is
+// backgrounded before saving, the value is restored when you come back.
+// DESIGN GUARANTEES (so this can never corrupt data or break boot):
+//   - Only fields with a stable id are tracked.
+//   - Restore ONLY fills a field that is currently EMPTY (never overwrites loaded
+//     or freshly-typed data).
+//   - Drafts self-expire after 12h. Clearing a field deletes its draft.
+//   - Excludes password / hidden / checkbox / radio / file fields.
+//   - Everything is wrapped in try/catch — worst case it silently does nothing.
+(function FormDraftAutoSave() {
+  try {
+    var PREFIX = 'golf:draft:';
+    var MAXAGE = 12 * 60 * 60 * 1000; // 12h
+    var OKTYPE = { text:1, number:1, search:1, tel:1, email:1, url:1, date:1, time:1,
+                   'datetime-local':1, month:1, week:1 };
+    function eligible(el) {
+      if (!el || !el.id) return false;
+      var tag = (el.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'select') return true;
+      if (tag !== 'input') return false;
+      var t = (el.type || 'text').toLowerCase();
+      return !!OKTYPE[t];
+    }
+    function keyFor(el) { return PREFIX + el.id; }
+    function save(el) {
+      try {
+        if (!eligible(el)) return;
+        var v = el.value;
+        if (v == null || v === '') { try { localStorage.removeItem(keyFor(el)); } catch (e) {} return; }
+        localStorage.setItem(keyFor(el), JSON.stringify({ v: v, t: Date.now() }));
+      } catch (e) {}
+    }
+    function restore(el) {
+      try {
+        if (!eligible(el)) return;
+        if (el.value != null && el.value !== '') return;     // never overwrite
+        if (el.offsetParent === null && el.type !== 'hidden') { /* not visible */ }
+        var raw = localStorage.getItem(keyFor(el));
+        if (!raw) return;
+        var d = JSON.parse(raw);
+        if (!d || typeof d.v !== 'string') return;
+        if (Date.now() - (d.t || 0) > MAXAGE) { try { localStorage.removeItem(keyFor(el)); } catch (e) {} return; }
+        el.value = d.v;
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+        try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+      } catch (e) {}
+    }
+    function restoreAll(root) {
+      try {
+        (root || document).querySelectorAll('input[id], select[id], textarea[id]').forEach(restore);
+      } catch (e) {}
+    }
+    document.addEventListener('input', function (e) { save(e.target); }, true);
+    document.addEventListener('change', function (e) { save(e.target); }, true);
+    document.addEventListener('focusin', function (e) { restore(e.target); }, true);
+    function flush() { try { var a = document.activeElement; if (a) save(a); } catch (e) {} }
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flush(); });
+    window.addEventListener('pagehide', flush);
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { restoreAll(document); });
+    else restoreAll(document);
+    // Light catch-up for screens rendered after load (modals/panels): re-scan on focus events
+    // is already covered by focusin; also expose a manual hook for callers if ever needed.
+    window.__restoreFormDrafts = restoreAll;
+  } catch (e) { /* draft system is best-effort; never breaks the app */ }
+})();
+// =================== END FORM DRAFT AUTO-SAVE ===================
+
 function defaultClubBag() {
   return CLUB_SLOTS.map(s => {
     const m = String(s[1]).split(/[–-]/); // en-dash or hyphen
