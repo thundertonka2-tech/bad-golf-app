@@ -5821,7 +5821,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.181';
+const BG_BUILD = 'v2026.11.182';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -5951,6 +5951,9 @@ async function initAuth() {
           let _tjk = _pendingTjoin;
           if (!_tjk) { try { _tjk = localStorage.getItem('golf:pending-tjoin'); } catch (e) {} }
           if (_tjk) { _pendingTjoin = null; processPendingTjoin(_tjk); }
+          // Same for the general ?tclaim=<id> "tap your name" tournament link.
+          let _tck = null; try { _tck = localStorage.getItem('golf:pending-tclaim'); } catch (e) {}
+          if (_tck && !_tjk) { processPendingTclaim(_tck); }
           // Same for a ?join=CODE round link opened before sign-in → drop them
           // straight into the round's GPS now that they're authenticated.
           let _jk = (typeof _pendingJoin !== 'undefined') ? _pendingJoin : null;
@@ -29175,6 +29178,13 @@ function openT2AddPlayer(tId, od) {
     const team = teamEl ? teamEl.value : 'A';
     saveEl.disabled = true; saveEl.textContent = 'Adding…';
     try {
+      // Duplicate guard: a same-name slot already in this event is almost always a
+      // mistake (the source of past duplicate players). Make the commissioner confirm.
+      let dup = null;
+      try { const ex = await t2GetPlayers(tId); dup = (ex || []).find(x => _t2NameKey(x.display_name) === _t2NameKey(nm)); } catch (e) {}
+      if (dup && !confirm('"' + nm + '" is already in this event. Add a second player with the same name anyway?')) {
+        saveEl.disabled = false; saveEl.textContent = 'Add player'; return;
+      }
       await t2AddPlayer(tId, { displayName: nm, team: team, handicap: hv !== '' ? parseFloat(hv) : null });
       close();
       await renderT2Home();
@@ -29454,6 +29464,7 @@ async function renderT2Home() {
   if (amCommish) html += '<button class="full" id="t2-save-template" style="margin-top:8px">⭐ Save as template</button>';
   if (amCommish) {
     html += '<h3 style="margin:18px 0 6px">Invite players</h3>' +
+      '<button class="primary full" id="t2-share-claim-link" style="margin-bottom:8px">🔗 Copy join link — everyone taps their own name</button>' +
       '<button class="full" id="t2-invite-friends-btn" style="margin-bottom:8px">👥 Invite friends — they get a ping & the event lands in their Events tab</button>' +
       '<div id="t2-friend-pick-list" style="display:none;margin-bottom:8px"></div>';
   }
@@ -29622,6 +29633,15 @@ async function renderT2Home() {
   try { checkCaptainReminder(_t2Current); } catch (e) {}
   body.querySelectorAll('.t2-move-here').forEach(b => b.onclick = () => t2MoveHere(b));
   body.querySelectorAll('.t2-logo-btn').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
+  { const shareBtn = document.getElementById('t2-share-claim-link');
+    if (shareBtn) shareBtn.onclick = async () => {
+      const link = BG_PUBLIC_URL + '?tclaim=' + t.id;
+      const text = 'Join my Bad Golf event "' + (t.name || 'tournament') + '": ' + link + '\n\nSign in and tap your name to join.';
+      try { if (navigator.share) { await navigator.share({ text: text }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+      try { await navigator.clipboard.writeText(text); showToast('Join link copied — send it to everyone 📋'); }
+      catch (e) { showToast(text, 6000); }
+    };
+  }
   const invBtn2 = document.getElementById('t2-invite-friends-btn');
   if (invBtn2) invBtn2.onclick = async () => {
     const box = document.getElementById('t2-friend-pick-list');
@@ -29653,7 +29673,7 @@ async function renderT2Home() {
         const nm = [String(prof.my_player || '').trim(), String(prof.display_name || '').trim()].find(looksHuman) || friendDisplayName(prof);
         const teamSel = document.getElementById('t2-add-team');
         const team = od ? 'A' : ((teamSel && teamSel.value) || 'A');
-        const added = await t2AddPlayer(t.id, { displayName: nm, team: team, userId: prof.id });
+        const added = await t2AddOrAdoptPlayer(t.id, { displayName: nm, team: team, userId: prof.id }, players);
         if (!added) { showToast('Could not add ' + friendDisplayName(prof)); b2.disabled = false; return; }
         const pinged = await sendTournamentInvite(prof.id, t);
         showToast(friendDisplayName(prof) + ' added' + (od ? '' : ' to Team ' + team) + (pinged ? ' — ping sent 📨' : ''));
@@ -29673,20 +29693,24 @@ async function renderT2Home() {
 
 // Bound deep-link join: ?tjoin=<token> claims a specific pre-assigned slot.
 async function handleTournamentJoinLink() {
-  let token = null;
-  try { token = new URLSearchParams(location.search || '').get('tjoin'); } catch (e) {}
+  let token = null, tclaim = null;
+  // ?tjoin=<slot token> = a personal pre-assigned slot link.
+  // ?tclaim=<tournament id> = the ONE general link everyone uses → "tap your name".
+  try { const q = new URLSearchParams(location.search || ''); token = q.get('tjoin'); tclaim = q.get('tclaim'); } catch (e) {}
   // A sign-in redirect (e.g. Google) reloads the page and strips the query
-  // string — fall back to the stashed token so the invite survives the trip.
+  // string — fall back to the stashed value so the invite survives the trip.
   if (!token) { try { token = localStorage.getItem('golf:pending-tjoin'); } catch (e) {} }
-  if (!token) return;
+  if (!tclaim) { try { tclaim = localStorage.getItem('golf:pending-tclaim'); } catch (e) {} }
+  if (!token && !tclaim) return;
   if (!isSignedIn()) {
-    _pendingTjoin = token;
-    try { localStorage.setItem('golf:pending-tjoin', token); } catch (e) {}
+    if (token) { _pendingTjoin = token; try { localStorage.setItem('golf:pending-tjoin', token); } catch (e) {} }
+    if (tclaim) { try { localStorage.setItem('golf:pending-tclaim', tclaim); } catch (e) {} }
     try { const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); } catch (e) {}
     showToast('Sign in to join the tournament');
     return;
   }
-  await processPendingTjoin(token);
+  if (token) await processPendingTjoin(token);
+  else if (tclaim) await processPendingTclaim(tclaim);
 }
 async function processPendingTjoin(token) {
   try { localStorage.removeItem('golf:pending-tjoin'); } catch (e) {}
@@ -29697,6 +29721,61 @@ async function processPendingTjoin(token) {
     switchTab('tourneys');
     openT2Home(tid);
   }
+}
+async function processPendingTclaim(tid) {
+  try { localStorage.removeItem('golf:pending-tclaim'); } catch (e) {}
+  try { history.replaceState({}, '', location.pathname); } catch (e) {}
+  switchTab('tourneys');
+  await openT2ClaimScreen(tid);
+}
+// "Tap your name" claim screen. One tournament link (?tclaim=<id>) lands every
+// invited player here; they claim the unclaimed slot the commissioner already
+// typed — ADOPTING that row instead of creating a duplicate. Reuses the atomic
+// claim_tournament_slot RPC via each slot's invite_token. Sign-in required.
+async function openT2ClaimScreen(tid) {
+  if (!isSignedIn()) { try { localStorage.setItem('golf:pending-tclaim', tid); } catch (e) {} const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); showToast('Sign in to join'); return; }
+  let players = [], t = null;
+  try { players = await t2GetPlayers(tid); } catch (e) {}
+  try { t = await t2Get(tid); } catch (e) {}
+  const myId = _authUser && _authUser.id;
+  if (players.find(p => p.user_id === myId)) { showToast("You're already in this event ✓"); switchTab('tourneys'); openT2Home(tid); return; }
+  const unclaimed = players.filter(p => !p.user_id);
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100070';
+  const rows = unclaimed.map(p => '<button class="full t2-claim-pick" data-token="' + t2esc(p.invite_token || '') + '" style="text-align:left;margin-bottom:6px;font-weight:600">' + t2esc(p.display_name || '?') + '</button>').join('');
+  ov.innerHTML = '<div class="modal" style="max-width:440px"><h2 style="margin-bottom:6px">Join ' + t2esc((t && t.name) || 'the tournament') + '</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">Tap your name to join. This links your account to the spot your organizer set up — so your scores and history stay in one place (no duplicate player).</p>' +
+    '<div style="max-height:50vh;overflow-y:auto">' + (rows || '<div class="help-text">Everyone here is already claimed. If one of these players is you, ask your organizer to re-add your name.</div>') + '</div>' +
+    '<div style="margin-top:10px"><button class="full" id="t2-claim-notme">I\'m not listed</button></div>' +
+    '<div class="actions" style="margin-top:8px"><button id="t2-claim-cancel" style="flex:1">Close</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#t2-claim-cancel').onclick = close;
+  ov.querySelector('#t2-claim-notme').onclick = () => showToast('Ask your organizer to add your name, then open the link again', 5000);
+  ov.querySelectorAll('.t2-claim-pick').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    const token = b.dataset.token;
+    if (!token) { showToast('That spot has no invite link — ask your organizer'); b.disabled = false; return; }
+    const claimedTid = await t2ClaimSlot(token);
+    if (claimedTid) { close(); showToast('Welcome to the tournament! 🎉'); switchTab('tourneys'); openT2Home(claimedTid); }
+    else b.disabled = false;
+  });
+}
+// Commissioner-side dedupe: when adding a known account (friend/roster pick),
+// ADOPT an existing unclaimed slot whose name matches instead of inserting a twin.
+function _t2NameKey(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+async function t2AdoptSlot(playerId, userId) {
+  try { const { error } = await supa.from('tournament_players').update({ user_id: userId, claimed: true }).eq('id', playerId); return !error; }
+  catch (e) { return false; }
+}
+async function t2AddOrAdoptPlayer(tid, p, existingPlayers) {
+  if (p.userId && Array.isArray(existingPlayers)) {
+    const key = _t2NameKey(p.displayName);
+    const slot = existingPlayers.find(x => !x.user_id && _t2NameKey(x.display_name) === key);
+    if (slot) { const ok = await t2AdoptSlot(slot.id, p.userId); if (ok) return Object.assign({}, slot, { user_id: p.userId, claimed: true }); }
+  }
+  return await t2AddPlayer(tid, p);
 }
 
 // ============================================================
