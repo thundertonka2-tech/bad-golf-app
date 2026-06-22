@@ -27647,7 +27647,7 @@ async function _t2MyGroupInfo(t) {
         const mem = await t2GetGroupMembers(g.id);
         if ((mem || []).some(m => m.tournament_player_id === myP.id)) {
           const isScorer = !!(g.captain && normalizeNameSegment(g.captain) === normalizeNameSegment(myP.display_name || ''));
-          return { day: d.day_number, groupNumber: g.group_number, teeTime: g.tee_time || '', isScorer: isScorer, gameCode: g.game_code || '', started: !!g.game_code };
+          return { tid: t.id, gid: g.id, day: d.day_number, groupNumber: g.group_number, teeTime: g.tee_time || '', isScorer: isScorer, gameCode: g.game_code || '', started: !!g.game_code };
         }
       }
     }
@@ -27684,7 +27684,7 @@ async function renderT2List() {
         '📍 <strong>Group ' + info.groupNumber + '</strong>' + (info.day > 1 ? ' · Day ' + info.day : '') +
         (info.teeTime ? ' · ⏱ ' + t2esc(info.teeTime) : '') +
         ' · <span style="color:' + (info.started ? 'var(--accent)' : 'var(--text-muted)') + '">' + (info.started ? 'live' : 'scheduled') + '</span>' +
-        (info.isScorer ? '<button class="full t2-grp-config" data-code="' + t2esc(info.gameCode) + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:600;padding:8px">🎮 Configure side games</button>' +
+        (info.isScorer ? '<button class="full t2-grp-config" data-code="' + t2esc(info.gameCode) + '" data-tid="' + t2esc(info.tid) + '" data-gid="' + t2esc(info.gid) + '" data-day="' + info.day + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:600;padding:8px">🎮 Configure side games</button>' +
           '<div class="small-text" style="color:var(--text-muted);margin-top:2px">You\'re the scorer — set your group\'s own games here.</div>' : '') +
         '</div>';
     }
@@ -27702,11 +27702,16 @@ async function renderT2List() {
   document.querySelectorAll('#t2-list .t2-row').forEach(b => b.onclick = () => openT2Home(b.dataset.id));
   document.querySelectorAll('#t2-list .t2-row-details').forEach(b => b.onclick = async () => { const tf = await _fullT(b.dataset.id); if (tf) openT2Summary(tf); });
   document.querySelectorAll('#t2-list .t2-row-lb').forEach(b => b.onclick = async () => { const tf = await _fullT(b.dataset.id); if (tf) { _t2Current = tf; openEventLeaderboard(tf); } });
-  // Scorer "Configure side games": opens the group's round config once it's live;
-  // before the day starts there's no round yet, so explain when it opens.
-  document.querySelectorAll('#t2-list .t2-grp-config').forEach(b => b.onclick = () => {
-    if (b.dataset.code) openT2GroupSideBets(b.dataset.code);
-    else showToast('Your group’s side games open once the day starts on game day', 4500);
+  // Scorer "Configure side games": if the round is live, open it directly; if the
+  // event is still scheduled, warn that re-teaming resets bets, then open the
+  // pre-launch config (saved to the event and applied when the round is created).
+  document.querySelectorAll('#t2-list .t2-grp-config').forEach(b => b.onclick = async () => {
+    if (b.dataset.code) { openT2GroupSideBets(b.dataset.code); return; }
+    const ok = await uiConfirm(
+      'This event is still scheduled and the teams could change. If the commissioner changes the teams, all the game bets you set here will be reset.\n\nSet up your group’s games now?',
+      { title: '⏳ Scheduled event', okLabel: 'Set games' });
+    if (!ok) return;
+    openT2GroupGamesConfig(b.dataset.tid, b.dataset.gid, parseInt(b.dataset.day, 10) || 1);
   });
 }
 
@@ -28905,6 +28910,67 @@ function _t2RestoreDayDraft(dayNumber) {
   try { if (typeof updateVegasTeamSection === 'function') updateVegasTeamSection(); } catch (e) {}
 }
 
+// PRE-LAUNCH group games: the scorer sets up their foursome's OWN side games while
+// the event is still scheduled (before the round exists). Reuses the setup form so
+// every game config is correct, restricted to group-allowed games, and saves to
+// t.settings.groupGames[gid] — t2LaunchDayRounds merges it when the round is created.
+async function openT2GroupGamesConfig(tid, gid, dayNumber) {
+  const t = (_t2Current && _t2Current.id === tid) ? _t2Current : await t2Get(tid);
+  if (!t) { showToast('Event not found'); return; }
+  _t2Current = t;
+  try {
+    showToast('Loading group setup…');
+    const mem = await t2GetGroupMembers(gid);
+    const allPlayers = await t2GetPlayers(tid);
+    const pById = {}; allPlayers.forEach(p => pById[p.id] = p);
+    const memPlayers = (mem || []).map(m => pById[m.tournament_player_id]).filter(Boolean);
+    if (memPlayers.length < 2) { showToast('This group needs at least 2 players'); return; }
+    const dc = (t.settings && t.settings.dayCourses && t.settings.dayCourses[dayNumber]) || null;
+    let pars = STANDARD_PARS.slice(), sis = DEFAULT_SI.slice(), tees = [], courseName = (dc && dc.name) ? dc.name : '';
+    if (dc && dc.id) { try { const sc = await getCourseScorecard(dc.id); if (sc && sc.pars && sc.sis) { pars = sc.pars.slice(); sis = sc.sis.slice(); tees = (sc.tees || []).slice(); } } catch (e) {} }
+    const formPlayers = memPlayers.map((p, i) => { const parts = (p.display_name || 'Player').trim().split(/\s+/); return { id: 'grp' + i, name: combineName(parts[0] || 'Player', parts.slice(1).join(' ') || ''), hcp: Math.round(parseFloat(p.handicap) || 0) }; });
+    const existing = (t.settings && t.settings.groupGames && t.settings.groupGames[gid]) || {};
+    const hcpRules = { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false };
+    state._t2GroupGamesConfig = { tid: tid, gid: gid, dayNumber: dayNumber };
+    state._t2GroupConfig = gid;        // drives the group-allowed game filter
+    state._t2DayConfig = null;
+    state.editingLiveRound = false;
+    try { document.getElementById('t2-home-modal').classList.remove('show'); } catch (e) {}
+    switchTab('setup');
+    $('setup-no-game').style.display = 'none';
+    $('setup-with-game').style.display = 'block';
+    document.body.classList.add('t2-day-config');   // hide add-player / roster / course pickers
+    await Promise.race([
+      setupNewGameForm({ course: courseName, pars: pars, sis: sis, tees: tees, players: formPlayers.map(p => ({ name: p.name, hcp: p.hcp })), games: existing, hcpRules: hcpRules }),
+      new Promise(r => setTimeout(r, 8000))
+    ]);
+    try { applySavedConfig({ course: courseName, pars: pars, sis: sis, tees: tees, players: formPlayers.map(p => ({ id: p.id, name: p.name, hcp: p.hcp })), games: existing, hcpRules: hcpRules, trackPutts: true, trackGirs: true, trackFairways: true }); } catch (e) {}
+    $('btn-start-round').style.display = 'none';
+    $('btn-save-tourney').style.display = 'none';
+    $('btn-save-edits').style.display = 'none';
+    const sd = $('btn-save-day'); if (sd) { sd.style.display = ''; sd.textContent = '💾 Save group games'; }
+    $('btn-cancel-setup').textContent = 'Cancel';
+    try { t2FilterGroupConfigGames(true); } catch (e) {}
+    setTimeout(updateSetupGates, 0);
+    try { window.scrollTo(0, 0); const _sp = $('setup-with-game'); if (_sp) _sp.scrollTop = 0; } catch (e) {}
+    showToast('Pick your group’s games, then Save');
+  } catch (e) { console.error('openT2GroupGamesConfig failed', e); showToast('Could not open group setup'); }
+}
+
+// Save the scorer's group games to the event (applied when the round is created).
+async function saveT2GroupGames() {
+  const gc = state._t2GroupGamesConfig; if (!gc) return false;
+  const setup = gatherSetup(); if (!setup) return false;   // validates participant counts etc.
+  const ok = await t2MergeSettings(gc.tid, s => { s.groupGames = s.groupGames || {}; s.groupGames[gc.gid] = setup.games || {}; });
+  if (!ok) { showToast('Save failed — check your connection'); return false; }
+  state._t2GroupGamesConfig = null; state._t2GroupConfig = null;
+  try { t2FilterGroupConfigGames(false); } catch (e) {}
+  exitT2DayConfigButtons();
+  $('setup-with-game').style.display = 'none';
+  $('setup-no-game').style.display = 'block';
+  return true;
+}
+
 // Restore the setup form's action buttons after leaving day-config mode.
 function exitT2DayConfigButtons() {
   $('btn-start-round').style.display = '';
@@ -29001,6 +29067,12 @@ async function t2LaunchDayRounds(courseId) {
         games.teamQuota = { mode: 'perpoint', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids };
       } // 'stroke' = leaderboard-only day: no game pre-configured
     }
+    // Merge the scorer's PRE-LAUNCH group games (set while the event was scheduled)
+    // onto this group's round — remapped to the group's players like the day games.
+    try {
+      const _grpGames = (t.settings && t.settings.groupGames && t.settings.groupGames[grp.id]) || null;
+      if (_grpGames && Object.keys(_grpGames).length) Object.assign(games, t2RemapGamesToGroup(_grpGames, gp, Aids, Bids));
+    } catch (e) {}
     // Side games are PER-GROUP now: each group's scorekeeper adds their own money
     // games on the group's round (💰 Side games) — no tournament-wide forcing.
     const code = generateCode();
@@ -32029,6 +32101,16 @@ async function init() {
   };
 
   $('btn-cancel-setup').onclick = () => {
+    if (state._t2GroupGamesConfig) {
+      state._t2GroupGamesConfig = null; state._t2GroupConfig = null;
+      try { t2FilterGroupConfigGames(false); } catch (e) {}
+      exitT2DayConfigButtons();
+      $('setup-with-game').style.display = 'none';
+      $('setup-no-game').style.display = 'block';
+      switchTab('tourneys');
+      try { renderT2List(); } catch (e) {}
+      return;
+    }
     if (state._t2DayConfig) {
       const tid = state._t2DayConfig.tournamentId;
       state._t2DayConfig = null;
@@ -32075,6 +32157,11 @@ async function init() {
     $('setup-no-game').style.display = 'block';
   }
   { const sd = $('btn-save-day'); if (sd) sd.onclick = async () => {
+    // Pre-launch group games config reuses this Save button — route it to its own save.
+    if (state._t2GroupGamesConfig) {
+      if (await saveT2GroupGames()) { showToast('Group games saved ✓'); switchTab('tourneys'); try { await renderT2List(); } catch (e) {} }
+      return;
+    }
     const cfg = state._t2DayConfig; const dn = cfg && cfg.dayNumber;
     showToast('Saving Day ' + dn + '…');
     if (!(await saveT2DayConfig())) return;
