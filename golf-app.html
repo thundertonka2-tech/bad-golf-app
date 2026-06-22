@@ -5832,7 +5832,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.202';
+const BG_BUILD = 'v2026.11.203';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -22473,6 +22473,7 @@ function updateActiveRoundBar() {
 // FIELD-WIDE standings (Skins, team bets, Long Drive). The group's own bet totals
 // are shown above this; the tournament pools settle across the whole field — the
 // two are kept visually separate (Tyler: list both, never merge). Idempotent.
+let _t2BoardMoneyCache = { tid: null, at: 0, money: null, skins: null };
 async function t2InjectTourneySummaryLink(g, container) {
   if (!container) return;
   const old = container.querySelector('#t2-tourney-summary-link'); if (old) old.remove();
@@ -22480,15 +22481,46 @@ async function t2InjectTourneySummaryLink(g, container) {
   const div = document.createElement('div');
   div.id = 't2-tourney-summary-link';
   div.style.cssText = 'margin-top:14px;padding-top:10px;border-top:1px solid var(--border)';
-  div.innerHTML = '<div style="font-weight:700;margin-bottom:4px">🏆 Tournament</div>' +
-    '<div class="small-text" style="color:var(--text-muted);margin-bottom:6px">The money above is your group’s own bets. Tournament-wide pools (Skins, team bets, Long Drive) settle across the whole field — kept separate.</div>' +
-    '<button class="full t2-summ-lb" style="font-weight:600;background:linear-gradient(135deg,#1d6fd6,#1456a8);color:#fff;border:none;border-radius:10px;padding:10px">🏆 Tournament standings &amp; payouts</button>';
+  div.innerHTML = '<div style="font-weight:700;margin-bottom:2px">🏆 Tournament bets <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field — separate from your group above)</span></div>' +
+    '<div class="t2-tourney-inline" style="font-size:13px;margin:4px 0 8px"><span class="small-text" style="color:var(--text-muted)">Loading your tournament bets…</span></div>' +
+    '<button class="full t2-summ-lb" style="font-weight:600;background:linear-gradient(135deg,#1d6fd6,#1456a8);color:#fff;border:none;border-radius:10px;padding:10px">🏆 Full standings &amp; payouts</button>';
   container.appendChild(div);
   const b = div.querySelector('.t2-summ-lb');
   if (b) b.onclick = async () => {
     try { const t = await t2Get(tid); if (t) { try { $('summary-modal').classList.remove('show'); } catch (e) {} openEventLeaderboard(t); } else showToast('Tournament not found'); }
     catch (e) { showToast('Could not open the tournament'); }
   };
+  // Show THIS player's field-wide tournament money inline (team bets + skins),
+  // cached ~20s so the Board doesn't re-query on every score tick.
+  (async () => {
+    const inlineEl = div.querySelector('.t2-tourney-inline'); if (!inlineEl) return;
+    let myName = ''; try { myName = (await getMeName()) || ''; } catch (e) {}
+    let money = null, skins = null;
+    try {
+      const now = Date.now();
+      if (_t2BoardMoneyCache.tid === tid && (now - _t2BoardMoneyCache.at) < 20000) {
+        money = _t2BoardMoneyCache.money; skins = _t2BoardMoneyCache.skins;
+      } else {
+        const t = await t2Get(tid);
+        money = await loadTourneyMoney(t);
+        let raw = []; try { raw = await loadTourneyRawRounds(t); } catch (e) {}
+        skins = (t && t.settings && t.settings.tourneySkins && t.settings.tourneySkins.on) ? t2ComputeFieldSkins(raw, t.settings.tourneySkins) : null;
+        _t2BoardMoneyCache = { tid: tid, at: now, money: money, skins: skins };
+      }
+    } catch (e) {}
+    if (!div.isConnected) return;
+    const nm = s => normalizeNameSegment(String(s || ''));
+    const myKey = nm(myName);
+    const netOf = rows => { const r = (rows || []).find(x => nm(x.first) === myKey || nm(x.name) === myKey); return r ? r.net : 0; };
+    const teamNet = money ? netOf(money.tourneyRows) : 0;
+    let skinsNet = 0; if (skins && skins.totals) { const sr = skins.totals.find(x => nm(x.first) === myKey); if (sr) skinsNet = sr.net; }
+    const fmt = n => (n >= 0 ? '+$' : '−$') + Math.abs(Number.isInteger(n) ? n : Number(n.toFixed(2)));
+    const col = n => n >= 0 ? '#1f7a46' : '#b3261e';
+    let lines = '';
+    if (teamNet) lines += '<div>Team bets (A vs B): <strong style="color:' + col(teamNet) + '">' + fmt(teamNet) + '</strong></div>';
+    if (skinsNet) lines += '<div>Tournament skins: <strong style="color:' + col(skinsNet) + '">' + fmt(skinsNet) + '</strong></div>';
+    inlineEl.innerHTML = lines || '<span class="small-text" style="color:var(--text-muted)">No tournament-wide bets settled yet — tap below for the full standings.</span>';
+  })();
 }
 
 // Build the HTML for the end-of-round summary modal — totals, settle-up, per-game breakdown
@@ -27638,8 +27670,12 @@ function wireT2() {
 async function _t2MyGroupInfo(t) {
   if (!_authUser || !t) return null;
   try {
+    let myName = ''; try { myName = (await getMeName()) || ''; } catch (e) {}
+    const myNameKey = normalizeNameSegment(myName);
     const players = await t2GetPlayers(t.id);
-    const myP = players.find(p => p.user_id === _authUser.id);
+    // Match by account link OR by name — the commissioner often adds themselves by
+    // name (unclaimed), so a user_id-only match would miss them on their own card.
+    const myP = players.find(p => (p.user_id && p.user_id === _authUser.id) || (myNameKey && normalizeNameSegment(p.display_name || '') === myNameKey));
     if (!myP) return null;
     const days = await t2GetDays(t.id);
     for (const d of (days || [])) {
@@ -29623,6 +29659,7 @@ async function renderT2Home() {
     html += renderTeam('Players', players);
   } else {
     html += '<h3 style="margin:14px 0 6px">Assign team</h3>';
+    if (amCommish) html += '<div style="display:flex;align-items:center;gap:6px;padding:0 0 3px;font-size:10px;font-weight:700;letter-spacing:.03em;color:var(--text-muted)"><div style="flex:1;min-width:0"></div><span style="width:62px;text-align:center;flex:0 0 auto">HCP</span><span style="flex:0 0 auto">Transfer</span><span style="flex:0 0 auto">Invite</span><span style="flex:0 0 auto;width:64px"></span></div>';
     html += renderTeam(t.team_a_name, teamA, 'A');
     html += renderTeam(t.team_b_name, teamB, 'B');
     if (unassigned.length) html += renderTeam('Unassigned', unassigned);
@@ -34891,7 +34928,13 @@ const gpsView = (() => {
     const club = (typeof myClubFor === 'function') ? myClubFor : (() => null);
     const drC = el('gps-dr-club'), apC = el('gps-ap-club');
     if (drC) drC.textContent = (Number(drP) > 0 ? (club(Number(drP)) || '') : '');
-    if (apC) apC.textContent = (Number(apP) > 0 ? (club(Number(apP)) || '') : '');
+    if (apC) {
+      // The approach / SECOND shot is never off the tee — never suggest Driver here
+      // (par-5 layups were showing Driver + Driver). Longest is 3W off the deck.
+      let _ac = (Number(apP) > 0 ? (club(Number(apP)) || '') : '');
+      if (/driver|^\s*dr\s*$|^\s*1\s*w/i.test(_ac)) _ac = '3W';
+      apC.textContent = _ac;
+    }
   }
   async function fetchWind() {
     try {
