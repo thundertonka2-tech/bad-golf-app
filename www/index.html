@@ -5849,7 +5849,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.209';
+const BG_BUILD = 'v2026.11.210';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -14410,7 +14410,11 @@ function gatherSetup() {
         const p = players.find(pl => pl.name === name);
         return p ? p.id : null;
       }).filter(Boolean);
-      if (partIds.length !== 2) {
+      // CROSS-GROUP: a pair member from another cart group isn't in THIS round's players
+      // but IS in the tournament field. Allow it — keep the names; it settles on the
+      // Event Leaderboard, not in the in-group round.
+      const _crossOk = !!state._t2FieldRoster && inst.pair.every(name => players.find(pl => pl.name === name) || _t2FieldHasName(name));
+      if (partIds.length !== 2 && !_crossOk) {
         showToast(`Match ${i + 1}: pair includes a player not in the round`);
         return null;
       }
@@ -14418,7 +14422,8 @@ function gatherSetup() {
         value: inst.value || 0,
         net: inst.net !== false,
         participants: partIds,
-        participantNames: inst.pair.slice()
+        participantNames: inst.pair.slice(),
+        pair: inst.pair.slice()
       });
     }
     if (validInstances.length === 0) {
@@ -20445,12 +20450,12 @@ function _t2MyCrossGroupStatuses(g, myId) {
       });
     });
     const gg2 = (cache.t.settings && cache.t.settings.groupGames) || {};
+    const cands = [];
+    Object.keys(gg2).forEach(gid => { const m = gg2[gid] && gg2[gid].match; if (m) (Array.isArray(m.instances) && m.instances.length ? m.instances : [m]).forEach(i => cands.push(i)); });
+    (cache.rows || []).forEach(row => { const gg = row && row.data ? row.data : row; const m = gg && gg.games && gg.games.match; if (m) (Array.isArray(m.instances) && m.instances.length ? m.instances : [m]).forEach(i => cands.push(i)); });
     const out = [], seen = new Set();
-    Object.keys(gg2).forEach(gid => {
-      const m = gg2[gid] && gg2[gid].match; if (!m) return;
-      const insts = (Array.isArray(m.instances) && m.instances.length) ? m.instances : [m];
-      insts.forEach(inst => {
-        const pr = inst.pair || []; if (pr.length !== 2) return;
+    cands.forEach(inst => {
+        const pr = inst.pair || inst.participantNames || []; if (pr.length !== 2) return;
         const a = nmk(pr[0]), b = nmk(pr[1]); if (a !== myKey && b !== myKey) return;
         const oppKey = (a === myKey) ? b : a; if (oppKey === myKey || !oppData[oppKey]) return;
         if (oppRound[oppKey] && oppRound[oppKey] === myRound) return;   // same round = in-group, not cross
@@ -20461,7 +20466,6 @@ function _t2MyCrossGroupStatuses(g, myId) {
         const opp = oppData[oppKey].first;
         const text = r.push ? ('AS · ' + opp) : ((r.winnerFirst === 'You' ? '▲ ' : '▼ ') + r.status.replace(/\s*\(thru[^)]*\)/, '') + ' · ' + opp);
         out.push({ label: '⚔︎', text: text, cls: r.push ? 'even' : (r.winnerFirst === 'You' ? 'pos' : 'neg') });
-      });
     });
     return out;
   } catch (e) { return []; }
@@ -28956,7 +28960,7 @@ function t2RemapGamesToGroup(src, gp, Aids, Bids) {
       const srcInsts = (Array.isArray(cfg.instances) && cfg.instances.length) ? cfg.instances : [cfg];
       const kept = [];
       srcInsts.forEach(si => {
-        const pr = (si.pair || []);
+        const pr = (si.pair || si.participantNames || []);
         if (pr.length === 2 && byName[pr[0]] && byName[pr[1]]) {
           kept.push({ value: si.value || 0, net: si.net !== false, pair: [pr[0], pr[1]], participants: [byName[pr[0]], byName[pr[1]]], participantNames: [pr[0], pr[1]] });
         }
@@ -29204,6 +29208,12 @@ function _t2MatchPickerPool() {
   }
   return { pool, sections };
 }
+// Is this name a player anywhere in the tournament field (used to allow a 1v1 pair
+// member who is in ANOTHER cart group, i.e. a cross-group bet)?
+function _t2FieldHasName(name) {
+  const fr = state._t2FieldRoster; if (!fr || !Array.isArray(fr.groups)) return false;
+  return fr.groups.some(g => (g.players || []).some(p => p.name === name));
+}
 async function openT2GroupGamesConfig(tid, gid, dayNumber) {
   const t = (_t2Current && _t2Current.id === tid) ? _t2Current : await t2Get(tid);
   if (!t) { showToast('Event not found'); return; }
@@ -29428,6 +29438,8 @@ async function openT2GroupSideBets(code) {
   if (!g) { showToast('Round not found — start the day first'); return; }
   state.game = g;
   state._t2GroupConfig = code;
+  // Cross-group 1v1s: load the field so the live picker can offer other groups too.
+  try { if (g.t2 && g.t2.tournamentId) await _t2LoadFieldRoster(g.t2.tournamentId, g.t2.groupId, g.t2.day); } catch (e) {}
   try { document.getElementById('t2-home-modal').classList.remove('show'); } catch (e) {}
   try { t2UnsubscribeHome(); } catch (e) {}
   showToast('Configuring this group’s games — they settle on your group only');
@@ -30886,21 +30898,23 @@ function t2ComputeCrossGroupMatches(t, rows) {
       if (!pdata[k] || thru > pdata[k].thru) { pdata[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), net: netA, gross: grossA, thru: thru }; playerRound[k] = rid; }
     });
   });
+  // Gather candidate 1v1 instances from BOTH sources: the saved group configs
+  // (pre-launch) AND each live round's games.match (live config). Settle only the
+  // CROSS-group ones (the two players resolve to different rounds). Deduped.
+  const candidates = [];
   const gg = (t.settings && t.settings.groupGames) || {};
+  Object.keys(gg).forEach(gid => { const m = gg[gid] && gg[gid].match; if (m) (Array.isArray(m.instances) && m.instances.length ? m.instances : [m]).forEach(inst => candidates.push(inst)); });
+  (rows || []).forEach(row => { const g = row && row.data ? row.data : row; const m = g && g.games && g.games.match; if (m) (Array.isArray(m.instances) && m.instances.length ? m.instances : [m]).forEach(inst => candidates.push(inst)); });
   const seen = new Set(), results = [];
-  Object.keys(gg).forEach(gid => {
-    const m = gg[gid] && gg[gid].match; if (!m) return;
-    const insts = (Array.isArray(m.instances) && m.instances.length) ? m.instances : [m];
-    insts.forEach(inst => {
-      const pr = inst.pair || []; if (pr.length !== 2) return;
-      const a = nmk(pr[0]), b = nmk(pr[1]);
-      if (!pdata[a] || !pdata[b]) return;                 // need both players' scores
-      if (playerRound[a] && playerRound[a] === playerRound[b]) return;  // same group → settled in-group
-      const key = [a, b].sort().join('|'); if (seen.has(key)) return; seen.add(key);
-      const net = inst.net !== false;
-      const r = _t2SettleCrossPair(pdata[a], pdata[b], net);
-      if (r) results.push(Object.assign({ aFirst: pdata[a].first, bFirst: pdata[b].first, value: Number(inst.value) || 0, net: net }, r));
-    });
+  candidates.forEach(inst => {
+    const pr = inst.pair || inst.participantNames || []; if (pr.length !== 2) return;
+    const a = nmk(pr[0]), b = nmk(pr[1]);
+    if (!pdata[a] || !pdata[b]) return;                 // need both players' scores
+    if (playerRound[a] && playerRound[a] === playerRound[b]) return;  // same group → settled in-group
+    const key = [a, b].sort().join('|'); if (seen.has(key)) return; seen.add(key);
+    const net = inst.net !== false;
+    const r = _t2SettleCrossPair(pdata[a], pdata[b], net);
+    if (r) results.push(Object.assign({ aFirst: pdata[a].first, bFirst: pdata[b].first, value: Number(inst.value) || 0, net: net }, r));
   });
   return results;
 }
