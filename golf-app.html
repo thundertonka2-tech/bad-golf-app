@@ -5844,7 +5844,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.215';
+const BG_BUILD = 'v2026.11.216';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -7997,6 +7997,60 @@ async function _readSharedSingletonNow(key) {
 // refresh overwrote the local edit with the stale cloud row. Now: retry up to 3×,
 // flag the key DIRTY until the cloud confirms (which blocks the clobber and drives
 // a background re-flush), and report real success so callers can warn the user.
+// ===== Merge-on-write for additive shared blobs (v216, Phase 2c) =====
+// Two devices editing the SAME shared overlay within ~1-2s of each other used to
+// clobber each other (last-writer-wins on the whole blob). For blobs with purely
+// ADDITIVE / object-map / accumulating-set semantics we re-read the cloud copy and
+// union the local change in before writing, so neither device's edit is lost.
+// DELIBERATELY EXCLUDED: the player roster (already merged via mergeRosters),
+// course_gps (its own table + merge), and recent-games / tourneys — those have
+// DELETE semantics with no shared tombstone, so a blind union would RESURRECT a
+// round/tournament that another device deleted. Those keep last-writer-wins.
+const _SHARED_MERGE_STRATEGY = {
+  'golf:courses': 'objectMap',                  // scorecards keyed by course id
+  'golf:course-library-additions': 'arrayById', // user-added courses
+  'golf:course-deletes': 'stringSet',           // deleted course ids (accumulate)
+  'golf:course-skipped': 'stringSet',           // admin skip set (accumulate)
+  'golf:course-verified': 'stringSet',          // admin verified set (accumulate)
+  'golf:course-name-overrides': 'objectMap',    // { id: name }
+  'golf:course-detail-overrides': 'objectMap',  // { id: {name,city,st} }
+  'golf:state-import-progress': 'objectMap'      // { state: progress }
+};
+async function _mergeSharedSingletonValue(key, local) {
+  const strat = _SHARED_MERGE_STRATEGY[key];
+  if (!strat) return undefined;                 // not a merge key — write as-is
+  let cloud = null;
+  try {
+    const { data, error } = await supa.from('games').select('data').eq('code', singletonRowCode(key)).maybeSingle();
+    if (error) return undefined;                // read failed — fall back to local-only (prior behavior)
+    cloud = data ? data.data : null;
+  } catch (e) { return undefined; }
+  if (cloud == null) return undefined;          // nothing in the cloud yet — local IS the superset
+  try {
+    if (strat === 'stringSet') {
+      const a = Array.isArray(cloud) ? cloud : [];
+      const b = Array.isArray(local) ? local : [];
+      return Array.from(new Set([...a, ...b]));
+    }
+    if (strat === 'arrayById') {
+      const a = Array.isArray(cloud) ? cloud : [];
+      const b = Array.isArray(local) ? local : [];
+      const idOf = x => (x && (x.id != null ? x.id : (x.code != null ? x.code : (x.courseId != null ? x.courseId : null))));
+      const map = new Map();
+      a.forEach(x => { const id = idOf(x); if (id != null) map.set(id, x); });
+      b.forEach(x => { const id = idOf(x); if (id != null) map.set(id, x); }); // local wins per id
+      const out = Array.from(map.values());
+      b.forEach(x => { if (idOf(x) == null) out.push(x); });                    // keep id-less locals
+      return out;
+    }
+    if (strat === 'objectMap') {
+      const a = (cloud && typeof cloud === 'object' && !Array.isArray(cloud)) ? cloud : {};
+      const b = (local && typeof local === 'object' && !Array.isArray(local)) ? local : {};
+      return Object.assign({}, a, b);            // local wins per key
+    }
+  } catch (e) { return undefined; }
+  return undefined;
+}
 async function writeSharedSingleton(key, value) {
   try { localStorage.setItem(key, value); } catch (e) {}  // cache locally so cache-first reads are correct right after a write
   _singletonWroteAt[key] = Date.now();                    // shield this fresh write from a stale background refresh (see readSharedSingleton)
@@ -8005,7 +8059,14 @@ async function writeSharedSingleton(key, value) {
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
-      const parsed = JSON.parse(value);
+      let parsed = JSON.parse(value);
+      // Merge-on-write: union an additive blob with the current cloud copy so a
+      // concurrent edit on another device isn't clobbered (v216, Phase 2c). No-op
+      // for non-merge keys (returns undefined → write local as-is).
+      try {
+        const _merged = await _mergeSharedSingletonValue(key, parsed);
+        if (_merged !== undefined) { parsed = _merged; try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {} }
+      } catch (e) {}
       for (let attempt = 0; attempt < 3 && !committed; attempt++) {
         try {
           const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: parsed, updated_at: new Date().toISOString() });
@@ -8041,6 +8102,46 @@ async function flushDirtySingletons() {
 try { setInterval(() => { flushDirtySingletons().catch(() => {}); }, 15000); } catch (e) {}
 try { flushDirtySingletons().catch(() => {}); } catch (e) {}   // retry any edits left unsaved from a previous session, on boot
 try { window.addEventListener('online', () => { flushDirtySingletons().catch(() => {}); }); } catch (e) {}
+
+// ===== Course-GPS dirty queue (v216, Phase 2b) =====
+// course_gps is its own table, NOT covered by flushDirtySingletons. When a hole
+// map fails all 3 upload retries (spotty course wifi / airplane mode), the course
+// id is parked here and re-pushed on the same 15s / boot / online triggers, so the
+// map still lands once the network returns. Pushes from the local GPS cache and
+// merges with the current cloud row first (same read-modify-write as saveCourseRow).
+function _dirtyCourseGpsList() { try { return JSON.parse(localStorage.getItem('golf:dirty-coursegps') || '[]') || []; } catch (e) { return []; } }
+function _dirtyCourseGpsSave(arr) { try { localStorage.setItem('golf:dirty-coursegps', JSON.stringify(Array.from(new Set(arr)).filter(Boolean))); } catch (e) {} }
+function markCourseGpsDirty(cid) { try { if (!cid) return; const a = _dirtyCourseGpsList(); if (a.indexOf(cid) < 0) { a.push(cid); _dirtyCourseGpsSave(a); } } catch (e) {} }
+function clearCourseGpsDirty(cid) { try { if (!cid) return; const a = _dirtyCourseGpsList(); const i = a.indexOf(cid); if (i >= 0) { a.splice(i, 1); _dirtyCourseGpsSave(a); } } catch (e) {} }
+async function flushDirtyCourseGps() {
+  const pending = _dirtyCourseGpsList();
+  if (!pending.length) return;
+  try { if (!supaReady) await initSupabase(); } catch (e) {}
+  if (!supa || !supaOnline) return;
+  const remaining = [];
+  for (const cid of pending) {
+    let local = null;
+    try { const raw = localStorage.getItem('golf:course-gps-cache:' + cid); if (raw) local = JSON.parse(raw); } catch (e) {}
+    if (!local || !local.holes) continue; // nothing cached to push — drop it
+    let mergedHoles = local.holes || {};
+    try {
+      const { data: cloudRow } = await supa.from('course_gps').select('holes').eq('course_id', cid).maybeSingle();
+      if (cloudRow && cloudRow.holes && Object.keys(cloudRow.holes).length) {
+        const m = Object.assign({}, cloudRow.holes);
+        for (const k of Object.keys(local.holes)) { m[k] = Object.assign({}, cloudRow.holes[k] || {}, local.holes[k] || {}); }
+        mergedHoles = m;
+      }
+    } catch (e) {}
+    const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === cid) : null;
+    const payload = { course_id: cid, name: lib ? lib.name : cid, city: lib ? (lib.city || '') : '', holes: mergedHoles, source: local.source || 'manual', updated_at: new Date().toISOString() };
+    try { const { error } = await supa.from('course_gps').upsert(payload); if (error) remaining.push(cid); }
+    catch (e) { remaining.push(cid); }
+  }
+  _dirtyCourseGpsSave(remaining);
+}
+try { setInterval(() => { flushDirtyCourseGps().catch(() => {}); }, 15000); } catch (e) {}
+try { flushDirtyCourseGps().catch(() => {}); } catch (e) {}
+try { window.addEventListener('online', () => { flushDirtyCourseGps().catch(() => {}); }); } catch (e) {}
 
 // Storage shim: routes shared keys to Supabase (with localStorage cache as
 // fallback) and personal keys to localStorage only.
@@ -11322,6 +11423,107 @@ function setWatchPlaysAsEnabled(on){
 // ============================================================
 // SETUP UI
 // ============================================================
+// ===== Round-setup structured draft (v216, Phase 1c) =====
+// Captures the in-progress round setup (players, tees, games/bets, scorecard)
+// so leaving the screen / a phone call / iOS backgrounding can't erase it.
+// Local-only safety net under the golf:draft: namespace; cleared on round start.
+function _setupDraftActive() {
+  try {
+    const c = document.getElementById('setup-with-game');
+    if (!c || c.style.display === 'none') return false;
+    if (typeof state !== 'undefined' && state && state.editingLiveRound) return false;
+    return true;
+  } catch (e) { return false; }
+}
+function serializeSetupDraft() {
+  try {
+    const out = { t: Date.now(), players: [], fields: {} };
+    const cn = document.getElementById('course-name'); if (cn) out.courseName = cn.value;
+    const cid = (cn && cn.dataset) ? (cn.dataset.courseId || '') : '';
+    out.courseId = cid;
+    const cs = document.getElementById('course-search'); if (cs) out.courseSearch = cs.value;
+    const pg = document.getElementById('par-grid'); if (pg) out.pars = Array.from(pg.querySelectorAll('input')).map(i => i.value);
+    const sg = document.getElementById('si-grid'); if (sg) out.sis = Array.from(sg.querySelectorAll('input')).map(i => i.value);
+    try { out.tees = getCurrentTees(); } catch (e) {}
+    document.querySelectorAll('#players-list .player-row').forEach(row => {
+      const fi = row.querySelector('.first-name'), li = row.querySelector('.last-name');
+      const hc = row.querySelector('.player-hcp') || row.querySelector('input[type=number]');
+      const pgx = row.querySelector('.plays-gross');
+      const ts = row.querySelector('.tee-select');
+      out.players.push({
+        firstName: fi ? fi.value.trim() : '',
+        lastName: li ? li.value.trim() : '',
+        hcp: hc ? hc.value : '',
+        playsGross: !!(pgx && pgx.checked),
+        teeLabel: ts ? ts.value : ''
+      });
+    });
+    // All id'd inputs in the bets + handicap + tracking blocks (incl. checkboxes,
+    // which the generic field-autosave deliberately skips).
+    ['setup-card-bets','setup-hcp-block','setup-tracking-block','junk-grid'].forEach(secId => {
+      const sec = document.getElementById(secId);
+      if (!sec) return;
+      sec.querySelectorAll('input[id],select[id],textarea[id]').forEach(el => {
+        out.fields[el.id] = (el.type === 'checkbox' || el.type === 'radio') ? el.checked : el.value;
+      });
+    });
+    try { out.playerTees = (state && state.playerTees) ? Object.assign({}, state.playerTees) : {}; } catch (e) {}
+    return out;
+  } catch (e) { return null; }
+}
+function _setupDraftHasName(d) { return !!(d && Array.isArray(d.players) && d.players.some(p => p && p.firstName)); }
+function saveSetupDraft() {
+  try {
+    if (!_setupDraftActive()) return;
+    const d = serializeSetupDraft();
+    if (!_setupDraftHasName(d)) { try { localStorage.removeItem('golf:draft:setup'); } catch (e) {} return; }
+    localStorage.setItem('golf:draft:setup', JSON.stringify(d));
+  } catch (e) {}
+}
+function clearSetupDraft() { try { localStorage.removeItem('golf:draft:setup'); } catch (e) {} }
+function loadSetupDraft() {
+  try {
+    const raw = localStorage.getItem('golf:draft:setup');
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    if (!d || (Date.now() - (d.t || 0) > 12 * 60 * 60 * 1000)) { clearSetupDraft(); return null; }
+    return _setupDraftHasName(d) ? d : null;
+  } catch (e) { return null; }
+}
+function restoreSetupDraft(d) {
+  try {
+    if (!d) return false;
+    if (d.courseName != null) { const cn = document.getElementById('course-name'); if (cn) { cn.value = d.courseName; if (cn.dataset) cn.dataset.courseId = d.courseId || ''; } }
+    if (d.courseSearch != null) { const cs = document.getElementById('course-search'); if (cs) cs.value = d.courseSearch; }
+    if (Array.isArray(d.pars)) { const pg = document.getElementById('par-grid'); if (pg) { const ins = pg.querySelectorAll('input'); d.pars.forEach((v, i) => { if (ins[i]) ins[i].value = v; }); } }
+    if (Array.isArray(d.sis)) { const sg = document.getElementById('si-grid'); if (sg) { const ins = sg.querySelectorAll('input'); d.sis.forEach((v, i) => { if (ins[i]) ins[i].value = v; }); } }
+    if (Array.isArray(d.tees) && d.tees.length) { try { renderTeesList(d.tees); } catch (e) {} }
+    if (Array.isArray(d.players) && d.players.length) {
+      const list = document.getElementById('players-list');
+      if (list) list.innerHTML = '';
+      d.players.forEach(p => { try { addPlayerRow(p.firstName || '', p.lastName || '', p.hcp || 0, !!p.playsGross, true); } catch (e) {} });
+    }
+    try { if (d.playerTees) state.playerTees = Object.assign({}, d.playerTees); } catch (e) {}
+    try { renderPlayerTeeSelects(); } catch (e) {}
+    if (Array.isArray(d.players)) {
+      const rows = document.querySelectorAll('#players-list .player-row');
+      d.players.forEach((p, i) => { if (rows[i] && p.teeLabel) { const ts = rows[i].querySelector('.tee-select'); if (ts) ts.value = p.teeLabel; } });
+    }
+    if (d.fields) {
+      // Checkboxes/radios first so their config panels open, then value fields.
+      Object.keys(d.fields).forEach(id => {
+        const el = document.getElementById(id);
+        if (el && (el.type === 'checkbox' || el.type === 'radio')) { el.checked = !!d.fields[id]; try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {} }
+      });
+      Object.keys(d.fields).forEach(id => {
+        const el = document.getElementById(id);
+        if (el && el.type !== 'checkbox' && el.type !== 'radio') { el.value = d.fields[id]; try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {} }
+      });
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
 async function setupNewGameForm(prefill) {
   // Fresh form build → clear any team assignments left over from a previous
   // round. Rows get brand-new puids below, so stale keys would otherwise be
@@ -11515,6 +11717,22 @@ async function setupNewGameForm(prefill) {
       renderTeesList([]);
     }
   }
+
+  // ===== Round-setup draft: bind autosave + restore last setup (v216, Phase 1c) =====
+  try {
+    const _sc = document.getElementById('setup-with-game');
+    if (_sc && !_sc._setupDraftBound) {
+      _sc._setupDraftBound = true;
+      _sc.addEventListener('input', saveSetupDraft);
+      _sc.addEventListener('change', saveSetupDraft);
+      document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') saveSetupDraft(); });
+      window.addEventListener('pagehide', saveSetupDraft);
+    }
+    if (!prefill && !(typeof state !== 'undefined' && state && state.editingLiveRound)) {
+      const _draft = loadSetupDraft();
+      if (_draft && restoreSetupDraft(_draft)) { try { showToast('Restored your last setup'); } catch (e) {} }
+    }
+  } catch (e) {}
 }
 
 // Add a player row to the setup form. Supports both legacy single-name calls
@@ -29188,7 +29406,14 @@ async function openT2DayConfig(dayNumber) {
 // Restore the games + participants the user had in progress before they popped out
 // to Configure Players. Consumed once (so it never re-applies stale state).
 function _t2RestoreDayDraft(dayNumber) {
-  const d = state._t2DayDraft;
+  let d = state._t2DayDraft;
+  if (!d || d.dayNumber !== dayNumber) {
+    // Fall back to the persisted copy (survives app kill, v216 Phase 1d).
+    try {
+      const raw = localStorage.getItem('golf:draft:t2day:' + dayNumber);
+      if (raw) { const pj = JSON.parse(raw); if (pj && pj.v && (Date.now() - (pj.t || 0) <= 12 * 60 * 60 * 1000)) d = pj.v; }
+    } catch (e) {}
+  }
   if (!d || d.dayNumber !== dayNumber) return;
   state._t2DayDraft = null;
   (d.checked || []).forEach(k => {
@@ -32610,6 +32835,7 @@ async function init() {
       if (_cnm) { s.dayCourses = s.dayCourses || {}; s.dayCourses[cfg.dayNumber] = { id: _cid, name: _cnm }; }
     });
     if (!ok) { showToast('Save failed — check connection and try again'); return false; }
+    try { localStorage.removeItem('golf:draft:t2day:' + cfg.dayNumber); } catch (e) {} // saved — drop the draft (v216, Phase 1d)
     return true;
   }
   function _closeT2DayConfig() {
@@ -32662,6 +32888,8 @@ async function init() {
           checked: Array.from(document.querySelectorAll('input[type="checkbox"][id^="game-"]:checked')).map(cb => cb.id.slice(5)),
           participants: Object.fromEntries(Object.entries(state.gameParticipants || {}).map(([k, set]) => [k, Array.from(set || [])]))
         };
+        // Persist so the day draft also survives an app kill (v216, Phase 1d).
+        try { localStorage.setItem('golf:draft:t2day:' + (cfg && cfg.dayNumber), JSON.stringify({ t: Date.now(), v: state._t2DayDraft })); } catch (e) {}
       } catch (e) {}
       showToast('Saving…');
       try { await saveT2DayConfig(); } catch (e) {}
@@ -33115,6 +33343,7 @@ async function init() {
     } catch (e) {}
     const ok = await saveGame(game, { deferRecent: true });
     if (!ok) { hideRoundLoading(_rl, true); showToast('Save failed'); return; }
+    try { clearSetupDraft(); } catch (e) {} // round started — drop the setup draft
 
     // Capture the tourney id before the slow work moves to the background.
     const _tourneyId = state.editingTourneyId;
@@ -34399,11 +34628,12 @@ const gpsView = (() => {
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const { error } = await supa.from('course_gps').upsert(payload);
-          if (!error) return true;
+          if (!error) { try { clearCourseGpsDirty(cid); } catch (e) {} return true; }
           console.warn('course_gps write failed (attempt ' + (attempt + 1) + '):', error);
         } catch (e) { console.warn('course_gps write threw (attempt ' + (attempt + 1) + '):', e); }
         await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
       }
+      try { markCourseGpsDirty(cid); } catch (e) {} // park for the dirty-queue retry (v216, Phase 2b)
       return false;
     }
     return true; // offline — local cache saved; not a failure to surface
@@ -37238,13 +37468,17 @@ async function loadMyClubs() {
 }
 async function saveMyClubs(clubs) {
   window._myClubs = clubs;
+  // Return the REAL result (v216, Phase 3): true only when the durable store
+  // accepted the write — cloud for signed-in users, localStorage for guests.
+  let ok = false;
   try {
     if (isSignedIn() && supa && _authUser) {
-      await supa.from('profiles').update({ clubs: clubs }).eq('id', _authUser.id);
-      return;
+      const { error } = await supa.from('profiles').update({ clubs: clubs }).eq('id', _authUser.id);
+      ok = !error;
     }
   } catch (e) {}
-  try { localStorage.setItem(KEY_MY_CLUBS, JSON.stringify(clubs)); } catch (e) {}
+  try { localStorage.setItem(KEY_MY_CLUBS, JSON.stringify(clubs)); if (!isSignedIn()) ok = true; } catch (e) {}
+  return ok;
 }
 
 // ===================== MY SHOTS (saved tracked shots) =====================
@@ -37441,6 +37675,17 @@ function renderMyShots() {
 })();
 // =================== END FORM DRAFT AUTO-SAVE ===================
 
+// ===== Uniform save status (v216, Phase 3) =====
+// Reflects the REAL committed boolean a save returns, so an editor never shows a
+// false "Saved" on a dropped write. Standardizes on the existing toast + sync dot.
+function reportSaveResult(ok, okMsg, failMsg) {
+  try {
+    if (ok) { showToast(okMsg || 'Saved ✓'); try { updateSyncIndicator(true); } catch (e) {} }
+    else { showToast(failMsg || 'Couldn\'t save — check your connection and try again'); try { updateSyncIndicator(false); } catch (e) {} }
+  } catch (e) {}
+  return ok;
+}
+
 function defaultClubBag() {
   return CLUB_SLOTS.map(s => {
     const m = String(s[1]).split(/[–-]/); // en-dash or hyphen
@@ -37595,7 +37840,8 @@ function wireClubRows() {
     save.disabled = true;
     const _label = save.textContent;
     save.textContent = 'Saving…';
-    try { await saveMyClubs(clubs); } catch (e) { console.warn('saveMyClubs', e); }
+    let _clubsOk = false;
+    try { _clubsOk = await saveMyClubs(clubs); } catch (e) { console.warn('saveMyClubs', e); _clubsOk = false; }
     window._myClubs = clubs;
     updateClubsStatus();
     const st = document.getElementById('clubs-status');
@@ -37604,6 +37850,10 @@ function wireClubRows() {
         // A bad range was dropped — let them know, but the rest still saved.
         st.style.color = 'var(--danger)';
         st.textContent = '⚠️ Max must be more than min: ' + clubs._bad.join(', ') + ' — that range wasn\'t saved';
+      } else if (!_clubsOk) {
+        // Honest failure (v216, Phase 3) — never show a false "saved".
+        st.style.color = 'var(--danger)';
+        st.textContent = '⚠️ Couldn\'t save — check your connection and try again';
       } else {
         st.style.color = '';
         st.textContent = st.textContent + '  · saved ✓';
