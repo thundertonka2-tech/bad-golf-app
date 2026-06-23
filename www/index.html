@@ -5849,7 +5849,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.218';
+const BG_BUILD = 'v2026.11.219';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -39357,6 +39357,28 @@ async function courseDataImport(file, stateFilter) {
     const WSLOPE = ['women_slope', 'womens_slope', 'w_slope', 'wslope', 'slope_w', 'ladies_slope', 'women slope', 'womens slope', 'wsr'];
     const GENDER = ['gender', 'sex', 'tee_gender', 'tee gender', 'teegender', 'm/f', 'mf'];
     const YARD = ['yardage', 'yards', 'length', 'distance', 'yds'];
+    // v219: per-hole par + stroke index (what USGA lacks; BlueGolf supplies them).
+    // Two CSV shapes: a single space/comma-separated "pars"/"sis" column, or
+    // numbered columns par1..par18 / si1..si18. Course-level (repeated on each tee
+    // row), so we read them once per course.
+    const PARS = ['pars', 'hole_pars', 'holepars', 'par_list'];
+    const SIS = ['sis', 'hcps', 'handicaps', 'stroke_index', 'strokeindex', 'si_list'];
+    const read18 = (r, names, prefixes, lo, hi) => {
+      let vals;
+      const direct = pick(r, names);
+      if (direct) {
+        vals = String(direct).trim().split(/[\s,;|]+/).map(x => parseInt(x, 10));
+      } else {
+        vals = [];
+        for (let i = 1; i <= 18; i++) {
+          let v = '';
+          for (const p of prefixes) { const k = p + i; if (r[k] != null && r[k] !== '') { v = r[k]; break; } }
+          vals.push(parseInt(v, 10));
+        }
+      }
+      if (vals.length !== 18 || vals.some(v => !isFinite(v) || v < lo || v > hi)) return null;
+      return vals;
+    };
 
     // Guard against picking the wrong file. The unmatched export
     // (course-import-unmatched.csv) has name/state/city but NO rating/slope,
@@ -39397,6 +39419,9 @@ async function courseDataImport(file, stateFilter) {
       if (hasM) { t.rating = mRating; t.slope = mSlope; }
       if (hasW) { t.ratingW = wRating; t.slopeW = wSlope; }
       if (isFinite(yard) && t.yardage == null) t.yardage = yard;
+      // v219: course-level per-hole pars / stroke index, read once per course.
+      if (!g.pars) { const _p = read18(r, PARS, ['par'], 3, 6); if (_p) g.pars = _p; }
+      if (!g.sis) { const _s = read18(r, SIS, ['si', 'hcp', 'handicap'], 1, 18); if (_s) g.sis = _s; }
       teeRows++;
     });
     let groupList = Object.values(groups);
@@ -39449,7 +39474,7 @@ async function courseDataImport(file, stateFilter) {
     }
 
     const saves = await getCourseSaves();
-    let matched = 0, filledTees = 0, preserved = 0;
+    let matched = 0, filledTees = 0, preserved = 0, filledPars = 0;
     const unmatched = [['name', 'state', 'city', 'tees']];
     const byStateMatched = {};
     const usedLibIds = new Set(); // one library course can't be claimed twice
@@ -39471,28 +39496,50 @@ async function courseDataImport(file, stateFilter) {
       if (!lib || usedLibIds.has(lib.id)) { unmatched.push([g.name, g.state, g.city || '', g.tees.length]); return; }
       usedLibIds.add(lib.id);
       const ex = saves[lib.id] || {};
-      // NEVER overwrite a course that already has rating/slope tees — those are
-      // either manually entered (correct) or filled by an earlier import. The
-      // import only FILLS gaps; clobbering here is what changed Buffalo Creek's
-      // tees on a card that was already right.
-      // RULE: never override a manually-edited course (userEdited) — Kevin's
-      // hand-entered ratings/tees/pars are sacred — or one that already has
-      // rating/slope. Imports only ever FILL gaps, never clobber manual inputs.
+      // RULE: never touch a manually-edited course (userEdited) — Kevin's
+      // hand-entered ratings/tees/pars are sacred. Skip it entirely.
+      if (ex.userEdited) { preserved++; return; }
+      // Imports only ever FILL gaps, never clobber. Keep existing rating/slope
+      // tees (manual or earlier import); only SET tees when the course has none.
       const exHasRS = Array.isArray(ex.tees) && ex.tees.some(t => t && t.rating != null && t.slope != null);
-      if (ex.userEdited || exHasRS) { preserved++; return; }
+      // v219: per-hole pars + stroke index can be filled even when rating/slope
+      // already exist (USGA supplies no pars/SI), as long as we don't already have
+      // real ones. DEFAULT_SI_IMPORT is the placeholder, so treat it as "no real SI".
+      const exHasPars = Array.isArray(ex.pars) && ex.pars.length === 18;
+      const exSiIsReal = Array.isArray(ex.sis) && ex.sis.length === 18 &&
+        ex.sis.join(',') !== DEFAULT_SI_IMPORT.join(',');
+      const csvPars = (g.pars && g.pars.length === 18) ? g.pars : null;
+      const csvSis = (g.sis && g.sis.length === 18) ? g.sis : null;
+
+      let teesOut = Array.isArray(ex.tees) ? ex.tees : [];
+      let teesChanged = false;
+      if (!exHasRS && g.tees && g.tees.length) { teesOut = g.tees; teesChanged = true; }
+
+      let parsOut = Array.isArray(ex.pars) ? ex.pars : [];
+      let parsChanged = false;
+      if (!exHasPars && csvPars) { parsOut = csvPars; parsChanged = true; }
+
+      let sisOut = (Array.isArray(ex.sis) && ex.sis.length) ? ex.sis : DEFAULT_SI_IMPORT.slice();
+      let sisChanged = false;
+      if (csvSis && !exSiIsReal) { sisOut = csvSis; sisChanged = true; }
+
+      // Nothing new for this course → leave it untouched.
+      if (!teesChanged && !parsChanged && !sisChanged) { preserved++; return; }
       saves[lib.id] = {
         name: lib.name,
-        pars: Array.isArray(ex.pars) ? ex.pars : [],
-        sis: (Array.isArray(ex.sis) && ex.sis.length) ? ex.sis : DEFAULT_SI_IMPORT.slice(),
-        tees: g.tees,
+        pars: parsOut,
+        sis: sisOut,
+        tees: teesOut,
         updatedAt: Date.now()
       };
-      matched++; filledTees += g.tees.length;
+      matched++;
+      if (teesChanged) filledTees += teesOut.length;
+      if (parsChanged) filledPars++;
       byStateMatched[g.state] = (byStateMatched[g.state] || 0) + 1;
     });
 
     await saveCourseSaves(saves);
-    log('✅ Filled <b>' + matched + '</b> courses (' + filledTees + ' tees) with rating/slope. Synced to everyone.', '#8fd19e');
+    log('✅ Filled <b>' + matched + '</b> courses (' + filledTees + ' tees rating/slope, ' + filledPars + ' with per-hole par+SI). Synced to everyone.', '#8fd19e');
     Object.keys(byStateMatched).sort().forEach(st => log('   ' + st + ': ' + byStateMatched[st] + ' courses'));
     if (unmatched.length > 1) {
       log('⚠️ ' + (unmatched.length - 1) + ' dataset courses had no library match (different name/state). CSV downloaded so you can reconcile or add them.', '#ffd34d');
@@ -39504,7 +39551,7 @@ async function courseDataImport(file, stateFilter) {
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 4000);
     }
-    log('<br>Pars stay from OSM; this only set tee rating/slope/yardage. Done — close this panel.');
+    log('<br>Tee rating/slope/yardage filled; per-hole par + stroke index applied where the CSV had them. Existing/manual data was kept. Done — close this panel.');
   } catch (e) {
     log('Import failed: ' + (e && e.message ? e.message : 'error'), '#ff8a80');
     console.error('courseDataImport crashed:', e);
