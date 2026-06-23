@@ -5860,7 +5860,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.234';
+const BG_BUILD = 'v2026.11.236';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8542,7 +8542,8 @@ async function addToRecent(game) {
     // fixed at round creation. Preserve a prior entry's date so older rounds settle.
     createdAt: game.createdAt || (prevEntry && (prevEntry.createdAt || prevEntry.updatedAt)) || game.updatedAt,
     updatedAt: game.updatedAt,
-    finishedAt: game.finishedAt || null // lets the Rounds tab show LIVE vs complete
+    finishedAt: game.finishedAt || null, // lets the Rounds tab show LIVE vs complete
+    t2: game.t2 || null                  // mark tournament rounds so they don't show under "Scheduled Rounds"
   });
   recent = recent.slice(0, 50);
   await safeSet(KEY_RECENT, JSON.stringify(recent), true);
@@ -26908,22 +26909,23 @@ async function t2Create(opts) {
 async function t2ListMine() {
   if (!supa || !_authUser) return [];
   // Reads are open (so participants can view any event they're in), but the LIST must
-  // only show events YOU'RE part of — not every tournament in the system. = events you
-  // run (commissioner) + events you're a claimed player in. Otherwise the list floods
-  // with everyone's events (incl. old test ones).
+  // only show events YOU'RE part of — not every tournament in the system. "Part of" =
+  //   (1) events you run (commissioner),
+  //   (2) events you're a registered player in (tournament_players),
+  //   (3) events you have a ROUND in (your group round links to it) — covers being added
+  //       to a group round even if you're not a claimed player yet.
   try {
     const uid = _authUser.id;
-    const [mineRes, partRes] = await Promise.all([
-      supa.from('tournaments').select('*').eq('commissioner_id', uid),
-      supa.from('tournament_players').select('tournament_id').eq('user_id', uid)
-    ]);
     const byId = {};
-    (mineRes.data || []).forEach(t => { byId[t.id] = t; });
-    const need = [...new Set((partRes.data || []).map(r => r.tournament_id).filter(Boolean))].filter(id => !byId[id]);
-    if (need.length) {
-      const { data: parts } = await supa.from('tournaments').select('*').in('id', need);
-      (parts || []).forEach(t => { byId[t.id] = t; });
-    }
+    const need = [];
+    try { const { data } = await supa.from('tournaments').select('*').eq('commissioner_id', uid); (data || []).forEach(t => { byId[t.id] = t; }); } catch (e) {}
+    try { const { data } = await supa.from('tournament_players').select('tournament_id').eq('user_id', uid); (data || []).forEach(r => { if (r.tournament_id) need.push(r.tournament_id); }); } catch (e) {}
+    try {
+      const codes = [...new Set(((await getRecent()) || []).map(r => r && r.code).filter(Boolean))];
+      if (codes.length) { const { data } = await supa.from('tournament_groups').select('tournament_id, game_code').in('game_code', codes); (data || []).forEach(g => { if (g.tournament_id) need.push(g.tournament_id); }); }
+    } catch (e) {}
+    const fetchIds = [...new Set(need)].filter(id => id && !byId[id]);
+    if (fetchIds.length) { try { const { data } = await supa.from('tournaments').select('*').in('id', fetchIds); (data || []).forEach(t => { byId[t.id] = t; }); } catch (e) {} }
     return Object.values(byId).sort((a, b) => (new Date(b.created_at || 0)) - (new Date(a.created_at || 0)));
   } catch (e) { return []; }
 }
@@ -28282,6 +28284,7 @@ async function _t2MyGroupInfo(t) {
   } catch (e) { return null; }
 }
 
+let _t2ShowPast = false;
 async function renderT2List() {
   wireT2();
   renderT2Templates(); // fire-and-forget — fills the ⭐ Templates section
@@ -28299,6 +28302,26 @@ async function renderT2List() {
   // Enrich each event with THIS user's group + tee time so they see where they play
   // (and, if they're the scorer, a button to set up their group's side games).
   const _infos = await Promise.all(list.map(t => _t2MyGroupInfo(t).catch(() => null)));
+  // Which events are PAST: completed, or their last scheduled day is before today.
+  // These auto-hide from the list (a toggle reveals them) so old tests fall off.
+  const _t2PastSet = new Set();
+  try {
+    const _ids = list.map(t => t.id);
+    const _lastDate = {};
+    if (_ids.length) {
+      const { data: _dd } = await supa.from('tournament_days').select('tournament_id, play_date').in('tournament_id', _ids);
+      (_dd || []).forEach(r => { if (r.play_date && (!_lastDate[r.tournament_id] || r.play_date > _lastDate[r.tournament_id])) _lastDate[r.tournament_id] = r.play_date; });
+    }
+    const _now = new Date();
+    const _todayStr = _now.getFullYear() + '-' + String(_now.getMonth() + 1).padStart(2, '0') + '-' + String(_now.getDate()).padStart(2, '0');
+    list.forEach(t => {
+      const _st = String(t.status || '').toLowerCase();
+      if (_st === 'complete' || _st === 'completed' || _st === 'final' || _st === 'done') { _t2PastSet.add(t.id); return; }
+      if (_st === 'live') return;            // live always shows
+      const _ld = _lastDate[t.id];
+      if (_ld && _ld < _todayStr) _t2PastSet.add(t.id);   // scheduled but its last day already passed
+    });
+  } catch (e) {}
   const row = (t, _idx) => {
     const img = _ei[t.id] || '';
     const thumb = img
@@ -28325,7 +28348,13 @@ async function renderT2List() {
       groupLine +
       '</div>';
   };
-  listEl.innerHTML = list.length ? list.map((t, i) => row(t, i)).join('') : '<div class="help-text" style="margin-top:4px">No tournaments yet.</div>';
+  // Auto-hide past/completed events; a toggle reveals them. Nothing is deleted.
+  const _rowsHtml = list.map((t, i) => (_t2ShowPast || !_t2PastSet.has(t.id)) ? row(t, i) : '').join('');
+  const _pastN = list.filter(t => _t2PastSet.has(t.id)).length;
+  const _anyVisible = list.some(t => _t2ShowPast || !_t2PastSet.has(t.id));
+  const _toggleHtml = _pastN ? ('<button class="small" id="t2-toggle-past" style="width:100%;margin-top:8px;color:var(--text-muted)">' + (_t2ShowPast ? '\u25B4 Hide ' : '\u25BE Show ') + _pastN + ' past event' + (_pastN === 1 ? '' : 's') + '</button>') : '';
+  listEl.innerHTML = (list.length ? (_anyVisible ? _rowsHtml : '<div class="help-text" style="margin-top:4px">No current tournaments — tap below to see past ones.</div>') : '<div class="help-text" style="margin-top:4px">No tournaments yet.</div>') + _toggleHtml;
+  { const _tp = document.getElementById('t2-toggle-past'); if (_tp) _tp.onclick = () => { _t2ShowPast = !_t2ShowPast; renderT2List(); }; }
   const _byId = {}; list.forEach(tt => _byId[tt.id] = tt);
   const _fullT = async id => { let tf = _byId[id]; try { const f = await t2Get(id); if (f) tf = f; } catch (e) {} return tf; };
   document.querySelectorAll('#t2-list .t2-row').forEach(b => b.onclick = () => openT2Home(b.dataset.id));
@@ -31202,6 +31231,10 @@ async function renderTourneyList() {
   // the user is in. A round Kevin scheduled and invited me to lives in my recent
   // cache as a game (code, no scores yet) — it should appear in Events too, not
   // only on the Rounds tab. Deduped against any live tourney card (by activeCode).
+  // Tournament group rounds belong under "Tournaments", not "Scheduled Rounds" — build
+  // the set of their game codes so we exclude them from the scheduled list below.
+  let _t2RoundCodes = new Set();
+  try { if (typeof supa !== 'undefined' && supa) { const { data: _tg } = await supa.from('tournament_groups').select('game_code'); (_tg || []).forEach(g => { if (g.game_code) _t2RoundCodes.add(g.game_code); }); } } catch (e) {}
   let schedGames = [];
   try {
     const rec = await getRecent();
@@ -31212,6 +31245,7 @@ async function renderTourneyList() {
       if (hidden.includes(r.code)) return false;
       if (r.scoreLine && String(r.scoreLine).trim()) return false;   // started → not a scheduled round
       if (tourneyCodes.has(r.code)) return false;                    // already shown as a tourney card
+      if ((r.t2 && r.t2.tournamentId) || _t2RoundCodes.has(r.code)) return false;  // tournament round → under Tournaments, not here
       return recentRowHasName(r, _meT);                              // I'm in it
     }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   } catch (e) {}
