@@ -5853,7 +5853,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.223';
+const BG_BUILD = 'v2026.11.224';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -19221,9 +19221,11 @@ function calcStableford(g) {
   // A buy-in pool isn't realized until the round ENDS — nobody owes anything
   // mid-round, so report points only (money 0) until then; the pool pays at end.
   const _sfPoolDone = !!(g && g.finishedAt) || (typeof allHolesScored === 'function' && allHolesScored(g));
-  if (!_sfPoolDone) {
+  if (cfg._t2field || !_sfPoolDone) {
+    // Whole-field game (settles across the tournament) OR pool not done yet → no
+    // per-group money; report points only.
     participants.forEach(p => { money[p.id] = 0; });
-    return { points, money, holePoints, totalPot, buyin, payout, mode: 'pool', pending: true };
+    return { points, money, holePoints, totalPot, buyin, payout, mode: 'pool', pending: true, field: !!cfg._t2field };
   }
 
   participants.forEach(p => { money[p.id] = -buyin; }); // everyone antes up
@@ -21609,7 +21611,7 @@ function renderBoard() {
       }
       div.innerHTML += `<div class="sub">${displayFull(p)}: ${stableford.points[p.id] || 0} pts${tail}</div>`;
     });
-    if (sfPending) div.innerHTML += `<div class="sub" style="color:var(--text-muted);font-style:italic">Pool pays out at the end — points only for now</div>`;
+    if (sfPending) div.innerHTML += `<div class="sub" style="color:var(--text-muted);font-style:italic">${stableford.field ? 'Whole-field pool — settles across all groups (see the tournament leaderboard)' : 'Pool pays out at the end — points only for now'}</div>`;
     gr.appendChild(div);
   }
 
@@ -22881,11 +22883,11 @@ async function t2InjectTourneySummaryLink(g, container) {
   (async () => {
     const inlineEl = div.querySelector('.t2-tourney-inline'); if (!inlineEl) return;
     let myName = ''; try { myName = (await getMeName()) || ''; } catch (e) {}
-    let money = null, skins = null, cross = null, scores = null;
+    let money = null, skins = null, cross = null, scores = null, fieldStbl = null;
     try {
       const now = Date.now();
       if (_t2BoardMoneyCache.tid === tid && (now - _t2BoardMoneyCache.at) < 20000) {
-        money = _t2BoardMoneyCache.money; skins = _t2BoardMoneyCache.skins; cross = _t2BoardMoneyCache.cross; scores = _t2BoardMoneyCache.scores;
+        money = _t2BoardMoneyCache.money; skins = _t2BoardMoneyCache.skins; cross = _t2BoardMoneyCache.cross; scores = _t2BoardMoneyCache.scores; fieldStbl = _t2BoardMoneyCache.fieldStbl;
       } else {
         const t = await t2Get(tid);
         money = await loadTourneyMoney(t);
@@ -22909,7 +22911,8 @@ async function t2InjectTourneySummaryLink(g, container) {
           });
           scores = Object.values(_agg).sort((a, b) => (a.net - b.net) || (a.gross - b.gross));
         } catch (e) {}
-        _t2BoardMoneyCache = { tid: tid, at: now, money: money, skins: skins, cross: cross, scores: scores };
+        try { fieldStbl = t2ComputeFieldStableford(raw, t); } catch (e) {}
+        _t2BoardMoneyCache = { tid: tid, at: now, money: money, skins: skins, cross: cross, scores: scores, fieldStbl: fieldStbl };
       }
     } catch (e) {}
     if (!div.isConnected) return;
@@ -22948,6 +22951,14 @@ async function t2InjectTourneySummaryLink(g, container) {
     let lines = '';
     if (teamNet) lines += '<div>Team bets (A vs B): <strong style="color:' + col(teamNet) + '">' + fmt(teamNet) + '</strong></div>';
     if (skinsNet) lines += '<div>Tournament skins: <strong style="color:' + col(skinsNet) + '">' + fmt(skinsNet) + '</strong></div>';
+    if (fieldStbl && Array.isArray(fieldStbl.standings) && fieldStbl.standings.length) {
+      const _fi = fieldStbl.standings.findIndex(x => nm(x.name) === myKey || nm(x.first) === myKey);
+      const _fpts = _fi >= 0 ? fieldStbl.standings[_fi].points : 0;
+      const _fnet = fieldStbl.money ? (fieldStbl.money[myKey] || 0) : 0;
+      let _fl = 'Stableford (whole field): <strong>' + _fpts + ' pts</strong>' + (_fi >= 0 ? ' · #' + (_fi + 1) + ' of ' + fieldStbl.standings.length : '') + ' · Pool $' + fieldStbl.pool;
+      _fl += (fieldStbl.complete && _fnet) ? (' · <strong style="color:' + col(_fnet) + '">' + fmt(_fnet) + '</strong>') : ' <span class="small-text" style="color:var(--text-muted)">(pays at the end)</span>';
+      lines += '<div>' + _fl + '</div>';
+    }
     // Cross-group 1v1s (match + Nassau) — my net, on the tournament side.
     let crossNet = 0;
     if (cross) {
@@ -29744,6 +29755,9 @@ async function t2LaunchDayRounds(courseId) {
     const _dayGamesCfg = (t.settings && t.settings.dayGames && t.settings.dayGames[ctx.dayNumber]) || null;
     if (_dayGamesCfg && Object.keys(_dayGamesCfg).length) {
       games = t2RemapGamesToGroup(_dayGamesCfg, gp, Aids, Bids);
+      // The day's Stableford is a WHOLE-FIELD pool, not a per-group bet: tag it so the
+      // group round shows points only and never settles per-group (the field settles).
+      if (games.stableford) games.stableford._t2field = true;
     } else {
       games = {};
       if (fmt === 'singles') {
@@ -31362,6 +31376,57 @@ function t2ComputeCrossGroupMatches(t, rows) {
 // NET scoring; a tied hole is broken by handicap-hole countback (hardest hole first)
 // so every contested hole awards exactly one skin (no carries). cfg =
 // { on, mode:'buyin'|'total', value }. Pure given the raw rows → unit-tested math.
+function t2ComputeFieldStableford(rows, t) {
+  try {
+    if (!Array.isArray(rows) || !rows.length || !t || !t.settings || !t.settings.dayGames) return null;
+    const nmk = s => normalizeNameSegment(String(s || ''));
+    let cfg = null;
+    Object.keys(t.settings.dayGames).forEach(d => {
+      const dg = t.settings.dayGames[d];
+      if (dg && dg.stableford && (dg.stableford.mode || 'pool') !== 'perpoint') cfg = dg.stableford;
+    });
+    if (!cfg) return null;
+    const buyin = cfg.buyin != null ? cfg.buyin : (cfg.value || 0);
+    const payout = cfg.payout || 'winner';
+    const byName = {}; let allComplete = true; let anyScores = false;
+    rows.forEach(row => {
+      const g = row && row.data ? row.data : row;
+      if (!g || !Array.isArray(g.players) || !g.games || !g.games.stableford) return;
+      let res = null; try { res = calcStableford(g); } catch (e) {}
+      const pts = (res && res.points) ? res.points : {};
+      const done = !!(g.finishedAt) || (typeof allHolesScored === 'function' && allHolesScored(g));
+      g.players.forEach(p => {
+        if (!p || !p.name) return;
+        const k = nmk(p.name);
+        if (!byName[k]) byName[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), points: 0 };
+        byName[k].points += (pts[p.id] || 0); anyScores = true;
+      });
+      if (!done) allComplete = false;
+    });
+    const standings = Object.values(byName).sort((a, b) => b.points - a.points);
+    if (!standings.length || !anyScores) return null;
+    const N = standings.length, pool = N * buyin, money = {};
+    standings.forEach(x => money[nmk(x.name)] = 0);
+    if (allComplete && buyin > 0 && N >= 2) {
+      standings.forEach(x => money[nmk(x.name)] = -buyin); // ante
+      const top = standings[0].points;
+      if (payout === '8020') {
+        const firsts = standings.filter(x => x.points === top);
+        if (firsts.length >= 2) { const sh = pool / firsts.length; firsts.forEach(x => money[nmk(x.name)] += sh); }
+        else {
+          money[nmk(standings[0].name)] += pool * 0.8;
+          const secondPts = standings[1].points;
+          const seconds = standings.filter(x => x.points === secondPts);
+          const sh = (pool * 0.2) / seconds.length; seconds.forEach(x => money[nmk(x.name)] += sh);
+        }
+      } else {
+        const winners = standings.filter(x => x.points === top);
+        const sh = pool / winners.length; winners.forEach(x => money[nmk(x.name)] += sh);
+      }
+    }
+    return { standings: standings, pool: pool, buyin: buyin, payout: payout, complete: allComplete, money: money };
+  } catch (e) { return null; }
+}
 function t2ComputeFieldSkins(rows, cfg) {
   if (!cfg || !cfg.on || !Array.isArray(rows) || !rows.length) return null;
   const nmk = s => normalizeNameSegment(String(s || ''));
@@ -31665,8 +31730,11 @@ async function openEventLeaderboard(t) {
   ov.querySelector('#evlb-x').onclick = () => ov.remove();
   ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
   const body = ov.querySelector('#evlb-body');
-  try {
-    const [list, money, teamStand, evPlayers] = await Promise.all([loadTourneyScores(t), loadTourneyMoney(t), loadTourneyTeamStandings(t), t2GetPlayers(t.id).catch(() => [])]);
+  let _evlbTimer = null;
+  const _renderEvlbBody = async () => {
+   try {
+    const [list, money, teamStand, evPlayers, _rawRounds] = await Promise.all([loadTourneyScores(t), loadTourneyMoney(t), loadTourneyTeamStandings(t), t2GetPlayers(t.id).catch(() => []), loadTourneyRawRounds(t).catch(() => [])]);
+    let _fieldStbl = null; try { _fieldStbl = t2ComputeFieldStableford(_rawRounds, t); } catch (e) {}
     let html = '';
     if (list && list.length) {
       html += '<h3 style="margin:6px 0 4px">Standings — whole field</h3><div style="font-size:13px">';
@@ -31702,6 +31770,15 @@ async function openEventLeaderboard(t) {
       money.tourneyRows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? '#1f7a46' : '#b3261e') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
       if (money.tourneyGames && money.tourneyGames.length) html += '<div class="small-text" style="color:var(--text-muted)">Games: ' + escapeHtml(money.tourneyGames.join(', ')) + '</div>';
       html += '</div>';
+    }
+    if (_fieldStbl && Array.isArray(_fieldStbl.standings) && _fieldStbl.standings.length) {
+      html += '<h3 style="margin:14px 0 4px">\uD83C\uDFAF Stableford <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field \u00b7 Pool $' + _fieldStbl.pool + ' \u00b7 $' + _fieldStbl.buyin + ' buy-in)</span></h3><div style="font-size:13px">';
+      _fieldStbl.standings.forEach((r, i) => {
+        const m = _fieldStbl.money ? (_fieldStbl.money[normalizeNameSegment(String(r.name || ''))] || 0) : 0;
+        const moneyStr = (_fieldStbl.complete && m) ? ' \u00b7 <strong style="color:' + (m >= 0 ? '#1f7a46' : '#b3261e') + '">' + _evFmtMoney(m) + '</strong>' : '';
+        html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:60px;text-align:right;font-weight:700">' + r.points + ' pts</span>' + (moneyStr ? '<span>' + moneyStr + '</span>' : '') + '</div>';
+      });
+      html += '</div>' + (_fieldStbl.complete ? '' : '<div class="small-text" style="color:var(--text-muted)">Pool pays out once every group finishes.</div>');
     }
     // Long Drive — ONE field-wide individual winner per day, set by the commissioner.
     const _amCommish = !!(_authUser && t.commissioner_id === _authUser.id);
@@ -31804,7 +31881,12 @@ async function openEventLeaderboard(t) {
     body.querySelectorAll('.evlb-ld-set').forEach(b => b.onclick = () => openLongDriveWinnerPicker(t, parseInt(b.dataset.day, 10), evPlayers || [], () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-lp-cfg').forEach(b => b.onclick = () => openTourneyLongPuttConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
-  } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
+   } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
+  };
+  await _renderEvlbBody();
+  // Live: refresh the whole field every 15s while the leaderboard is open. The
+  // interval self-clears once the overlay is removed (close button or backdrop).
+  try { _evlbTimer = setInterval(() => { if (!document.body.contains(ov)) { try { clearInterval(_evlbTimer); } catch (e) {} return; } _renderEvlbBody(); }, 15000); } catch (e) {}
 }
 // Commissioner sets up the field-wide Tournament Long Putt pot. Stored in
 // t.settings.tourneyLongPutt = { on, mode:'buyin'|'total', value }. The longest made
