@@ -5878,7 +5878,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.245';
+const BG_BUILD = 'v2026.11.246';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -11593,6 +11593,9 @@ function restoreSetupDraft(d) {
 }
 
 async function setupNewGameForm(prefill) {
+  // Safety: a normal (non-tournament) setup must never inherit the locked-group
+  // hide styles from a prior group/day config. (Tyler, June 2026.)
+  try { if (!state._t2DayConfig && !state._t2GroupConfig) { document.body.classList.remove('t2-day-config'); document.body.classList.remove('t2-has-course-step'); } } catch (e) {}
   // Fresh form build → clear any team assignments left over from a previous
   // round. Rows get brand-new puids below, so stale keys would otherwise be
   // orphaned; for prefilled rounds applySavedConfig re-applies the saved teams.
@@ -22162,6 +22165,7 @@ async function openScoreEditCard() {
     if (state.viewOnlyMode || g.finishedAt) canEdit = false;
     else if (typeof isAdmin === 'function' && isAdmin()) canEdit = true;
     else if (!g.createdBy) canEdit = true;                       // legacy round, no recorded creator
+    else if (typeof roundManagedByMe === 'function' && roundManagedByMe(g)) canEdit = true; // tournament director / admin can fix any group's scores
     else {
       const me = await getMeName();
       const norm = s => normalizeNameSegment(String(s || ''));
@@ -28475,6 +28479,53 @@ async function t2CreateDaily() {
 // Individual ("one-day") events: no teams, leaderboard-only. Flag lives in
 // tournaments.settings so every screen can adapt.
 function t2IsOneDay(t) { return !!(t && t.settings && t.settings.type === 'oneday'); }
+// Can the current user MANAGE this tournament? True for the commissioner, any
+// assigned tourney admin (settings.admins = account user_ids — same rights as the
+// director), or a global app admin. (Tyler, June 2026.)
+function t2CanManage(t) {
+  if (typeof isAdmin === 'function' && isAdmin()) return true;
+  if (!_authUser || !t) return false;
+  if (t.commissioner_id === _authUser.id) return true;
+  const adm = (t.settings && Array.isArray(t.settings.admins)) ? t.settings.admins : [];
+  return adm.indexOf(_authUser.id) !== -1;
+}
+// Does the current user manage the TOURNAMENT a round belongs to? Lets a director /
+// tourney admin fix scores on any group's round. managerIds is stamped on the round
+// at launch and refreshed when it's opened.
+function roundManagedByMe(g) {
+  if (typeof isAdmin === 'function' && isAdmin()) return true;
+  if (!_authUser || !g || !g.t2 || !Array.isArray(g.t2.managerIds)) return false;
+  return g.t2.managerIds.indexOf(_authUser.id) !== -1;
+}
+// Optional end-of-workflow step: the director assigns tournament admins (players who
+// have an app account). Admins get the SAME rights as the director.
+async function openT2AdminPicker() {
+  const t = _t2Current; if (!t) return;
+  let players = []; try { players = await t2GetPlayers(t.id); } catch (e) {}
+  const eligible = players.filter(p => p && p.user_id);
+  const cur = (t.settings && Array.isArray(t.settings.admins)) ? t.settings.admins.slice() : [];
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100060';
+  const rows = eligible.length
+    ? eligible.map(p => '<label style="display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid var(--border)"><input type="checkbox" class="t2adm" data-uid="' + t2esc(p.user_id) + '"' + (cur.indexOf(p.user_id) !== -1 ? ' checked' : '') + ' style="width:auto;transform:scale(1.3);flex:0 0 auto"><span>' + t2esc(p.display_name || 'Player') + '</span></label>').join('')
+    : '<div class="help-text" style="padding:12px;text-align:center">No players have signed in / claimed their spot yet. Admins need a Bad Golf account — share the join link, then come back here.</div>';
+  ov.innerHTML = '<div class="modal" style="max-width:440px"><h2 style="margin-bottom:4px">\ud83d\udc64 Tournament admins</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">Admins get the SAME rights as you (the director): edit setup, build groups, and fix scores on any group. You stay the commissioner.</p>' +
+    '<div style="max-height:50vh;overflow-y:auto">' + rows + '</div>' +
+    '<div class="actions" style="margin-top:12px"><button id="t2adm-cancel" style="flex:1">Cancel</button><button class="primary" id="t2adm-save" style="flex:1">Save admins</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#t2adm-cancel').onclick = close;
+  ov.querySelector('#t2adm-save').onclick = async () => {
+    const ids = Array.from(ov.querySelectorAll('.t2adm:checked')).map(c => c.dataset.uid).filter(Boolean);
+    const ok = await t2MergeSettings(t.id, s => { s.admins = ids; });
+    if (!ok) { showToast('Could not save admins'); return; }
+    if (_t2Current && _t2Current.id === t.id) { _t2Current.settings = _t2Current.settings || {}; _t2Current.settings.admins = ids; }
+    close(); showToast('Tournament admins saved \u2713');
+    try { await renderT2Home(); } catch (e) {}
+  };
+}
 // What team structure does a day's games need on each cart card?
 //   null         — no team game this day (nothing to show)
 //   {mode:'pairs'}  — a 2-man game: commissioner sets the 2 v 2 on the card
@@ -29327,7 +29378,7 @@ async function openT2Carts(dayNumber, dayId) {
   const t = _t2Current; if (!t) return;
   if (!dayId) { showToast('Save this day first, then configure carts'); return; }
   const od = t2IsOneDay(t);
-  const amCommish = !!(_authUser && t.commissioner_id === _authUser.id);
+  const amCommish = t2CanManage(t);
   const oldM = document.getElementById('t2-carts-modal'); if (oldM) oldM.remove();
   const ov = document.createElement('div');
   ov.id = 't2-carts-modal'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100060';
@@ -29668,7 +29719,7 @@ async function openT2DayConfig(dayNumber) {
   if (!t) return;
   // Primary tournament settings are commissioner-only (admins may assist). A non-admin
   // player can never change the event's day games / config.
-  if (!(_authUser && t.commissioner_id === _authUser.id) && !(typeof isAdmin === 'function' && isAdmin())) { showToast('Only the tournament commissioner can change the event settings'); return; }
+  if (!t2CanManage(t)) { showToast('Only the tournament commissioner or an admin can change the event settings'); return; }
   try {
     showToast('Loading day setup…');
     const players = await t2GetPlayers(t.id);
@@ -30020,7 +30071,7 @@ async function t2LaunchDayRounds(courseId) {
       wolfData: { holes: {} },
       junkData: {},
       tourneyId: null,
-      t2: { tournamentId: t.id, dayId: ctx.dayId, groupId: grp.id, format: fmt, group: grp.group_number, name: t.name, day: ctx.dayNumber },
+      t2: { tournamentId: t.id, dayId: ctx.dayId, groupId: grp.id, format: fmt, group: grp.group_number, name: t.name, day: ctx.dayNumber, managerIds: [t.commissioner_id].concat((t.settings && Array.isArray(t.settings.admins)) ? t.settings.admins : []).filter(Boolean) },
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -30040,6 +30091,14 @@ async function openT2Round(code) {
   const g = await loadGame(code);
   if (!g) { showToast('Round not found'); return; }
   state.game = g;
+  // Refresh tournament manager ids so the director / tourney admins can fix scores
+  // on this round (director = universal scorer for their event). (Tyler, June 2026.)
+  try {
+    if (g.t2 && g.t2.tournamentId && typeof supa !== 'undefined' && supa) {
+      const { data: _tt } = await supa.from('tournaments').select('commissioner_id,settings').eq('id', g.t2.tournamentId).maybeSingle();
+      if (_tt) g.t2.managerIds = [_tt.commissioner_id].concat((_tt.settings && Array.isArray(_tt.settings.admins)) ? _tt.settings.admins : []).filter(Boolean);
+    }
+  } catch (e) {}
   state.viewOnlyMode = !!g.finishedAt;
   state.currentHole = 1;
   try { await safeSet(KEY_LAST, code, false); } catch (e) {}
@@ -30457,7 +30516,7 @@ async function renderT2Home() {
   if (!t) return;
   _t2SwapSel = null; // clear any half-finished swap on re-render
   const body = document.getElementById('t2-home-body');
-  const amCommish = !!(_authUser && t.commissioner_id === _authUser.id);
+  const amCommish = t2CanManage(t);
   const [players, days] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id)]);
   // Groups + members per saved day (small scale — a handful of queries).
   const groupsByDay = {}; const membersByGroup = {};
@@ -30781,6 +30840,7 @@ async function renderT2Home() {
   if (amCommish) html += '<button class="full" id="t2-add-day" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:600">➕ Add day</button>';
   if (amCommish) html += '<button class="full" id="t2-save-days" style="margin-top:6px;background:#fff;color:var(--accent);border:1px solid var(--accent);font-weight:600">💾 Schedule &amp; Save</button>';
   if (amCommish) html += '<button class="full" id="t2-start-event" style="margin-top:8px;background:var(--accent);color:#fff;border:none;font-weight:700">🚀 Start Event</button>';
+  if (amCommish) html += '<button class="full" id="t2-assign-admins" style="margin-top:8px;background:#fff;color:var(--accent);border:1px solid var(--accent);font-weight:600">👤 Assign tournament admins (optional)</button>';
   if (amCommish) html += '<button class="full" id="t2-save-template" style="margin-top:8px;background:#fff;color:var(--accent);border:1px solid var(--accent);font-weight:600">⭐ Save as template</button>';
   if (amCommish) {
     html += '<h3 style="margin:18px 0 6px">Invite players</h3>' +
@@ -30862,6 +30922,7 @@ async function renderT2Home() {
     };
     const addDay = document.getElementById('t2-add-day');
     if (addDay) addDay.onclick = () => t2AddDay(t);
+    { const _aa = document.getElementById('t2-assign-admins'); if (_aa) _aa.onclick = () => openT2AdminPicker(); }
     const startEvent = document.getElementById('t2-start-event');
     if (startEvent && !od && !_wfEventReady) { startEvent.style.opacity = '0.5'; startEvent.title = 'Finish every setup step first — see the checklist at the top'; }
     if (startEvent) startEvent.onclick = async () => {
@@ -32135,7 +32196,7 @@ async function openEventLeaderboard(t) {
       html += '</div>' + (_fieldStbl.complete ? '' : '<div class="small-text" style="color:var(--text-muted)">Pool pays out once every group finishes.</div>');
     }
     // Long Drive — ONE field-wide individual winner per day, set by the commissioner.
-    const _amCommish = !!(_authUser && t.commissioner_id === _authUser.id);
+    const _amCommish = t2CanManage(t);
     const _ldDays = [];
     for (let d = 1; d <= (t.num_days || 1); d++) {
       const _c = t.settings && t.settings.dayGames && t.settings.dayGames[d] && t.settings.dayGames[d].longDrive;
@@ -32702,6 +32763,14 @@ window.switchTab = function(name, opts) {
     state.game = null; state.viewOnlyMode = false;
     try { enableGameTabs(false); } catch (e) {}
   }
+  // Abandoning a tournament Configure-Day / group-config by tapping another tab
+  // (instead of Save/Cancel) must not leave its lock flags or hide-styles stuck —
+  // they'd wrongly hide players/handicaps/course in a later normal round setup.
+  // Save/Cancel already clear these first, so this only catches the abandon case.
+  if (name !== 'setup') {
+    if (state._t2DayConfig || state._t2GroupConfig) { state._t2DayConfig = null; state._t2GroupConfig = null; }
+    try { document.body.classList.remove('t2-day-config'); document.body.classList.remove('t2-has-course-step'); } catch (e) {}
+  }
   // Remember the tab we're leaving so panels without their own nav (e.g. Clubs)
   // can send the user back exactly where they came from.
   const _prevActive = document.querySelector('.tab.active');
@@ -32873,6 +32942,9 @@ async function enterEditLiveRoundMode() {
   // Apply (or clear) the group-only game restriction. Restores ALL games for a
   // normal live edit, hides the group-disallowed set only during group config.
   try { t2FilterGroupConfigGames(!!state._t2GroupConfig); } catch (e) {}
+  // Editing a GROUP's round: the director already set players, handicaps & course —
+  // lock them (reuse the day-config hide styles) so the scorer only edits games.
+  try { if (state._t2GroupConfig) { document.body.classList.add('t2-day-config'); document.body.classList.add('t2-has-course-step'); } } catch (e) {}
   // Form is fully restored — allow auto-save again.
   state._liveEditBuilding = false;
 }
@@ -32882,6 +32954,7 @@ function exitEditLiveRoundMode() {
   state.editingLiveRound = false;
   state._t2GroupConfig = null;
   try { t2FilterGroupConfigGames(false); } catch (e) {}   // always restore every game card
+  try { document.body.classList.remove('t2-day-config'); document.body.classList.remove('t2-has-course-step'); } catch (e) {}   // un-lock the locked-group styles
   $('btn-start-round').style.display = '';
   $('btn-save-tourney').style.display = '';
   $('btn-save-edits').style.display = 'none';
