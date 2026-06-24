@@ -2036,7 +2036,11 @@
   #gps-drive-bubble .lbl, #gps-lp-bubble .lbl, #gps-quota-bubble .lbl, #gps-stableford-bubble .lbl { font-size: var(--gps-lbl); font-weight: 800; letter-spacing: 0.08em; opacity: 0.92; }
   #gps-drive-bubble .val, #gps-lp-bubble .val, #gps-quota-bubble .val, #gps-stableford-bubble .val { font-size: var(--gps-num); font-weight: 900; line-height: 1.05; }
   /* Spectators don't get these bubbles (they read from the player's own GPS). */
-  #gps-overlay.spectating #gps-right-stack { display: none !important; }
+  /* While spectating, keep the right stack for the quota PLACE bubble (watched
+     player) but hide the personal-only bubbles (long putt / stableford / drive). */
+  #gps-overlay.spectating #gps-lp-bubble,
+  #gps-overlay.spectating #gps-stableford-bubble,
+  #gps-overlay.spectating #gps-drive-bubble { display: none !important; }
   /* While the player pinch-zooms IN past the framed view, clear the corner
      bubbles (right stack + money/match) so the map is unobstructed. They come
      back when the view resets (auto-follow reframe or zoom back out). */
@@ -5905,7 +5909,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.258';
+const BG_BUILD = 'v2026.11.261';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8435,6 +8439,26 @@ async function pollGameOnce(code) {
 // Broadcast MY live position to the game channel (Spectator mode source). No-op
 // unless a round is live, a channel is up, and I resolve to a player. Throttled
 // by the caller. Ephemeral — does not touch the games table.
+// Apple Watch live location bridge. The native WatchBridge plugin calls
+// window.__onWatchPosition({lat,lng}) when the paired Watch sends a fix; we stamp
+// it and broadcastMyPosition prefers it (when fresh) so SPECTATORS follow the
+// player's WRIST, not the phone left in the cart. Dormant until the native ships.
+window.__watchPos = window.__watchPos || null;
+window.__onWatchPosition = function (p) {
+  try {
+    if (!p) return;
+    const _lat = (p.lat != null) ? p.lat : p.latitude;
+    const _lng = (p.lng != null) ? p.lng : p.longitude;
+    if (_lat == null || _lng == null) return;
+    window.__watchPos = { lat: Number(_lat), lng: Number(_lng), at: Date.now() };
+    // Push it out immediately so the spectator dot tracks the wrist in near real-time.
+    try { if (typeof broadcastMyPosition === 'function') broadcastMyPosition(window.__watchPos.lng, window.__watchPos.lat, (typeof state !== 'undefined' && state ? state.currentHole : null)); } catch (e) {}
+  } catch (e) {}
+};
+function freshWatchPos() {
+  try { const w = window.__watchPos; if (w && w.lat != null && w.lng != null && (Date.now() - (w.at || 0) < 12000)) return w; } catch (e) {}
+  return null;
+}
 let _lastPosSentAt = 0;
 function broadcastMyPosition(lng, lat, hole) {
   try {
@@ -8453,6 +8477,9 @@ function broadcastMyPosition(lng, lat, hole) {
     // the stable name lets spectators match the dot regardless of id. (v258)
     let pname = '';
     try { const _meP = (g.players || []).find(p => p.id === pid); pname = _meP ? normalizeNameSegment(String(_meP.name || '')) : ''; } catch (e) {}
+    // Prefer the player's WATCH location (wrist) over the phone (cart) when the
+    // watch is actively sending it through the native bridge.
+    try { const _w = freshWatchPos(); if (_w) { lng = _w.lng; lat = _w.lat; } } catch (e) {}
     _lastPosSentAt = now;
     activeRealtimeSub.send({ type: 'broadcast', event: 'pos', payload: { pid, pname, lng, lat, hole: hole || null, at: now, share: !!share } });
   } catch (e) {}
@@ -20750,14 +20777,29 @@ function gpsMyStatuses(g, res, myId) {
       });
     }
   } catch (e) {}
-  // ---- Quota — my points vs my quota (over / under / on) ----
+  // ---- Quota — show my PLACE, not the running over/under value (which is
+  // meaningless until the round ends). Ranks everyone in the quota pool by
+  // points-over-quota; same treatment for standard groups AND tournaments. ----
   try {
     const q = res && res.results && res.results.quota;
     if (q && q.result && q.result[myId] != null) {
-      const r = q.result[myId]; // points earned − quota
-      const text = r > 0 ? '+' + r : (r < 0 ? String(r) : 'E');
-      const cls = r > 0 ? 'pos' : (r < 0 ? 'neg' : 'even');
-      out.push({ label: 'QUOTA', text, cls });
+      const ranked = Object.keys(q.result)
+        .filter(id => q.result[id] != null)
+        .map(id => ({ id, v: q.result[id] }))
+        .sort((a, b) => b.v - a.v);
+      const place = ranked.findIndex(e => e.id === myId) + 1;
+      if (place > 0) {
+        let text, cls;
+        if (place === 1) {
+          const lead = ranked[1] ? (ranked[0].v - ranked[1].v) : 0;
+          text = '1st' + (lead > 0 ? ' by ' + lead : '');
+          cls = 'pos';
+        } else {
+          text = ord(place) + ' of ' + ranked.length;
+          cls = 'neg';
+        }
+        out.push({ label: 'QUOTA', text, cls });
+      }
     }
   } catch (e) {}
   // ---- Huckles I'm in — one stacked chip each (separate mid-segment side bets) ----
@@ -20898,6 +20940,19 @@ function updateGpsMoneyMatch() {
     matchesEl.onclick = goToBoard;
     if (statuses.length) any = true;
   }
+  // Spectating with no live money line yet (e.g. a quota/points game that settles
+  // at the end) → still give a tappable "Board" entry so the watcher can open the
+  // betting summary and see who's winning.
+  try {
+    const _hasGame = g.games && Object.keys(g.games).some(k => g.games[k]);
+    if (!any && window._gpsSpectatePid && _hasGame && moneyEl) {
+      moneyEl.innerHTML = '<span class="mm-lbl">📊</span>Board';
+      moneyEl.className = 'gps-mm even';
+      moneyEl.style.display = 'flex'; moneyEl.style.cursor = 'pointer';
+      moneyEl.onclick = goToBoard;
+      any = true;
+    }
+  } catch (e) {}
   wrap.style.display = any ? 'flex' : 'none';
 }
 window.updateGpsMoneyMatch = updateGpsMoneyMatch;
@@ -36409,25 +36464,27 @@ const gpsView = (() => {
     if (!b) return;
     const hide = () => { b.style.display = 'none'; };
     try {
-      if (spectate || mode !== 'view') return hide();
+      if (mode !== 'view') return hide();   // shows when spectating too (watched player)
       const g = state.game;
       if (!g || !g.games) return hide();
       const cfg = g.games.quota || g.games.teamQuota;
       if (!cfg) return hide();
       if (typeof computeQuotaPoints !== 'function' || typeof quotaTargetFor !== 'function') return hide();
-      const myId = gpsResolveMyId(g);
-      const me = (myId && g.players) ? g.players.find(p => p.id === myId) : null;
-      if (!me) return hide();
-      let pts, quota;
-      try {
-        const cp = computeQuotaPoints(g, cfg, [me]);
-        pts = cp.points[me.id];
-        quota = quotaTargetFor(g, cfg, me);
-      } catch (e) { return hide(); }
-      if (pts == null || quota == null) return hide();
-      const diff = pts - quota;
-      const v = b.querySelector('.val'); if (v) v.textContent = pts + '/' + quota;
-      const l = b.querySelector('.lbl'); if (l) l.textContent = 'QUOTA ' + (diff >= 0 ? '+' + diff : diff);
+      // When spectating, show the WATCHED player's place; otherwise mine.
+      const myId = spectate ? spectate.pid : gpsResolveMyId(g);
+      if (!myId || !Array.isArray(g.players)) return hide();
+      // Show the PLACE — the running points-vs-quota is meaningless until the end.
+      let cp; try { cp = computeQuotaPoints(g, cfg, g.players); } catch (e) { return hide(); }
+      const rows = g.players.map(p => {
+        let over = null;
+        try { const pts = cp.points[p.id]; const q = quotaTargetFor(g, cfg, p); if (pts != null && q != null) over = pts - q; } catch (e) {}
+        return { id: p.id, over };
+      }).filter(r => r.over != null).sort((a, b) => b.over - a.over);
+      const place = rows.findIndex(r => r.id === myId) + 1;
+      if (!place) return hide();
+      const ordL = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : (n + 'th');
+      const v = b.querySelector('.val'); if (v) v.textContent = ordL(place);
+      const l = b.querySelector('.lbl'); if (l) l.textContent = 'QUOTA';
       b.style.display = 'block';
     } catch (e) { hide(); }
   }
