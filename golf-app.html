@@ -3632,7 +3632,11 @@
         <div class="card" id="edit-live-banner" style="display:none;background:var(--accent-light);border-color:var(--accent)">
           <h2 style="color:var(--accent);margin-bottom:6px">✏️ Editing live round</h2>
           <p class="help-text" style="margin:0 0 10px">Changes apply immediately to the round in progress. Dollar-amount changes apply <strong>retroactively</strong> to all 18 holes (including holes already scored).</p>
-          <button id="btn-edit-live-newround" class="full" style="background:var(--surface);color:var(--accent);border:1px solid var(--accent);border-radius:10px;padding:10px;font-weight:600">➕ Start a new round instead</button>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <button id="btn-live-finish" class="full" style="background:var(--surface);color:var(--accent);border:1px solid var(--accent);border-radius:10px;padding:10px;font-weight:700">🏁 Finish round</button>
+            <button id="btn-live-delete" class="full" style="background:var(--surface);color:var(--danger);border:1px solid var(--danger);border-radius:10px;padding:10px;font-weight:700">🗑️ Delete round</button>
+            <button id="btn-edit-live-newround" class="full" style="display:none;background:var(--surface);color:var(--accent);border:1px solid var(--accent);border-radius:10px;padding:10px;font-weight:600">➕ Start a new round instead</button>
+          </div>
         </div>
 
         <div class="actions">
@@ -5892,7 +5896,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.250';
+const BG_BUILD = 'v2026.11.251';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -32874,8 +32878,15 @@ function _nrcLockTourneyButtons() {
   try {
     const g = state.game;
     const isT = !!(g && ((g.t2 && g.t2.tournamentId) || g.tourneyId));
+    const amAdmin = (typeof isAdmin === 'function' && isAdmin());
     ['nrc-save-and-new', 'nrc-discard-and-new'].forEach(id => {
       const b = document.getElementById(id); if (!b) return;
+      // Non-admins may have only ONE live round at a time, so the "start a new
+      // round" shortcuts don't apply to them — hide them entirely (they finish or
+      // delete the current round first). Admins keep them, just disabled for
+      // tournament rounds (managed from Events).
+      if (!amAdmin) { b.style.display = 'none'; return; }
+      b.style.display = '';
       b.disabled = isT;
       b.style.opacity = isT ? '0.45' : '';
       b.style.pointerEvents = isT ? 'none' : '';
@@ -33041,6 +33052,17 @@ async function enterEditLiveRoundMode() {
   $('btn-save-tourney').style.display = 'none';
   $('btn-save-edits').style.display = '';
   $('edit-live-banner').style.display = 'block';
+  // Single-live-round controls in the banner: "Start a new round instead" is
+  // admin-only (only admins may run two live rounds at once). Finish / Delete let
+  // a normal round be ended right here; tournament rounds are managed from Events,
+  // so hide Finish/Delete for those.
+  try {
+    const _isT = !!(g && ((g.t2 && g.t2.tournamentId) || g.tourneyId));
+    const _amAdmin = (typeof isAdmin === 'function' && isAdmin());
+    const _nr = document.getElementById('btn-edit-live-newround'); if (_nr) _nr.style.display = _amAdmin ? 'block' : 'none';
+    const _lf = document.getElementById('btn-live-finish'); if (_lf) _lf.style.display = _isT ? 'none' : 'block';
+    const _ld = document.getElementById('btn-live-delete'); if (_ld) _ld.style.display = _isT ? 'none' : 'block';
+  } catch (e) {}
   $('btn-cancel-setup').textContent = 'Cancel edits';
 
   // Pre-fill the form using the existing applySavedConfig path. We pass two
@@ -33428,9 +33450,26 @@ async function init() {
       hasActiveRound = false;
     }
     if (hasActiveRound) {
-      // Pre-fill confirm text with the current round's course so the user
-      // knows what they're about to save or discard.
       const course = state.game.course || 'Untitled course';
+      // Single-live-round rule: non-admins must finish or delete the current round
+      // before starting a new one. Tell them, then drop them into THIS round's
+      // settings screen (where the Finish round / Delete round buttons live).
+      // Admins are exempt and get the full chooser (they can run concurrent rounds).
+      const _amAdmin = (typeof isAdmin === 'function' && isAdmin());
+      if (!_amAdmin) {
+        const go = await uiConfirm(
+          'You already have a live round at ' + course + '. You need to finish it or delete it before starting a new one — you can do both on the next screen.',
+          { title: 'Finish your current round first', okLabel: 'Go to round settings', cancelLabel: 'Not now', danger: false });
+        if (!go) return;
+        try {
+          document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'setup'));
+          document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-setup'));
+          if (typeof renderBottomNav === 'function') renderBottomNav();
+        } catch (e) {}
+        try { await enterEditLiveRoundMode(); } catch (e) {}
+        return;
+      }
+      // Admin: full chooser (can start a concurrent round).
       $('new-round-confirm-text').innerHTML =
         `You have an active round at <strong>${course}</strong>. What do you want to do?`;
       $('new-round-confirm-modal').classList.add('show'); try { _nrcLockTourneyButtons(); } catch (e) {}
@@ -33451,6 +33490,27 @@ async function init() {
   // Edit-live-round banner: escape hatch to start a fresh round (otherwise the
   // only buttons are Save changes / Cancel, with no way to begin a new round).
   { const _eln = $('btn-edit-live-newround'); if (_eln) _eln.onclick = () => $('btn-new-game').click(); }
+  // Finish the live round from its settings screen → run the normal finish/summary
+  // flow (saves it to history). Once saved, the user is free to start a new one.
+  { const _lf = $('btn-live-finish'); if (_lf) _lf.onclick = () => {
+      try { exitEditLiveRoundMode(); } catch (e) {}
+      state._scoreResumeAsked = true;
+      try { switchTab('score'); } catch (e) {}
+      setTimeout(() => { try { $('btn-finish-round').click(); } catch (e) {} }, 80);
+    }; }
+  // Delete the live round outright (cloud + recent + everyone's stats), then drop
+  // into a fresh setup. Confirmed first — it can't be undone.
+  { const _ld = $('btn-live-delete'); if (_ld) _ld.onclick = async () => {
+      const ok = await uiConfirm('Delete this round for good? It is removed for everyone in it and can\'t be undone.',
+        { title: 'Delete round?', okLabel: 'Delete round', cancelLabel: 'Keep it' });
+      if (!ok) return;
+      const code = state.game && state.game.code;
+      try { exitEditLiveRoundMode(); } catch (e) {}
+      if (code) { try { await deleteRecentGame(code); } catch (e) {} }
+      try { await discardActiveRound(); } catch (e) {}
+      try { openFreshSetupForm(); } catch (e) {}
+      try { showToast('Round deleted'); } catch (e) {}
+    }; }
 
   // New-round confirm modal: Save current round & start new — finishes the
   // round through the normal summary flow, then user can hit New round again.
