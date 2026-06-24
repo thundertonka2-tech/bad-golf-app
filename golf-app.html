@@ -5900,7 +5900,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.257';
+const BG_BUILD = 'v2026.11.258';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8402,7 +8402,10 @@ function subscribeToGame(code) {
         if (!payload || payload.pid == null) return;
         if (!window._livePos) window._livePos = {};
         const bag = (window._livePos[code] = window._livePos[code] || {});
-        bag[payload.pid] = { lng: payload.lng, lat: payload.lat, hole: payload.hole, at: payload.at || Date.now(), share: payload.share !== false };
+        const rec = { lng: payload.lng, lat: payload.lat, hole: payload.hole, at: payload.at || Date.now(), share: payload.share !== false };
+        bag[payload.pid] = rec;
+        // Stable-name alias so a spectator whose player-id differs still finds the dot. (v258)
+        if (payload.pname) bag['name:' + payload.pname] = rec;
         if (typeof window.onSpectatePos === 'function') window.onSpectatePos(code, payload.pid);
       } catch (e) {}
     })
@@ -8454,11 +8457,28 @@ function broadcastMyPosition(lng, lat, hole) {
     if (now - _lastPosSentAt < 4000) return;                              // throttle to ~every 4s
     const pid = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null;
     if (!pid) return;
+    // Also send the player's NORMALIZED NAME. Per-device player ids diverge when a
+    // live round is edited, which silently broke spectating ("only Kevin worked");
+    // the stable name lets spectators match the dot regardless of id. (v258)
+    let pname = '';
+    try { const _meP = (g.players || []).find(p => p.id === pid); pname = _meP ? normalizeNameSegment(String(_meP.name || '')) : ''; } catch (e) {}
     _lastPosSentAt = now;
-    activeRealtimeSub.send({ type: 'broadcast', event: 'pos', payload: { pid, lng, lat, hole: hole || null, at: now, share: !!share } });
+    activeRealtimeSub.send({ type: 'broadcast', event: 'pos', payload: { pid, pname, lng, lat, hole: hole || null, at: now, share: !!share } });
   } catch (e) {}
 }
 window.broadcastMyPosition = broadcastMyPosition;
+
+// Resolve a player's live broadcast position by their (volatile) player id OR
+// their stable normalized name — per-device ids can differ, names don't. (v258)
+function _livePosFor(code, player) {
+  try {
+    const bag = (window._livePos && code) ? (window._livePos[code] || {}) : {};
+    if (!player) return null;
+    let rec = (player.id != null) ? bag[player.id] : null;
+    if (!rec && player.name) rec = bag['name:' + normalizeNameSegment(String(player.name))];
+    return rec || null;
+  } catch (e) { return null; }
+}
 
 // Live-round position PING: keep broadcasting your spot to spectators even when
 // you're on the SCORE screen (not the GPS map), so an admin/crew can follow your
@@ -26336,8 +26356,8 @@ async function openSpectateGps(code) {
   let pid = null;
   try {
     const bag = (window._livePos && window._livePos[code]) || {};
-    const livePid = (g.players || []).map(p => p.id).find(id => bag[id] && (bag[id].share !== false || (typeof isAdmin === 'function' && isAdmin())) && (Date.now() - (bag[id].at || 0) < 60000));
-    pid = livePid || ((g.players && g.players[0]) ? g.players[0].id : null);
+    const _lpFind = (g.players || []).find(p => { const lp = _livePosFor(code, p); return lp && (lp.share !== false || (typeof isAdmin === 'function' && isAdmin())) && (Date.now() - (lp.at || 0) < 60000); });
+    pid = (_lpFind ? _lpFind.id : null) || ((g.players && g.players[0]) ? g.players[0].id : null);
   } catch (e) { pid = (g.players && g.players[0]) ? g.players[0].id : null; }
   if (!pid) { openCrewRound(code); return; }
   try {
@@ -36525,7 +36545,8 @@ const gpsView = (() => {
     if (!spectate || mode !== 'view') return;
     const g = state.game;
     const bag = (window._livePos && g && g.code) ? (window._livePos[g.code] || {}) : {};
-    const pos = bag[spectate.pid];
+    const _spl = (g.players || []).find(p => p.id === spectate.pid);
+    const pos = _livePosFor(g.code, _spl) || bag[spectate.pid];
     // Non-admins only see a player who's sharing; admins can follow anyone.
     const canSee = !!pos && (pos.share !== false || (typeof isAdmin === 'function' && isAdmin()));
     if (canSee && pos.lng != null && pos.lat != null) {
@@ -36546,7 +36567,8 @@ const gpsView = (() => {
     const players = (g && Array.isArray(g.players)) ? g.players : [];
     const bag = (window._livePos && g && g.code) ? (window._livePos[g.code] || {}) : {};
     bar.innerHTML = '<span class="gps-spectate-lbl">👀</span>' + players.map(p => {
-      const live = bag[p.id] && (bag[p.id].share !== false || (typeof isAdmin === 'function' && isAdmin())) && (Date.now() - (bag[p.id].at || 0) < 60000);
+      const _lp = _livePosFor(g.code, p);
+      const live = _lp && (_lp.share !== false || (typeof isAdmin === 'function' && isAdmin())) && (Date.now() - (_lp.at || 0) < 60000);
       const on = p.id === spectate.pid;
       return '<button class="gps-spectate-chip' + (on ? ' on' : '') + '" data-pid="' + p.id + '">' + (live ? '🟢 ' : '') + (typeof displayFirst === 'function' ? displayFirst(p) : (p.name || '?')) + '</button>';
     }).join('');
