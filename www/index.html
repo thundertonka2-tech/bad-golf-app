@@ -208,6 +208,9 @@
      hide it. Only when that button exists (team events add t2-has-course-step);
      individual one-day events keep the card so they can still pick. (Tyler 2026.) */
   body.t2-day-config.t2-has-course-step #setup-card-course { display: none !important; }
+  /* Gated tournament workflow: a step stays locked until the prior one is done. */
+  .t2-wf-locked { opacity: 0.45 !important; cursor: not-allowed !important; pointer-events: none !important; }
+  .t2-wf-card { border: 1px solid var(--accent); }
   /* In tournament setup (Configure Day AND a group's config) the commissioner
      locks players, handicaps and tracking — only Holes-to-play stays editable
      (a group may switch front/back). Hidden, not removed, so values still save. */
@@ -5026,8 +5029,17 @@
 <div class="modal-overlay" id="roster-modal">
   <div class="modal">
     <h2>Bad Golf Users</h2>
-    <p class="help-text" style="margin-bottom:8px">Tap to add. Names are saved automatically when you start a round.</p>
+    <p class="help-text" style="margin-bottom:8px">Tap to add. Names are saved automatically when you start a round — or use ➕ Add a player to store a guest (non-user) now so they're here next time.</p>
     <input type="text" id="roster-search" placeholder="Search names…" style="width:100%;margin-bottom:10px">
+    <button class="full" id="roster-add-new" style="margin-bottom:10px;background:rgba(43,108,184,0.10);color:var(--accent);border:1px solid var(--accent);font-weight:600">➕ Add a player (guest / non-user)</button>
+    <div id="roster-add-form" style="display:none;background:var(--surface-2);border-radius:8px;padding:10px;margin-bottom:10px">
+      <div class="row" style="gap:6px">
+        <div class="field" style="flex:1"><label>First</label><input type="text" id="roster-add-first" placeholder="Robert"></div>
+        <div class="field" style="flex:1"><label>Last</label><input type="text" id="roster-add-last" placeholder="Martin"></div>
+        <div class="field" style="width:72px;flex:0 0 auto"><label>HCP</label><input type="text" id="roster-add-hcp" placeholder="0"></div>
+      </div>
+      <div class="actions" style="margin-top:6px"><button id="roster-add-cancel" style="flex:1">Cancel</button><button class="primary" id="roster-add-save" style="flex:1">Save player</button></div>
+    </div>
     <div id="roster-list" style="max-height:340px;overflow-y:auto"></div>
     <!-- Primary Done button — clearly anchored at the bottom of the modal so
          the user can dismiss without scrolling to find it. Styled as primary
@@ -5870,7 +5882,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.241';
+const BG_BUILD = 'v2026.11.243';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -30457,6 +30469,54 @@ async function renderT2Home() {
   const _teeCid = (_teeDC && _teeDC.id) || '';
   const _teeMap = (_teeCid && t.settings && t.settings.playerTees && t.settings.playerTees[_teeCid]) || {};
 
+  // ===== Sequential setup workflow gating (Tyler's gated checklist) =====
+  // Order per day: players -> course -> tees -> date -> games -> carts -> scorer.
+  // Each step's control stays LOCKED (greyed/disabled) until the step before it
+  // is complete; finished steps show a check and stay editable. Start Event
+  // unlocks only when every day is fully set up. Individual (one-day) events are
+  // left UNGATED on purpose: they pick their course inside Configure Day, so the
+  // course->date->configure-day chain would deadlock. (Tyler, June 2026.)
+  const _wfPlayersDone = players.length >= 2;
+  const _wfAssigned = od ? players.slice() : players.filter(p => p.team === 'A' || p.team === 'B');
+  const _wfDayNums = days.map(d => d.day_number);
+  const _wfTeeCounts = {};
+  await Promise.all(days.map(async d => {
+    const dc = (t.settings && t.settings.dayCourses && t.settings.dayCourses[d.day_number]) || null;
+    const cid = dc && dc.id;
+    if (!cid) { _wfTeeCounts[d.day_number] = 0; return; }
+    try { const sc = await getCourseScorecard(cid); _wfTeeCounts[d.day_number] = (sc && Array.isArray(sc.tees)) ? sc.tees.filter(te => te && te.label).length : 0; }
+    catch (e) { _wfTeeCounts[d.day_number] = 0; }
+  }));
+  function _wfDayState(i) {
+    const dc = (t.settings && t.settings.dayCourses && t.settings.dayCourses[i]) || null;
+    const cid = (dc && dc.id) || '';
+    const courseDone = !!cid;
+    const tmap = (cid && t.settings && t.settings.playerTees && t.settings.playerTees[cid]) || {};
+    const teeCount = _wfTeeCounts[i] || 0;
+    // Tees auto-complete when the course has <2 tees (nothing to assign) so a
+    // 0/1-tee course never strands the director.
+    const teesDone = courseDone && (od || teeCount < 2 || (_wfAssigned.length > 0 && _wfAssigned.every(p => tmap[p.id])));
+    const dObj = days.find(x => x.day_number === i) || {};
+    const dateDone = !!dObj.play_date;
+    const gamesDone = !!(t.settings && t.settings.dayGames && t.settings.dayGames[i] && Object.keys(t.settings.dayGames[i]).length);
+    const gs = groupsByDay[i] || [];
+    const inG = new Set(); gs.forEach(g2 => (membersByGroup[g2.id] || []).forEach(m => inG.add(m.tournament_player_id)));
+    const cartsDone = gs.length > 0 && _wfAssigned.length > 0 && _wfAssigned.every(p => inG.has(p.id));
+    // Only ENFORCE a scorer when the captain column actually exists in the DB
+    // (Add_group_captain.sql). If it's missing, g2.captain is undefined on every
+    // group — treat the step as satisfied so the commissioner is never stranded
+    // at Start Event over a feature their DB can't store. (Review fix, June 2026.)
+    const _wfCapCol = gs.some(g2 => g2.captain !== undefined);
+    const scorerDone = gs.length > 0 && (!_wfCapCol || gs.every(g2 => !!g2.captain));
+    const allDone = _wfPlayersDone && courseDone && teesDone && dateDone && gamesDone && cartsDone && scorerDone;
+    return { courseDone, teesDone, dateDone, gamesDone, cartsDone, scorerDone, allDone };
+  }
+  const _wfA = _wfDayState(_teeDay);
+  const _wfEventReady = _wfPlayersDone && days.length > 0 && days.every(d => _wfDayState(d.day_number).allDone);
+  // od (individual) events are never gated -> the helpers become no-ops for them.
+  const _wfDis = (ok) => (od || ok) ? '' : ' disabled';
+  const _wfLk  = (ok) => (od || ok) ? '' : ' t2-wf-locked';
+
   let html = '<h2 style="margin:0 24px 2px 0">' + t2esc(t.name) + '</h2>';
   html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:12px">' +
     (od ? 'Individual event · ' : '') +
@@ -30465,6 +30525,21 @@ async function renderT2Home() {
   html += '<div id="t2-event-img"></div>';
   if (amCommish) html += '<button class="small" id="t2-set-img" style="margin:0 8px 4px 0">🖼 Event image</button>';
   if (amCommish) html += '<div class="small-text" style="color:var(--text-muted);margin:0 0 12px">Tip: a wide image (≈ 2.5:1, e.g. 1280×512) looks best — we center-crop to fit.</div>';
+  // Gated setup checklist (team events only, while setup is in progress).
+  if (amCommish && !od && !_wfEventReady) {
+    const _wfSteps = [['Players', _wfPlayersDone], ['Course', _wfA.courseDone], ['Assign tees', _wfA.teesDone], ['Set the date', _wfA.dateDone], ['Configure day', _wfA.gamesDone], ['Configure carts', _wfA.cartsDone], ['Add scorer', _wfA.scorerDone]];
+    let _wfFirst = -1; for (let _s = 0; _s < _wfSteps.length; _s++) { if (!_wfSteps[_s][1]) { _wfFirst = _s; break; } }
+    html += '<div class="card t2-wf-card" style="margin:0 0 14px;padding:12px">' +
+      '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">\ud83d\udccb Setup checklist' + (_numDays > 1 ? ' — Day ' + _teeDay : '') + '</div>' +
+      _wfSteps.map(function (st, idx) {
+        const done = st[1], isCur = (idx === _wfFirst);
+        const icon = done ? '✓' : (isCur ? '●' : '\ud83d\udd12');
+        const col = done ? 'var(--money-pos,#2e7d32)' : (isCur ? 'var(--accent)' : 'var(--text-muted)');
+        return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;color:' + col + ';font-weight:' + (isCur ? '700' : (done ? '600' : '400')) + (done || isCur ? '' : ';opacity:.6') + '">' +
+          '<span style="width:18px;text-align:center">' + icon + '</span><span>' + (idx + 1) + '. ' + st[0] + '</span></div>';
+      }).join('') +
+      '<div class="small-text" style="color:var(--text-muted);margin-top:6px">Finish each step to unlock the next. ' + (_numDays > 1 ? 'Repeat for every day. ' : '') + 'Start Event unlocks when all steps are ✓.</div></div>';
+  }
 
   // ---- Cup standings (team events only) + stroke leaderboard ----
   if (standings.anyRounds) {
@@ -30515,7 +30590,7 @@ async function renderT2Home() {
   html += '<button class="full" id="t2-evlb-btn" style="margin:6px 0 10px;font-weight:700;background:linear-gradient(135deg,#1d6fd6,#1456a8);color:#fff;border:none;border-radius:12px;padding:11px">🏆 Event Leaderboard — everyone, scorecards & side games</button>';
   // (Removed the "Bet a player 1v1" button — cross-event side bets are now set up via
   // normal round settings, where a tournament round's game pickers list every event player.)
-  html += '<h3 style="margin:10px 0 6px">' + (od ? 'Players' : 'Players & teams') + '</h3>';
+  html += '<h3 style="margin:10px 0 6px">' + (od ? 'Players' : ((_wfPlayersDone ? '✓ ' : 'Step 1 · ') + 'Players & teams')) + '</h3>';
   if (amCommish) {
     html += '<button class="full" id="t2-pick-roster-btn" style="margin-bottom:8px">👥 Bad Golf Users</button>' +
       '<button class="full" id="t2-add-player-btn" style="margin-bottom:8px">+ Add New Player</button>' +
@@ -30557,8 +30632,8 @@ async function renderT2Home() {
     // Pick course — its OWN step (above Assign Tees) so the course is chosen before
     // tees, instead of being buried inside Configure Day. Flow: players → course →
     // tees → Configure Day → carts/teams.
-    html += '<button class="full t2-day-course" data-day="' + _teeDay + '" style="margin:6px 0 4px;font-weight:600;background:#fff;color:var(--accent);border:1px solid var(--accent)">⛳ ' + (_teeDC && _teeDC.name ? 'Course: ' + t2esc(_teeDC.name) : 'Pick course') + (_numDays > 1 ? ' — Day ' + _teeDay : '') + '</button>';
-    html += '<button class="full" id="t2-assign-tees-btn" data-day="' + _teeDay + '" data-cid="' + t2esc(_teeCid) + '" style="margin:6px 0 4px;background:#f5c518;color:#1a1a1a;border:1px solid #d4a017;font-weight:600">⛳ Assign Tees' + (_numDays > 1 ? ' — Day ' + _teeDay : '') + '</button>';
+    html += '<button class="full t2-day-course' + _wfLk(_wfPlayersDone) + '"' + _wfDis(_wfPlayersDone) + ' data-day="' + _teeDay + '" style="margin:6px 0 4px;font-weight:600;background:#fff;color:var(--accent);border:1px solid var(--accent)">⛳ ' + (_teeDC && _teeDC.name ? '✓ Course: ' + t2esc(_teeDC.name) : 'Step 2 · Pick course') + (_numDays > 1 ? ' — Day ' + _teeDay : '') + '</button>';
+    html += '<button class="full' + _wfLk(_wfA.courseDone) + '" id="t2-assign-tees-btn"' + _wfDis(_wfA.courseDone) + ' data-day="' + _teeDay + '" data-cid="' + t2esc(_teeCid) + '" style="margin:6px 0 4px;background:#f5c518;color:#1a1a1a;border:1px solid #d4a017;font-weight:600">⛳ ' + (_wfA.teesDone ? '✓ Tees set' : 'Step 3 · Assign Tees') + (_numDays > 1 ? ' — Day ' + _teeDay : '') + '</button>';
   }
 
   html += '<h3 style="margin:16px 0 6px">Days</h3>';
@@ -30571,7 +30646,7 @@ async function renderT2Home() {
       // Hidden format carrier: the visible dropdown is gone (Configure Day is the
       // source of truth), but grouping + the save handlers still read this value.
       '<input type="hidden" class="t2-day-format" data-day="' + i + '" value="' + (d.format || 'stroke') + '">' +
-      '<div class="field" style="flex:1"><input type="date" class="t2-day-date" data-day="' + i + '" value="' + (d.play_date || '') + '"' + (amCommish ? '' : ' disabled') + '></div>' +
+      '<div class="field" style="flex:1"><input type="date" class="t2-day-date' + _wfLk(_wfDayState(i).teesDone) + '" data-day="' + i + '" value="' + (d.play_date || '') + '"' + ((amCommish && (od || _wfDayState(i).teesDone)) ? '' : ' disabled') + '></div>' +
       ((amCommish && t.num_days > 1) ? '<button class="small t2-day-remove" data-day="' + i + '" title="Remove this day" style="flex:0 0 auto;color:#b3261e;border-color:#b3261e">🗑</button>' : '') +
       '</div>';
     // Configure this day's games (reuses the normal setup form). The format
@@ -30579,9 +30654,10 @@ async function renderT2Home() {
     if (amCommish) {
       const _dgN = (t.settings && t.settings.dayGames && t.settings.dayGames[i]) ? Object.keys(t.settings.dayGames[i]).length : 0;
       const _cfgBg = _dgN ? '#2e7d32' : 'var(--accent)';
-      html += '<div style="margin:8px 0 6px"><button class="t2-day-config-btn" data-day="' + i + '" style="width:100%;padding:13px;font-weight:700;font-size:14px;border-radius:11px;border:none;color:#fff;background:' + _cfgBg + '">⚙️ Configure Day ' + i + ' games' + (_dgN ? ' · ✓ ' + _dgN + ' set' : '') + '</button></div>';
+      const _wfDi = _wfDayState(i);
+      html += '<div style="margin:8px 0 6px"><button class="t2-day-config-btn' + _wfLk(_wfDi.dateDone) + '"' + _wfDis(_wfDi.dateDone) + ' data-day="' + i + '" style="width:100%;padding:13px;font-weight:700;font-size:14px;border-radius:11px;border:none;color:#fff;background:' + _cfgBg + '">' + (od ? ('⚙️ Configure Day ' + i + ' games' + (_dgN ? ' · ✓ ' + _dgN + ' set' : '')) : (_dgN ? ('✓ Day ' + i + ' games · ' + _dgN + ' set') : ('⚙️ Step 5 · Configure Day ' + i + ' games'))) + '</button></div>';
       if (_dgN) { const _summ = t2DayGamesSummary(t.settings.dayGames[i]); if (_summ) html += '<div style="margin:-2px 0 8px;font-size:12px;color:var(--text-muted)">🎮 ' + t2esc(_summ) + '</div>'; }
-      if (d.id) html += '<div style="margin:0 0 8px"><button class="full t2-carts-btn" data-day="' + i + '" data-dayid="' + d.id + '" style="font-weight:600;background:#fff;color:var(--accent);border:1px solid var(--accent)">🛺 Configure Carts' + (od ? '' : ' and Teams') + ' — Day ' + i + '</button></div>';
+      if (d.id) html += '<div style="margin:0 0 8px"><button class="full t2-carts-btn' + _wfLk(_wfDi.gamesDone) + '"' + _wfDis(_wfDi.gamesDone) + ' data-day="' + i + '" data-dayid="' + d.id + '" style="font-weight:600;background:#fff;color:var(--accent);border:1px solid var(--accent)">🛺 ' + (od ? ('Configure Carts — Day ' + i) : ((_wfDi.cartsDone ? '✓ Carts & teams' : 'Step 6 · Configure Carts and Teams') + ' — Day ' + i)) + '</button></div>';
     }
     // Course + tees are configured elsewhere now (course in Configure Day, tees
     // via the Assign Tees button up in Players & teams) — no course line here.
@@ -30772,8 +30848,16 @@ async function renderT2Home() {
     const addDay = document.getElementById('t2-add-day');
     if (addDay) addDay.onclick = () => t2AddDay(t);
     const startEvent = document.getElementById('t2-start-event');
+    if (startEvent && !od && !_wfEventReady) { startEvent.style.opacity = '0.5'; startEvent.title = 'Finish every setup step first — see the checklist at the top'; }
     if (startEvent) startEvent.onclick = async () => {
      try {
+      if (!od && !_wfEventReady) {
+        const _miss = [];
+        if (!_wfPlayersDone) _miss.push('players');
+        _wfDayNums.forEach(function (dn) { const st = _wfDayState(dn); const lbl = (_numDays > 1) ? (' (Day ' + dn + ')') : ''; if (!st.courseDone) _miss.push('course' + lbl); else if (!st.teesDone) _miss.push('tees' + lbl); else if (!st.dateDone) _miss.push('date' + lbl); else if (!st.gamesDone) _miss.push('games' + lbl); else if (!st.cartsDone) _miss.push('carts' + lbl); else if (!st.scorerDone) _miss.push('scorer' + lbl); });
+        showToast('Finish setup first — still needed: ' + (_miss.slice(0, 4).join(', ') || 'a few steps'));
+        return;
+      }
       const days = await t2GetDays(t.id);
       const d1 = days.find(d => d.day_number === 1);
       const dc1 = (t.settings && t.settings.dayCourses) ? t.settings.dayCourses[1] : null;
@@ -33473,6 +33557,25 @@ async function init() {
 
   // Roster modal wiring
   $('roster-cancel').onclick = () => $('roster-modal').classList.remove('show');
+  // ➕ Add a guest / non-user straight to Bad Golf Users (no round needed) — the
+  // modern replacement for the old no-email test users. Stored in the shared
+  // roster via upsertPlayerInRoster, so they're findable everywhere. (Tyler, June 2026.)
+  { const _ra = document.getElementById('roster-add-new'); if (_ra) _ra.onclick = () => { const f = document.getElementById('roster-add-form'); if (f) { f.style.display = (f.style.display === 'none' || !f.style.display) ? 'block' : 'none'; const fi = document.getElementById('roster-add-first'); if (fi && f.style.display === 'block') { try { fi.focus(); } catch (e) {} } } }; }
+  { const _rc = document.getElementById('roster-add-cancel'); if (_rc) _rc.onclick = () => { const f = document.getElementById('roster-add-form'); if (f) f.style.display = 'none'; }; }
+  { const _rs = document.getElementById('roster-add-save'); if (_rs) _rs.onclick = async () => {
+      const first = (document.getElementById('roster-add-first').value || '').trim();
+      const last = (document.getElementById('roster-add-last').value || '').trim();
+      if (!first) { showToast('Enter at least a first name'); return; }
+      const hcp = (typeof parseHcpInput === 'function') ? parseHcpInput(document.getElementById('roster-add-hcp').value || '0') : (parseFloat(document.getElementById('roster-add-hcp').value) || 0);
+      _rs.disabled = true; _rs.textContent = 'Saving…';
+      try { await upsertPlayerInRoster(first, last, hcp || 0); } catch (e) {}
+      _rs.disabled = false; _rs.textContent = 'Save player';
+      document.getElementById('roster-add-first').value = ''; document.getElementById('roster-add-last').value = ''; document.getElementById('roster-add-hcp').value = '';
+      const f = document.getElementById('roster-add-form'); if (f) f.style.display = 'none';
+      const se = document.getElementById('roster-search'); if (se) se.value = '';
+      try { await renderRosterList(); } catch (e) {}
+      try { showToast(combineName(first, last) + ' added to Bad Golf Users ✓' + (isSignedIn() ? '' : ' (sign in to sync to your other devices)')); } catch (e) {}
+    }; }
   $('roster-modal').onclick = (e) => {
     if (e.target.id === 'roster-modal') $('roster-modal').classList.remove('show');
   };
