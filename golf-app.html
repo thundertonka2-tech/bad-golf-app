@@ -5896,7 +5896,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.251';
+const BG_BUILD = 'v2026.11.252';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8754,7 +8754,10 @@ async function getPlayerRoster() {
   const v = await safeGet(KEY_PLAYER_ROSTER, false);
   if (!v) return [];
   try {
-    const roster = JSON.parse(v);
+    let roster = JSON.parse(v);
+    // Apply SHARED tombstones on read so a deleted player/round stays gone even
+    // before the next write (and even on a device that never did the delete).
+    try { const _t = await getSharedTombstones(); roster = applyTombstonesToRoster(roster, _t); } catch (e) {}
     // Heal any avatar the cloud row is missing, from the local cache (additive —
     // never removes), so profile photos survive roster-mutating saves.
     let avatarHealed = false;
@@ -8889,6 +8892,59 @@ function mergeRosters(base, incoming, removals) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// SHARED deletion tombstones (cloud, multi-writer) — THE durable fix for
+// "I delete a player/round and it comes back overnight". Deletions used to be
+// remembered only on the device that did them, but the roster + stats are a
+// SHARED blob: any other phone (or crew member) that still had the item re-added
+// it through the additive merge-on-write. These tombstones live in the same
+// shared singleton store (no new DB table), so EVERY device drops the tombstoned
+// player/round on every read and every write — a delete finally sticks.
+const KEY_ROSTER_TOMBSTONES = 'golf:roster-tombstones';
+let _tombCache = null;
+async function getSharedTombstones() {
+  try {
+    let v = null;
+    if (typeof isSignedIn === 'function' && isSignedIn() && typeof readSharedSingleton === 'function') v = await readSharedSingleton(KEY_ROSTER_TOMBSTONES);
+    else { try { v = localStorage.getItem(KEY_ROSTER_TOMBSTONES); } catch (e) {} }
+    const o = v ? JSON.parse(v) : {};
+    _tombCache = { players: new Set(Array.isArray(o.players) ? o.players : []), rounds: new Set(Array.isArray(o.rounds) ? o.rounds : []) };
+  } catch (e) { if (!_tombCache) _tombCache = { players: new Set(), rounds: new Set() }; }
+  return _tombCache;
+}
+async function _writeSharedTombstones(out) {
+  _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds) };
+  try { localStorage.setItem(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
+  try { if (typeof isSignedIn === 'function' && isSignedIn() && typeof writeSharedSingleton === 'function') await writeSharedSingleton(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
+}
+async function addSharedTombstones(players, rounds) {
+  try {
+    const t = await getSharedTombstones();
+    (players || []).forEach(k => { if (k) t.players.add(k); });
+    (rounds || []).forEach(k => { if (k) t.rounds.add(k); });
+    await _writeSharedTombstones({ players: Array.from(t.players).slice(-3000), rounds: Array.from(t.rounds).slice(-5000) });
+  } catch (e) { console.warn('addSharedTombstones', e); }
+}
+async function unTombstonePlayers(players) {
+  try {
+    const t = await getSharedTombstones();
+    let changed = false;
+    (players || []).forEach(k => { if (k && t.players.delete(k)) changed = true; });
+    if (changed) await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds) });
+  } catch (e) {}
+}
+// Drop tombstoned players + rounds from a roster array. Failsafe: returns the
+// input unchanged on any error so a tombstone-read hiccup never hides real data.
+function applyTombstonesToRoster(roster, tomb) {
+  try {
+    if (!Array.isArray(roster) || !tomb) return roster;
+    let out = roster;
+    if (tomb.players && tomb.players.size) out = out.filter(p => !tomb.players.has(rosterPlayerKey(p)));
+    if (tomb.rounds && tomb.rounds.size) out.forEach(p => { if (Array.isArray(p.scoreHistory)) p.scoreHistory = p.scoreHistory.filter(s => !(tomb.rounds.has(rosterRoundKey(s)) || tomb.rounds.has(statsRoundKey(s)))); });
+    return out;
+  } catch (e) { return roster; }
+}
+
 async function savePlayerRoster(roster, opts) {
   opts = opts || {};
   // Cache locally first (instant read-after-write; offline-safe).
@@ -8905,7 +8961,19 @@ async function savePlayerRoster(roster, opts) {
         const { data } = await supa.from('games').select('data').eq('code', singletonRowCode(KEY_PLAYER_ROSTER)).maybeSingle();
         if (data && Array.isArray(data.data)) cloud = data.data;
       } catch (e) {}
-      const merged = mergeRosters(cloud, roster, opts.removals);
+      // Persist any explicit deletions as SHARED tombstones (so other devices
+      // can't resurrect them) and apply the full shared tombstone set to the
+      // merged result, so a delete sticks everywhere — not just on this phone.
+      let _tomb = null;
+      if (opts.removals) {
+        const _rp = opts.removals.players ? Array.from(opts.removals.players) : [];
+        const _rr = [];
+        if (opts.removals.rounds) opts.removals.rounds.forEach(set => { if (set && set.forEach) set.forEach(k => _rr.push(k)); });
+        try { await addSharedTombstones(_rp, _rr); } catch (e) {}
+      }
+      try { _tomb = await getSharedTombstones(); } catch (e) {}
+      let merged = mergeRosters(cloud, roster, opts.removals);
+      try { merged = applyTombstonesToRoster(merged, _tomb); } catch (e) {}
       const json = JSON.stringify(merged);
       try { localStorage.setItem(KEY_PLAYER_ROSTER, json); } catch (e) {}
       _singletonWroteAt[KEY_PLAYER_ROSTER] = Date.now();
@@ -8958,6 +9026,9 @@ async function upsertPlayerInRoster(firstName, lastName, hcp) {
       scoreHistory: []
     });
   }
+  // Re-adding a player must clear any old tombstone, or the shared filter would
+  // immediately drop them again.
+  try { await unTombstonePlayers([rosterPlayerKey({ firstName: f, lastName: l })]); } catch (e) {}
   roster.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
   // Cap at 200 (was 50, which silently dropped tail entries for deep rosters).
   await savePlayerRoster(roster.slice(0, 200));
@@ -23564,6 +23635,13 @@ function tombstoneRound(roundOrKey) {
   const k = (typeof roundOrKey === 'string') ? roundOrKey : statsRoundKey(roundOrKey);
   if (!k) return;
   try { const set = getDeletedRoundKeys(); if (!set.has(k)) { set.add(k); localStorage.setItem(KEY_DELETED_ROUNDS, JSON.stringify(Array.from(set).slice(-1000))); } } catch (e) {}
+  // Mirror to the SHARED tombstones so other devices can't resurrect this round
+  // from the roster blob / their stats backup. Include the roster-key variant too.
+  try {
+    const keys = [k];
+    if (typeof roundOrKey === 'object' && roundOrKey && typeof rosterRoundKey === 'function') { const rk = rosterRoundKey(roundOrKey); if (rk && rk !== k) keys.push(rk); }
+    if (typeof addSharedTombstones === 'function') addSharedTombstones([], keys);
+  } catch (e) {}
 }
 
 async function syncMyStatsToCloud(roster, visOverride){
@@ -23573,6 +23651,7 @@ async function syncMyStatsToCloud(roster, visOverride){
     const meNm = await getMeName();
     const me = findMyRosterPlayer(roster || [], meNm);
     const _deleted = getDeletedRoundKeys();
+    try { const _st = await getSharedTombstones(); if (_st && _st.rounds) _st.rounds.forEach(k => _deleted.add(k)); } catch (e) {}
     let stats = (me && Array.isArray(me.scoreHistory)) ? me.scoreHistory.slice() : [];
     stats = stats.filter(s => !_deleted.has(statsRoundKey(s)));   // never re-upload a deleted (tombstoned) round
     // Never SHRINK the per-user backup: union in any rounds the cloud copy already
@@ -23620,7 +23699,10 @@ async function mergedPlayerHistory(player) {
   // backup (only mine — another player's history is left untouched).
   let _del = new Set();
   try { const _me = await getMeName(); if (_me && player && player.name && normalizeNameSegment(player.name) === normalizeNameSegment(_me)) _del = getDeletedRoundKeys(); } catch (e) {}
-  if (_del.size) hist = hist.filter(s => !_del.has(statsRoundKey(s)));
+  // Shared round tombstones apply to EVERY player (a deleted shared round is gone
+  // for all of them), not just mine.
+  try { const _st = await getSharedTombstones(); if (_st && _st.rounds) _st.rounds.forEach(k => _del.add(k)); } catch (e) {}
+  if (_del.size) hist = hist.filter(s => !(_del.has(statsRoundKey(s)) || _del.has(rosterRoundKey(s))));
   try {
     const cloud = await fetchPlayerCloudStats(player && player.name);
     if (cloud && cloud.length) {
@@ -25142,8 +25224,12 @@ async function loadRounds() {
       if (patched) { try { await safeSet(KEY_RECENT, JSON.stringify(fullRecent), true); } catch (e) {} }
     }
   } catch (e) {}
+  // Shared round tombstones: a round deleted on ANY device stays gone here too.
+  let _sharedRoundTomb = new Set();
+  try { const _st = await getSharedTombstones(); if (_st && _st.rounds) _sharedRoundTomb = _st.rounds; } catch (e) {}
   const recent = fullRecent
     .filter(r => !getHiddenRounds().includes(r.code))
+    .filter(r => !(r && r.code && _sharedRoundTomb.has(r.code)))
     .filter(r => recentRowHasName(r, meName));
 
   // Upcoming SCHEDULED rounds (shared) — surface them at the top of Rounds so the
@@ -25200,7 +25286,7 @@ async function loadRounds() {
     const roster2 = await getPlayerRoster();
     const mineP = findMyRosterPlayer(roster2, meName);
     if (mineP && Array.isArray(mineP.scoreHistory)) {
-      pastRounds = mineP.scoreHistory.filter(s => s && s.manual)
+      pastRounds = mineP.scoreHistory.filter(s => s && s.manual && !(_sharedRoundTomb.has(rosterRoundKey(s)) || _sharedRoundTomb.has(statsRoundKey(s))))
         .slice().sort((a, b) => (b.date || 0) - (a.date || 0));
     }
   } catch (e) {}
@@ -25503,6 +25589,7 @@ async function deleteRecentGame(code) {
   // A scheduled round started into this code should return to the schedule, not
   // vanish, when the round is deleted.
   try { await restoreScheduledRoundForCode(code); } catch (e) {}
+  try { tombstoneRound(code); } catch (e) {}   // shared tombstone → can't resurrect on any device
   // Remove from recent list (now shared across devices)
   let recent = [];
   const v = await safeGet(KEY_RECENT, true);
@@ -36394,21 +36481,27 @@ const gpsView = (() => {
   // Drive the view from the followed player's broadcast position instead of the
   // watcher's own GPS. Degrades gracefully to the tee view if they aren't sharing.
   function applySpectatePos() {
-    if (!spectate || mode !== 'view') return;
+    if (!spectate) return;
     const g = state.game;
     const bag = (window._livePos && g && g.code) ? (window._livePos[g.code] || {}) : {};
     const pos = bag[spectate.pid];
     // Non-admins only see a player who's sharing; admins can follow anyone.
     const canSee = !!pos && (pos.share !== false || (typeof isAdmin === 'function' && isAdmin()));
-    if (canSee && pos.lng != null && pos.lat != null) {
-      ball = [pos.lng, pos.lat];
-      holeArrived = true;
-      if (ballMk) ballMk.setLngLat(ball);
-      if (!targetManual && targetMk && hd) { target = smartTargetPos(); targetMk.setLngLat(target); }
-      refresh();
-      try { updateGpsMoneyMatch(); } catch (e) {}
-      maybeFollow();
-    }
+    if (!canSee || pos.lng == null || pos.lat == null) return;
+    // FOLLOW the player to THEIR hole. Without this the dot was placed at the
+    // player's real-world coordinates on whatever hole the SPECTATOR happened to
+    // be viewing — so it sat off the map and looked frozen ("green chip, no
+    // movement"). Switching to a mapped hole also enters view mode.
+    if (pos.hole && pos.hole !== hole) { try { showHole(pos.hole); } catch (e) {} }
+    if (mode !== 'view') { try { if (hd) enterView(); } catch (e) {} }
+    if (mode !== 'view') return;   // their hole isn't mapped yet — can't place the dot
+    ball = [pos.lng, pos.lat];
+    holeArrived = true;
+    if (ballMk) ballMk.setLngLat(ball);
+    if (!targetManual && targetMk && hd) { target = smartTargetPos(); targetMk.setLngLat(target); }
+    refresh();
+    try { updateGpsMoneyMatch(); } catch (e) {}
+    maybeFollow();
   }
   function renderSpectatePicker() {
     if (!spectate) return;
