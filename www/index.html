@@ -3809,7 +3809,7 @@
       </div>
 
       <div class="actions">
-        <button id="btn-back-score" class="full">Back to scoring</button>
+        <button id="btn-back-score" class="full">Back</button>
       </div>
       <div class="actions" id="board-home-row" style="margin-top:8px;display:none">
         <button id="btn-board-home" class="full" style="border:1px solid var(--accent);color:var(--accent);font-weight:600">🏠 Back to home</button>
@@ -5937,7 +5937,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.271';
+const BG_BUILD = 'v2026.11.273';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8315,22 +8315,28 @@ async function safeSet(key, value, shared) {
     try {
       if (!supaReady) await initSupabase();
       if (supa && supaOnline) {
-        const parsed = JSON.parse(value);
-        const { error } = await supa
-          .from('games')
-          .upsert({ code, data: parsed, updated_at: new Date().toISOString() });
-        if (error) {
-          console.warn('Supabase write failed:', error);
-          updateSyncIndicator(false);
-        } else {
-          updateSyncIndicator(true);
+        let parsed = JSON.parse(value);
+        // Merge-on-write: re-read the cloud row and union THIS device's edited cells
+        // over it, so a concurrent scorer's entries (and handicap/bet changes) aren't
+        // clobbered by a stale whole-blob write.
+        try { parsed = await _mergeGameForWrite(parsed); } catch (e) {}
+        try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {} // cache the merged copy
+        try {
+          const r = await _promiseTimeout(
+            supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'saveGame');
+          if (r && r.error) { console.warn('Supabase write failed:', r.error); markGameDirty(code); updateSyncIndicator(false); }
+          else { clearGameDirty(code); updateSyncIndicator(true); }
+        } catch (e) {
+          // Timeout / dropped signal: keep playing on the local copy and queue the
+          // write — flushDirtyGames re-pushes it the moment the connection returns.
+          markGameDirty(code); updateSyncIndicator(false);
         }
       } else {
-        updateSyncIndicator(false);
+        markGameDirty(code); updateSyncIndicator(false);
       }
     } catch (e) {
       console.warn('Supabase write error:', e);
-      updateSyncIndicator(false);
+      markGameDirty(code); updateSyncIndicator(false);
     }
     return true;
   }
@@ -8367,6 +8373,10 @@ function subscribeToGame(code) {
         // skips them.)
         const justFinished = !!(incoming.finishedAt) && !(state.game && state.game.finishedAt);
 
+        // Keep MY just-tapped cells on top so a slightly-stale incoming row can't blank
+        // a score I entered a moment ago (the merge-on-write makes every cloud write a
+        // union, so this only covers the brief in-flight window).
+        try { _applyMyTouchedCells(incoming); } catch (e) {}
         state.game = incoming;
         // Cache the fresh copy locally
         try { localStorage.setItem('game:' + code, JSON.stringify(incoming)); } catch (e) {}
@@ -8453,6 +8463,7 @@ async function pollGameOnce(code) {
     if (!incoming || !incoming.updatedAt) return;
     if (state.game.updatedAt && incoming.updatedAt <= state.game.updatedAt) return; // nothing newer
     migrateLegacyData(incoming);
+    try { _applyMyTouchedCells(incoming); } catch (e) {}
     state.game = incoming;
     try { localStorage.setItem('game:' + code, JSON.stringify(incoming)); } catch (e) {}
     try { if (typeof reactToGroupHole === 'function') reactToGroupHole(); } catch (e) {}
@@ -8463,6 +8474,150 @@ async function pollGameOnce(code) {
     else if (onBoard && typeof renderBoard === 'function') renderBoard();
   } catch (e) {}
 }
+
+// ===== Live-game merge-on-write + offline cushion (concurrent-scoring safety) =====
+// Two phones scoring the same round used to clobber each other: every save wrote the
+// WHOLE game blob (last-writer-wins), so a slightly-stale phone could wipe another
+// phone's just-entered scores and revert handicaps ("data thrown in that wasn't even
+// clicked / scores lost / handicaps reset"). Fix: before writing, re-read the cloud
+// row and merge — each device is authoritative ONLY for the cells IT edited this
+// session (tracked in state._scoreTouch); every other cell (and players/handicaps/bets
+// it didn't touch) is taken from the cloud. Network calls are timeout-bounded so a
+// dropped signal can't freeze scoring, and failed writes queue for re-push when the
+// connection returns (Kevin's offline lock-up). All wrapped so any failure falls back
+// to the previous plain-write behavior — never breaks saving.
+function _promiseTimeout(p, ms, tag) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const t = setTimeout(() => { if (!done) { done = true; reject(new Error('timeout:' + (tag || ''))); } }, ms);
+    Promise.resolve(p).then(
+      v => { if (!done) { done = true; clearTimeout(t); resolve(v); } },
+      e => { if (!done) { done = true; clearTimeout(t); reject(e); } });
+  });
+}
+// Per-session record of which (player,hole) cells THIS device edited, per field. Local
+// edits win the merge for the whole session; every other cell mirrors the cloud. Reset
+// when the active round changes so a previous round's edits never leak in.
+function _touchStore() {
+  const code = (state.game && state.game.code) || '';
+  if (!state._scoreTouch || state._scoreTouch.code !== code) {
+    state._scoreTouch = { code: code, scores: {}, puttsData: {}, girData: {}, fairwaysData: {} };
+  }
+  return state._scoreTouch;
+}
+function _markScoreTouched(field, pid, holeIdx) {
+  try { const s = _touchStore(); if (!s[field]) s[field] = {}; if (!s[field][pid]) s[field][pid] = new Set(); s[field][pid].add(holeIdx); } catch (e) {}
+}
+function _isTouched(s, field, pid, holeIdx) {
+  return !!(s && s[field] && s[field][pid] && s[field][pid].has(holeIdx));
+}
+// Fold cloud cells THIS device didn't touch into `local` (mutates + returns local).
+function _mergeGameArrays(local, cloud) {
+  const touch = _touchStore();
+  ['scores', 'puttsData', 'girData', 'fairwaysData'].forEach(field => {
+    const cc = cloud[field]; if (!cc || typeof cc !== 'object') return;
+    if (!local[field]) local[field] = {};
+    const lf = local[field];
+    Object.keys(cc).forEach(pid => {
+      const cArr = cc[pid]; if (!Array.isArray(cArr)) return;
+      if (!Array.isArray(lf[pid])) { lf[pid] = cArr.slice(); return; }
+      for (let i = 0; i < cArr.length; i++) {
+        if (!_isTouched(touch, field, pid, i)) lf[pid][i] = cArr[i];
+      }
+    });
+  });
+  return local;
+}
+// Union an additive hole-keyed map (cloud as base, local wins per key) so the other
+// phone's banker/wolf/junk/sip entry on a different hole is never dropped.
+function _unionHoleMap(local, parentKey, subKey, cloud) {
+  try {
+    const cp = cloud[parentKey]; if (!cp) return;
+    const cm = subKey ? cp[subKey] : cp; if (!cm || typeof cm !== 'object') return;
+    if (!local[parentKey]) local[parentKey] = {};
+    const lmCur = subKey ? (local[parentKey][subKey] || {}) : (local[parentKey] || {});
+    const merged = Object.assign({}, cm, lmCur);
+    if (subKey) local[parentKey][subKey] = merged; else local[parentKey] = merged;
+  } catch (e) {}
+}
+// Build the row to write: local edits union'd over the freshest cloud copy.
+async function _mergeGameForWrite(local) {
+  try {
+    if (!supa || !supaOnline || !local || !local.code) return local;
+    let cloud = null;
+    try {
+      const r = await _promiseTimeout(
+        supa.from('games').select('data').eq('code', local.code).maybeSingle(), 3000, 'mergeRead');
+      if (r && !r.error && r.data) cloud = r.data.data;
+    } catch (e) { return local; } // read failed/timed out → write local as-is (prior behavior)
+    if (!cloud || typeof cloud !== 'object') return local;
+    _mergeGameArrays(local, cloud);
+    _unionHoleMap(local, 'bankerData', 'holes', cloud);
+    _unionHoleMap(local, 'bankerData', 'picks', cloud);
+    _unionHoleMap(local, 'wolfData', 'holes', cloud);
+    _unionHoleMap(local, 'junkData', null, cloud);
+    _unionHoleMap(local, 'sipManual', null, cloud);
+    // players + config: the cloud wins UNLESS this device edited settings in the last
+    // 60s (set in applyLiveEditMerge). This is what stops a plain scoring save from
+    // reverting a handicap/bet change made on another phone.
+    const cfgFresh = state._configEditedAt && (Date.now() - state._configEditedAt < 60000);
+    if (!cfgFresh) {
+      if (Array.isArray(cloud.players) && Array.isArray(local.players)) {
+        local.players = local.players.map(lp => (cloud.players.find(p => p && p.id === lp.id) || lp));
+        cloud.players.forEach(cp => { if (cp && !local.players.some(p => p && p.id === cp.id)) local.players.push(cp); });
+      }
+      ['games', 'hcpRules', 'pars', 'sis', 'tees', 'teeYards', 'unranked', 'nineMode', 'trackPutts', 'trackGirs', 'trackFairways', 'hydration'].forEach(k => {
+        if (cloud[k] !== undefined) local[k] = cloud[k];
+      });
+    }
+  } catch (e) { /* any merge failure → fall back to writing local unchanged */ }
+  return local;
+}
+// Receive side: when another phone's update arrives, keep MY just-edited cells on top
+// so a slightly-stale incoming row can't blank a score I just tapped (mutates + returns).
+function _applyMyTouchedCells(incoming) {
+  try {
+    const prev = state.game; if (!prev || !incoming) return incoming;
+    const touch = _touchStore();
+    ['scores', 'puttsData', 'girData', 'fairwaysData'].forEach(field => {
+      const pf = prev[field]; if (!pf) return;
+      const tf = touch[field] || {};
+      Object.keys(tf).forEach(pid => {
+        const ts = tf[pid]; if (!ts || !Array.isArray(pf[pid])) return;
+        if (!incoming[field]) incoming[field] = {};
+        if (!Array.isArray(incoming[field][pid])) incoming[field][pid] = pf[pid].slice();
+        ts.forEach(i => { incoming[field][pid][i] = pf[pid][i]; });
+      });
+    });
+  } catch (e) {}
+  return incoming;
+}
+// Dirty-game queue: rounds whose cloud write failed/timed out, re-pushed on the 15s
+// timer + on reconnect, so play continues offline and syncs when signal returns.
+function _dirtyGames() { try { return JSON.parse(localStorage.getItem('golf:dirty-games') || '[]') || []; } catch (e) { return []; } }
+function _dirtyGamesSave(a) { try { localStorage.setItem('golf:dirty-games', JSON.stringify(Array.from(new Set(a)).filter(Boolean))); } catch (e) {} }
+function markGameDirty(code) { try { if (!code) return; const a = _dirtyGames(); if (a.indexOf(code) < 0) { a.push(code); _dirtyGamesSave(a); } } catch (e) {} }
+function clearGameDirty(code) { try { const a = _dirtyGames(); const i = a.indexOf(code); if (i >= 0) { a.splice(i, 1); _dirtyGamesSave(a); } } catch (e) {} }
+async function flushDirtyGames() {
+  const pending = _dirtyGames();
+  if (!pending.length) return;
+  try { if (!supaReady) await initSupabase(); } catch (e) {}
+  if (!supa || !supaOnline) return;
+  for (const code of pending) {
+    let v = null; try { v = localStorage.getItem('game:' + code); } catch (e) {}
+    if (v == null) { clearGameDirty(code); continue; }
+    try {
+      let parsed = JSON.parse(v);
+      parsed = await _mergeGameForWrite(parsed);
+      try { localStorage.setItem('game:' + code, JSON.stringify(parsed)); } catch (e) {}
+      const r = await _promiseTimeout(
+        supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'flushGame');
+      if (r && !r.error) { clearGameDirty(code); updateSyncIndicator(true); }
+    } catch (e) { /* still offline / still hung → leave queued for the next pass */ }
+  }
+}
+try { setInterval(() => { flushDirtyGames().catch(() => {}); }, 15000); } catch (e) {}
+try { window.addEventListener('online', () => { flushDirtyGames().catch(() => {}); }); } catch (e) {}
 
 // Broadcast MY live position to the game channel (Spectator mode source). No-op
 // unless a round is live, a channel is up, and I resolve to a player. Throttled
@@ -17159,6 +17314,16 @@ async function handlePuttChange(pid, action) {
   else if (action === 'inc') v = Math.min(10, v + 1);
   else v = (v <= 0) ? null : v - 1; // − below zero backs the putts out entirely
   g.puttsData[pid][h - 1] = v;
+  _markScoreTouched('puttsData', pid, h - 1);
+  // Optimistic UI: update the visible putt count NOW, before the (possibly slow /
+  // offline) save. Previously the number only refreshed AFTER the save, so on a laggy
+  // connection it looked stuck and players tapped again — the "shows two, then four"
+  // double/quadruple counting. The number is right immediately now.
+  try {
+    const _btn = document.querySelector('button[data-putt][data-pid="' + pid + '"]');
+    const _pv = _btn && _btn.parentElement ? _btn.parentElement.querySelector('.pval') : null;
+    if (_pv) _pv.textContent = (v == null ? '—' : v);
+  } catch (e) {}
   syncGirJunk(g, state.currentHole);
   await saveGame(g);
   renderScoreEntry();
@@ -17478,6 +17643,7 @@ async function handleGirToggle(pid) {
   if (!g.girData) g.girData = {};
   if (!Array.isArray(g.girData[pid])) g.girData[pid] = new Array(18).fill(null);
   g.girData[pid][h - 1] = g.girData[pid][h - 1] === true ? null : true;
+  _markScoreTouched('girData', pid, h - 1);
   syncGirJunk(g, h);
   await saveGame(g);
   renderScoreEntry();
@@ -17494,6 +17660,7 @@ async function handleFairwayToggle(pid) {
   if (!Array.isArray(g.fairwaysData[pid])) g.fairwaysData[pid] = new Array(18).fill(null);
   const cur = g.fairwaysData[pid][h - 1];
   g.fairwaysData[pid][h - 1] = cur == null ? true : (cur === true ? false : null);
+  _markScoreTouched('fairwaysData', pid, h - 1);
   await saveGame(g);
   renderScoreEntry();
 }
@@ -17506,6 +17673,7 @@ async function clearScoreFor(pid) {
   const h = state.currentHole;
   if (!g.scores[pid] || g.scores[pid][h - 1] == null) return;
   g.scores[pid][h - 1] = null;
+  _markScoreTouched('scores', pid, h - 1); // a deliberate clear must STICK — never let a stale write resurrect it
   syncGirJunk(g, h);
   await saveGame(g);
   renderScoreEntry();
@@ -17537,6 +17705,7 @@ async function handleScoreChange(pid, action) {
   }
 
   g.scores[pid][h - 1] = cur;
+  _markScoreTouched('scores', pid, h - 1); // this cell is mine — wins any concurrent merge
   // Round timer starts at the FIRST score logged (not at round creation).
   if (cur !== null && !g.firstScoreAt) g.firstScoreAt = Date.now();
   syncGirJunk(g, h);
@@ -17921,6 +18090,9 @@ function announceStrokes(leaving, localSuppress){
     if (!g || !leaving) return;
     const rules = g.hcpRules || {};
     if (rules.noHandicaps) return; // straight-up gross — no strokes given
+    // Quota and Team Quota bake the strokes into each player's quota target, so the
+    // "you get a stroke" heads-up is meaningless (and confusing) there — suppress it.
+    if (g.games && (g.games.quota || g.games.teamQuota)) return;
     const si = (g.sis && g.sis[leaving - 1] != null) ? g.sis[leaving - 1] : null;
     if (si == null) return;
     const par = g.pars ? g.pars[leaving - 1] : null;
@@ -21569,7 +21741,7 @@ function renderBoard() {
   // button to the Rounds list, and "Abandon" becomes a personal "Delete".
   const backBtn = $('btn-back-score');
   const abandonBtn = $('btn-abandon-round');
-  if (backBtn) backBtn.textContent = state.viewOnlyMode ? '← Back to rounds' : 'Back to scoring';
+  if (backBtn) backBtn.textContent = state.viewOnlyMode ? '← Back to rounds' : 'Back';
   if (abandonBtn) abandonBtn.textContent = state.viewOnlyMode ? '🗑 Delete' : 'Abandon';
   const banner = $('view-only-banner');
   const finishBtn = $('btn-finish-round');
@@ -33659,6 +33831,10 @@ function exitEditLiveRoundMode() {
 // cleans up data for any game that was switched off.
 function applyLiveEditMerge(g, setup) {
   if (!g || !setup) return;
+  // This device just edited settings/handicaps — make its config + players win the
+  // merge-on-write for the next 60s so a concurrent scoring save on another phone
+  // can't revert the change (auto-expires, so a later plain save defers to cloud).
+  try { state._configEditedAt = Date.now(); } catch (e) {}
   g.course = setup.course;
   g.courseId = $('course-name').dataset.courseId || g.courseId || '';
   g.pars = setup.pars;
@@ -34744,7 +34920,10 @@ async function init() {
     }
 
     state.game = game;
-    state.currentHole = 1;
+    // Honor the chosen start hole — "Start on the Back 9" sets startHole 10. This was
+    // hard-coded to 1, which silently dropped players on hole 1 no matter what they
+    // picked (the "back nine first wouldn't let us" bug).
+    state.currentHole = game.startHole || 1;
     state.viewOnlyMode = false; // brand-new round you created — never spectator/read-only
     // Crew heads-up: if the "alert friends" toggle is on, stamp the round so each
     // crew member's app can surface a one-time "XX is playing <course> in <city>" toast.
@@ -34778,7 +34957,7 @@ async function init() {
     $('setup-with-game').style.display = 'none';
     $('setup-no-game').style.display = 'block';
     switchTab('score');
-    openPlayGps(); // GPS is the default play screen (hole 1)
+    openPlayGps(); // GPS is the default play screen (opens on state.currentHole / chosen start hole)
     hideRoundLoading(_rl);
     showToast('Round started');
 
@@ -35181,7 +35360,15 @@ async function init() {
       try { enterEditLiveRoundMode(); } catch (e) {}
     }; }
 
-  $('btn-back-score').onclick = () => { if (state.viewOnlyMode) { exitViewOnly(); } else { switchTab('score'); try { window.scrollTo(0, 0); } catch (e) {} setTimeout(() => { try { window.scrollTo(0, 0); const _ps = document.getElementById('panel-score'); if (_ps) _ps.scrollTop = 0; } catch (e) {} }, 0); } };
+  $('btn-back-score').onclick = () => {
+    if (state.viewOnlyMode) { exitViewOnly(); return; }
+    // If you got here from the GPS map (opened settings/board off the map), go back to
+    // the map — not the score list — so "Back" returns you where you were.
+    if (typeof returnFromGps === 'function' && state._gpsReturn != null) { returnFromGps(); return; }
+    switchTab('score');
+    try { window.scrollTo(0, 0); } catch (e) {}
+    setTimeout(() => { try { window.scrollTo(0, 0); const _ps = document.getElementById('panel-score'); if (_ps) _ps.scrollTop = 0; } catch (e) {} }, 0);
+  };
   { const _bh = $('btn-board-home'); if (_bh) _bh.onclick = () => { try { switchTab('home'); } catch (e) {} }; }
 
   // Admin-only: rename a mis-named course (keeps its id, so all rounds/GPS stay).
@@ -36770,6 +36957,23 @@ const gpsView = (() => {
       if (!g || !g.games) return hide();
       const cfg = g.games.quota || g.games.teamQuota;
       if (!cfg) return hide();
+      // Team Quota → show MY TEAM's combined quota total (points − quota summed across
+      // the team), labeled TEAM — not the individual's personal standing.
+      if (g.games.teamQuota && typeof calcTeamQuota === 'function') {
+        let tq = null; try { tq = calcTeamQuota(g); } catch (e) {}
+        if (!tq) return hide();
+        const myTid = spectate ? spectate.pid : gpsResolveMyId(g);
+        if (!myTid) return hide();
+        let total = null;
+        if (tq.teamMode === '4man') total = tq.aTotal;
+        else if (Array.isArray(tq.teamAIds) && tq.teamAIds.indexOf(myTid) >= 0) total = tq.aTotal;
+        else if (Array.isArray(tq.teamBIds) && tq.teamBIds.indexOf(myTid) >= 0) total = tq.bTotal;
+        if (total == null) return hide();
+        const vt = b.querySelector('.val'); if (vt) vt.textContent = (total > 0 ? '+' : '') + total;
+        const lt = b.querySelector('.lbl'); if (lt) lt.textContent = 'TEAM';
+        b.style.display = 'block';
+        return;
+      }
       if (typeof computeQuotaPoints !== 'function' || typeof quotaTargetFor !== 'function') return hide();
       // When spectating, show the WATCHED player's place; otherwise mine.
       const myId = spectate ? spectate.pid : gpsResolveMyId(g);
@@ -39481,6 +39685,36 @@ function returnFromGps() {
       KB.addListener('keyboardWillHide', () => {
         try { document.body.classList.remove('kb-open'); document.documentElement.style.setProperty('--kb-height', '0px'); } catch (e) {}
       });
+    }
+  } catch (e) {}
+  // VisualViewport fallback: the Capacitor Keyboard plugin isn't always present/firing,
+  // so detect the on-screen keyboard from the shrinking visual viewport and drive the
+  // SAME --kb-height / body.kb-open the CSS keys off of. This makes modals anchor-to-top
+  // and shrink above the keyboard even without the native plugin (the case where the
+  // WebView viewport does NOT auto-resize and the keyboard overlaps the form fields).
+  try {
+    const vv = window.visualViewport;
+    if (vv) {
+      let _kbRaf = 0;
+      const onVV = () => {
+        cancelAnimationFrame(_kbRaf);
+        _kbRaf = requestAnimationFrame(() => {
+          try {
+            const overlap = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+            if (overlap > 120) {
+              document.documentElement.style.setProperty('--kb-height', Math.round(overlap) + 'px');
+              document.body.classList.add('kb-open');
+              const el = document.activeElement;
+              if (el && el.scrollIntoView) { try { el.scrollIntoView({ block: 'center' }); } catch (e) {} }
+            } else {
+              document.body.classList.remove('kb-open');
+              document.documentElement.style.setProperty('--kb-height', '0px');
+            }
+          } catch (e) {}
+        });
+      };
+      vv.addEventListener('resize', onVV);
+      vv.addEventListener('scroll', onVV);
     }
   } catch (e) {}
   // Web + universal fallback: always nudge the focused field into view.
