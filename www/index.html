@@ -5949,7 +5949,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.284';
+const BG_BUILD = 'v2026.11.285';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8131,15 +8131,16 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:course-detail-overrides': 'objectMap',  // { id: {name,city,st} }
   'golf:state-import-progress': 'objectMap'      // { state: progress }
 };
+const _MERGE_READ_FAILED = '__BG_MERGE_READ_FAILED__';  // cloud read FAILED (vs. cloud genuinely empty)
 async function _mergeSharedSingletonValue(key, local) {
   const strat = _SHARED_MERGE_STRATEGY[key];
   if (!strat) return undefined;                 // not a merge key — write as-is
   let cloud = null;
   try {
     const { data, error } = await supa.from('games').select('data').eq('code', singletonRowCode(key)).maybeSingle();
-    if (error) return undefined;                // read failed — fall back to local-only (prior behavior)
+    if (error) return _MERGE_READ_FAILED;       // read failed — signal callers (don't shrink accumulate sets)
     cloud = data ? data.data : null;
-  } catch (e) { return undefined; }
+  } catch (e) { return _MERGE_READ_FAILED; }
   if (cloud == null) return undefined;          // nothing in the cloud yet — local IS the superset
   try {
     if (strat === 'stringSet') {
@@ -8197,7 +8198,16 @@ async function writeSharedSingleton(key, value) {
         // for non-merge keys (returns undefined → write local as-is).
         try {
           const _merged = await _mergeSharedSingletonValue(key, parsed);
-          if (_merged !== undefined) { parsed = _merged; try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {} }
+          if (_merged === _MERGE_READ_FAILED) {
+            // Cloud read failed. For accumulate sets (verified / deletes / skipped) a
+            // blind overwrite could SHRINK the cloud and silently drop another device's
+            // entries (this is how Kevin's verified courses reverted). Skip the write,
+            // keep it DIRTY, and let the 15s / online retry union once the cloud is back.
+            if (_SHARED_MERGE_STRATEGY[key] === 'stringSet') { return false; }
+            // other merge keys: keep prior behavior (write the local copy cached above)
+          } else if (_merged !== undefined) {
+            parsed = _merged; try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {}
+          }
         } catch (e) {}
       }
       for (let attempt = 0; attempt < 3 && !committed; attempt++) {
@@ -8236,7 +8246,14 @@ async function flushDirtySingletons() {
       // Re-merge additive / object-map blobs against the CURRENT cloud row before
       // re-pushing, so a deferred retry can't clobber edits made elsewhere since (v284).
       let _data = JSON.parse(v);
-      try { const _m = await _mergeSharedSingletonValue(key, _data); if (_m !== undefined) { _data = _m; try { localStorage.setItem(key, JSON.stringify(_data)); } catch (e) {} } } catch (e) {}
+      try {
+        const _m = await _mergeSharedSingletonValue(key, _data);
+        if (_m === _MERGE_READ_FAILED) {
+          // Still can't read the cloud — for accumulate sets, do NOT blind-overwrite
+          // (would shrink/drop entries). Leave it DIRTY and retry on the next tick.
+          if (_SHARED_MERGE_STRATEGY[key] === 'stringSet') { continue; }
+        } else if (_m !== undefined) { _data = _m; try { localStorage.setItem(key, JSON.stringify(_data)); } catch (e) {} }
+      } catch (e) {}
       const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: _data, updated_at: new Date().toISOString() });
       if (!error) { _singletonDirty[key] = false; _singletonWroteAt[key] = Date.now(); _persistDirty(); }
     } catch (e) {}
@@ -41558,7 +41575,11 @@ async function courseDataImport(file, stateFilter, override) {
     }
 
     const saves = await getCourseSaves();
-    let matched = 0, filledTees = 0, preserved = 0, filledPars = 0;
+    // Refresh the admin-verified overlay so the guards below see the latest set even
+    // when the import auto-runs at boot (?courseoverride=1) before the overlay finished
+    // loading. Verified / hand-entered courses are NEVER overwritten (Tyler's rule).
+    try { const _vids = await getCourseVerified(); if (Array.isArray(_vids)) _vids.forEach(id => { try { _adminVerified.add(id); } catch (e) {} }); } catch (e) {}
+    let matched = 0, filledTees = 0, preserved = 0, filledPars = 0, protectedSkips = 0;
     const unmatched = [['name', 'state', 'city', 'tees']];
     const byStateMatched = {};
     const usedLibIds = new Set(); // one library course can't be claimed twice
@@ -41588,6 +41609,9 @@ async function courseDataImport(file, stateFilter, override) {
       // saves[lib.id] here never touches greens/targets. When the CSV is missing
       // a field for a course, the existing value is kept (never blanked).
       if (override) {
+        // RULE (Tyler): NEVER override a verified or hand-entered course. Kevin's
+        // verified / manually-entered ratings, pars and stroke index are sacred.
+        if ((typeof _adminVerified !== 'undefined' && _adminVerified.has(lib.id)) || ex.userEdited) { protectedSkips++; preserved++; return; }
         const oTees = (g.tees && g.tees.length) ? g.tees : (Array.isArray(ex.tees) ? ex.tees : []);
         const oPars = (g.pars && g.pars.length === 18) ? g.pars : (Array.isArray(ex.pars) ? ex.pars : []);
         const oSis = (g.sis && g.sis.length === 18) ? g.sis : ((Array.isArray(ex.sis) && ex.sis.length) ? ex.sis : DEFAULT_SI_IMPORT.slice());
@@ -41600,9 +41624,9 @@ async function courseDataImport(file, stateFilter, override) {
         byStateMatched[g.state] = (byStateMatched[g.state] || 0) + 1;
         return;
       }
-      // RULE: never touch a manually-edited course (userEdited) — Kevin's
-      // hand-entered ratings/tees/pars are sacred. Skip it entirely.
-      if (ex.userEdited) { preserved++; return; }
+      // RULE: never touch a manually-edited OR admin-verified course — Kevin's
+      // hand-entered ratings/tees/pars and verified courses are sacred. Skip entirely.
+      if ((typeof _adminVerified !== 'undefined' && _adminVerified.has(lib.id)) || ex.userEdited) { protectedSkips++; preserved++; return; }
       // Imports only ever FILL gaps, never clobber. Keep existing rating/slope
       // tees (manual or earlier import); only SET tees when the course has none.
       const exHasRS = Array.isArray(ex.tees) && ex.tees.some(t => t && t.rating != null && t.slope != null);
@@ -41644,6 +41668,7 @@ async function courseDataImport(file, stateFilter, override) {
 
     await saveCourseSaves(saves);
     log('✅ Filled <b>' + matched + '</b> courses (' + filledTees + ' tees rating/slope, ' + filledPars + ' with per-hole par+SI). Synced to everyone.', '#8fd19e');
+    if (protectedSkips) log('🔒 Left <b>' + protectedSkips + '</b> verified / hand-entered course(s) untouched (protected).', '#9ec5ff');
     Object.keys(byStateMatched).sort().forEach(st => log('   ' + st + ': ' + byStateMatched[st] + ' courses'));
     if (unmatched.length > 1) {
       log('⚠️ ' + (unmatched.length - 1) + ' dataset courses had no library match (different name/state). CSV downloaded so you can reconcile or add them.', '#ffd34d');
