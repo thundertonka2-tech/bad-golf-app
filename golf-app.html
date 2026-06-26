@@ -5944,7 +5944,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.283';
+const BG_BUILD = 'v2026.11.284';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8184,13 +8184,31 @@ async function writeSharedSingleton(key, value) {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
       let parsed = JSON.parse(value);
-      // Merge-on-write: union an additive blob with the current cloud copy so a
-      // concurrent edit on another device isn't clobbered (v216, Phase 2c). No-op
-      // for non-merge keys (returns undefined → write local as-is).
-      try {
-        const _merged = await _mergeSharedSingletonValue(key, parsed);
-        if (_merged !== undefined) { parsed = _merged; try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {} }
-      } catch (e) {}
+      // ROSTER merge-on-write (v284): the shared player roster must NEVER be blind-
+      // written from a possibly-stale local copy — that is the recurring "lost my
+      // players / past rounds" bug. Every writer (savePlayerRoster's fallbacks AND the
+      // direct safeSet(roster) calls in the stats / migration / avatar-heal paths)
+      // funnels through here, so union it into the FRESHEST cloud roster and apply the
+      // shared tombstones, exactly like savePlayerRoster's main path.
+      if (key === KEY_PLAYER_ROSTER) {
+        try {
+          const { data: _rrow, error: _rerr } = await supa.from('games').select('data').eq('code', singletonRowCode(key)).maybeSingle();
+          if (!_rerr && _rrow && Array.isArray(_rrow.data) && Array.isArray(parsed)) {
+            let _rm = mergeRosters(_rrow.data, parsed);
+            try { _rm = applyTombstonesToRoster(_rm, await getSharedTombstones()); } catch (e) {}
+            parsed = _rm;
+            try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {}
+          }
+        } catch (e) { /* read failed — fall through and write the local copy (cached above) */ }
+      } else {
+        // Merge-on-write: union an additive blob with the current cloud copy so a
+        // concurrent edit on another device isn't clobbered (v216, Phase 2c). No-op
+        // for non-merge keys (returns undefined → write local as-is).
+        try {
+          const _merged = await _mergeSharedSingletonValue(key, parsed);
+          if (_merged !== undefined) { parsed = _merged; try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {} }
+        } catch (e) {}
+      }
       for (let attempt = 0; attempt < 3 && !committed; attempt++) {
         try {
           const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: parsed, updated_at: new Date().toISOString() });
@@ -8215,10 +8233,20 @@ async function flushDirtySingletons() {
   try { if (!supaReady) await initSupabase(); } catch (e) {}
   if (!supa || !supaOnline) return;
   for (const key of dirtyKeys) {
+    // The roster has its own hardened merge-on-write; re-run it so a queued retry
+    // re-reads the cloud and UNIONS rather than blind-overwriting a stale blob (v284).
+    if (key === KEY_PLAYER_ROSTER) {
+      try { const _lr = JSON.parse(localStorage.getItem(key) || '[]'); if (Array.isArray(_lr)) { _singletonDirty[key] = false; _persistDirty(); await savePlayerRoster(_lr); } } catch (e) {}
+      continue;
+    }
     let v = null; try { v = localStorage.getItem(key); } catch (e) {}
     if (v == null) { _singletonDirty[key] = false; continue; }
     try {
-      const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: JSON.parse(v), updated_at: new Date().toISOString() });
+      // Re-merge additive / object-map blobs against the CURRENT cloud row before
+      // re-pushing, so a deferred retry can't clobber edits made elsewhere since (v284).
+      let _data = JSON.parse(v);
+      try { const _m = await _mergeSharedSingletonValue(key, _data); if (_m !== undefined) { _data = _m; try { localStorage.setItem(key, JSON.stringify(_data)); } catch (e) {} } } catch (e) {}
+      const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: _data, updated_at: new Date().toISOString() });
       if (!error) { _singletonDirty[key] = false; _singletonWroteAt[key] = Date.now(); _persistDirty(); }
     } catch (e) {}
   }
@@ -9226,6 +9254,10 @@ function applyTombstonesToRoster(roster, tomb) {
 
 async function savePlayerRoster(roster, opts) {
   opts = opts || {};
+  // Capture the prior known-full roster BEFORE overwriting the local cache, so a
+  // FAILED cloud read can merge against the last-known superset instead of [] (v284).
+  let _priorLocal = [];
+  try { const _p = JSON.parse(localStorage.getItem(KEY_PLAYER_ROSTER) || '[]'); if (Array.isArray(_p)) _priorLocal = _p; } catch (e) {}
   // Cache locally first (instant read-after-write; offline-safe).
   try { localStorage.setItem(KEY_PLAYER_ROSTER, JSON.stringify(roster)); } catch (e) {}
   if (!isSignedIn()) return true;
@@ -9235,11 +9267,20 @@ async function savePlayerRoster(roster, opts) {
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
-      let cloud = [];
-      try {
-        const { data } = await supa.from('games').select('data').eq('code', singletonRowCode(KEY_PLAYER_ROSTER)).maybeSingle();
-        if (data && Array.isArray(data.data)) cloud = data.data;
-      } catch (e) {}
+      // Read the freshest cloud roster. cloudReadOk distinguishes a genuine empty
+      // row from a FAILED read (v284) — we must never merge against [] on a failure,
+      // or one dropped request overwrites the cloud with only THIS device's players.
+      let cloud = []; let cloudReadOk = false;
+      for (let _ra = 0; _ra < 3 && !cloudReadOk; _ra++) {
+        try {
+          const { data, error } = await supa.from('games').select('data').eq('code', singletonRowCode(KEY_PLAYER_ROSTER)).maybeSingle();
+          if (!error) { cloudReadOk = true; if (data && Array.isArray(data.data)) cloud = data.data; }
+        } catch (e) {}
+        if (!cloudReadOk) await new Promise(r => setTimeout(r, 300 * (_ra + 1)));
+      }
+      // On a failed read, merge over the last-known-full LOCAL roster instead of []
+      // so we still can't shrink below what this device already had.
+      if (!cloudReadOk) cloud = _priorLocal;
       // Persist any explicit deletions as SHARED tombstones (so other devices
       // can't resurrect them) and apply the full shared tombstone set to the
       // merged result, so a delete sticks everywhere — not just on this phone.
@@ -9256,13 +9297,22 @@ async function savePlayerRoster(roster, opts) {
       const json = JSON.stringify(merged);
       try { localStorage.setItem(KEY_PLAYER_ROSTER, json); } catch (e) {}
       _singletonWroteAt[KEY_PLAYER_ROSTER] = Date.now();
-      await supa.from('games').upsert({ code: singletonRowCode(KEY_PLAYER_ROSTER), data: merged, updated_at: new Date().toISOString() });
+      // Retry the upsert (v284) — a single dropped write left the merge un-saved, and
+      // the next stale write from another device then "won". On persistent failure flag
+      // the key DIRTY so flushDirtySingletons re-merges + re-pushes it.
+      let _wrote = false;
+      for (let _wa = 0; _wa < 3 && !_wrote; _wa++) {
+        try { const { error } = await supa.from('games').upsert({ code: singletonRowCode(KEY_PLAYER_ROSTER), data: merged, updated_at: new Date().toISOString() }); if (!error) _wrote = true; } catch (e) {}
+        if (!_wrote) await new Promise(r => setTimeout(r, 400 * (_wa + 1)));
+      }
+      if (_wrote) { _singletonDirty[KEY_PLAYER_ROSTER] = false; _persistDirty(); }
+      else { _singletonDirty[KEY_PLAYER_ROSTER] = true; _persistDirty(); }
     } else {
-      await writeSharedSingleton(KEY_PLAYER_ROSTER, JSON.stringify(roster)); // offline: local cache only
+      _singletonDirty[KEY_PLAYER_ROSTER] = true; _persistDirty(); // offline: queue a re-merge for reconnect
     }
   } catch (e) {
     console.warn('savePlayerRoster merge-write failed', e);
-    try { await writeSharedSingleton(KEY_PLAYER_ROSTER, JSON.stringify(roster)); } catch (e2) {}
+    _singletonDirty[KEY_PLAYER_ROSTER] = true; _persistDirty(); // re-merged + re-pushed by flushDirtySingletons
   }
   return true;
 }
