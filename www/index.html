@@ -5937,7 +5937,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.274';
+const BG_BUILD = 'v2026.11.275';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -13760,12 +13760,20 @@ function renderPlayerTeeSelects() {
   if (!state.playerTees) state.playerTees = {};
   const tees = getCurrentTees();
   const validTees = tees.filter(t => t.label);
-  // Drop selections for tees that no longer exist (label changed or removed)
-  Object.keys(state.playerTees).forEach(name => {
-    if (!validTees.find(t => t.label === state.playerTees[name])) {
-      delete state.playerTees[name];
-    }
-  });
+  // Drop selections for tees that no longer exist (label changed or removed).
+  // SAFE PATH (#6): only prune when there's a REAL, populated tee list (2+ tees,
+  // the threshold at which per-player selection is even shown). Otherwise a
+  // transient empty/half-loaded tee list — common while re-opening Settings on a
+  // live round before the course scorecard finishes loading — would wipe EVERY
+  // saved player tee, and they'd silently revert to a default on the next render.
+  // Keyed-in tees must stick at all times. (June 2026)
+  if (validTees.length >= 2) {
+    Object.keys(state.playerTees).forEach(name => {
+      if (!validTees.find(t => t.label === state.playerTees[name])) {
+        delete state.playerTees[name];
+      }
+    });
+  }
   // For each player row, find or create the tee select
   const playerRows = document.querySelectorAll('#players-list .player-row');
   // Player 1's tee is the GROUP DEFAULT — any other player with no tee picked
@@ -13811,8 +13819,11 @@ function renderPlayerTeeSelects() {
     // wrong tee's slope/rating — breaking bets. June 2026.)
     if (liveSel && liveSel.value) currentVal = liveSel.value;
     else if (name) currentVal = state.playerTees[name] || '';
-    // Drop a stale selection that points at a tee that no longer exists.
-    if (currentVal && !validTees.find(t => t.label === currentVal)) currentVal = '';
+    // SAFE PATH (#6): do NOT silently drop a saved tee that isn't in the loaded
+    // list right now (label drift, or scorecard still loading). Keep it and
+    // inject it as an option below so the keyed-in tee stays selected and is
+    // preserved on Save — it must never quietly revert to a default.
+    const curMissing = !!(currentVal && !validTees.find(t => t.label === currentVal));
     // No tee yet on a non-first player → inherit player 1's tee (the default).
     if (!currentVal && row !== firstRow && groupDefaultTee) currentVal = groupDefaultTee;
     if (name) state.playerTees[name] = currentVal;
@@ -13825,6 +13836,7 @@ function renderPlayerTeeSelects() {
     teeBox.innerHTML = `
       <select class="tee-select" style="width:100%;font-size:12px">
         <option value="">— pick tee —</option>
+        ${curMissing ? `<option value="${currentVal}" selected>${currentVal}</option>` : ''}
         ${validTees.map(t => `<option value="${t.label}" ${t.label === currentVal ? 'selected' : ''}>${t.label}</option>`).join('')}
       </select>
     `;
@@ -15002,6 +15014,15 @@ function gatherSetup() {
         if (rowTeeSel && rowTeeSel.value) teeLabel = rowTeeSel.value;
       }
       if (!teeLabel && tees.length === 1) teeLabel = tees[0].label;
+      // SAFE PATH (#6): editing a live round must NEVER downgrade a player's
+      // existing tee to blank/default. If the form couldn't resolve a tee (e.g.
+      // the dropdown rebuilt without the saved label, or the tee list was still
+      // loading when Save was tapped), fall back to the tee already recorded on
+      // the live round for this player. Keyed-in tees stick at all times.
+      if (!teeLabel && state.editingLiveRound && state.game && Array.isArray(state.game.players)) {
+        const prevP = state.game.players.find(p => p.name === name);
+        if (prevP && prevP.teeLabel) teeLabel = prevP.teeLabel;
+      }
       // If editing a live round, REUSE existing player IDs (matched by name)
       // so that game.games.X.participants references stay valid after Save.
       // Without this, every Save generated brand-new IDs and broke skins,
@@ -19278,7 +19299,11 @@ function calcVegas(g) {
     let aTeamScore = pairScores(aScores[0], aScores[1]);
     let bTeamScore = pairScores(bScores[0], bScores[1]);
 
-    // Birdie/eagle BOOST detection — uses gross scores.
+    // Birdie/eagle BOOST detection — respects the NET setting (#8/#9). When
+    // Vegas is played NET, a NET birdie/eagle (after handicap strokes) triggers
+    // the flip/double, matching the Vegas-settings rules ("a net eagle should
+    // flip & double"). When gross, uses gross. Detection MUST use the same
+    // scoring mode as the team scores above, or the flip lies about the hole.
     // Boost rules (when only ONE team has a boost):
     //   1 birdie               → flip opponent's score (no double)
     //   2 birdies              → flip + ×2
@@ -19290,8 +19315,8 @@ function calcVegas(g) {
     // straight scores. BUT a tieStreak +1 carries to the next hole so it
     // doubles, since "anything vs anything" still escalates the action even
     // when the boosts wash each other out.
-    const aGross = teamA.map(p => getScore(p, false));
-    const bGross = teamB.map(p => getScore(p, false));
+    const aGross = teamA.map(p => getScore(p, cfg.net));
+    const bGross = teamB.map(p => getScore(p, cfg.net));
     const aBirdies = aGross.filter(s => s !== null && s === par - 1).length;
     const bBirdies = bGross.filter(s => s !== null && s === par - 1).length;
     const aEagles = aGross.filter(s => s !== null && s <= par - 2).length;
@@ -19492,8 +19517,11 @@ function calcDynamicVegas(g) {
     // Boost rules: see calcVegas for the full explanation. Identical here.
     //   1 birdie → flip; 2 birdies → flip+×2; 1 eagle → flip+×2;
     //   2 eagles → flip+×4; etc. Both teams boosted → cancel + carry +1.
-    const aGross = teamA.map(p => getScore(p, h, false));
-    const bGross = teamB.map(p => getScore(p, h, false));
+    // Boost detection respects the NET setting (#8/#9) — a NET eagle flips &
+    // doubles when this Vegas is played net, same scoring mode as the team
+    // scores above.
+    const aGross = teamA.map(p => getScore(p, h, cfg.net));
+    const bGross = teamB.map(p => getScore(p, h, cfg.net));
     const aBirdies = aGross.filter(s => s !== null && s === par - 1).length;
     const bBirdies = bGross.filter(s => s !== null && s === par - 1).length;
     const aEagles = aGross.filter(s => s !== null && s <= par - 2).length;
@@ -21185,6 +21213,30 @@ function gpsMyStatuses(g, res, myId) {
         if (!(g.players || []).some(p => p && p.id === myId)) return;
         out.push({ label: 'HKL ' + segShort, text: (hk.callerId === myId ? 'mine' : 'live'), cls: 'even' });
       }
+    });
+  } catch (e) {}
+  // ---- Vegas / Dynamic Vegas — a live $ chip so the bet ALWAYS has a tappable
+  // path to the Board scoring summary (#3 — "Vegas bets tab did nothing"). Vegas
+  // is a team game with no dedicated GPS bubble, so without this chip a Vegas-only
+  // round had nothing to tap once money was still even. The chip taps through to
+  // the Board (matchesEl.onclick = goToBoard) like every other bet chip. ----
+  try {
+    [['vegas', 'VEGAS'], ['dvegas', 'DYN VEGAS']].forEach(([key, lbl]) => {
+      const cfg = g.games && g.games[key];
+      if (!cfg) return;                                  // game not active
+      const r = res && res.results && res.results[key];
+      if (!r || !r.money) return;
+      // Only show the chip if I'm actually a participant in this Vegas — money is
+      // keyed for every player, so gate on the participant set, not money[myId].
+      let parts = [];
+      try { parts = (typeof getParticipants === 'function') ? getParticipants(g, cfg) : []; } catch (e) { parts = []; }
+      if (!parts.some(p => p && p.id === myId)) return;
+      const v = r.money[myId] || 0;
+      const abs = Math.abs(v);
+      const amt = Number.isInteger(abs) ? String(abs) : abs.toFixed(2);
+      const text = v > 0 ? '+$' + amt : (v < 0 ? '−$' + amt : 'live');
+      const cls = v > 0 ? 'pos' : (v < 0 ? 'neg' : 'even');
+      out.push({ label: lbl, text, cls });
     });
   } catch (e) {}
   return out;
