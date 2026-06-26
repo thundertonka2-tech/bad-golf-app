@@ -1278,6 +1278,12 @@
   .bg-modal-title  { font-size: 17px; font-weight: 700; color: var(--accent-dark); margin: 0 0 14px; }
   .bg-section-title{ font-size: 15px; font-weight: 700; color: var(--accent-dark); margin: 0 0 12px; }
   .bg-eyebrow      { font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 6px; }
+  /* Canonical round-status chip — one look across Events / Stats / Crew lists */
+  .bg-chip { display:inline-block; font-size:10px; font-weight:800; letter-spacing:.4px; padding:1px 7px; border-radius:999px; margin-right:6px; }
+  .bg-chip-live, .bg-chip-complete { background:var(--money-pos-light); color:var(--money-pos); }
+  .bg-chip-unfinished { background:var(--warn-light); color:var(--warn); }
+  .bg-chip-scheduled  { background:var(--bg); color:var(--accent); }
+  .bg-chip-past       { background:var(--surface-3); color:var(--text-muted); }
   .bg-header       { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: calc(8px + env(safe-area-inset-top)) 14px 8px; }
   .bg-header .bg-header-title { flex: 1; text-align: center; font-size: 18px; font-weight: 800; color: var(--accent-dark); margin: 0; }
   .bg-header .bg-header-btn   { min-width: 44px; min-height: 44px; padding: 6px 8px; background: none; border: none; color: var(--accent); font-size: 16px; font-weight: 700; cursor: pointer; }
@@ -5956,7 +5962,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.287';
+const BG_BUILD = 'v2026.11.288';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -25607,7 +25613,15 @@ async function renderStatsForSelectedPlayer() {
   list.style.maxHeight = '540px';
   list.style.overflowY = 'auto';
   // Sort newest first
-  const sortedRounds = [...history].sort((a, b) => (b.date || 0) - (a.date || 0));
+  // Hide rounds deleted anywhere (shared tombstones / hidden / deleted-keys) so test
+  // data removed on the Events tab can't linger here (reconcile also drops them from
+  // the stored history; this is the render-time guard).
+  let _statHidden = new Set(); try { _statHidden = new Set(getHiddenRounds() || []); } catch (e) {}
+  const _statTomb = (typeof _tombCache !== 'undefined' && _tombCache) ? _tombCache : { rounds: new Set() };
+  let _statDel = new Set(); try { _statDel = getDeletedRoundKeys(); } catch (e) {}
+  const sortedRounds = [...history]
+    .filter(s => !isDeletedRound(s, _statHidden, _statTomb, _statDel))
+    .sort((a, b) => (b.date || 0) - (a.date || 0));
   sortedRounds.forEach(s => {
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--border)';
@@ -25636,7 +25650,7 @@ async function renderStatsForSelectedPlayer() {
     row.innerHTML = `
       <div style="flex:1;min-width:0">
         <div style="font-weight:500;font-size:14px">${s.course || 'Untitled'}${teeStr}</div>
-        <div class="small-text" style="font-size:11px;color:var(--text-muted)">${s.complete === false ? '<span style="display:inline-block;background:var(--warn-light);color:var(--warn);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">UNFINISHED</span>' : '<span style="display:inline-block;background:var(--money-pos-light);color:var(--money-pos);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">✓ COMPLETE</span>'}${dateStr} · ${scoreLine}</div>
+        <div class="small-text" style="font-size:11px;color:var(--text-muted)">${bgStatusChip(s.complete === false ? 'unfinished' : 'complete')}${dateStr} · ${scoreLine}</div>
       </div>
       <div>${moneyChip}</div>
     `;
@@ -25886,6 +25900,15 @@ async function reconcileMyScoreHistory() {
     let hiddenSet = new Set();
     try { hiddenSet = new Set(getHiddenRounds() || []); } catch (e) {}
     if (hiddenSet.size) entry.scoreHistory = entry.scoreHistory.filter(s => s && !hiddenSet.has(s.gameCode));
+    // 1b) Drop rounds tombstoned on ANY device (deleted-for-all / removed on another
+    //     phone). Unconditional — a tombstone is an explicit delete — so it isn't
+    //     subject to step 2's 50-round cap guard (which is exactly when test data
+    //     used to survive in Stats after the Events list had already dropped it).
+    try {
+      const _tomb = await getSharedTombstones();
+      const _del = (typeof getDeletedRoundKeys === 'function') ? getDeletedRoundKeys() : new Set();
+      entry.scoreHistory = entry.scoreHistory.filter(s => !isDeletedRound(s, hiddenSet, _tomb, _del));
+    } catch (e) {}
     // 2) Auto-heal: keep the stats/handicap count in lockstep with your Rounds
     //    list. Drop any stats round whose game is no longer in your recent list —
     //    this catches rounds that left the list some other way (globally deleted,
@@ -25924,6 +25947,28 @@ function shortNameList(str) {
   }).filter(Boolean).join(', ');
 }
 
+// Canonical round-status chip used by every round list (Events ▸ Saved rounds,
+// Stats ▸ Rounds, Crew ▸ Recent) so all three render identically from one place.
+function bgStatusChip(status) {
+  const m = { live:['bg-chip-live','LIVE'], scheduled:['bg-chip-scheduled','SCHEDULED'],
+    unfinished:['bg-chip-unfinished','UNFINISHED'], complete:['bg-chip-complete','✓ COMPLETE'],
+    past:['bg-chip-past','PAST'] };
+  const x = m[status] || m.complete;
+  return '<span class="bg-chip ' + x[0] + '">' + x[1] + '</span>';
+}
+// True if a round was deleted on ANY device (hidden set, shared tombstones by code
+// OR content key, or the local deleted-keys set). Keeps the Stats list in lockstep
+// with the Events list so removed test data can't linger in Stats.
+function isDeletedRound(s, hidden, tomb, delKeys) {
+  if (!s) return false;
+  const gc = s.gameCode;
+  const sk = (typeof statsRoundKey === 'function') ? statsRoundKey(s) : '';
+  const rk = (typeof rosterRoundKey === 'function') ? rosterRoundKey(s) : '';
+  if (gc && hidden && (hidden.has ? hidden.has(gc) : hidden.includes(gc))) return true;
+  if (tomb && tomb.rounds && ((gc && tomb.rounds.has(gc)) || (sk && tomb.rounds.has(sk)) || (rk && tomb.rounds.has(rk)))) return true;
+  if (delKeys && ((sk && delKeys.has(sk)) || (rk && delKeys.has(rk)))) return true;
+  return false;
+}
 async function loadRounds() {
   try { await reconcileMyScoreHistory(); } catch (e) {}
   // Only rounds YOU played in. Spectating other groups lives on the Crew tab
@@ -26057,13 +26102,7 @@ async function loadRounds() {
     const stale = isRoundStale(r);
     const isScheduled = unfinished && !started;
     const isLive = unfinished && started && !stale;
-    const liveTag = isScheduled
-      ? `<span style="display:inline-block;background:var(--bg);color:var(--accent);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">SCHEDULED</span>`
-      : (isLive
-        ? `<span style="display:inline-block;background:var(--money-pos-light);color:var(--money-pos);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">LIVE</span>`
-        : (unfinished
-          ? `<span style="display:inline-block;background:var(--warn-light);color:var(--warn);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">UNFINISHED</span>`
-          : `<span style="display:inline-block;background:var(--money-pos-light);color:var(--money-pos);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">✓ COMPLETE</span>`));
+    const liveTag = bgStatusChip(isScheduled ? 'scheduled' : (isLive ? 'live' : (unfinished ? 'unfinished' : 'complete')));
     const btnLabel = (isLive || isScheduled) ? 'Join now' : (unfinished ? 'Resume' : 'View');
     const btnStyle = (isLive || isScheduled) ? ' style="background:var(--accent);color:#fff;border-color:var(--accent)"' : '';
     row.innerHTML = `
@@ -26116,7 +26155,7 @@ async function loadRounds() {
       '<div style="flex:1;min-width:0;cursor:pointer" class="past-row-tap">' +
         '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(s.course || 'Past round') + '</div>' +
         '<div style="font-size:12px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
-          '<span style="display:inline-block;background:var(--surface-3,#eee);color:var(--text-muted);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">PAST</span>' +
+          bgStatusChip('past') +
           escapeHtml(date) + ' · Gross ' + grossStr + '</div>' +
       '</div>' +
       '<button class="small past-open-btn">View</button>' +
@@ -26823,9 +26862,7 @@ async function renderCrewRecent() {
     const unfinished = !r.finishedAt;
     const started = !!(r.scoreLine && String(r.scoreLine).trim());
     let stale = false; try { stale = isRoundStale(r); } catch (e) {}
-    const chip = (unfinished && !started) ? '<span style="display:inline-block;background:var(--bg);color:var(--accent);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">SCHEDULED</span>'
-      : ((unfinished && started && !stale) ? '<span style="display:inline-block;background:var(--money-pos-light);color:var(--money-pos);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">LIVE</span>'
-        : (unfinished ? '<span style="display:inline-block;background:var(--warn-light);color:var(--warn);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">UNFINISHED</span>' : '<span style="display:inline-block;background:var(--money-pos-light);color:var(--money-pos);font-size:10px;font-weight:800;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:6px">✓ COMPLETE</span>'));
+    const chip = bgStatusChip((unfinished && !started) ? 'scheduled' : ((unfinished && started && !stale) ? 'live' : (unfinished ? 'unfinished' : 'complete')));
     return '<div class="crew-recent-row" data-code="' + (r.code || '').replace(/"/g, '&quot;') + '" ' +
       'style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:12px 0;border-bottom:1px solid var(--border)">' +
       '<div style="flex:1;min-width:0;cursor:pointer" class="crew-recent-tap">' +
