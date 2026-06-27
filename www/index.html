@@ -5928,7 +5928,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.300';
+const BG_BUILD = 'v2026.11.301';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -36019,6 +36019,7 @@ async function init() {
       // Mark the round as finished — this is the durable signal for view-only mode
       // when reopened later from the Rounds tab.
       g.finishedAt = Date.now();
+      try { if (typeof liveActivity !== 'undefined') liveActivity.end(); } catch (e) {}
       try { await saveGame(g); } catch (e) { console.warn('saveGame on finish failed:', e); }
       // Void any single-sided wagers nobody took, then auto-settle the rest, so a
       // finished round never leaves a dangling "open" bet on the board.
@@ -36558,6 +36559,39 @@ const GPS_ESRI_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/Wor
 // GitHub Pages domain + restricted to Map Tiles API only, with a hard daily
 // quota cap — safe to ship client-side (standard for web map keys).
 const GPS_GOOGLE_KEY = 'AIzaSyCcjqCB2o39weiWkBytXqRpEj1yjUBvpL4';
+
+// ============================================================
+// LIVE ACTIVITY (iOS Lock Screen / Dynamic Island round card)
+// Renee shipped the native Capacitor plugin (Capacitor.Plugins.LiveActivity)
+// with start/update/end. It silently no-ops on iOS < 16.1, Android, and the web,
+// so we never need a platform check. We drive it from the GPS view (which already
+// computes hole/par/distances/plays-like/club) and end it when the round finishes.
+// ============================================================
+const liveActivity = (() => {
+  let activeCode = null, lastAt = 0, lastHole = null;
+  function plugin() { try { return (window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.LiveActivity) || null; } catch (e) { return null; } }
+  async function push(p) {
+    const LA = plugin(); if (!LA || !p || !p.roundCode) return;
+    try {
+      if (activeCode && activeCode !== p.roundCode) { try { await LA.end(); } catch (e) {} activeCode = null; }
+      if (activeCode !== p.roundCode) {
+        activeCode = p.roundCode; lastAt = Date.now(); lastHole = p.hole;
+        await LA.start(p);
+      } else {
+        const holeChanged = p.hole !== lastHole;
+        if (!holeChanged && (Date.now() - lastAt) < 3000) return;   // throttle steady updates
+        lastAt = Date.now(); lastHole = p.hole;
+        await LA.update({ hole: p.hole, par: p.par, toPar: p.toPar, playsLikeYds: p.playsLikeYds, suggestedClub: p.suggestedClub, fromTeeYds: p.fromTeeYds, toGreenYds: p.toGreenYds });
+      }
+    } catch (e) { /* plugin missing or older iOS — ignore */ }
+  }
+  async function end() {
+    const LA = plugin(); activeCode = null; lastHole = null;
+    if (!LA) return;
+    try { await LA.end(); } catch (e) {}
+  }
+  return { push, end };
+})();
 
 const gpsView = (() => {
   const YD = 1.0936133;
@@ -37677,6 +37711,35 @@ const gpsView = (() => {
     const pars = state.game && state.game.pars;
     return Number(pars && pars[hole - 1]) === 3;
   }
+  // Feed the iOS Live Activity from the live GPS numbers. Skips spectating and
+  // finished rounds; safe no-op when the native plugin isn't present.
+  function pushLiveActivity() {
+    try {
+      if (mode !== 'view' || spectate) return;
+      const g = state.game;
+      if (!g || !g.code || g.finishedAt) return;
+      if (!hd || !Array.isArray(ball) || !Array.isArray(hd.mid)) return;
+      const par = (g.pars && g.pars[hole - 1] != null) ? g.pars[hole - 1] : 0;
+      let toPar = 0;
+      try {
+        const myId = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null;
+        const sc = (myId && g.scores) ? g.scores[myId] : null;
+        if (Array.isArray(sc) && Array.isArray(g.pars)) {
+          toPar = sc.reduce((a, v, i) => a + ((v != null && g.pars[i] != null) ? (v - g.pars[i]) : 0), 0);
+        }
+      } catch (e) {}
+      const toGreenYds = ydsBetween(ball, hd.mid);
+      const fromTeeYds = hd.tee ? ydsBetween(hd.tee, ball) : 0;
+      const plays = playsLike(ball, hd.mid, elev && elev.ball, elev && elev.green) || toGreenYds;
+      let club = '';
+      try { club = (typeof myClubFor === 'function' ? myClubFor(plays) : null) || typicalClub(plays) || ''; } catch (e) {}
+      liveActivity.push({
+        courseName: g.course || '', roundCode: g.code, hole: hole, par: par, toPar: toPar,
+        playsLikeYds: plays, suggestedClub: club, fromTeeYds: fromTeeYds, toGreenYds: toGreenYds
+      });
+    } catch (e) {}
+  }
+
   function refresh() {
     if (mode !== 'view') return;
     setLine();
@@ -37709,6 +37772,7 @@ const gpsView = (() => {
     try { updateLongPuttBubble(); } catch (e) {}
     try { updateQuotaBubble(); } catch (e) {}
     try { updateStablefordBubble(); } catch (e) {}
+    try { pushLiveActivity(); } catch (e) {}
   }
 
   function positionPills() {
