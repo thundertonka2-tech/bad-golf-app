@@ -5928,7 +5928,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.292';
+const BG_BUILD = 'v2026.11.293';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -25986,8 +25986,19 @@ async function loadRounds() {
     const roster2 = await getPlayerRoster();
     const mineP = findMyRosterPlayer(roster2, meName);
     if (mineP && Array.isArray(mineP.scoreHistory)) {
-      pastRounds = mineP.scoreHistory.filter(s => s && s.manual && !(_sharedRoundTomb.has(rosterRoundKey(s)) || _sharedRoundTomb.has(statsRoundKey(s))))
-        .slice().sort((a, b) => (b.date || 0) - (a.date || 0));
+      const _recentCodes = new Set(recent.map(r => r && r.code).filter(Boolean));
+      const _delKeys = (typeof getDeletedRoundKeys === 'function') ? getDeletedRoundKeys() : new Set();
+      // Surface EVERY round that counts toward your stats but isn't already in the
+      // recent list above — manual past rounds AND older / other-device rounds from
+      // your cloud history — so the profile "Rounds" count matches this list and you
+      // can delete any you don't want. (Tyler: profile said 39, list showed 27.)
+      pastRounds = mineP.scoreHistory.filter(s => {
+        if (!s) return false;
+        if (s.gameCode && _recentCodes.has(s.gameCode)) return false;   // already shown above
+        if (_sharedRoundTomb.has(rosterRoundKey(s)) || _sharedRoundTomb.has(statsRoundKey(s))) return false;
+        if (_delKeys.has(statsRoundKey(s))) return false;
+        return true;
+      }).slice().sort((a, b) => (new Date(b.date || 0)) - (new Date(a.date || 0)));
     }
   } catch (e) {}
 
@@ -26085,27 +26096,43 @@ async function loadRounds() {
       '<div style="flex:1;min-width:0;cursor:pointer" class="past-row-tap">' +
         '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(s.course || 'Past round') + '</div>' +
         '<div style="font-size:12px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
-          bgStatusChip('past') +
+          bgStatusChip(s.complete ? 'complete' : 'past') +
           escapeHtml(date) + ' · Gross ' + grossStr + '</div>' +
       '</div>' +
       '<button class="small past-open-btn">View</button>' +
       '<button class="small past-delete-btn" title="Delete" style="background:transparent;color:var(--danger);border-color:var(--danger);padding:4px 10px">×</button>';
-    const goStats = () => { try { switchTab('stats'); } catch (e) {} };
-    row.querySelector('.past-row-tap').onclick = goStats;
-    row.querySelector('.past-open-btn').onclick = goStats;
+    const _openPast = async () => {
+      if (s.gameCode && !s.manual && !/^manual-/.test(String(s.gameCode))) {
+        try { await openRecent({ code: s.gameCode, course: s.course }); return; } catch (e) {}
+      }
+      try { switchTab('stats'); } catch (e) {}
+    };
+    row.querySelector('.past-row-tap').onclick = _openPast;
+    row.querySelector('.past-open-btn').onclick = _openPast;
     row.querySelector('.past-delete-btn').onclick = async (e) => {
       e.stopPropagation();
-      if (!(await uiConfirm('Remove this manually-added past round at ' + (s.course || '—') + '?\n\nIt will be removed from your history and your handicap recalculated.', { title: 'Remove past round?', okLabel: 'Remove' }))) return;
+      if (!(await uiConfirm('Remove this round at ' + (s.course || '—') + ' from your stats?\n\nIt will be removed from your history and your handicap recalculated. It won\u2019t come back from a backup.', { title: 'Remove round?', okLabel: 'Remove' }))) return;
       try {
         const roster3 = await getPlayerRoster();
         const mine3 = findMyRosterPlayer(roster3, meName);
         if (mine3 && Array.isArray(mine3.scoreHistory)) {
-          const idx = mine3.scoreHistory.findIndex(x => x && x.manual && x.gameCode === s.gameCode && x.date === s.date);
-          if (idx >= 0) { const removed = mine3.scoreHistory[idx]; mine3.scoreHistory.splice(idx, 1); try { tombstoneRound(removed); } catch (e) {} await savePlayerRoster(roster3, { removals: { rounds: new Map([[rosterPlayerKey(mine3), new Set([rosterRoundKey(removed)])]]) } }); }
+          const matches = (x) => !!x && (
+            (s.gameCode && x.gameCode === s.gameCode) ||
+            (!s.gameCode && !x.gameCode && x.date === s.date && x.course === s.course && x.gross === s.gross)
+          );
+          const removed = mine3.scoreHistory.filter(matches);
+          mine3.scoreHistory = mine3.scoreHistory.filter(x => !matches(x));
+          // Tombstone each removed round so the cloud-backup top-up / heal can't re-add it.
+          removed.forEach(rd => { try { tombstoneRound(rd); } catch (e) {} });
+          // Drop the in-memory stats backup copy too, so it isn't re-unioned this session.
+          try { if (Array.isArray(window._myStatsBackupRounds)) window._myStatsBackupRounds = window._myStatsBackupRounds.filter(x => !matches(x)); } catch (e) {}
+          const rmSet = new Set(removed.map(rosterRoundKey));
+          await savePlayerRoster(roster3, { removals: { rounds: new Map([[rosterPlayerKey(mine3), rmSet]]) } });
         }
       } catch (err) {}
-      showToast('Past round removed');
+      showToast('Round removed — handicap recalculated');
       await loadRounds();
+      try { renderStats(); } catch (e) {}
     };
     list.appendChild(row);
   });
