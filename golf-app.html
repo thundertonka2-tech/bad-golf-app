@@ -5931,7 +5931,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.304';
+const BG_BUILD = 'v2026.11.305';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -33127,6 +33127,86 @@ function t2ComputeFieldStableford(rows, t, fieldPlayers) {
     return { standings: standings, pool: pool, buyin: buyin, payout: payout, complete: allComplete, money: money };
   } catch (e) { return null; }
 }
+// ===== FIELD-WIDE POOL NASSAU =====
+// One whole-field NET pool: best net Front 9 / Back 9 / (optional) Overall 18.
+// Each segment is its OWN pot (ante = cfg.value per player). Places paid scale
+// with the field size (~1 per 10, capped at 3); ties split the combined place
+// money. Host picks the % split: 'standard' (100 / 65-35 / 50-30-20) or '8020'
+// top-heavy (100 / 80-20 / 60-30-10). Modeled on t2ComputeFieldSkins (reads net
+// per hole across every cart group's round). cfg = { on, value, segments:'fbo'|'fb',
+// payoutSplit:'standard'|'8020' }. Returns per-day, per-segment standings + money.
+function nassauFieldPlaces(N) { return N <= 10 ? 1 : (N <= 20 ? 2 : 3); }
+function nassauFieldSplit(places, split) {
+  if (places <= 1) return [1];
+  if (places === 2) return split === '8020' ? [0.8, 0.2] : [0.65, 0.35];
+  return split === '8020' ? [0.6, 0.3, 0.1] : [0.5, 0.3, 0.2];
+}
+function t2ComputeFieldNassau(rows, cfg) {
+  if (!cfg || !cfg.on || !Array.isArray(rows) || !rows.length) return null;
+  const value = Number(cfg.value) || 0;
+  const split = cfg.payoutSplit === '8020' ? '8020' : 'standard';
+  const segs = (cfg.segments === 'fb') ? ['front', 'back'] : ['front', 'back', 'overall'];
+  const segHoles = { front: [0, 8], back: [9, 17], overall: [0, 17] };
+  const nmk = s => normalizeNameSegment(String(s || ''));
+  const byDay = {};
+  rows.forEach(row => {
+    const g = row && row.data ? row.data : row;
+    if (!g || !Array.isArray(g.players)) return;
+    const day = (g.t2 && g.t2.day) || 1;
+    const pars = Array.isArray(g.pars) ? g.pars : null;
+    const sis = Array.isArray(g.sis) ? g.sis : null;
+    if (!sis) return;                       // need stroke index for net
+    const rules = g.hcpRules || null;
+    byDay[day] = byDay[day] || { parts: {} };
+    g.players.forEach(p => {
+      if (!p || !p.name) return;
+      const sc = (g.scores && g.scores[p.id]) || [];
+      const net = new Array(18).fill(null); let thru = 0;
+      for (let h = 0; h < 18; h++) {
+        const s = sc[h]; if (s == null) continue;
+        const par = pars ? pars[h] : 4;
+        net[h] = netHoleScore(s, (p.hcp != null ? p.hcp : 0), sis[h], par, rules); thru++;
+      }
+      if (!thru) return;
+      const k = nmk(p.name); const cur = byDay[day].parts[k];
+      if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), net: net, thru: thru };
+    });
+  });
+  const perDay = []; const totalsByName = {};
+  Object.keys(byDay).sort((a, b) => a - b).forEach(day => {
+    const players = Object.values(byDay[day].parts); const Nall = players.length;
+    if (Nall < 2) return;
+    const segOut = [];
+    segs.forEach(seg => {
+      const rng = segHoles[seg], from = rng[0], to = rng[1];
+      const started = players.filter(p => { for (let h = from; h <= to; h++) if (p.net[h] != null) return true; return false; });
+      const fin = players.filter(p => { for (let h = from; h <= to; h++) if (p.net[h] == null) return false; return true; });
+      const complete = fin.length >= 2 && fin.length === started.length && started.length === Nall;
+      const rowsSeg = (complete ? fin : started).map(p => {
+        let net = 0, thru = 0; for (let h = from; h <= to; h++) { if (p.net[h] != null) { net += p.net[h]; thru++; } }
+        return { key: nmk(p.name), name: p.name, first: p.first, net: net, thru: thru, pay: 0 };
+      }).sort((a, b) => a.net - b.net || b.thru - a.thru);
+      let pot = 0, places = 0;
+      if (complete && value > 0) {
+        const N = rowsSeg.length; pot = N * value; places = Math.min(nassauFieldPlaces(N), N);
+        const placeMoney = nassauFieldSplit(places, split).map(x => x * pot);
+        rowsSeg.forEach(r => r.pay = -value);                       // every finisher antes
+        let i = 0;
+        while (i < rowsSeg.length) {
+          let j = i; while (j < rowsSeg.length && rowsSeg[j].net === rowsSeg[i].net) j++;
+          let sum = 0; for (let k = i; k < j; k++) if (k < places) sum += (placeMoney[k] || 0);
+          if (sum > 0) { const share = sum / (j - i); for (let k = i; k < j; k++) rowsSeg[k].pay += share; }
+          i = j;
+        }
+        rowsSeg.forEach(r => { totalsByName[r.key] = totalsByName[r.key] || { first: r.first, net: 0 }; totalsByName[r.key].net += r.pay; });
+      }
+      segOut.push({ seg: seg, pot: pot, places: places, complete: complete, value: value, finished: fin.length, started: started.length, total: Nall, rows: rowsSeg });
+    });
+    perDay.push({ day: Number(day), N: Nall, segments: segOut });
+  });
+  if (!perDay.length) return null;
+  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), value: value, split: split, segments: segs };
+}
 function t2ComputeFieldSkins(rows, cfg) {
   if (!cfg || !cfg.on || !Array.isArray(rows) || !rows.length) return null;
   const nmk = s => normalizeNameSegment(String(s || ''));
@@ -33564,6 +33644,43 @@ async function openEventLeaderboard(t) {
         }
       }
     }
+    // Tournament Nassau — FIELD-WIDE NET pool: best net Front/Back/Overall with
+    // multi-place payouts that scale with field size. SEPARATE from any group Nassau.
+    {
+      const _tn = (t.settings && t.settings.tourneyNassau) || null;
+      if (_amCommish || (_tn && _tn.on)) {
+        html += '<h3 style="margin:14px 0 4px">🏆 Tournament Nassau <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field · net)</span></h3>';
+        if (_amCommish) html += '<button class="small evlb-nassau-cfg" style="margin-bottom:6px">' + ((_tn && _tn.on) ? '⚙️ Edit Tournament Nassau' : '➕ Set up Tournament Nassau') + '</button>';
+        if (_tn && _tn.on) {
+          let _nRows = []; try { _nRows = await loadTourneyRawRounds(t); } catch (e) {}
+          const _nz = t2ComputeFieldNassau(_nRows, _tn);
+          if (_nz && _nz.perDay.length) {
+            const _segName = { front: 'Front 9', back: 'Back 9', overall: 'Overall 18' };
+            html += '<div style="font-size:13px">';
+            _nz.perDay.forEach(dd => {
+              if ((dd.segments || []).length) html += '<div style="font-weight:700;margin-top:6px">Day ' + dd.day + '</div>';
+              dd.segments.forEach(sg => {
+                const hdr = (_segName[sg.seg] || sg.seg) + ' · $' + sg.value + '/player';
+                if (sg.complete) {
+                  html += '<div style="font-weight:600;margin-top:3px">' + hdr + ' · pot $' + sg.pot.toFixed(0) + ' · pays ' + sg.places + ' place' + (sg.places === 1 ? '' : 's') + '</div>';
+                  sg.rows.filter(r => r.pay !== 0).forEach(r => {
+                    html += '<div>' + escapeHtml(r.first || r.name) + ' — net ' + r.net + ' <strong style="color:' + (r.pay >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.pay) + '</strong></div>';
+                  });
+                } else {
+                  const lead = sg.rows[0];
+                  html += '<div style="margin-top:3px">' + hdr + ' — <span style="color:var(--text-muted)">in progress (' + sg.finished + '/' + sg.total + ' done)' + (lead ? ' · leader ' + escapeHtml(lead.first || lead.name) + ' net ' + lead.net : '') + '</span></div>';
+                }
+              });
+            });
+            html += '<div class="small-text" style="color:var(--text-muted)">Best NET per segment. Places scale with field size (≈1 per 10, max 3); ties split. ' + (_nz.split === '8020' ? 'Top-heavy 80/20 split.' : 'Standard split.') + '</div></div>';
+          } else {
+            html += '<div class="small-text" style="color:var(--text-muted)">$' + _tn.value + '/player per segment — results show once the field finishes a nine.</div>';
+          }
+        } else if (_amCommish) {
+          html += '<div class="small-text" style="color:var(--text-muted)">Not set up yet.</div>';
+        }
+      }
+    }
     // Tournament Long Putt — FIELD-WIDE pot: the longest made putt across ALL groups
     // wins. SEPARATE pool from each group's own long putt (which still pays in-group).
     {
@@ -33617,6 +33734,7 @@ async function openEventLeaderboard(t) {
     body.innerHTML = html || '<div class="help-text">No scores in this event yet.</div>';
     body.querySelectorAll('.evlb-ld-set').forEach(b => b.onclick = () => openLongDriveWinnerPicker(t, parseInt(b.dataset.day, 10), evPlayers || [], () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    body.querySelectorAll('.evlb-nassau-cfg').forEach(b => b.onclick = () => openTourneyNassauConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-lp-cfg').forEach(b => b.onclick = () => openTourneyLongPuttConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
    } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
   };
@@ -33677,6 +33795,37 @@ function openTourneySkinsConfig(t, onDone) {
     const value = parseFloat(ov.querySelector('#tsk-val').value) || 0;
     const ok = await t2MergeSettings(t.id, s => { s.tourneySkins = { on: on, mode: mode, value: value }; });
     showToast(ok ? 'Tournament Skins saved ✓' : 'Couldn’t save — try again');
+    close(); if (typeof onDone === 'function') onDone();
+  };
+}
+
+// t.settings.tourneyNassau = { on, value, segments:'fbo'|'fb', payoutSplit:'standard'|'8020' }.
+// Computed by t2ComputeFieldNassau on the Event Leaderboard — a SEPARATE pool from group Nassau.
+function openTourneyNassauConfig(t, onDone) {
+  const cur = (t.settings && t.settings.tourneyNassau) || { on: false, value: '', segments: 'fbo', payoutSplit: 'standard' };
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100065';
+  ov.innerHTML = '<div class="modal" style="max-width:440px"><h2 style="margin-bottom:6px">🏆 Tournament Nassau</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">One field-wide NET pool — best net Front 9, Back 9, and (optionally) Overall 18. Each segment is its own pot ($/player). Places paid scale with the field (≈1 per 10, max 3); ties split. Separate from any group’s own Nassau.</p>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="tnz-on"' + (cur.on ? ' checked' : '') + ' style="width:auto;transform:scale(1.3)"> <span style="font-weight:600">Run Tournament Nassau this event</span></label>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Segments</label>' +
+    '<select id="tnz-seg" style="width:100%;margin-bottom:8px"><option value="fbo"' + (cur.segments !== 'fb' ? ' selected' : '') + '>Front, back &amp; overall</option><option value="fb"' + (cur.segments === 'fb' ? ' selected' : '') + '>Front &amp; back only</option></select>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Payout split</label>' +
+    '<select id="tnz-split" style="width:100%;margin-bottom:8px"><option value="standard"' + (cur.payoutSplit !== '8020' ? ' selected' : '') + '>Standard (100 · 65/35 · 50/30/20)</option><option value="8020"' + (cur.payoutSplit === '8020' ? ' selected' : '') + '>Top-heavy (100 · 80/20 · 60/30/10)</option></select>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Buy-in per player (per segment)</label>' +
+    '<div class="row" style="align-items:center;gap:8px;margin-bottom:12px"><span class="small-text">$</span><input type="number" id="tnz-val" inputmode="decimal" min="0" value="' + (cur.value != null ? cur.value : '') + '" style="flex:1" placeholder="0"></div>' +
+    '<div class="actions"><button id="tnz-cancel" style="flex:1">Cancel</button><button class="primary" id="tnz-save" style="flex:1">Save</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#tnz-cancel').onclick = close;
+  ov.querySelector('#tnz-save').onclick = async () => {
+    const on = ov.querySelector('#tnz-on').checked;
+    const segments = ov.querySelector('#tnz-seg').value === 'fb' ? 'fb' : 'fbo';
+    const payoutSplit = ov.querySelector('#tnz-split').value === '8020' ? '8020' : 'standard';
+    const value = parseFloat(ov.querySelector('#tnz-val').value) || 0;
+    const ok = await t2MergeSettings(t.id, s => { s.tourneyNassau = { on: on, value: value, segments: segments, payoutSplit: payoutSplit }; });
+    showToast(ok ? 'Tournament Nassau saved ✓' : 'Couldn’t save — try again');
     close(); if (typeof onDone === 'function') onDone();
   };
 }
