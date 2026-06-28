@@ -1,44 +1,55 @@
-# Bad Golf — Notifications backend deploy (for Renee)
+# Notifications — what TYLER does from here (Supabase + Apple portal)
 
-Built in app build **v2026.11.332**. The app code is already wired and is **inert
-(safe no-op)** until these backend pieces are deployed — so the web/iOS build can
-ship now and push "lights up" the moment this is live. All six notifications run
-through ONE generic sender, `send-push`.
+App build **v2026.11.332**. All app code is wired and is a **safe no-op until the
+backend below is live** — so push "lights up" the moment you finish these steps.
+Everything here is the Supabase dashboard, the SQL editor, the Supabase CLI, and the
+developer.apple.com website. **No Mac/Xcode needed for any of this** — the only
+Mac/Xcode work is Renee's one-time native setup (see `HANDOFF_Renee_Push_Mac_Steps.md`).
 
-## Prereqs (Tyler — Apple side, gates ALL push)
-Same as the Phase B wager-push handoff (`HANDOFF_SendWager_PhaseB_ApplePush.md`):
-1. Enable **Push Notifications** on the App ID at developer.apple.com.
-2. Create an **APNs Auth Key (.p8)**; record **Key ID, Team ID, Bundle ID**.
-3. Add the Push entitlement + `@capacitor/push-notifications` (already covered by the
-   Phase B package `BadGolf-SendWagerPush-PhaseB`). `www/push-bridge.js` here is the
-   updated version (now deep-links by notification type).
+Bundle ID (APNs topic): **com.simplisticfishing.badgolf**
 
-## 1. Tables (SQL editor, run once each)
-- `push_tokens.sql` — already in the Phase B package (device tokens). Run if not done.
+---
+
+## Step 1 — Apple Developer website (no Xcode)
+At https://developer.apple.com → Certificates, IDs & Profiles:
+1. **Identifiers → your App ID** (`com.simplisticfishing.badgolf`) → enable the
+   **Push Notifications** capability → Save.
+2. **Keys → +** → name it "Bad Golf APNs" → tick **Apple Push Notifications service
+   (APNs)** → Continue → Register → **Download the `.p8`** (you only get to download
+   once). Note the **Key ID** on that page.
+3. Note your **Team ID** (top-right of the portal / Membership page).
+
+You now have: the `.p8` file contents, **Key ID**, **Team ID**, **Bundle ID**.
+
+## Step 2 — SQL (run once each in the Supabase SQL editor)
+- `push_tokens.sql` — device tokens (from the Phase B package, if not already run).
 - `notif_prefs.sql` — per-user opt-outs (default ON).
 - `handicap_snapshots.sql` — monthly index snapshots the app writes.
 
-## 2. Edge function secrets (same for all functions)
-`APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_P8` (full .p8 text),
-`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+## Step 3 — Edge function secrets (Supabase → Project Settings → Edge Functions → Secrets)
+Set these (the SUPABASE_* ones are usually auto-present):
+```
+APNS_KEY_ID     = <Key ID from Step 1>
+APNS_TEAM_ID    = <Team ID from Step 1>
+APNS_BUNDLE_ID  = com.simplisticfishing.badgolf
+APNS_P8         = <paste the FULL .p8 text, including the BEGIN/END lines>
+```
 
-## 3. Deploy the edge functions
+## Step 4 — Deploy the edge functions (Supabase CLI)
 ```
 supabase functions deploy send-push
 supabase functions deploy notify-admins-remap
 supabase functions deploy monthly-handicap-push
 ```
-- `send-push` — generic APNs sender. Honors `notif_prefs` by `data.type`, sets
-  `apns-collapse-id`, deletes tokens on HTTP 410. Everything calls this.
-- `notify-admins-remap` — invoked fire-and-forget by the app after a re-map request
-  (`{ request_id }`). Re-reads the row, resolves admins, forwards to `send-push`.
-  (Optional hardening: add a DB webhook on `course_requests` INSERT where
-  `type='remap'` → this function; it also accepts `{ record }`.)
-- `monthly-handicap-push` — cron. Diffs each user's two latest `handicap_snapshots`
-  and pushes one line. Keep `send-wager-push` deployed too (the live wager path).
+- `send-push` — the generic APNs sender everything routes through. Honors
+  `notif_prefs` by `data.type`, sets `apns-collapse-id`, deletes tokens on HTTP 410.
+- `notify-admins-remap` — the app calls this after a re-map request; it resolves
+  admins and forwards to `send-push`.
+- `monthly-handicap-push` — the monthly cron job (Step 5).
+- Keep `send-wager-push` deployed too (the existing wager path still uses it).
 
-## 4. Schedule the monthly cron (pg_cron)
-~9am on the 1st of each month:
+## Step 5 — Schedule the monthly handicap cron (SQL editor, pg_cron)
+Runs ~9am on the 1st of each month. Replace `<PROJECT-REF>` and `<SERVICE_ROLE_KEY>`:
 ```sql
 select cron.schedule(
   'monthly-handicap-push',
@@ -52,6 +63,15 @@ select cron.schedule(
      ); $$
 );
 ```
+(Requires the `pg_cron` + `pg_net` extensions — enable them under Database → Extensions.)
+
+## Step 6 (optional hardening) — DB webhook for admin re-map
+The app already fire-and-forgets `notify-admins-remap` after a re-map request, so this
+is optional. For a fully server-trusted path, add a Database Webhook on
+`course_requests` INSERT (filter `type = remap`) → call the `notify-admins-remap`
+function. It accepts the webhook `{ record }` shape too.
+
+---
 
 ## Notification → type → opt-out column
 | # | Notification | data.type | notif_prefs column |
@@ -63,6 +83,9 @@ select cron.schedule(
 | 5 | Monthly handicap | handicap | monthly_handicap |
 | 6 | Admin re-map | remap | admin_remap |
 
-## Tap routing (www/push-bridge.js, already updated)
-wager/round_start → Wager tab · round_complete → crew round/Stats · handicap → Stats ·
-remap → Admin dashboard · friend_request → Crew tab.
+## What's required before any push actually delivers
+1. These Supabase + Apple steps (you, here).
+2. Renee's one-time Mac/Xcode native setup — see `HANDOFF_Renee_Push_Mac_Steps.md`.
+Until #2 ships, devices won't have push tokens yet, so sends just find "no tokens"
+and no-op. The in-app cards, settings toggles, and the "turn on notifications" intro
+all work today regardless.
