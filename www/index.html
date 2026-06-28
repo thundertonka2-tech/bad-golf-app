@@ -4748,6 +4748,33 @@
         </div>
       </details>
 
+      <details class="card bet-section" id="notif-prefs-card" style="margin-top:16px">
+        <summary style="font-weight:700;cursor:pointer">🔔 Push notifications</summary>
+        <div style="margin-top:12px">
+          <div class="small-text" style="color:var(--text-muted);margin-bottom:10px">Bad Golf would like to send you push notifications. Pick what you want below — turn any of them on or off any time. (On iPhone you also need to allow notifications for Bad Golf in your phone's Settings. In-app alerts always show while the app is open.)</div>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer">
+            <span style="font-weight:500">⛳ A friend starts a round</span>
+            <input type="checkbox" id="np-friend-starts" style="width:auto;margin:0;transform:scale(1.3);flex:0 0 auto" checked>
+          </label>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;margin-top:10px">
+            <span style="font-weight:500">🏁 A friend completes a round</span>
+            <input type="checkbox" id="np-friend-completes" style="width:auto;margin:0;transform:scale(1.3);flex:0 0 auto" checked>
+          </label>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;margin-top:10px">
+            <span style="font-weight:500">🎲 A friend sends me a bet</span>
+            <input type="checkbox" id="np-wager-requests" style="width:auto;margin:0;transform:scale(1.3);flex:0 0 auto" checked>
+          </label>
+          <label style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;margin-top:10px">
+            <span style="font-weight:500">📈 Monthly handicap summary</span>
+            <input type="checkbox" id="np-monthly-handicap" style="width:auto;margin:0;transform:scale(1.3);flex:0 0 auto" checked>
+          </label>
+          <label id="np-admin-remap-row" style="display:none;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;margin-top:10px">
+            <span style="font-weight:500">🗺️ Course re-map requests (admin)</span>
+            <input type="checkbox" id="np-admin-remap" style="width:auto;margin:0;transform:scale(1.3);flex:0 0 auto" checked>
+          </label>
+        </div>
+      </details>
+
       <!-- Handicap hero + quick stats -->
       <div class="card" id="stats-kpi-card" style="display:none"></div>
 
@@ -6019,7 +6046,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.331';
+const BG_BUILD = 'v2026.11.332';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -6548,6 +6575,9 @@ async function crCreate(type, payload) {
     const row = Object.assign({ type: type, status: 'open', requester_id: (_authUser && _authUser.id) || null, requester_name: me || null }, payload || {});
     const { data, error } = await supa.from('course_requests').insert(row).select().maybeSingle();
     if (error) { console.warn('crCreate', error); try { showToast(error.message || 'Could not send request — is the table set up?'); } catch (e) {} return null; }
+    if (type === 'remap' && data && data.id) { // #6 ping admins about a re-map request
+      try { if (supa.functions && supa.functions.invoke) supa.functions.invoke('notify-admins-remap', { body: { request_id: data.id } }).catch(function () {}); } catch (e) {}
+    }
     return data;
   } catch (e) { console.warn('crCreate', e); try { showToast('Could not send request'); } catch (e2) {} return null; }
 }
@@ -27784,6 +27814,205 @@ async function renderCrewLive() {
 // fires app-wide. De-duped per round code in localStorage.
 function _crewAlertSeen() { try { return JSON.parse(localStorage.getItem('golf:crew-alerts-shown') || '[]'); } catch (e) { return []; } }
 function _crewAlertMark(code) { try { const l = _crewAlertSeen(); if (l.indexOf(code) < 0) { l.push(code); localStorage.setItem('golf:crew-alerts-shown', JSON.stringify(l.slice(-80))); } } catch (e) {} }
+// ===== Push / notification foundation (Notifications Build) =================
+// Fire-and-forget Apple push via the generic `send-push` edge function. Inert
+// (no-op) until that function is deployed, so it can never block boot or UI.
+async function sendPush(userIds, title, body, data, collapseId) {
+  try {
+    if (!supa || !supa.functions || !supa.functions.invoke) return;
+    const ids = (Array.isArray(userIds) ? userIds : [userIds]).filter(Boolean);
+    if (!ids.length) return;
+    supa.functions.invoke('send-push', { body: {
+      user_ids: ids, title: title || 'Bad Golf', body: body || '',
+      data: data || {}, collapse_id: collapseId || null
+    } }).catch(function () {});
+  } catch (e) { /* non-fatal */ }
+}
+// Accepted-friend account ids for the signed-in user. RLS limits friendships to
+// my own rows, so this only ever returns MY friends — exactly who should hear
+// about MY rounds.
+async function friendUserIds() {
+  try {
+    if (!isSignedIn() || !supa || !_authUser) return [];
+    const meId = _authUser.id;
+    const edges = await fetchFriendships();
+    const ids = [];
+    (edges || []).forEach(function (e) {
+      if (e && e.status === 'accepted' && (e.requester === meId || e.addressee === meId)) {
+        const other = (e.requester === meId) ? e.addressee : e.requester;
+        if (other && other !== meId && ids.indexOf(other) < 0) ids.push(other);
+      }
+    });
+    return ids;
+  } catch (e) { return []; }
+}
+// Reusable dismissible "friend round" card (in-app counterpart for #2 start and
+// #3 finish). Close + an optional action button (Wager / View).
+function _showFriendRoundCard(o) {
+  try {
+    o = o || {};
+    const esc = (typeof escapeHtml === 'function') ? escapeHtml : function (x) { return String(x == null ? '' : x); };
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:100040;display:flex;justify-content:center;padding:0 12px calc(env(safe-area-inset-bottom,12px) + 12px)';
+    const close = function () { try { ov.remove(); } catch (e) {} };
+    ov.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);box-shadow:0 8px 30px rgba(0,0,0,0.35);border-radius:14px;width:100%;max-width:460px;padding:14px 14px 12px;display:flex;gap:10px;align-items:flex-start">'
+      + '<div style="font-size:26px;line-height:1">' + esc(o.emoji || '⛳') + '</div>'
+      + '<div style="flex:1;min-width:0">'
+      +   '<div style="font-weight:800;font-size:15px">' + esc(o.title || '') + '</div>'
+      +   '<div style="font-size:13px;color:var(--text-muted);margin-top:2px">' + esc(o.sub || '') + '</div>'
+      +   '<div style="display:flex;gap:8px;margin-top:10px">'
+      +     '<button class="_frc-close small" style="flex:1">Close</button>'
+      +     (o.actionLabel ? '<button class="_frc-action small primary" style="flex:1">' + esc(o.actionLabel) + '</button>' : '')
+      +   '</div>'
+      + '</div></div>';
+    const cb = ov.querySelector('._frc-close'); if (cb) cb.onclick = close;
+    const act = ov.querySelector('._frc-action');
+    if (act) act.onclick = function () { close(); try { if (typeof o.onAction === 'function') o.onAction(); } catch (e) {} };
+    document.body.appendChild(ov);
+    setTimeout(function () { try { if (ov && ov.parentNode) ov.remove(); } catch (e) {} }, 30000);
+  } catch (e) {}
+}
+// #3 Friend completes a round — notify MY friends when I finish (RLS-safe).
+async function notifyFriendsRoundComplete(g) {
+  try {
+    if (!g || !g.code || !isSignedIn() || !supa || !_authUser) return;
+    const markKey = 'golf:rc-pushed';
+    let seen = []; try { seen = JSON.parse(localStorage.getItem(markKey) || '[]'); } catch (e) {}
+    if (seen.indexOf(g.code) >= 0) return;
+    let me = ''; try { me = (await getMeName().catch(function () { return null; })) || (localStorage.getItem(KEY_ME) || ''); } catch (e) {}
+    const meNorm = me ? normalizeNameSegment(me) : '';
+    if (!meNorm || !Array.isArray(g.players)) return;
+    const mine = g.players.find(function (p) { return p && p.name && normalizeNameSegment(p.name) === meNorm; });
+    if (!mine) return;                               // I'm not a player in this round
+    const fids = await friendUserIds();
+    try { seen.push(g.code); localStorage.setItem(markKey, JSON.stringify(seen.slice(-120))); } catch (e) {} // mark BEFORE send
+    if (!fids.length) return;
+    let gross = null;
+    try {
+      const arr = (g.scores && g.scores[mine.id]) || [];
+      const tot = arr.reduce(function (a, v) { return (v != null && !isNaN(v)) ? a + Number(v) : a; }, 0);
+      const played = arr.filter(function (v) { return v != null; }).length;
+      if (played >= 9) gross = tot;                  // only attach a score for a real (>=9 holes) round
+    } catch (e) {}
+    const courseName = g.course || 'a round';
+    const body = (me || 'A friend') + ' completed a round at ' + courseName + (gross != null ? (' for ' + gross) : '');
+    sendPush(fids, 'Bad Golf', body, { type: 'round_complete', round_code: g.code }, 'rc:' + g.code);
+  } catch (e) {}
+}
+// #3 in-app counterpart: surface recently-finished FRIEND rounds as a card on a
+// light poll. De-duped per round in localStorage; skips my own finishes.
+function _finishSeen() { try { return JSON.parse(localStorage.getItem('golf:finish-alerts-shown') || '[]'); } catch (e) { return []; } }
+function _finishMark(code) { try { const l = _finishSeen(); if (l.indexOf(code) < 0) { l.push(code); localStorage.setItem('golf:finish-alerts-shown', JSON.stringify(l.slice(-100))); } } catch (e) {} }
+async function checkFriendFinishAlerts() {
+  try {
+    try { if (!isSignedIn()) return; } catch (e) { return; }
+    if (!supa || !supaOnline) return;
+    const allowed = await friendNameSet();
+    if (!allowed || !allowed.size) return;
+    let me = ''; try { me = (localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
+    const meNorm = me ? normalizeNameSegment(me) : '';
+    const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', 'shared:%').order('updated_at', { ascending: false }).limit(40);
+    const rows = data || [];
+    const seen = new Set(_finishSeen());
+    const recent = Date.now() - 3 * 60 * 60 * 1000;  // finished within last 3h
+    let shown = 0;
+    for (const row of rows) {
+      if (shown >= 1) break;
+      const g = row.data, code = row.code;
+      if (!g || !g.finishedAt || seen.has(code)) continue;
+      if (g.finishedAt < recent) { _finishMark(code); continue; }
+      if (!Array.isArray(g.players) || !g.players.length) { _finishMark(code); continue; }
+      if (meNorm && g.players.some(function (p) { return p && p.name && normalizeNameSegment(p.name) === meNorm; })) { _finishMark(code); continue; } // my own finish
+      const fr = g.players.find(function (p) { return p && p.name && allowed.has(normalizeNameSegment(p.name)); });
+      if (!fr) { _finishMark(code); continue; }
+      let gross = null;
+      try { const arr = (g.scores && g.scores[fr.id]) || []; const tot = arr.reduce(function (a, v) { return (v != null && !isNaN(v)) ? a + Number(v) : a; }, 0); const played = arr.filter(function (v) { return v != null; }).length; if (played >= 9) gross = tot; } catch (e) {}
+      _finishMark(code); shown++;
+      _showFriendRoundCard({
+        emoji: '🏁',
+        title: ((typeof displayFirst === 'function') ? displayFirst(fr) : (fr.name || 'A friend')) + ' finished ' + (g.course || 'a round'),
+        sub: gross != null ? ('Score ' + gross) : 'Tap to view',
+        code: code, actionLabel: 'View',
+        onAction: function () { try { openCrewRound(code); } catch (e) {} }
+      });
+    }
+  } catch (e) {}
+}
+try { setInterval(function () { checkFriendFinishAlerts(); }, 90000); setTimeout(function () { checkFriendFinishAlerts(); }, 15000); } catch (e) {}
+// #5 Monthly handicap — write a snapshot of the app's own computed index for the
+// current month so the cron can diff months without re-implementing the formula.
+async function upsertHandicapSnapshot() {
+  try {
+    if (!isSignedIn() || !supa || !_authUser) return;
+    let me = null; try { me = await getMeName(); } catch (e) {}
+    if (!me) return;
+    const roster = await getPlayerRoster();
+    const p = findMyRosterPlayer(roster, me);
+    const hist = (p && Array.isArray(p.scoreHistory)) ? p.scoreHistory : [];
+    const calc = calcHandicapIndex(hist);
+    const validN = (calc && typeof calc.n === 'number') ? calc.n : 0;
+    // Only store a real (non-provisional) index; provisional (<5 valid) -> null so the cron skips.
+    const idx = (calc && calc.index != null && validN >= 5) ? calc.index : null;
+    const d = new Date();
+    const month = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
+    await supa.from('handicap_snapshots').upsert({
+      user_id: _authUser.id, month: month, hcp_index: idx, rounds_ct: validN
+    }, { onConflict: 'user_id,month' }).catch(function () {});
+  } catch (e) { /* table may not exist yet — non-fatal */ }
+}
+// Notification preferences (notif_prefs) — load current values + persist on change.
+async function wireNotifPrefs() {
+  try {
+    const map = {
+      'np-friend-starts': 'friend_starts',
+      'np-friend-completes': 'friend_completes',
+      'np-wager-requests': 'wager_requests',
+      'np-monthly-handicap': 'monthly_handicap',
+      'np-admin-remap': 'admin_remap'
+    };
+    try { const ar = document.getElementById('np-admin-remap-row'); if (ar && typeof isAdmin === 'function' && isAdmin()) ar.style.display = 'flex'; } catch (e) {}
+    if (!isSignedIn() || !supa || !_authUser) return;
+    let row = null;
+    try { const r = await supa.from('notif_prefs').select('*').eq('user_id', _authUser.id).maybeSingle(); row = r && r.data; } catch (e) {}
+    Object.keys(map).forEach(function (id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (row && row[map[id]] === false) el.checked = false;
+      el.onchange = function () {
+        try {
+          const patch = { user_id: _authUser.id, updated_at: new Date().toISOString() };
+          patch[map[id]] = !!el.checked;
+          supa.from('notif_prefs').upsert(patch, { onConflict: 'user_id' }).catch(function () {});
+        } catch (e) {}
+      };
+    });
+  } catch (e) {}
+}
+// One-time, friendly heads-up that Bad Golf would like to send push
+// notifications — and where to turn them on/off. Shown once per device.
+function maybeShowPushIntro() {
+  try {
+    if (!isSignedIn || !isSignedIn()) return;
+    if (localStorage.getItem('golf:push-intro-shown') === '1') return;
+    localStorage.setItem('golf:push-intro-shown', '1');
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:100050;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:18px';
+    const close = function () { try { ov.remove(); } catch (e) {} };
+    ov.innerHTML = '<div onclick="event.stopPropagation()" style="background:var(--surface);border-radius:16px;max-width:420px;width:100%;padding:20px 18px;text-align:center">'
+      + '<div style="font-size:38px;margin-bottom:6px">🔔</div>'
+      + '<div style="font-weight:800;font-size:18px;margin-bottom:8px">Turn on notifications?</div>'
+      + '<div style="font-size:14px;color:var(--text-muted);line-height:1.5;margin-bottom:16px">Bad Golf can let you know when a friend starts or finishes a round, sends you a bet, and how your handicap moved each month. You can turn any of these on or off any time in <b>Stats › 🔔 Push notifications</b>.</div>'
+      + '<button class="_pi-ok full primary" style="margin-bottom:8px">Sounds good</button>'
+      + '<button class="_pi-settings full">Choose what I get</button>'
+      + '</div>';
+    ov.onclick = close;
+    const ok = ov.querySelector('._pi-ok'); if (ok) ok.onclick = close;
+    const st = ov.querySelector('._pi-settings');
+    if (st) st.onclick = function () { close(); try { switchTab('stats'); } catch (e) {} try { const c = document.getElementById('notif-prefs-card'); if (c) { c.open = true; c.scrollIntoView({ behavior: 'smooth', block: 'center' }); } } catch (e) {} };
+    document.body.appendChild(ov);
+  } catch (e) {}
+}
+// ===== end push / notification foundation ===================================
 async function checkCrewRoundAlerts() {
   try {
     try { if (!isSignedIn()) return; } catch (e) { return; }
@@ -27811,11 +28040,13 @@ async function checkCrewRoundAlerts() {
       const isFriend = (byNorm && allowed.has(byNorm)) ||
         (Array.isArray(g.players) && g.players.some(p => p && p.name && allowed.has(normalizeNameSegment(p.name))));
       if (!isFriend) { _crewAlertMark(code); continue; }
-      { const _e = (typeof escapeHtml === 'function') ? escapeHtml : (x => String(x == null ? '' : x).replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c])));
-        showInfoNotice('<div style="font-size:34px;margin-bottom:6px">⛳</div>'
-          + '<div style="font-weight:800;font-size:17px;margin-bottom:4px"><b>' + _e(a.by || 'A friend') + '</b> is playing</div>'
-          + '<div style="font-size:15px">' + _e(a.course || 'a round') + (a.city ? (' <span style="color:var(--text-muted)">in ' + _e(a.city) + '</span>') : '') + '</div>'
-          + '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">A friend just started a round near you.</div>'); }
+      _showFriendRoundCard({
+        emoji: '⛳',
+        title: (a.by || 'A friend') + ' started a round',
+        sub: (a.course || 'a round') + (a.city ? (' · ' + a.city) : ''),
+        code: code, actionLabel: '🎲 Wager',
+        onAction: function () { try { openWagerScreen(code); } catch (e) {} }
+      });
       _crewAlertMark(code); shown++;
     }
   } catch (e) {}
@@ -28185,6 +28416,7 @@ async function sendFriendRequest(toId) {
   if (!supa || !_authUser || !toId || toId === _authUser.id) return;
   try {
     await supa.from('friendships').insert({ requester: _authUser.id, addressee: toId, status: 'pending' });
+    try { const myName = (await getMeName().catch(function () { return null; })) || 'Someone'; sendPush(toId, 'Bad Golf', myName + ' wants to be friends on Bad Golf', { type: 'friend_request' }, 'fr:' + _authUser.id + ':' + toId); } catch (e) {}
     showToast('Friend request sent');
   } catch (e) { console.warn('sendFriendRequest', e); showToast('Could not send request'); }
 }
@@ -28461,6 +28693,7 @@ async function sendWagerProposal(toId, code) {
       from_user: _authUser.id, to_user: toId,
       game_code: 'W:' + code, course: course, status: 'pending'
     });
+    try { const _mn = await getMeName().catch(function () { return null; }); sendPush(toId, 'Bad Golf', (_mn || 'A friend') + ' sent you a bet on ' + (course || 'a round'), { type: 'wager', round_code: code }, 'wb:' + code); } catch (e) {}
     showToast('Bet proposal sent');
   } catch (e) { console.warn('sendWagerProposal', e); showToast('Could not send proposal'); }
 }
@@ -36670,7 +36903,10 @@ async function init() {
     try {
       if (typeof startAlertEnabled === 'function' && startAlertEnabled() && creatorName) {
         const _ce = (COURSE_LIBRARY || []).find(c => c.id === courseId);
-        game.crewAlert = { by: creatorName, course: setup.course || game.course || 'a round', city: (_ce && _ce.city) || '', at: Date.now() };
+        const _csName = setup.course || game.course || 'a round';
+        game.crewAlert = { by: creatorName, course: _csName, city: (_ce && _ce.city) || '', at: Date.now() };
+        // #2 Apple push to my friends when their app is closed (in-app card = checkCrewRoundAlerts).
+        try { friendUserIds().then(function (fids) { if (fids && fids.length) sendPush(fids, 'Bad Golf', creatorName + ' started a round at ' + _csName, { type: 'round_start', round_code: game.code }, 'rs:' + game.code); }).catch(function () {}); } catch (e) {}
       }
     } catch (e) {}
     // Roland's Spanish round-start announcement (when smack talk is on + he's in).
@@ -37262,6 +37498,7 @@ async function init() {
       g.finishedAt = Date.now();
       try { if (typeof liveActivity !== 'undefined') liveActivity.end(); } catch (e) {}
       try { await saveGame(g); } catch (e) { console.warn('saveGame on finish failed:', e); }
+      try { notifyFriendsRoundComplete(g); } catch (e) {} // #3 push my friends that I finished
       // Void any single-sided wagers nobody took, then auto-settle the rest, so a
       // finished round never leaves a dangling "open" bet on the board.
       try {
@@ -37645,6 +37882,9 @@ async function init() {
       if (!window._statsSyncedOnce) { window._statsSyncedOnce = true; try { syncMyStatsToCloud(); } catch (e) {} }
       if (!window._avatarHealedOnce) { window._avatarHealedOnce = true; try { healMyAvatarFromCloud(); } catch (e) {} }
       if (!window._roundsHealedOnce) { window._roundsHealedOnce = true; try { healMyRoundsFromCloud(); } catch (e) {} }
+      if (!window._notifPrefsWired) { window._notifPrefsWired = true; try { wireNotifPrefs(); } catch (e) {} }
+      if (!window._hcpSnapOnce) { window._hcpSnapOnce = true; try { setTimeout(function () { upsertHandicapSnapshot(); }, 4000); } catch (e) {} }
+      if (!window._pushIntroOnce) { window._pushIntroOnce = true; try { setTimeout(function () { maybeShowPushIntro(); }, 2500); } catch (e) {} }
     } }
 
   // Wire empty-state CTAs: Rounds + Stats → switch to Setup tab

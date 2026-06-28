@@ -25,12 +25,32 @@
     try {
       Push.addListener('registration', function (t) { if (t && t.value) upsertToken(t.value); });
       Push.addListener('registrationError', function (e) { console.warn('push reg error', e); });
-      // Tapped a notification -> deep link into the Wager tab for that round.
+      // Tapped a notification -> deep link by notification type (legacy
+      // wager_round_code still routes to the Wager tab).
       Push.addListener('pushNotificationActionPerformed', function (ev) {
         try {
           var data = (ev && ev.notification && ev.notification.data) || {};
-          var code = data.wager_round_code;
-          if (code && typeof window.openWagerScreen === 'function') window.openWagerScreen(code);
+          var type = data.type || '';
+          var code = data.round_code || data.wager_round_code;
+          if (type === 'round_complete') {
+            if (code && typeof window.openCrewRound === 'function') return window.openCrewRound(code);
+            if (typeof window.switchTab === 'function') return window.switchTab('stats');
+          }
+          if (type === 'handicap') {
+            if (typeof window.switchTab === 'function') return window.switchTab('stats');
+          }
+          if (type === 'remap') {
+            if (typeof window.switchTab === 'function') {
+              window.switchTab('admin');
+              if (typeof window.openAdminDashboard === 'function') { try { window.openAdminDashboard(); } catch (e) {} }
+              return;
+            }
+          }
+          if (type === 'friend_request') {
+            if (typeof window.switchTab === 'function') return window.switchTab('crew');
+          }
+          // Default (wager / round_start / legacy) -> open the Wager tab for that round.
+          if (code && typeof window.openWagerScreen === 'function') return window.openWagerScreen(code);
         } catch (e) {}
       });
       Push.requestPermissions().then(function (res) {
