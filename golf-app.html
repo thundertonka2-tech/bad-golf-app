@@ -5997,7 +5997,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.327';
+const BG_BUILD = 'v2026.11.328';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -6468,12 +6468,16 @@ async function fixMyRoundStat(idx, kind) {
     } catch (e) {}
   }
   if (!myId) { try { showToast('Could not find you in that round'); } catch (e) {} return; }
-  if (kind === 'fairways') { if (!g.fairwaysData) g.fairwaysData = {}; g.fairwaysData[myId] = new Array(18).fill(null); }
-  else if (kind === 'girs') { if (!g.girData) g.girData = {}; g.girData[myId] = new Array(18).fill(null); }
-  else if (kind === 'putts') { if (!g.puttsData) g.puttsData = {}; g.puttsData[myId] = new Array(18).fill(null); }
-  else return;
+  const fieldMap = { fairways: 'fairwaysData', girs: 'girData', putts: 'puttsData' };
+  const fieldName = fieldMap[kind];
+  if (!fieldName) return;
+  if (!g[fieldName]) g[fieldName] = {};
+  g[fieldName][myId] = new Array(18).fill(null);
   let ok = true;
-  try { await saveGame(g); } catch (e) { ok = false; }
+  // authoritative: this is an intentional wholesale clear of MY field on this round,
+  // so the merge-on-write must NOT re-fold the old cloud values back over the nulls.
+  // (This round usually isn't the active game, so the per-cell touch store can't help.)
+  try { await saveGame(g, { authoritative: { [fieldName]: [myId] } }); } catch (e) { ok = false; }
   try { await archiveScoresFromRound(g); } catch (e) {}
   try { var fo = document.getElementById('fix-round-ov'); if (fo) fo.remove(); } catch (e) {}
   try { var rc = document.getElementById('round-card-ov'); if (rc) rc.remove(); } catch (e) {}
@@ -8758,7 +8762,7 @@ async function safeGet(key, shared) {
   try { return localStorage.getItem(key) || null; } catch (e) { return null; }
 }
 
-async function safeSet(key, value, shared) {
+async function safeSet(key, value, shared, opts) {
   // Always cache locally first — works offline + provides instant local read
   try { localStorage.setItem(key, value); } catch (e) {}
 
@@ -8782,8 +8786,9 @@ async function safeSet(key, value, shared) {
         let parsed = JSON.parse(value);
         // Merge-on-write: re-read the cloud row and union THIS device's edited cells
         // over it, so a concurrent scorer's entries (and handicap/bet changes) aren't
-        // clobbered by a stale whole-blob write.
-        try { parsed = await _mergeGameForWrite(parsed); } catch (e) {}
+        // clobbered by a stale whole-blob write. opts.authoritative lets a caller keep
+        // an intentionally-cleared stat array from being re-folded from the cloud.
+        try { parsed = await _mergeGameForWrite(parsed, opts); } catch (e) {}
         try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {} // cache the merged copy
         try {
           const r = await _promiseTimeout(
@@ -8988,14 +8993,26 @@ function _isTouched(s, field, pid, holeIdx) {
   return !!(s && s[field] && s[field][pid] && s[field][pid].has(holeIdx));
 }
 // Fold cloud cells THIS device didn't touch into `local` (mutates + returns local).
-function _mergeGameArrays(local, cloud) {
+// opts.authoritative = { field: [pid,...] } marks (field,player) arrays this device
+// just intentionally rewrote wholesale — e.g. "Clear my fairway data" — so the cloud's
+// old values are NOT folded back over them (the cleared nulls stick). Without this the
+// clear silently reverted because the cleared cells were never in the per-cell touch set.
+function _mergeGameArrays(local, cloud, opts) {
   const touch = _touchStore();
+  const auth = (opts && opts.authoritative) || null;
+  const isAuth = (field, pid) => {
+    if (!auth || !auth[field]) return false;
+    const a = auth[field];
+    return Array.isArray(a) ? (a.indexOf(pid) !== -1) : (a && typeof a.has === 'function' && a.has(pid));
+  };
   ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData'].forEach(field => {
     const cc = cloud[field]; if (!cc || typeof cc !== 'object') return;
     if (!local[field]) local[field] = {};
     const lf = local[field];
     Object.keys(cc).forEach(pid => {
       const cArr = cc[pid]; if (!Array.isArray(cArr)) return;
+      // Authoritative wholesale write for this player's field → keep local as-is.
+      if (isAuth(field, pid) && Array.isArray(lf[pid])) return;
       if (!Array.isArray(lf[pid])) { lf[pid] = cArr.slice(); return; }
       for (let i = 0; i < cArr.length; i++) {
         if (!_isTouched(touch, field, pid, i)) lf[pid][i] = cArr[i];
@@ -9017,7 +9034,9 @@ function _unionHoleMap(local, parentKey, subKey, cloud) {
   } catch (e) {}
 }
 // Build the row to write: local edits union'd over the freshest cloud copy.
-async function _mergeGameForWrite(local) {
+// opts.authoritative (see _mergeGameArrays) lets a caller declare a player's whole
+// stat array as authoritative so a cloud re-read can't undo an intentional clear.
+async function _mergeGameForWrite(local, opts) {
   try {
     if (!supa || !supaOnline || !local || !local.code) return local;
     let cloud = null;
@@ -9027,7 +9046,7 @@ async function _mergeGameForWrite(local) {
       if (r && !r.error && r.data) cloud = r.data.data;
     } catch (e) { return local; } // read failed/timed out → write local as-is (prior behavior)
     if (!cloud || typeof cloud !== 'object') return local;
-    _mergeGameArrays(local, cloud);
+    _mergeGameArrays(local, cloud, opts);
     _unionHoleMap(local, 'bankerData', 'holes', cloud);
     _unionHoleMap(local, 'bankerData', 'picks', cloud);
     _unionHoleMap(local, 'wolfData', 'holes', cloud);
@@ -9231,7 +9250,7 @@ async function saveGame(game, opts) {
   if (game.reopenedAt) {
     game.editedAt = Date.now();
   }
-  const ok = await safeSet('game:' + game.code, JSON.stringify(game), true);
+  const ok = await safeSet('game:' + game.code, JSON.stringify(game), true, opts);
   if (ok) {
     await safeSet(KEY_LAST, game.code, false);
     // deferRecent: skip the Rounds-list update (a cloud read + write) on the hot
@@ -24064,16 +24083,19 @@ async function renderHomeInvites() {
 
   if (!rows.length) { card.style.display = 'none'; list.innerHTML = ''; return; }
   card.style.display = 'block';
+  // Mobile-first: name/date on top, full-width action buttons in a wrapping row
+  // below. The old side-by-side layout crushed "Edit details/settings" into a
+  // skinny right column on narrow phones.
   list.innerHTML = rows.map((r, i) =>
-    '<div class="home-invite-row" data-i="' + i + '" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-top:' + (i ? '1px solid var(--border)' : 'none') + '">' +
-      '<div style="flex:1;min-width:0">' +
-        '<div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.course) + '</div>' +
+    '<div class="home-invite-row" data-i="' + i + '" style="display:flex;flex-direction:column;gap:8px;padding:12px 0;border-top:' + (i ? '1px solid var(--border)' : 'none') + '">' +
+      '<div style="min-width:0">' +
+        '<div style="font-weight:600;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.course) + '</div>' +
         '<div class="small-text" style="color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.sub) + '</div>' +
       '</div>' +
-      '<div style="flex:0 0 auto;display:flex;flex-direction:column;gap:4px;align-items:stretch;min-width:96px">' +
-        '<button class="small primary home-invite-btn" data-i="' + i + '" style="flex:0 0 auto">' + escapeHtml(r.action) + '</button>' +
-        (r.kind === 'scheduled' ? '<button class="small home-edit-details-btn" data-i="' + i + '" style="flex:0 0 auto">Edit details</button>' : '') +
-        (r.kind === 'scheduled' && r.isCreator ? '<button class="small home-edit-settings-btn" data-i="' + i + '" style="flex:0 0 auto">Edit settings</button>' : '') +
+      '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+        '<button class="small primary home-invite-btn" data-i="' + i + '" style="flex:1 1 auto;min-width:88px">' + escapeHtml(r.action) + '</button>' +
+        (r.kind === 'scheduled' ? '<button class="small home-edit-details-btn" data-i="' + i + '" style="flex:1 1 auto;min-width:88px">Edit details</button>' : '') +
+        (r.kind === 'scheduled' && r.isCreator ? '<button class="small home-edit-settings-btn" data-i="' + i + '" style="flex:1 1 auto;min-width:88px">Edit settings</button>' : '') +
       '</div>' +
     '</div>').join('');
   const go = (i) => {
@@ -34539,6 +34561,9 @@ async function openTourneySettingsEditor(t) {
   if (t.savedConfig) applySavedConfig(t.savedConfig);
   state.editingTourneyId = t.id;
   try { state._schedStartPids = true; } catch (e) {}
+  // Already-scheduled round → the bottom action is a plain "Save", not "Schedule
+  // for later" (templates still schedule). Reset to the schedule label for new rounds.
+  try { const sb = $('btn-save-tourney'); if (sb) sb.innerHTML = (t && !t.isTemplate) ? '💾 Save' : '📅 Schedule for later'; } catch (e) {}
   switchTab('setup', { skipActivePrompt: true });
   showToast('Edit the games, players & settings — then save to update this round (or Start round now).');
 }
@@ -34707,6 +34732,73 @@ function openTourneyModal(existing) {
   $('tourney-modal').classList.add('show');
 }
 
+// Build the savedConfig + cleaned player list from a gathered setup. Shared by the
+// "schedule" modal save (stm-save) and the in-place "Save" on an already-scheduled
+// round's Edit settings, so both produce identical, name-stable stored config.
+function _buildTourneySavedConfig(setup) {
+  const cleanPlayers = (setup.players || []).map(p => ({
+    firstName: p.firstName || '',
+    lastName: p.lastName || '',
+    name: p.name,
+    hcp: p.rawHcp != null ? p.rawHcp : p.hcp,
+    teeLabel: p.teeLabel || null,
+    playsGross: !!p.playsGross
+  }));
+  const cleanGames = JSON.parse(JSON.stringify(setup.games || {}));
+  const idToName = (pid) => { const p = (setup.players || []).find(pl => pl.id === pid); return p ? p.name : null; };
+  Object.keys(cleanGames).forEach(gKey => {
+    const cfg = cleanGames[gKey];
+    if (cfg && Array.isArray(cfg.participants)) {
+      cfg.participantNames = cfg.participants.map(idToName).filter(Boolean);
+      delete cfg.participants;
+    }
+    if (cfg && Array.isArray(cfg.instances)) {
+      cfg.instances.forEach(inst => {
+        if (Array.isArray(inst.participants)) {
+          inst.participantNames = inst.participants.map(idToName).filter(Boolean);
+          delete inst.participants;
+        }
+      });
+    }
+  });
+  const savedConfig = {
+    course: setup.course,
+    pars: setup.pars,
+    sis: setup.sis,
+    tees: Array.isArray(setup.tees) ? setup.tees : [],
+    players: cleanPlayers,
+    games: cleanGames,
+    hcpRules: setup.hcpRules
+  };
+  return { savedConfig, cleanPlayers };
+}
+
+// In-place "Save" for an already-scheduled round being re-configured from Edit
+// settings: persist the updated games/players/settings WITHOUT reopening the
+// "schedule" modal (the name/date already exist), then return to Home. Returns
+// true if it handled the save.
+async function saveScheduledRoundEdits(setup) {
+  if (!state.editingTourneyId) return false;
+  const { savedConfig, cleanPlayers } = _buildTourneySavedConfig(setup);
+  let list = await getTourneys();
+  const idx = list.findIndex(x => x.id === state.editingTourneyId);
+  if (idx < 0 || !list[idx] || list[idx].isTemplate) return false; // not an existing scheduled round
+  list[idx].course = setup.course;
+  list[idx].players = cleanPlayers.map(p => p.name).join(', ');
+  list[idx].savedConfig = savedConfig;
+  list[idx].status = list[idx].status === 'live' ? 'live' : 'scheduled';
+  await saveTourneys(list);
+  state.pendingTourneySetup = null;
+  state.editingTourneyId = null;
+  try { $('setup-with-game').style.display = 'none'; $('setup-no-game').style.display = 'block'; } catch (e) {}
+  try { const am = document.getElementById('tourney-actions-modal'); if (am) am.classList.remove('show'); } catch (e) {}
+  renderTourneyList();
+  renderHome();
+  try { if (typeof switchTab === 'function') switchTab('home'); } catch (e) {}
+  showToast('Round updated ✓');
+  return true;
+}
+
 async function saveTourney() {
   const name = $('tm-name').value.trim();
   if (!name) { showToast('Name required'); return; }
@@ -34735,14 +34827,15 @@ async function saveTourney() {
   await saveTourneys(list);
   $('tourney-modal').classList.remove('show');
   const wasEdit = idx >= 0;
-  const saved = wasEdit ? list[idx] : t;
   state.editingTourneyId = null;
   renderTourneyList();
   renderHome();
   showToast(wasEdit ? 'Game updated' : 'Game saved');
-  // Saving from "Edit game" (launched off the actions screen) should return you
-  // THERE to keep managing the event — not kick you out to the Events list.
-  if (wasEdit) { try { openTourneyActions(saved); } catch (e) {} }
+  // After editing a scheduled round's details, return to the Home screen (Tyler's
+  // request) — don't reopen the round-card actions popup, which felt like the save
+  // hadn't taken you anywhere. Make sure that popup is closed too.
+  try { const am = document.getElementById('tourney-actions-modal'); if (am) am.classList.remove('show'); } catch (e) {}
+  try { if (typeof switchTab === 'function') switchTab('home'); } catch (e) {}
 }
 
 async function deleteTourney(id) {
@@ -35435,6 +35528,9 @@ async function init() {
     $('setup-no-game').style.display = 'none';
     $('setup-with-game').style.display = 'block';
     setupNewGameForm();
+    // Fresh round → the save button schedules for later (only an existing scheduled
+    // round's Edit settings shows a plain "Save").
+    try { const sb = $('btn-save-tourney'); if (sb) sb.innerHTML = '📅 Schedule for later'; } catch (e) {}
     updateSetupGates(); // fresh round: hide Course + Bets until prerequisites met
     const code = generateCode();
     $('display-code').textContent = code;
@@ -36406,9 +36502,15 @@ async function init() {
     } }
 
   // Save the current setup as a tournament for later
-  $('btn-save-tourney').onclick = () => {
+  $('btn-save-tourney').onclick = async () => {
     const setup = gatherSetup();
     if (!setup) return; // gatherSetup shows its own toast on validation errors
+    // EDIT MODE: re-configuring an already-scheduled round. It already has a
+    // name/date, so skip the "schedule" modal entirely and just save the updated
+    // settings in place, returning Home. (Tyler: a simple Save, not Schedule for later.)
+    if (state.editingTourneyId) {
+      try { if (await saveScheduledRoundEdits(setup)) return; } catch (e) {}
+    }
     // Stash the gathered setup so the modal save handler can use it
     state.pendingTourneySetup = setup;
     // If editing an existing tourney, prefill the name/date from the existing record
@@ -36475,52 +36577,9 @@ async function init() {
     const setup = state.pendingTourneySetup;
     if (!setup) { showToast('Setup data missing — try again'); return; }
 
-    // Strip ephemeral player IDs and rawHcp computed during gatherSetup; keep raw
-    // hcp so handicap percentages don't double-apply when reloaded.
-    // Include firstName/lastName + playsGross so the tournament restores accurately.
-    const cleanPlayers = setup.players.map(p => ({
-      firstName: p.firstName || '',
-      lastName: p.lastName || '',
-      name: p.name,
-      hcp: p.rawHcp != null ? p.rawHcp : p.hcp,
-      teeLabel: p.teeLabel || null,
-      playsGross: !!p.playsGross
-    }));
-
-    // Convert per-game participant ID arrays to NAME arrays for stable storage
-    // (player IDs are regenerated every round, names are stable). Walks both
-    // top-level participants AND per-instance participants for multi-instance games.
-    const cleanGames = JSON.parse(JSON.stringify(setup.games || {}));
-    const idToName = (pid) => {
-      const p = setup.players.find(pl => pl.id === pid);
-      return p ? p.name : null;
-    };
-    Object.keys(cleanGames).forEach(gKey => {
-      const cfg = cleanGames[gKey];
-      if (cfg && Array.isArray(cfg.participants)) {
-        cfg.participantNames = cfg.participants.map(idToName).filter(Boolean);
-        delete cfg.participants;
-      }
-      // Walk instances arrays (Match Play, Nassau)
-      if (cfg && Array.isArray(cfg.instances)) {
-        cfg.instances.forEach(inst => {
-          if (Array.isArray(inst.participants)) {
-            inst.participantNames = inst.participants.map(idToName).filter(Boolean);
-            delete inst.participants;
-          }
-        });
-      }
-    });
-
-    const savedConfig = {
-      course: setup.course,
-      pars: setup.pars,
-      sis: setup.sis,
-      tees: Array.isArray(setup.tees) ? setup.tees : [],
-      players: cleanPlayers,
-      games: cleanGames,
-      hcpRules: setup.hcpRules
-    };
+    // Strip ephemeral player IDs and convert participant IDs → names for stable
+    // storage. Shared with the in-place Edit-settings save via this helper.
+    const { savedConfig, cleanPlayers } = _buildTourneySavedConfig(setup);
 
     let list = await getTourneys();
     const existingId = state.editingTourneyId;
