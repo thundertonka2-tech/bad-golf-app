@@ -18,6 +18,36 @@ struct DistanceView: View {
         return Geo.distances(from: l, hole: h)
     }
 
+    // ---- Last-known yardage fallback (Kevin, June 2026) ----------------------
+    // When the live GPS fix briefly drops (or the watch/phone link is flaky) the
+    // hero number would snap to "—". Instead we hold the last good distance for
+    // the CURRENT hole and keep showing it, then update the instant a fresh fix
+    // arrives. Cached in-memory and keyed to the hole so we never show a stale
+    // number from a different hole.
+    struct LastKnownDistance { var hole: Int; var dist: Geo.Distances; var at: Date }
+    @State private var lastKnown: LastKnownDistance?
+
+    // What the screen actually renders: live distance if we have one, else the
+    // last-known reading for this hole.
+    private var shownDistances: Geo.Distances? {
+        if let d = distances, d.center != nil { return d }
+        if let lk = lastKnown, lk.hole == store.currentHole, lk.dist.center != nil { return lk.dist }
+        return distances
+    }
+    // True when we're falling back to a cached number (live fix unavailable).
+    private var showingLastKnown: Bool {
+        (distances?.center == nil) && (lastKnown?.hole == store.currentHole) && (lastKnown?.dist.center != nil)
+    }
+    // Remember the latest good fix for this hole. Computed from the RECEIVED
+    // location so it isn't a render behind the @Published update.
+    private func cacheDistances(from newLoc: CLLocation?) {
+        guard let l = newLoc, let h = store.hole else { return }
+        let d = Geo.distances(from: l, hole: h)
+        if d.center != nil {
+            lastKnown = LastKnownDistance(hole: store.currentHole, dist: d, at: Date())
+        }
+    }
+
     // Player coordinate (watch GPS) and the green (mid) coordinate.
     private var playerCoord: CLLocationCoordinate2D? { loc.location?.coordinate }
     private var greenCoord: CLLocationCoordinate2D? { store.hole?.mid?.clLocation.coordinate }
@@ -40,10 +70,11 @@ struct DistanceView: View {
         return pl != c
     }
 
-    // Yardage the club suggestion is based on: plays-as when enabled & different, else center.
+    // Yardage the club suggestion is based on: plays-as when enabled & different,
+    // else the shown center (live, or last-known during a GPS gap).
     private var clubYards: Int? {
         if store.watchPlaysAs, showPlaysLike, let pl = playsLike { return pl }
-        return distances?.center
+        return shownDistances?.center
     }
     private var suggestedClub: String? {
         guard let y = clubYards else { return nil }
@@ -62,9 +93,11 @@ struct DistanceView: View {
             from: 1, through: Double(store.holeCount), by: 1, sensitivity: .low
         )
         .onTapGesture(perform: goToScoring)
-        .onAppear { refreshWeather() }
-        .onChange(of: store.currentHole) { _, _ in refreshWeather() }
+        .onAppear { refreshWeather(); cacheDistances(from: loc.location) }
+        .onChange(of: store.currentHole) { _, _ in refreshWeather(); cacheDistances(from: loc.location) }
         .onChange(of: greenCoord?.latitude) { _, _ in refreshWeather() }
+        // Every fresh watch GPS fix updates the last-known cache for this hole.
+        .onReceive(loc.$location) { newLoc in cacheDistances(from: newLoc) }
     }
 
     private func refreshWeather() {
@@ -133,28 +166,45 @@ struct DistanceView: View {
 
     private var fullGreens: some View {
         VStack(spacing: 0) {
-            Text(distances?.center.map(String.init) ?? "—")
+            Text(shownDistances?.center.map(String.init) ?? "—")
                 .font(.system(size: 64, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(showingLastKnown ? Color.white.opacity(0.55) : .white)
                 .minimumScaleFactor(0.6)
                 .monospacedDigit()
             HStack(spacing: 16) {
-                label("F", distances?.front)
-                label("B", distances?.back)
+                label("F", shownDistances?.front)
+                label("B", shownDistances?.back)
             }
             .font(.system(size: 18, weight: .semibold))
             .foregroundStyle(Color.white.opacity(0.7))
+            lastKnownCaption
         }
     }
 
     private var centerOnly: some View {
         VStack(spacing: 2) {
-            Text(distances?.center.map(String.init) ?? "—")
+            Text(shownDistances?.center.map(String.init) ?? "—")
                 .font(.system(size: 60, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(showingLastKnown ? Color.white.opacity(0.55) : .white)
                 .monospacedDigit()
             Text("to center · est.")
                 .font(.system(size: 12)).foregroundStyle(Color.white.opacity(0.7))
+            lastKnownCaption
+        }
+    }
+
+    // Honest "this is the last reading, not a live fix" marker. Only shows while
+    // we're falling back to the cache; it clears itself the moment GPS returns.
+    @ViewBuilder private var lastKnownCaption: some View {
+        if showingLastKnown {
+            HStack(spacing: 3) {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .font(.system(size: 9, weight: .bold))
+                Text("last known")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(Color.badGolfAmber)
+            .padding(.top, 1)
         }
     }
 
