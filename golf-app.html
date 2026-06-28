@@ -14854,7 +14854,11 @@ const PARTICIPANT_GAME_KEYS = [
   { key: 'junk',      min: 2, label: 'Junk side bet participants' },
   { key: 'ctp',       min: 2, label: 'CTP participants' },
   { key: 'birdiePool', min: 2, label: 'Birdie Pool participants' },
-  { key: 'quota',     min: 2, label: 'Quota participants' }
+  { key: 'quota',     min: 2, label: 'Quota participants' },
+  // Snake is its own card (value at games.junk.snake) but gets its OWN participant
+  // list (games.junk.snakeParticipants), independent of the Junk bundle — handled
+  // specially in gather/restore/calc (the cfgKey maps below intentionally omit it).
+  { key: 'snake',     min: 2, label: 'Snake participants' }
 ];
 // Games that run PER cart group in a tournament (restricted to that foursome's
 // players), so their field-wide participant picker is replaced with a note in
@@ -15724,6 +15728,18 @@ function applySavedConfig(config) {
       });
     }
   });
+  // Snake — its own participant list (games.junk.snakeParticipants/Names), handled
+  // here because the generic loop above skips it (no cfgKey). Prefer names (stable).
+  try {
+    if (!state.gameParticipants) state.gameParticipants = {};
+    state.gameParticipants['snake'] = new Set();
+    const _sj = games.junk || {};
+    if (Array.isArray(_sj.snakeParticipantNames)) {
+      _sj.snakeParticipantNames.forEach(name => { const r = resolveSavedNameToCurrent(name); if (r) state.gameParticipants['snake'].add(r); });
+    } else if (Array.isArray(_sj.snakeParticipants)) {
+      _sj.snakeParticipants.forEach(pid => { const p = (config.players || []).find(pl => pl.id === pid); if (p) { const r = resolveSavedNameToCurrent(p.name); if (r) state.gameParticipants['snake'].add(r); } });
+    }
+  } catch (e) {}
   // Re-render with the restored sets
   renderParticipantPickers();
   // Re-render the team pickers so every restored team game (teamQuota, teamMatch,
@@ -16265,6 +16281,15 @@ function gatherSetup() {
   if ($('game-snake') && $('game-snake').checked) {
     games.junk = games.junk || {};
     games.junk.snake = parseFloat($('snake-value').value) || 0;
+    // Snake has its OWN participant list (separate from the Junk bundle), so it can
+    // be assigned to a subset of players like every other side bet. Stored under
+    // games.junk.snakeParticipants/Names; the snake payout (calcJunk) reads them.
+    const _snakeSet = (state.gameParticipants && state.gameParticipants['snake']) || new Set();
+    if (_snakeSet.size < 2) { showToast('Snake needs at least 2 players selected'); return null; }
+    const _snakeIds = [], _snakeNames = [];
+    Array.from(_snakeSet).forEach(name => { const p = players.find(pl => pl.name === name); if (p) { _snakeIds.push(p.id); _snakeNames.push(p.name); } });
+    games.junk.snakeParticipants = _snakeIds;
+    games.junk.snakeParticipantNames = _snakeNames;
   }
   // Birdie Pool — three configurable dollar amounts that auto-pay from scorecard.
   // Each player who makes the relevant score (birdie/eagle/HIO) collects that
@@ -16291,6 +16316,10 @@ function gatherSetup() {
       'birdiePool': 'birdiePool', 'quota': 'quota'
     })[spec.key];
     if (!cfgKey || !games[cfgKey]) continue;
+    // Snake-only rounds set games.junk = { snake } WITHOUT the Junk bundle being on,
+    // which was wrongly tripping "Junk side bet needs at least 2 players". Skip the
+    // Junk-bundle participant gate unless the Junk bundle checkbox itself is on.
+    if (spec.key === 'junk' && !($('game-junk') && $('game-junk').checked)) continue;
     if (state._t2DayConfig && T2_PER_GROUP_GAMES.has(spec.key)) continue;   // per-group game: participants come from each foursome at launch
     const partSet = (state.gameParticipants && state.gameParticipants[spec.key]) || new Set();
     if (partSet.size < spec.min) {
@@ -21511,12 +21540,21 @@ function calcJunk(g) {
   try {
     const snakeAmt = g.games.junk['snake'] || 0;
     if (snakeAmt > 0) {
+      // Snake has its OWN participant list (separate from the Junk bundle). Fall back
+      // to the junk participants / everyone for legacy rounds saved before Snake had
+      // its own picker.
+      let snakeParts = participants, snakePartIds = partIds;
+      if (Array.isArray(g.games.junk.snakeParticipants) && g.games.junk.snakeParticipants.length) {
+        const _sIds = new Set(g.games.junk.snakeParticipants);
+        const _sFil = g.players.filter(p => _sIds.has(p.id));
+        if (_sFil.length >= 2) { snakeParts = _sFil; snakePartIds = _sIds; }
+      }
       let finalHole = 0, holders = [], snakeCount = 0;
       for (let h = 1; h <= 18; h++) {
         let e = (g.junkData[h] || {})['snake'];
         if (typeof e === 'string') e = [e];
         if (!Array.isArray(e)) continue;
-        const ids = e.filter(id => partIds.has(id));
+        const ids = e.filter(id => snakePartIds.has(id));
         if (ids.length) { snakeCount += ids.length; finalHole = h; holders = ids; }   // tally every snake; last hole = final holder
       }
       if (finalHole && holders.length && snakeCount > 0) {
@@ -21527,7 +21565,7 @@ function calcJunk(g) {
         // player. The pot still grows by EVERY 3-putt all round (snakeCount); the
         // single final holder pays the whole pot and everyone else splits it.
         const finalHolderId = holders[holders.length - 1];
-        const nonHolders = participants.filter(p => p.id !== finalHolderId);
+        const nonHolders = snakeParts.filter(p => p.id !== finalHolderId);
         if (nonHolders.length) {
           const pot = snakeAmt * snakeCount;            // final holder pays amount × #snakes
           const share = pot / nonHolders.length;         // others split the pot evenly
@@ -34915,7 +34953,11 @@ function renderBottomNav() {
   // has no betting games (a plain no-bet round has nothing to show on the Board).
   const _gBoard = state.game;
   const _hasBets = !!(_gBoard && _gBoard.games && Object.keys(_gBoard.games).length > 0);
-  const boardBtn = (_hasBets && _gBoard.code) ? it('board', 'board', 'Board') : '';
+  // Only show the Board tab when there's a LIVE round, or while you're actually
+  // viewing this round's Board (a finished round's settle-up). Otherwise a finished
+  // round still in state.game (e.g. restored on launch) left the Board tab lingering
+  // on Home and tapping it jumped you back into the last tournament. (Tyler)
+  const boardBtn = (_hasBets && _gBoard.code && (live || activeTab === 'board')) ? it('board', 'board', 'Board') : '';
   nav.innerHTML = left1 + it('tourneys', 'cal', 'Events') + center + it('crew', 'crew', 'Crew') + boardBtn + moreBtn;
 }
 function bnavGo(tab) {
