@@ -8,6 +8,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Override point for customization after application launch.
+        // Disable iOS "shake to undo" app-wide. During a round phones get jostled in
+        // carts/pockets while a score field still holds focus, which spuriously popped
+        // the native "Undo Typing" alert — especially while two people were scoring.
+        application.applicationSupportsShakeToEdit = false
         return true
     }
 
