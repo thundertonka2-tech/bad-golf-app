@@ -6178,7 +6178,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.371';
+const BG_BUILD = 'v2026.11.372';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8454,7 +8454,7 @@ function wireAuthUI() {
 function isMaintenanceLink() {
   try {
     const src = (location.search || '') + ' ' + (location.hash || '');
-    return /[?&](courseimport|courseoverride|stateimport|osmimport|nextstate|coursecheck|coursegaps|courselist|contactimport|coursecleanup|multinine|dupcleanup|cleanup|statsreset)=/.test(src);
+    return /[?&](courseimport|courseoverride|stateimport|osmimport|nextstate|coursecheck|coursegaps|courselist|contactimport|coursecleanup|multinine|dupcleanup|cleanup|statsreset|statecheck|statefill)=/.test(src);
   } catch (e) { return false; }
 }
 
@@ -44207,6 +44207,140 @@ async function courseListExport(stOverride){
 }
 window.bgCourseList = st => courseListExport(st);
 
+// ====================================================================
+// STATE BACKFILL (v372) — find/fix courses with no state.
+// A course with no state can't be found by searching "IN", "TX", etc.
+// Most come from the old hand-add form (pre-v371) that didn't capture state.
+//   ?statecheck=1  → audit screen: list every stateless course, fill inline.
+//   ?statefill=1   → bulk import a researched CSV (course_id,st) — used to apply
+//                    GolfPass-matched states automatically. Only fills BLANKS;
+//                    never clobbers a course that already has a state.
+// ====================================================================
+async function _setCourseState(id, st){
+  st = String(st||'').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(st)) return false;
+  const c = (typeof COURSE_LIBRARY!=='undefined'?COURSE_LIBRARY:[]).find(x=>x && x.id===id);
+  if (!c) return false;
+  const ov = await getCourseDetailOverrides();
+  const prev = ov[id] || {};
+  ov[id] = Object.assign({ name:'', city:(c.city||'') }, prev, { st: st });
+  await safeSet(KEY_COURSE_DETAIL_OVERRIDES, JSON.stringify(ov), true);
+  c.st = st;
+  try { const adds = await getCourseLibraryAdditions(); const a = adds.find(x=>x.id===id); if (a){ a.st = st; await saveCourseLibraryAdditions(adds); } } catch(e){}
+  try { invalidateCourseLibraryCache(); } catch(e){}
+  return true;
+}
+
+function _csvParseLine(l){
+  const out=[]; let cur='', q=false;
+  for (let i=0;i<l.length;i++){ const ch=l[i];
+    if (q){ if (ch==='"'){ if (l[i+1]==='"'){ cur+='"'; i++; } else q=false; } else cur+=ch; }
+    else { if (ch===','){ out.push(cur); cur=''; } else if (ch==='"'){ q=true; } else cur+=ch; }
+  }
+  out.push(cur); return out;
+}
+
+async function stateFillImport(file){
+  let panel = document.getElementById('statefill-panel'); if (panel) panel.remove();
+  panel = document.createElement('div');
+  panel.id='statefill-panel';
+  panel.style.cssText='position:fixed;inset:0;z-index:100090;background:var(--bg);color:var(--text);overflow:auto;padding:16px;font-size:13px;line-height:1.6';
+  panel.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><strong>🗺️ State backfill import</strong><button id="sf-close" style="background:var(--surface-2);border:none;color:var(--text);border-radius:8px;padding:6px 12px;cursor:pointer">✕ Close</button></div><div id="sf-log"></div>';
+  document.body.appendChild(panel);
+  document.getElementById('sf-close').onclick=()=>panel.remove();
+  const log=(m,c)=>{ const b=document.getElementById('sf-log'); if(b) b.innerHTML+='<div'+(c?' style="color:'+c+'"':'')+'>'+m+'</div>'; };
+  try {
+    if (typeof loadCourseLibrary==='function') await loadCourseLibrary();
+    const text = await file.text();
+    const lines = text.split(/\r?\n/).filter(l=>l.trim().length);
+    if (!lines.length){ log('Empty file.','var(--log-warn,#ffd34d)'); return; }
+    const header = _csvParseLine(lines[0]).map(h=>h.trim().toLowerCase());
+    const idIdx = header.findIndex(h=>h==='course_id'||h==='id');
+    const stIdx = header.findIndex(h=>h==='st'||h==='state'||h==='state_code'||h==='state code');
+    const nameIdx = header.findIndex(h=>h==='name');
+    if (stIdx<0){ log('No "st"/"state" column in the header — found: '+header.join(', '),'var(--log-err,#ff8a80)'); return; }
+    const ov = await getCourseDetailOverrides();
+    const adds = await getCourseLibraryAdditions();
+    const addById = {}; adds.forEach(a=>{ if(a&&a.id) addById[a.id]=a; });
+    let applied=0, already=0, bad=0, notfound=0;
+    for (let i=1;i<lines.length;i++){
+      const cells=_csvParseLine(lines[i]);
+      const st=((cells[stIdx]||'').trim().toUpperCase());
+      if (!/^[A-Z]{2}$/.test(st)){ bad++; continue; }
+      const id = idIdx>=0 ? (cells[idIdx]||'').trim() : '';
+      const name = nameIdx>=0 ? (cells[nameIdx]||'').trim() : '';
+      let c=null;
+      if (id) c=COURSE_LIBRARY.find(x=>x&&x.id===id);
+      if (!c && name) c=COURSE_LIBRARY.find(x=>x&&x.name&&x.name.trim().toLowerCase()===name.toLowerCase());
+      if (!c){ notfound++; log('• no match: '+(id||name),'var(--log-warn,#ffd34d)'); continue; }
+      const cur = (typeof courseStateCode==='function') ? courseStateCode(c) : (c.st||'');
+      if (cur){ already++; continue; }                         // never clobber a real state
+      const prev = ov[c.id] || {};
+      ov[c.id] = Object.assign({ name:'', city:(c.city||'') }, prev, { st:st });
+      c.st = st;
+      const a = addById[c.id]; if (a) a.st=st;
+      applied++;
+    }
+    await safeSet(KEY_COURSE_DETAIL_OVERRIDES, JSON.stringify(ov), true);
+    try { await saveCourseLibraryAdditions(adds); } catch(e){}
+    try { invalidateCourseLibraryCache(); } catch(e){}
+    log('<strong>Done.</strong> Filled '+applied+' · '+already+' already had a state · '+notfound+' not matched · '+bad+' invalid rows.','var(--log-ok,#8fd19e)');
+    try { showToast('State backfill: '+applied+' courses updated'); } catch(e){}
+  } catch(e){ log('Import failed: '+(e&&e.message||e),'var(--log-err,#ff8a80)'); console.error('stateFillImport', e); }
+}
+window.bgStateFill = function(){ const inp=document.createElement('input'); inp.type='file'; inp.accept='.csv,text/csv'; inp.onchange=function(){ if(inp.files&&inp.files[0]) stateFillImport(inp.files[0]); }; inp.click(); };
+
+async function openMissingStateAudit(){
+  try { if (typeof loadCourseLibrary==='function') await loadCourseLibrary(); } catch(e){}
+  const esc=(typeof escapeHtml==='function')?escapeHtml:(x=>x);
+  const ea=(typeof escAttr==='function')?escAttr:(x=>String(x).replace(/"/g,'&quot;'));
+  const lib=(typeof COURSE_LIBRARY!=='undefined')?COURSE_LIBRARY:[];
+  const stOf=c=>(typeof courseStateCode==='function')?courseStateCode(c):(c.st||'');
+  const missing=lib.filter(c=>c && !stOf(c)).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+  const ov=document.createElement('div'); ov.id='missing-state-ov'; ov.className='modal-overlay show'; ov.style.cssText='z-index:100050;align-items:flex-start;overflow-y:auto';
+  let head='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">'+
+    '<h2 style="margin:0;font-size:18px">🗺️ Courses missing a state</h2>'+
+    '<button id="msa-x" aria-label="Close" style="background:transparent;border:none;font-size:22px;line-height:1;cursor:pointer">✕</button></div>'+
+    '<div class="help-text" style="margin-bottom:10px">'+missing.length+' course'+(missing.length===1?'':'s')+' have no state, so they can’t be found by searching a state. Fill one in and tap Save, or export the list for a bulk GolfPass backfill (?statefill=1).</div>'+
+    '<button id="msa-export" class="small" style="margin-bottom:10px">⬇️ Export list (CSV)</button>';
+  let body='';
+  if (!missing.length){ body='<div class="help-text">✓ Every course has a state. Nothing to fix.</div>'; }
+  else body=missing.map(c=>{
+    const city=(c.city||'').replace(/,\s*[A-Za-z]{2}\s*$/,'').trim();
+    return '<div class="msa-row" data-id="'+ea(c.id)+'" style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">'+
+      '<div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(c.name||'?')+'</div>'+
+      (city?'<div class="small-text" style="color:var(--text-muted)">'+esc(city)+'</div>':'')+'</div>'+
+      '<input class="msa-st" maxlength="2" placeholder="ST" style="flex:0 0 56px;width:56px;padding:8px;text-transform:uppercase;text-align:center;font-size:15px">'+
+      '<button class="small primary msa-save" style="flex:0 0 auto">Save</button></div>';
+  }).join('');
+  ov.innerHTML='<div class="modal" style="max-width:560px;width:96%;margin:12px auto;max-height:90vh;overflow-y:auto">'+head+'<div id="msa-body">'+body+'</div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#msa-x').onclick=()=>ov.remove();
+  ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
+  const exp=ov.querySelector('#msa-export'); if(exp) exp.onclick=()=>{
+    const rows=[['course_id','name','city','state']];
+    missing.forEach(c=>rows.push([c.id,c.name||'',(c.city||'').replace(/,\s*[A-Za-z]{2}\s*$/,'').trim(),'']));
+    const csv=rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n');
+    const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download='bad-golf-missing-state.csv'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+    try{ showToast(missing.length+' courses exported'); }catch(e){}
+  };
+  ov.querySelectorAll('.msa-row').forEach(row=>{
+    const btn=row.querySelector('.msa-save'); const inp=row.querySelector('.msa-st');
+    if (btn) btn.onclick=async ()=>{
+      const st=(inp&&inp.value||'').trim().toUpperCase();
+      if(!/^[A-Z]{2}$/.test(st)){ try{showToast('Enter a 2-letter state');}catch(e){} return; }
+      btn.disabled=true; btn.textContent='Saving…';
+      const ok=await _setCourseState(row.dataset.id, st);
+      if (ok){ row.style.opacity='0.45'; btn.textContent='✓ Saved'; }
+      else { btn.disabled=false; btn.textContent='Save'; try{showToast('Could not save');}catch(e){} }
+    };
+  });
+}
+window.bgMissingStates = openMissingStateAudit;
+
+
 // ---------- course contact import (?contactimport=1 or =ST) ----------------
 // Adds phone / website / address ONLY, into the course_contact table. This code
 // path NEVER reads or writes scorecards, rating/slope, par, stroke index,
@@ -44308,6 +44442,12 @@ window.bgImportCourseContact = (st) => {
 {
   const m = location.search.match(/[?&]contactimport=([A-Za-z0-9]+)/);
   if (m) setTimeout(() => { window.bgImportCourseContact(m[1] === '1' ? '' : m[1]); }, 2500);
+}
+{
+  if (/[?&]statecheck=1/.test(location.search)) setTimeout(() => { try { window.bgMissingStates(); } catch (e) {} }, 2500);
+}
+{
+  if (/[?&]statefill=1/.test(location.search)) setTimeout(() => { try { window.bgStateFill(); } catch (e) {} }, 1500);
 }
 
 
