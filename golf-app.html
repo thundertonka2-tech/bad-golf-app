@@ -6142,7 +6142,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.347';
+const BG_BUILD = 'v2026.11.348';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -7669,7 +7669,10 @@ async function adminCreateCourse() {
   if (!name.trim()) { showToast('Enter a course name'); return; }
   // Duplicate check — warn on any same-name course already in the library.
   const dups = (COURSE_LIBRARY || []).filter(c => c.name && c.name.trim().toLowerCase() === name.trim().toLowerCase());
-  if (dups.length && !window.confirm('⚠️ Possible duplicate — already in the library:\n' + dups.map(d => '• ' + d.name + (d.city ? ' (' + d.city + ')' : '')).join('\n') + '\n\nCreate it anyway?')) return;
+  if (dups.length) {
+    const _dupChoice = await confirmDuplicateCourse(dups);
+    if (_dupChoice !== 'create') return;   // Cancel, or tapped a dup to View it — abort this create
+  }
   let added = null;
   try { added = await addCourseToLibrary(name.trim(), city, '', st ? { st } : null); } catch (e) {}
   if (!added) { showToast('Could not create course'); return; }
@@ -9604,6 +9607,48 @@ function uiPrompt(message, opts) {
       ov.appendChild(card); document.body.appendChild(ov);
       setTimeout(function () { try { inp.focus(); } catch (e) {} }, 50);
     } catch (e) { try { resolve(window.prompt(message, opts.value || '')); } catch (_) { resolve(null); } }
+  });
+}
+// Duplicate-course confirm with a TAPPABLE list so the admin can VIEW the
+// possible duplicate before deciding (was a plain confirm with only Cancel/OK,
+// giving no way to check whether it's really the same course). Resolves
+// 'create' (make it anyway), 'cancel', or 'view' (opens the dup's detail screen
+// and aborts the create so the admin can inspect it).
+function confirmDuplicateCourse(dups) {
+  dups = Array.isArray(dups) ? dups : [];
+  return new Promise(function (resolve) {
+    try {
+      var esc = (typeof escapeHtml === 'function') ? escapeHtml : function (x) { return String(x == null ? '' : x); };
+      var ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;z-index:100085;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;padding:18px';
+      var card = document.createElement('div');
+      card.onclick = function (e) { e.stopPropagation(); };
+      card.style.cssText = 'background:var(--surface);color:var(--text);border-radius:16px;max-width:420px;width:100%;padding:20px 18px;box-shadow:0 10px 40px rgba(0,0,0,0.4)';
+      var rows = dups.map(function (d, i) {
+        return '<button class="cdc-view" data-i="' + i + '" style="display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;text-align:left;padding:11px 12px;margin-bottom:8px;border:1px solid var(--border);border-radius:10px;background:var(--bg);color:var(--text);font-size:14px;cursor:pointer">' +
+          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="font-weight:600">' + esc(d.name) + '</span>' + (d.city ? (' <span style="color:var(--text-muted)">(' + esc(d.city) + ')</span>') : '') + '</span>' +
+          '<span style="color:var(--accent);font-weight:700;white-space:nowrap">View ›</span></button>';
+      }).join('');
+      card.innerHTML =
+        '<div style="font-weight:800;font-size:17px;margin-bottom:6px">⚠️ Possible duplicate</div>' +
+        '<div style="font-size:14px;color:var(--text-muted);line-height:1.5;margin-bottom:12px">Already in the library — tap one to view it first:</div>' +
+        rows +
+        '<div style="display:flex;gap:8px;margin-top:6px"><button class="cdc-cancel" style="flex:1;padding:12px">Cancel</button><button class="cdc-create primary" style="flex:1;padding:12px;font-weight:700">Create it anyway</button></div>';
+      var done = function (val, dupId) {
+        try { ov.remove(); } catch (e) {}
+        if (val === 'view' && dupId != null) { try { openCourseDetail(dupId); } catch (e) {} }
+        resolve(val);
+      };
+      card.querySelectorAll('.cdc-view').forEach(function (b) {
+        b.onclick = function () { var d = dups[parseInt(b.getAttribute('data-i'), 10)]; done('view', d && d.id); };
+      });
+      card.querySelector('.cdc-create').onclick = function () { done('create'); };
+      card.querySelector('.cdc-cancel').onclick = function () { done('cancel'); };
+      ov.onclick = function () { done('cancel'); };
+      ov.appendChild(card); document.body.appendChild(ov);
+    } catch (e) {
+      try { resolve(window.confirm('Possible duplicate already in the library. Create it anyway?') ? 'create' : 'cancel'); } catch (_) { resolve('cancel'); }
+    }
   });
 }
 // Clean gate for the soft start-round warnings (unranked course, zero handicaps,
@@ -34511,6 +34556,10 @@ async function _orRenderCrewPicker(){
 }
 
 async function savePostOpenRound(){
+  if (window._orPosting) return;                          // re-entry guard: ignore a 2nd tap while a post is in flight (the double-post bug)
+  window._orPosting = true;
+  var _orSaveBtn = null;
+  try { _orSaveBtn = document.getElementById('orm-save'); if (_orSaveBtn){ _orSaveBtn.disabled = true; _orSaveBtn.style.opacity = '0.6'; } } catch(e){}
   try {
     var setup = window._orPendingSetup;
     if (!setup) { showToast('Setup missing - try again'); return; }
@@ -34566,6 +34615,18 @@ async function savePostOpenRound(){
     var created=[];
     for (var k=0;k<tees.length;k++){
       var tee=tees[k];
+      // Backstop against a duplicate post: skip a tee that already exists as an
+      // OPEN round I created for the same course + date + time (the 4.3s-apart
+      // double-post). The re-entry guard above stops same-session double taps;
+      // this catches a re-post after the first one already finished.
+      var _orDupExists = (listT||[]).some(function(x){
+        return x && x.status==='open' && !x.isTemplate
+          && _orNorm(x.createdBy)===_orNorm(me)
+          && String(x.course||'')===String(setup.course||'')
+          && String(x.date||'')===String(tee.date||'')
+          && String(x.time||'')===String(tee.time||'');
+      });
+      if (_orDupExists) continue;
       var cfg = JSON.parse(JSON.stringify(baseCfg));
       cfg.players = [ JSON.parse(JSON.stringify(hostPlayer)) ];
       var rid = 'or-' + Date.now() + '-' + k + '-' + Math.random().toString(36).slice(2,6);
@@ -34582,6 +34643,7 @@ async function savePostOpenRound(){
       };
       listT.push(t); created.push(t);
     }
+    if (!created.length){ showToast('That open round is already posted'); return; }
     await saveTourneys(listT);
     for (var b=0;b<created.length;b++){ try { await _orBroadcast(created[b]); } catch(e){ console.warn('OR broadcast', e); } }
     // Heads-up push to every friend NOT seated and NOT already directly invited.
@@ -34593,6 +34655,10 @@ async function savePostOpenRound(){
     try { await renderOpenRounds(); } catch(e){}
     showToast(created.length>1 ? (created.length+' open tee times posted - crew can grab spots') : 'Open Round posted - crew can grab the open spots');
   } catch(e){ console.warn('savePostOpenRound', e); showToast('Could not post - try again'); }
+  finally {
+    window._orPosting = false;
+    try { if (_orSaveBtn){ _orSaveBtn.disabled = false; _orSaveBtn.style.opacity = ''; } } catch(e){}
+  }
 }
 
 async function _orBroadcast(t){
