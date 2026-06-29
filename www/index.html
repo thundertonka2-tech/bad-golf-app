@@ -6184,7 +6184,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.381';
+const BG_BUILD = 'v2026.11.382';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -41710,17 +41710,106 @@ const gpsView = (() => {
     } catch (e) { console.warn('scorecard auto-fill from OSM failed:', e); return false; }
   }
 
+  // Per-nine OSM import for a wired three-nine course. OSM numbers each nine from
+  // its own 1 (so two nines share refs 1-9) — importing by raw ref drops a nine
+  // on the collision (the Gleannloch/Loch bug). Instead: group holes per nine by
+  // NAME, else by ref + par-sequence + spatial centroid, match each to a wired
+  // nine, and write each to its `base#nine` row (never overwriting mapped holes).
+  async function importThreeNineOsm(base, center) {
+    const set = (typeof THREE_NINE_COURSES === 'object') ? THREE_NINE_COURSES[base] : null;
+    if (!set) return 0;
+    const nineKeys = Object.keys(set).filter(k => set[k] && Array.isArray(set[k].pars));
+    if (!nineKeys.length) return 0;
+    const q = '[out:json][timeout:25];(way["golf"="hole"](around:3000,' + center[1] + ',' + center[0] + ');way["golf"="green"](around:3000,' + center[1] + ',' + center[0] + '););out geom;';
+    const j2 = await overpassQuery(q);
+    const holeWays = [], greens = [];
+    (j2.elements || []).forEach(e => {
+      if (!e.geometry || e.geometry.length < 2) return;
+      const pts = e.geometry.map(g2 => [g2.lon, g2.lat]);
+      if (e.tags && e.tags.golf === 'hole') holeWays.push({ ref: parseInt(e.tags.ref, 10) || 0, par: e.tags.par ? parseInt(e.tags.par, 10) : null, name: e.tags.name || '', pts: pts, cen: polyCentroid(pts) });
+      if (e.tags && e.tags.golf === 'green') greens.push(pts);
+    });
+    if (holeWays.length < 9) return 0;
+    const mkHole = (hw) => {
+      const tee = hw.pts[0], lineEnd = hw.pts[hw.pts.length - 1];
+      const prev = hw.pts.length >= 2 ? hw.pts[hw.pts.length - 2] : tee;
+      let best = null, bestD = 80;
+      for (const g2 of greens) { const c = polyCentroid(g2); const d = distM(c, lineEnd); if (d < bestD) { bestD = d; best = g2; } }
+      let front, back, mid;
+      if (best) {
+        const axis = brgBetween(prev, lineEnd);
+        let minP = Infinity, maxP = -Infinity, fPt = null, bPt = null;
+        for (const v of best) { const proj = projAlong(lineEnd, v, axis); if (proj < minP) { minP = proj; fPt = v; } if (proj > maxP) { maxP = proj; bPt = v; } }
+        front = fPt; back = bPt; mid = polyCentroid(best);
+      } else { const axis = brgBetween(prev, lineEnd); front = offsetPt(lineEnd, -14, axis); back = offsetPt(lineEnd, 14, axis); mid = lineEnd; }
+      return { tee: tee, front: front, mid: mid, back: back, par: hw.par || undefined, line: hw.pts.slice() };
+    };
+    const assigned = {}, used = new Set();
+    const named = {}, unnamed = [];
+    holeWays.forEach(h => { const mm = h.name.match(/^(.*?)\s*#?\s*\d+$/); const b = mm ? mm[1].trim().toLowerCase() : ''; if (b) (named[b] = named[b] || []).push(h); else unnamed.push(h); });
+    for (const b in named) {
+      let key = null;
+      for (const k of nineKeys) { if (used.has(k)) continue; if (b.indexOf(String(set[k].name || '').toLowerCase()) >= 0) { key = k; break; } }
+      if (key && named[b].length >= 9) { named[b].sort((a, c) => a.ref - c.ref); assigned[key] = named[b].slice(0, 9); used.add(key); }
+      else { for (const h of named[b]) unnamed.push(h); }
+    }
+    const remaining = nineKeys.filter(k => !used.has(k));
+    if (remaining.length) {
+      const byRef = {}; unnamed.forEach(h => { (byRef[h.ref] = byRef[h.ref] || []).push(h); });
+      const allPerms = []; (function go(a, rest) { if (!rest.length) { allPerms.push(a); return; } rest.forEach((x, i) => go(a.concat(x), rest.slice(0, i).concat(rest.slice(i + 1)))); })([], remaining.map((_, i) => i));
+      let cen = {}; remaining.forEach(k => cen[k] = null);
+      let pick = {};
+      for (let round = 0; round < 4; round++) {
+        pick = {}; remaining.forEach(k => pick[k] = new Array(9).fill(null));
+        for (let p = 1; p <= 9; p++) {
+          const c = (byRef[p] || []).slice();
+          if (c.length < remaining.length) continue;
+          let bestPerm = null, bestCost = Infinity;
+          for (const perm of allPerms) {
+            let cost = 0;
+            perm.forEach((ci, ri) => { const k = remaining[ri]; const cand = c[ci]; cost += (cand.par === set[k].pars[p - 1] ? 0 : 50); if (cen[k]) cost += distM(cand.cen, cen[k]) / 1000; });
+            if (cost < bestCost) { bestCost = cost; bestPerm = perm; }
+          }
+          if (bestPerm) bestPerm.forEach((ci, ri) => { pick[remaining[ri]][p - 1] = c[ci]; });
+        }
+        remaining.forEach(k => { const hs = pick[k].filter(Boolean); if (hs.length) cen[k] = polyCentroid(hs.map(h => h.cen)); });
+      }
+      remaining.forEach(k => { if (pick[k].every(Boolean)) { assigned[k] = pick[k]; used.add(k); } });
+    }
+    let imported = 0;
+    for (const k of Object.keys(assigned)) {
+      const nine = assigned[k];
+      const parSeq = nine.map(h => h.par);
+      if (!set[k].pars.every((p, i) => p === parSeq[i])) continue; // only write a confirmed par-sequence match
+      const nineId = base + '#' + k;
+      if (!courseGps[nineId]) courseGps[nineId] = { holes: {}, source: 'osm' };
+      if (!courseGps[nineId].holes) courseGps[nineId].holes = {};
+      nine.forEach((hw, pos) => { const hnum = pos + 1; if (courseGps[nineId].holes[hnum]) return; courseGps[nineId].holes[hnum] = mkHole(hw); imported++; });
+      courseGps[nineId].osmTried = true; courseGps[nineId].updatedAt = Date.now();
+      try { await saveCourseRow(nineId); } catch (e) {}
+    }
+    return imported;
+  }
   // Per-course import launched from the GPS setup panel (UI wrapper).
   async function osmImport() {
     const status = el('gps-setup-status');
     status.textContent = 'Locating course…';
     try {
-      const center = courseCenter || await geocodeCourseId(courseId);
+      const _cs = (typeof comboSpecFromId === 'function') ? comboSpecFromId(courseId) : null;
+      const _base = _cs ? _cs.base : courseId;
+      const center = courseCenter || await geocodeCourseId(_base);
       courseCenter = center;
       if (map) map.jumpTo({ center, zoom: 15.5 });
       status.textContent = 'Searching OpenStreetMap for mapped holes…';
-      const imported = await importCourseOsm(courseId, center);
-      await saveStore();
+      let imported;
+      if (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[_base]) {
+        imported = await importThreeNineOsm(_base, center);
+        try { delete courseGps[courseId]; } catch (e) {}
+        await loadCourse(courseId);
+      } else {
+        imported = await importCourseOsm(courseId, center);
+        await saveStore();
+      }
       if (imported > 0) {
         gToast('Imported ' + imported + ' holes from OpenStreetMap 🎉');
         showHole(hole);
