@@ -6178,7 +6178,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.379';
+const BG_BUILD = 'v2026.11.380';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8018,14 +8018,42 @@ function adminPrepCourse(courseId, name) {
   try { window.open(q('bluegolf scorecard'), '_blank'); } catch (e) {}
   showToast('Opened USGA · 18Birdies · BlueGolf — research & verify');
 }
+// Admin: pick which loop of a three-nine course to map, then map it (each nine is
+// stored once; mapping two loops covers all three nines).
+function adminPickLoop(baseId, then) {
+  const set = (typeof THREE_NINE_COURSES === 'object') ? THREE_NINE_COURSES[baseId] : null;
+  if (!set || !Array.isArray(set.searchCombos) || !set.searchCombos.length) { then(baseId); return; }
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.zIndex = 100092;
+  const btns = set.searchCombos.map(p => {
+    const f = p[0], b = p[1];
+    const fn = (set[f] && set[f].name) || f, bn = (set[b] && set[b].name) || b;
+    return '<button class="primary full" data-loop="' + f + '-' + b + '" style="margin-bottom:8px">\ud83d\uddfa\ufe0f Map ' + escapeHtml(fn + ' / ' + bn) + '</button>';
+  }).join('');
+  ov.innerHTML = '<div class="modal" style="max-width:420px"><h2>Which loop to map?</h2>' +
+    '<p class="help-text" style="margin-bottom:12px">Each nine is mapped once \u2014 mapping two loops covers all three nines. Already-mapped holes are skipped.</p>' +
+    btns + '<button class="full" id="apl-cancel" style="margin-top:4px">Cancel</button></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#apl-cancel').onclick = close;
+  ov.querySelectorAll('button[data-loop]').forEach(b => b.onclick = () => { const fb = b.dataset.loop; close(); then(baseId + ':' + fb); });
+}
 async function adminMapCourse(courseId, opts) {
   opts = opts || {};
-  const lib = (COURSE_LIBRARY || []).find(c => c.id === courseId);
+  const _csm = (typeof comboSpecFromId === 'function') ? comboSpecFromId(courseId) : null;
+  const lib = _csm ? { id: courseId, name: _csm.name, city: _csm.city } : (COURSE_LIBRARY || []).find(c => c.id === courseId);
   if (!lib) { showToast('Course not found'); return; }
-  let sc = null; try { sc = await getCourseScorecard(courseId); } catch (e) {}
-  const pars = (sc && Array.isArray(sc.pars) && sc.pars.length === 18) ? sc.pars.slice() : new Array(18).fill(4);
-  const sis = (sc && Array.isArray(sc.sis) && sc.sis.length === 18) ? sc.sis.slice()
-    : (typeof DEFAULT_SI !== 'undefined' ? DEFAULT_SI.slice() : pars.map((_, i) => i + 1));
+  let sc = null;
+  let pars, sis;
+  if (_csm) {
+    pars = _csm.combo.pars.slice(); sis = _csm.combo.sis.slice(); sc = { tees: _csm.combo.tees };
+  } else {
+    try { sc = await getCourseScorecard(courseId); } catch (e) {}
+    pars = (sc && Array.isArray(sc.pars) && sc.pars.length === 18) ? sc.pars.slice() : new Array(18).fill(4);
+    sis = (sc && Array.isArray(sc.sis) && sc.sis.length === 18) ? sc.sis.slice()
+      : (typeof DEFAULT_SI !== 'undefined' ? DEFAULT_SI.slice() : pars.map((_, i) => i + 1));
+  }
   state._preMapGame = state.game; state._preMapHole = state.currentHole; state._preMapView = state.viewOnlyMode;
   state._mapSession = true;
   state._mapMissingOnly = !!opts.missingOnly;
@@ -11819,8 +11847,8 @@ async function openCourseDetail(id) {
     if (act === 'prep') { adminPrepCourse(id, it.name); return; }
     if (act === 'usga') { closeOv(); try { await adminUsgaLookup(id, it.name); } catch (e) {} openCourseDetail(id); return; }
     if (act === 'bluegolf') { closeOv(); try { await adminBlueGolfLookup(id, it.name); } catch (e) {} openCourseDetail(id); return; }
-    if (act === 'viewmap') { closeOv(); adminMappingChecklist(id); return; }
-    if (act === 'gpsadmin') { state._thenReopenDetailId = id; closeOv(); adminMapCourse(id); return; }
+    if (act === 'viewmap') { closeOv(); if (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]) { state._thenReopenDetailId = id; adminPickLoop(id, cid => adminMapCourse(cid)); } else { adminMappingChecklist(id); } return; }
+    if (act === 'gpsadmin') { state._thenReopenDetailId = id; closeOv(); if (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]) { adminPickLoop(id, cid => adminMapCourse(cid)); } else { adminMapCourse(id); } return; }
     if (act === 'scimg') { closeOv(); await showScorecardImageFor(id, it.name); openCourseDetail(id); return; }
     if (act === 'verify') {
       if (!completeNow) { showToast('Finish GPS (18/18) and rating first'); return; }
@@ -39812,8 +39840,47 @@ const gpsView = (() => {
       try { pruneGpsCache(60); localStorage.setItem(gpsCacheKey(cid), json); } catch (e2) {}
     }
   }
+  // Seed a per-nine GPS row from a legacy single-18 row, for the DEFAULT loop
+  // (searchCombos[0]). base holes 1-9 = default front nine, 10-18 = default back.
+  // So an already-mapped 27-hole course keeps its GPS without a re-map.
+  async function seedNineFromLegacy(base, nineKey, nineId) {
+    try {
+      const set = (typeof THREE_NINE_COURSES === 'object') ? THREE_NINE_COURSES[base] : null;
+      if (!set || !Array.isArray(set.searchCombos) || !set.searchCombos.length) return;
+      const def = set.searchCombos[0]; if (!def) return;
+      let slice = null;
+      if (nineKey === def[0]) slice = [1,2,3,4,5,6,7,8,9];
+      else if (nineKey === def[1]) slice = [10,11,12,13,14,15,16,17,18];
+      else return; // this nine has no legacy data
+      const has = courseGps[nineId] && courseGps[nineId].holes && Object.keys(courseGps[nineId].holes).length;
+      if (has) return;
+      await loadCourse(base);
+      const baseH = (courseGps[base] && courseGps[base].holes) || {};
+      if (!Object.keys(baseH).length) return;
+      const h = {}; slice.forEach((bh, i) => { if (baseH[bh]) h[i + 1] = baseH[bh]; });
+      if (Object.keys(h).length) { courseGps[nineId] = { holes: h, source: 'legacy-split', updatedAt: Date.now() }; await saveCourseRow(nineId); }
+    } catch (e) {}
+  }
   async function loadCourse(cid) {
     if (!courseGps) courseGps = {};
+    // Three-nine combo id (base:front-back): assemble GPS from the two per-nine
+    // rows (base#nine, holes 1-9). Seeds from a legacy base-18 where available.
+    {
+      const _cs = (typeof comboSpecFromId === 'function') ? comboSpecFromId(cid) : null;
+      if (_cs) {
+        const fId = _cs.base + '#' + _cs.front, bId = _cs.base + '#' + _cs.back;
+        await loadCourse(fId); await loadCourse(bId);
+        await seedNineFromLegacy(_cs.base, _cs.front, fId);
+        await seedNineFromLegacy(_cs.base, _cs.back, bId);
+        const fH = (courseGps[fId] && courseGps[fId].holes) || {};
+        const bH = (courseGps[bId] && courseGps[bId].holes) || {};
+        const holes = {};
+        for (let i = 1; i <= 9; i++) { if (fH[i]) holes[i] = fH[i]; }
+        for (let i = 1; i <= 9; i++) { if (bH[i]) holes[9 + i] = bH[i]; }
+        courseGps[cid] = { holes: holes, source: 'nine-combo', updatedAt: Date.now(), osmTried: true };
+        return;
+      }
+    }
     if (!cid || courseGps[cid]) return;
     // CACHE-FIRST: if this course is cached locally, use it immediately so the
     // map paints without waiting on a network round trip, then refresh from the
@@ -39878,6 +39945,21 @@ const gpsView = (() => {
   // — callers surface that so a "saved ✓" is never shown for a write that didn't land.
   async function saveCourseRow(cid) {
     if (!cid || !courseGps[cid]) return false;
+    // Three-nine combo: persist to the two per-nine rows (base#nine), not a combo row.
+    {
+      const _csv = (typeof comboSpecFromId === 'function') ? comboSpecFromId(cid) : null;
+      if (_csv) {
+        const fId = _csv.base + '#' + _csv.front, bId = _csv.base + '#' + _csv.back;
+        const H = (courseGps[cid] && courseGps[cid].holes) || {};
+        const fH = {}, bH = {};
+        for (let i = 1; i <= 9; i++) { if (H[i]) fH[i] = H[i]; }
+        for (let i = 1; i <= 9; i++) { if (H[9 + i]) bH[i] = H[9 + i]; }
+        courseGps[fId] = { holes: Object.assign({}, (courseGps[fId] && courseGps[fId].holes), fH), source: 'manual', updatedAt: Date.now() };
+        courseGps[bId] = { holes: Object.assign({}, (courseGps[bId] && courseGps[bId].holes), bH), source: 'manual', updatedAt: Date.now() };
+        const r1 = await saveCourseRow(fId), r2 = await saveCourseRow(bId);
+        return r1 && r2;
+      }
+    }
     try { gpsCacheSet(cid, JSON.stringify(courseGps[cid])); } catch (e) { console.warn('gps cache write failed:', e); }
     if (await ensureSupa()) {
       const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === cid) : null;
