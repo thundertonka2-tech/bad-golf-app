@@ -1238,6 +1238,7 @@
   .t-status.scheduled { background: var(--info-light); color: var(--info); }
   .t-status.live { background: var(--accent-light); color: var(--accent-dark); }
   .t-status.complete { background: var(--surface); color: var(--text-muted); border: 1px solid var(--border); }
+  .t-status.open { background: var(--accent); color: #fff; }
 
   .empty {
     text-align: center;
@@ -6141,7 +6142,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.335';
+const BG_BUILD = 'v2026.11.337';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -34045,6 +34046,12 @@ function renderTourneyCard(t, compact) {
   const dateStr = t.isTemplate ? '⭐ Template — start any day'
     : (t.date ? new Date(t.date + 'T00:00:00').toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'}) : 'No date');
   const players = t.players ? t.players.split(',').map(s => s.trim()).filter(Boolean) : [];
+  // Open-round-origin round still gathering players: show live fill status + who's in.
+  const isOpenRound = (t.status === 'open');
+  const orFilled = isOpenRound ? _orPlayers(t).length : 0;
+  const orCap = isOpenRound ? _orCapacity(t) : 0;
+  const orSlots = isOpenRound ? _orOpenSlots(t) : 0;
+  const orWho = isOpenRound ? _orPlayers(t).map(p => p && p.name).filter(Boolean).join(', ') : '';
   // Event image banner — the creator's custom image, else the Bad Golf icon.
   const _imgUrl = (window._eventImgs && window._eventImgs[t.id]) || '';
   // Small square logo (like a player-profile avatar) sitting BESIDE the details,
@@ -34060,14 +34067,15 @@ function renderTourneyCard(t, compact) {
         <div class="t-meta">
           <span>📅 ${dateStr}${t.time ? ' · ' + fmtClock12(t.time) : ''}</span>
           ${t.course ? `<span>⛳ ${t.course}</span>` : ''}
-          ${players.length ? `<span>👥 ${players.length}</span>` : ''}
+          ${isOpenRound ? `<span>👥 ${orFilled}/${orCap} in</span>` : (players.length ? `<span>👥 ${players.length}</span>` : '')}
         </div>
-        <span class="t-status ${t.status || 'scheduled'}">${t.status || 'scheduled'}</span>
+        ${isOpenRound && orWho ? `<div class="t-meta" style="margin-top:2px"><span>👤 ${escapeHtml(orWho)}</span></div>` : ''}
+        <span class="t-status ${isOpenRound ? 'open' : (t.status || 'scheduled')}">${isOpenRound ? ('OPEN · ' + orSlots + ' spot' + (orSlots===1?'':'s') + ' left') : (t.status || 'scheduled')}</span>
       </div>
     </div>
   `;
   try { const _lg = card.querySelector('.bg-evt-logo'); if (_lg) _lg.onclick = (e) => { e.stopPropagation(); editEventImageFor(t.id, () => { try { renderTourneyList(); } catch (er) {} }); }; } catch (e) {}
-  card.onclick = () => openTourneyActions(t);
+  card.onclick = () => { if (t.status === 'open') { try { openManageOpenRound(t.id); return; } catch (e) {} } openTourneyActions(t); };
   return card;
 }
 
@@ -34088,7 +34096,13 @@ async function renderTourneyList() {
     const createdByMe = !!_meKeyT && !!t.createdBy && _normT(t.createdBy) === _meKeyT;
     if (t.isTemplate) return createdByMe || !t.createdBy;        // templates I created (legacy w/o creator stays visible)
     const _st = t.status || 'scheduled';
-    if (_st === 'open') return false;                            // open rounds live in their own "Open Rounds" card
+    if (_st === 'open') {                                        // open rounds normally live in their own card,
+      // but a committed (non-host) player keeps it on THEIR schedule with live open
+      // status + who's in; the host manages it from the Open Rounds card.
+      if (!_meKeyT) return false;
+      if (typeof schedExpired === 'function' && schedExpired(t)) return false;
+      return _orHasPlayer(t, _meKeyT) && !_orIsHost(t, _meKeyT);
+    }
     if (_st === 'complete') return false;                        // hide ONLY completed events — a LIVE event must stay visible so players can find + join it (was hiding live, so Kevin's started tournament vanished from Events)
     if (_st !== 'live' && schedExpired(t)) return false;         // hide past-its-time, but keep in-progress live rounds visible
     if (createdByMe) return true;
@@ -34108,11 +34122,18 @@ async function renderTourneyList() {
     const rec = await getRecent();
     const hidden = (typeof getHiddenRounds === 'function') ? getHiddenRounds() : [];
     const tourneyCodes = new Set(tourneys.map(t => t.activeCode).filter(Boolean));
+    // Open rounds (status 'open') are filtered out of `tourneys` above, so their
+    // pre-allocated game code can leak in here and show the SAME round a 2nd time
+    // as a "Scheduled" card next to its Open Rounds card. Exclude any code that
+    // belongs to an open-round tourney (planned OR active code).
+    const openRoundCodes = new Set();
+    (_allT || []).forEach(t => { if (t && (t.status === 'open' || t.openRound)) { if (t.plannedCode) openRoundCodes.add(t.plannedCode); if (t.activeCode) openRoundCodes.add(t.activeCode); } });
     schedGames = (rec || []).filter(r => {
       if (!r || !r.code || r.finishedAt) return false;
       if (hidden.includes(r.code)) return false;
       if (r.scoreLine && String(r.scoreLine).trim()) return false;   // started → not a scheduled round
       if (tourneyCodes.has(r.code)) return false;                    // already shown as a tourney card
+      if (openRoundCodes.has(r.code)) return false;                  // belongs to an Open Round — shown there
       if ((r.t2 && r.t2.tournamentId) || _t2RoundCodes.has(r.code)) return false;  // tournament round → under Tournaments, not here
       return recentRowHasName(r, _meT);                              // I'm in it
     }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -34368,7 +34389,7 @@ async function renderOpenRounds(){
     if (!t || t.status!=='open' || t.isTemplate) return false;
     try { if (typeof schedExpired==='function' && schedExpired(t)) return false; } catch(e){}
     if (_orIsHost(t, meKey)) return true;
-    if (_orHasPlayer(t, meKey)) return true;
+    if (_orHasPlayer(t, meKey)) return false;   // committed (non-host) -> now lives in their Scheduled Rounds
     if (t.broadcast!=='select') return true; // all-crew broadcast
     try { return (t.invited||[]).some(function(x){ return _orNorm(x.name)===meKey; }); } catch(e){ return false; }
   }).sort(function(a,b){ return String(a.date||'9999').localeCompare(String(b.date||'9999')); });
@@ -36010,7 +36031,10 @@ async function saveScheduledRoundEdits(setup) {
   list[idx].course = setup.course;
   list[idx].players = cleanPlayers.map(p => p.name).join(', ');
   list[idx].savedConfig = savedConfig;
-  list[idx].status = list[idx].status === 'live' ? 'live' : 'scheduled';
+  // Open-round-origin round with a freed spot → back to Open Rounds (not stuck scheduled).
+  list[idx].status = (list[idx].status === 'live') ? 'live'
+    : (list[idx].openRound && _orOpenSlots(list[idx]) > 0) ? 'open'
+    : 'scheduled';
   await saveTourneys(list);
   state.pendingTourneySetup = null;
   state.editingTourneyId = null;
@@ -37828,7 +37852,10 @@ async function init() {
         list[idx].course = setup.course;
         list[idx].players = cleanPlayers.map(p => p.name).join(', ');
         list[idx].savedConfig = savedConfig;
-        list[idx].status = list[idx].status === 'live' ? 'live' : 'scheduled';
+        // Open-round-origin round with a freed spot → back to Open Rounds (not stuck scheduled).
+        list[idx].status = (list[idx].status === 'live') ? 'live'
+          : (list[idx].openRound && _orOpenSlots(list[idx]) > 0) ? 'open'
+          : 'scheduled';
       }
     } else {
       // Create new
