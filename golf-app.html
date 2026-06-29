@@ -6178,7 +6178,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.383';
+const BG_BUILD = 'v2026.11.386';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -7035,41 +7035,55 @@ function renderAdminUserList() {
 // Map of course_id → number of holes actually mapped. The OSM import created
 // course_gps rows with 0 (or partial) holes that previously counted as "mapped"
 // — so we count the holes and treat only fully-mapped (18-hole) courses as done.
-async function getMappedCourseIdSet() {
+// Session cache of per-course mapped-hole info so the admin never refetches the
+// same course twice (course_id -> { holes, fwc, center }).
+let _adminMappedCache = new Map();
+function _storeMappedRow(r) {
+  if (!r || !r.course_id) return;
+  const hs = r.holes || {}; let fc = 0, cen = null;
+  for (const k in hs) {
+    const h = hs[k]; if (!h) continue;
+    if (Array.isArray(h.fwc) && h.fwc.length === 2) fc++;
+    if (!cen) { const p = h.mid || h.tee || h.front || h.back; if (Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number') cen = { lng: p[0], lat: p[1] }; }
+  }
+  _adminMappedCache.set(r.course_id, { holes: Object.keys(hs).length, fwc: fc, center: cen });
+}
+// Per-course mapped-hole counts. Pass an ARRAY of course ids to fetch ONLY those
+// (scoped to what the admin is viewing). The old call read the WHOLE course_gps
+// table — every course's full hole geometry, ~16 MB over ~9k rows — on every
+// admin load. Now we fetch just the in-scope ids (chunked) and cache them, so a
+// state pick / search loads in a flash and narrowing it never refetches.
+async function getMappedCourseIdSet(ids) {
   const counts = new Map();
-  counts.fwc = new Map();   // course_id → # holes that have a fairway-center (target) marked
-  counts.center = new Map(); // course_id → {lng,lat} representative point (admin-map pin)
-  // .has(id) → true only when a course is FULLY mapped (18 holes); otherwise it
-  // still needs mapping. (We keep the name .has so callers read naturally.)
+  counts.fwc = new Map();
+  counts.center = new Map();
   counts.has = function (id) { return (this.get(id) || 0) >= 18; };
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
-      let from = 0; const page = 500;
-      while (true) {
-        const { data, error } = await supa.from('course_gps').select('course_id,holes').range(from, from + page - 1);
-        if (error || !data || !data.length) break;
-        data.forEach(r => {
-          if (!r || !r.course_id) return;
-          const hs = r.holes || {};
-          counts.set(r.course_id, Object.keys(hs).length);
-          let fc = 0; let cen = null;
-          for (const k in hs) {
-            const h = hs[k]; if (!h) continue;
-            if (Array.isArray(h.fwc) && h.fwc.length === 2) fc++;
-            // Grab a point [lng,lat] so the admin map can pin a GPS-mapped course
-            // even when its library entry has no center coord (seed/manual adds
-            // like Buffalo Creek — mapped & playable but no lat/lng on record).
-            if (!cen) { const p = h.mid || h.tee || h.front || h.back; if (Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number') cen = { lng: p[0], lat: p[1] }; }
-          }
-          counts.fwc.set(r.course_id, fc);
-          if (cen) counts.center.set(r.course_id, cen);
-        });
-        if (data.length < page) break;
-        from += page;
+      if (!Array.isArray(ids)) {
+        let from = 0; const page = 500;
+        while (true) {
+          const { data, error } = await supa.from('course_gps').select('course_id,holes').range(from, from + page - 1);
+          if (error || !data || !data.length) break;
+          data.forEach(_storeMappedRow);
+          if (data.length < page) break;
+          from += page;
+        }
+      } else {
+        const toFetch = ids.filter(id => id && !_adminMappedCache.has(id));
+        const CH = 150;
+        for (let i = 0; i < toFetch.length; i += CH) {
+          const chunk = toFetch.slice(i, i + CH);
+          const { data, error } = await supa.from('course_gps').select('course_id,holes').in('course_id', chunk);
+          if (!error && data) data.forEach(_storeMappedRow);
+          chunk.forEach(id => { if (!_adminMappedCache.has(id)) _adminMappedCache.set(id, { holes: 0, fwc: 0, center: null }); });
+        }
       }
     }
   } catch (e) { console.warn('mapped hole-count fetch failed', e); }
+  const wanted = Array.isArray(ids) ? ids : Array.from(_adminMappedCache.keys());
+  wanted.forEach(id => { const m = _adminMappedCache.get(id); if (!m) return; if (m.holes) counts.set(id, m.holes); if (m.fwc) counts.fwc.set(id, m.fwc); if (m.center) counts.center.set(id, m.center); });
   return counts;
 }
 
@@ -7404,16 +7418,42 @@ let _adminUsersLoaded = false;
 // Lazy course-data loader for the Admin screen: pulls scorecards + GPS hole
 // counts + recent rounds ONCE, the first time the admin narrows to a state or
 // search. Guarded so repeat calls are free.
+// The library ids the admin is currently viewing (chosen state + search). Mirrors
+// renderAdminWorklist's inScope rule so we only fetch GPS counts for what shows.
+function adminScopeLibIds() {
+  const q = (_adminSearch || '').toLowerCase().trim();
+  const st = (_adminStateFilter || '').toUpperCase();
+  const stateNames = (typeof US_STATE_NAMES !== 'undefined') ? US_STATE_NAMES : {};
+  const stCode = c => (c.st || (typeof courseStateCode === 'function' ? courseStateCode(c) : '') || '').toUpperCase();
+  const terms = q ? q.split(/[\s,]+/).filter(Boolean) : [];
+  const out = [];
+  (COURSE_LIBRARY || []).forEach(c => {
+    if (!c || !c.id) return;
+    const cst = stCode(c);
+    if (st && cst !== st && !(q && !cst)) return;
+    if (terms.length) {
+      const stName = (stateNames[cst] || '').toLowerCase();
+      const hay = (String(c.name || '') + ' ' + String(c.city || '') + ' ' + cst + ' ' + stName + ' ' + c.id).toLowerCase();
+      if (!terms.every(t => hay.includes(t))) return;
+    }
+    out.push(c.id);
+  });
+  return out;
+}
+let _adminScopeKey = null;
 async function ensureAdminData() {
-  if (_adminDataReady) return;
+  const key = (_adminStateFilter || '') + '|' + (_adminSearch || '');
+  if (_adminDataReady && _adminScopeKey === key) return;
+  const scopeIds = adminScopeLibIds();
   const [saves, mapped, recent] = await Promise.all([
     getCourseSaves().catch(() => ({})),
-    getMappedCourseIdSet().catch(() => new Map()),
+    getMappedCourseIdSet(scopeIds).catch(() => { const m = new Map(); m.fwc = new Map(); m.center = new Map(); m.has = () => false; return m; }),
     getRecent().catch(() => [])
   ]);
   const playCount = {};
   try { (recent || []).forEach(r => { const nm = (r.course || '').trim().toLowerCase(); if (nm) playCount[nm] = (playCount[nm] || 0) + 1; }); } catch (e) {}
   _adminWork = buildAdminWorklist(saves, mapped, playCount);
+  _adminScopeKey = key;
   _adminDataReady = true;
 }
 // Admin-only: list EVERY active round (not friend-filtered) so an admin can
@@ -7489,7 +7529,7 @@ async function renderAdmin() {
   // Admin screen instant even with a big library.
   _adminSkipped = new Set(await getCourseSkipped().catch(() => []));
   _adminVerified = new Set(await getCourseVerified().catch(() => []));
-  _adminDataReady = false;
+  _adminDataReady = false; _adminScopeKey = null; if (typeof _adminMappedCache !== 'undefined') _adminMappedCache.clear();
   _adminUsersLoaded = false;
   // The admin body is rebuilt below, which destroys the old map container — drop
   // the stale map instance so the toggle re-creates a fresh one.
@@ -11289,7 +11329,7 @@ function openDuplicateCompare(id) {
     for (const c of removeList) { try { const ok = await deleteCourse(c.id); if (ok) removed++; } catch (e) {} }
     showToast('Kept 1 copy · removed ' + removed);
     close();
-    _adminDataReady = false; renderAdmin();
+    _adminDataReady = false; _adminScopeKey = null; if (typeof _adminMappedCache !== 'undefined') _adminMappedCache.clear(); renderAdmin();
   });
 }
 
@@ -11874,7 +11914,7 @@ async function openCourseDetail(id) {
       const nm = it.name || 'this course';
       if (window.confirm('Clear ALL GPS mapping for "' + nm + '"?\n\nThis wipes every mapped hole (tees, greens, fairway centers) for EVERYONE so the course can be re-mapped from scratch. The course, its scorecard and ratings are kept. Cannot be undone.')) {
         const ok = await clearCourseMapping(id);
-        if (ok) { showToast('Course mapping cleared'); _adminDataReady = false; closeOv(); renderAdmin(); }
+        if (ok) { showToast('Course mapping cleared'); _adminDataReady = false; _adminScopeKey = null; if (typeof _adminMappedCache !== 'undefined') _adminMappedCache.clear(); closeOv(); renderAdmin(); }
       }
       return;
     }
