@@ -6184,7 +6184,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.391';
+const BG_BUILD = 'v2026.11.392';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -7107,7 +7107,8 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
     const fwcCount = (mappedSet && mappedSet.fwc && typeof mappedSet.fwc.get === 'function') ? (mappedSet.fwc.get(id) || 0) : 0;
     const hasGPS = holes >= 18;                 // every green mapped
     const hasRS = !!(sc && Array.isArray(sc.tees) && sc.tees.some(t => t && t.rating != null && t.slope != null))
-  
+      || !!(sc && sc.rating != null && sc.slope != null)
+      || !!(typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]);
     // Fairway targets are part of "done": every par 4/5 needs a fairway center.
     const _parArr = (sc && Array.isArray(sc.pars) && sc.pars.length === 18) ? sc.pars : null;
     const targetsNeeded = _parArr ? _parArr.filter(p => Number(p) !== 3).length : 18;
@@ -44990,6 +44991,47 @@ window.bgRemoveCourses = (stateFilter) => {
   if (_rm) { const _rs = (_rm[1] && _rm[1] !== '1') ? _rm[1].toUpperCase() : ''; setTimeout(() => { window.bgRemoveCourses(_rs); }, 1500); }
 }
 
+// ---------- generic facility-orphan dedup (auto, every state) -- v392 ------
+// After a sweep, old FACILITY-level library entries (e.g. "RTJ Oxmoor Valley")
+// linger empty because the sweep created per-COURSE entries ("Ridge at Oxmoor
+// Valley") under different names. This removes those dataless duplicates for ANY
+// state — no per-state list needed. HARD guards: never removes a course with a
+// real rating/slope, an admin-verified course, or a wired three-nine. Two safe
+// signals: (a) a known multi-course BRAND name with a data-filled sibling in the
+// same city, or (b) the dataless name's distinctive tokens are a strict SUBSET of
+// a data-filled sibling's at the same city.
+async function sweepDedupeOrphans(stateFilter) {
+  try {
+    const ST = (stateFilter||'').toUpperCase(); if (!ST) return { removed:0 };
+    const saves = await getCourseSaves();
+    const STOP = ['golf','course','club','country','the','at','of','and','cc','gc','g','c','rtj','robert','trent','jones','trail'];
+    const norm = s => (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+    const core = s => norm(s).split(' ').filter(w => w && STOP.indexOf(w) < 0);
+    const stOf = c => (c.st || (((c.city||'').match(/,\s*([A-Za-z]{2})$/)||[])[1]) || '').toUpperCase();
+    const hasRS = id => { const s=saves[id]; return !!(s&&Array.isArray(s.tees)&&s.tees.some(t=>t&&t.rating!=null&&t.slope!=null)); };
+    const isVer = id => (typeof _adminVerified!=='undefined' && _adminVerified.has(id));
+    const isTN = id => (typeof THREE_NINE_COURSES==='object' && THREE_NINE_COURSES[id]);
+    const BRAND = /robert trent jones|^rtj\b|^tpc\b|\btroon\b|kempersports/i;
+    const inState = (COURSE_LIBRARY||[]).filter(c => c && c.id && stOf(c) === ST);
+    const filled = inState.filter(c => hasRS(c.id) || isTN(c.id)).map(c => ({ id:c.id, city:norm(c.city), core:core(c.name) }));
+    let removed=0; const rn=[];
+    for (const c of inState) {
+      if (hasRS(c.id) || isVer(c.id) || isTN(c.id)) continue;
+      const cCore=core(c.name), cCity=norm(c.city), brand=BRAND.test(c.name);
+      const sib = filled.find(f => {
+        if (f.city && cCity && f.city !== cCity) return false;
+        if (brand) return true;
+        if (cCore.length < 2) return false;
+        const ov = cCore.filter(t => f.core.indexOf(t) >= 0);
+        return ov.length === cCore.length && f.core.length > cCore.length; // strict subset
+      });
+      if (sib) { try { if (await deleteCourse(c.id)) { removed++; rn.push(c.name); } } catch(e){} }
+    }
+    if (removed) { try { showToast('🧹 Removed '+removed+' duplicate facility entr'+(removed===1?'y':'ies')+' in '+ST); } catch(e){} }
+    return { removed, rn };
+  } catch(e) { return { removed:0 }; }
+}
+
 // ---------- one-shot sweep auto-import (?sweepimport=ST) ----- v387 --------
 // Behind-the-scenes: fetch committed sweep data for a state and run
 // ratings (create+fill) -> contacts -> GPS in order. Admin opens this URL once.
@@ -45004,6 +45046,7 @@ window.bgRemoveCourses = (stateFilter) => {
       const con = await grab('course-contacts-'+_st+'.csv'); if (con) { await contactDataImport(con, _st); }
       const gps = await grab('gpsimport-'+_st+'.json'); if (gps) { await gpsDataImport(gps, _st); }
       const rem = await grab('course-remove-'+_st+'.csv'); if (rem) { await courseRemoveImport(rem, _st); }
+      try { await sweepDedupeOrphans(_st); } catch(e){}
       // v388: mark data-COMPLETE imported courses as verified (greens+ratings+fairway targets). Never verifies incomplete data.
       try {
         const _saves = await getCourseSaves();
