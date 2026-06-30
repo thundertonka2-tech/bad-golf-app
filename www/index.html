@@ -6197,7 +6197,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.405';
+const BG_BUILD = 'v2026.11.406';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -6295,6 +6295,14 @@ async function initAuth() {
       .catch(() => {});
     supa.auth.onAuthStateChange(async (_event, session) => {
       _authUser = session ? session.user : null;
+      // Session isolation: when the signed-in identity actually CHANGES, drop the
+      // previous account's in-memory caches + once-gates so their stats/clubs can't
+      // bleed into the new user. (An explicit SIGNED_OUT clears via signOutUser.)
+      try {
+        var _uid = _authUser ? _authUser.id : null;
+        if (_uid && window._lastAuthUid && _uid !== window._lastAuthUid) { resetSessionIdentity(); }
+        if (_uid) window._lastAuthUid = _uid;
+      } catch (e) {}
       await fetchMyRole();
       // Refresh THIS account's saved clubs now that auth is resolved. The startup
       // load can run as a guest (empty bag) before sign-in completes, which left
@@ -6318,6 +6326,10 @@ async function initAuth() {
         // player if it isn't already. No-op (one quick read) once linked.
         if (_event === 'SIGNED_IN' || _event === 'INITIAL_SESSION') {
           autoLinkMyPlayer();
+          // Repopulate THIS account's stats backup + saved shots (idempotent) so the
+          // new user's own data shows immediately instead of the cleared/old caches.
+          try { if (typeof healMyRoundsFromCloud === 'function') healMyRoundsFromCloud(); } catch (e) {}
+          try { if (typeof loadMyShots === 'function') loadMyShots().then(function (s) { if (Array.isArray(s)) window._myShots = s; }).catch(function () {}); } catch (e) {}
           // Phase 3: live invite delivery + catch any queued invites.
           try { subscribeToInvites(); } catch (e) {}
           try { subscribeToFriendRequests(); } catch (e) {}
@@ -6387,9 +6399,37 @@ async function resetPasswordEmail(email) {
     { redirectTo: location.origin + location.pathname });
   return error ? error.message : null;
 }
+// ── Session isolation ───────────────────────────────────
+// Per-account data that lives in memory or in NON-namespaced localStorage must be
+// dropped when the signed-in identity changes, or the next user inherits the
+// previous user's stats/clubs. The shared roster blob is multi-player and stays;
+// what leaked was: the in-memory cloud-stats backup (re-unioned into "me" on every
+// roster read), the bag/shots caches, and the once-gates that otherwise stayed
+// true and blocked the new user's heal/sync from re-running.
+function resetSessionIdentity() {
+  try {
+    window._myStatsBackupRounds = null;   // stop topUpMyRoundsFromBackup injecting the prior user's rounds
+    window._myClubs = [];
+    window._myShots = [];
+    // Force the per-user heal/sync to run again for the new account.
+    window._roundsHealedOnce = false;
+    window._avatarHealedOnce = false;
+    window._statsSyncedOnce = false;
+    window._hcpSnapOnce = false;
+  } catch (e) {}
+  // Non-namespaced per-account localStorage. For a signed-in user, clubs/shots are
+  // read from their OWN RLS-protected profile row, so dropping the device cache is
+  // safe AND closes the shared-phone leak where loadMyClubs() would migrate the
+  // cached bag onto a different account.
+  ['golf:me-name', 'golf:my-clubs', 'golf:my-shots', 'golf:stats-visibility'].forEach(function (k) {
+    try { localStorage.removeItem(k); } catch (e) {}
+  });
+}
+
 async function signOutUser() {
   try { await supa.auth.signOut(); } catch (e) {}
   _authUser = null; _authRole = 'guest';
+  try { resetSessionIdentity(); } catch (e) {}
   // Re-prompt for sign-in on next launch after an explicit sign-out.
   try { localStorage.removeItem('golf:guest-ok'); } catch (e) {}
   try { applyAdminGating(); renderAccountUI(); } catch (e) {}
