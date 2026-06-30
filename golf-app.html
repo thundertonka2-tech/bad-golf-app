@@ -6178,7 +6178,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.392';
+const BG_BUILD = 'v2026.11.393';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -44978,6 +44978,50 @@ async function sweepDedupeOrphans(stateFilter) {
   } catch(e) { return { removed:0 }; }
 }
 
+// ---------- finalize: verify-complete + purge-empty (?verifystate / ?finalize) v393 ----
+// Run after a sweep (auto inside sweepimport, or standalone). Two actions over the
+// state, from FRESH saves + course_gps:
+//   VERIFY  — a data-COMPLETE course (ratings + 18 greens + fairway targets) is added
+//             to _adminVerified.
+//   PURGE   — a course with NO ratings AND fewer than 9 mapped greens (nothing found
+//             after all research) is deleted. HARD guards: never a verified course or a
+//             wired three-nine; a course with ratings OR real GPS is KEPT (it only has
+//             "some missing info").
+async function sweepFinalize(stateFilter) {
+  try {
+    const ST = (stateFilter||'').toUpperCase(); if (!ST) return { verified:0, purged:0 };
+    if (typeof supa === 'undefined' || !supa) { try { await initSupabase(); } catch(e){} }
+    const saves = await getCourseSaves();
+    const stOf = c => (c.st || (((c.city||'').match(/,\s*([A-Za-z]{2})$/)||[])[1]) || '').toUpperCase();
+    const hasRS = id => { const s=saves[id]; return !!(s&&Array.isArray(s.tees)&&s.tees.some(t=>t&&t.rating!=null&&t.slope!=null)) || !!(s&&s.rating!=null&&s.slope!=null); };
+    const isVer = id => (typeof _adminVerified!=='undefined' && _adminVerified.has(id));
+    const isTN = id => (typeof THREE_NINE_COURSES==='object' && THREE_NINE_COURSES[id]);
+    const inState = (COURSE_LIBRARY||[]).filter(c => c && c.id && stOf(c) === ST);
+    const ids = inState.map(c=>c.id); const g = {};
+    for (let i=0;i<ids.length;i+=150){ const ch=ids.slice(i,i+150);
+      try { const r = await supa.from('course_gps').select('course_id,holes').in('course_id',ch);
+        (r&&r.data||[]).forEach(row=>{ const hs=row.holes||{}; let fc=0; for(const k in hs){ const h=hs[k]; if(h&&Array.isArray(h.fwc)&&h.fwc.length===2) fc++; } g[row.course_id]={holes:Object.keys(hs).length,fwc:fc}; }); } catch(e){}
+    }
+    let verified=0, purged=0; const pn=[];
+    for (const c of inState) {
+      if (isTN(c.id)) continue;                 // wired three-nines: leave to config
+      const sc=saves[c.id], rs=hasRS(c.id), gg=g[c.id]||{holes:0,fwc:0};
+      if (!rs && gg.holes < 9 && !isVer(c.id)) { try { if (await deleteCourse(c.id)) { purged++; pn.push(c.name); } } catch(e){} continue; }
+      const pars=(sc&&Array.isArray(sc.pars)&&sc.pars.length===18)?sc.pars:null;
+      const need=pars?pars.filter(p=>Number(p)!==3).length:18;
+      const complete = rs && gg.holes>=18 && (need===0||gg.fwc>=need);
+      if (complete && !isVer(c.id)) { _adminVerified.add(c.id); verified++; }
+    }
+    if (verified && typeof persistCourseVerified==='function') await persistCourseVerified();
+    try { showToast('✅ '+ST+': verified '+verified+', removed '+purged+' empty course(s)'); } catch(e){}
+    return { verified, purged, pn };
+  } catch(e) { return { verified:0, purged:0 }; }
+}
+{
+  const _vm = location.search.match(/[?&](?:verifystate|finalize)=([A-Za-z]{2})/);
+  if (_vm) { const _vs = _vm[1].toUpperCase(); setTimeout(async () => { try { await sweepFinalize(_vs); } catch(e){} }, 1800); }
+}
+
 // ---------- one-shot sweep auto-import (?sweepimport=ST) ----- v387 --------
 // Behind-the-scenes: fetch committed sweep data for a state and run
 // ratings (create+fill) -> contacts -> GPS in order. Admin opens this URL once.
@@ -44993,6 +45037,7 @@ async function sweepDedupeOrphans(stateFilter) {
       const gps = await grab('gpsimport-'+_st+'.json'); if (gps) { await gpsDataImport(gps, _st); }
       const rem = await grab('course-remove-'+_st+'.csv'); if (rem) { await courseRemoveImport(rem, _st); }
       try { await sweepDedupeOrphans(_st); } catch(e){}
+      try { await sweepFinalize(_st); } catch(e){}
       // v388: mark data-COMPLETE imported courses as verified (greens+ratings+fairway targets). Never verifies incomplete data.
       try {
         const _saves = await getCourseSaves();
