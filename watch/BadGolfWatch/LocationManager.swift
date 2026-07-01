@@ -93,8 +93,22 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 
     func locationManager(_ m: CLLocationManager, didUpdateLocations locs: [CLLocation]) {
         guard let loc = locs.last else { return }
-        // Ignore wildly inaccurate fixes.
+        // Reject fixes that would flash a WRONG yardage and then "self-correct" — the
+        // exact flaky behaviour of a false reading that comes back right a moment later:
+        //   * negative horizontalAccuracy = an invalid fix
+        //   * a cached/stale fix: CoreLocation often hands back an OLD location first
+        //     (e.g. the drive to the course), which reads as a huge false distance
+        //   * a low-accuracy fix (signal dipped / reacquiring): the number jumps, then
+        //     settles once a good fix lands
+        // Keep the last GOOD location instead so the displayed number never lies. The
+        // confidence dot still shows green/yellow, but we no longer feed it a bad spot.
         guard loc.horizontalAccuracy >= 0 else { return }
+        if abs(loc.timestamp.timeIntervalSinceNow) > 5 { return }   // stale / cached fix
+        let acceptMeters = 50.0                                       // reject worse-than-50 m fixes
+        if loc.horizontalAccuracy > acceptMeters {
+            if location == nil { acquiring = true }                  // nothing usable yet → "acquiring", not a wrong number
+            return                                                   // already have a good fix → keep it, ignore this one
+        }
         location = loc
         lastFixAt = Date()
         accuracyGood = loc.horizontalAccuracy <= 12   // ~within 12 m
