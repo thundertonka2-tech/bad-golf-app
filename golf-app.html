@@ -6251,7 +6251,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.437';
+const BG_BUILD = 'v2026.11.438';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -42836,6 +42836,21 @@ const gpsView = (() => {
     }
     if (lib.length === 0) { showToast(opts.state ? ('No ' + opts.state + ' courses in the library yet — run ?stateimport=' + opts.state + ' first to add them') : 'Course library is empty'); return; }
 
+    // v438 PROTECTION: in force mode, still never re-crawl/overwrite an admin-verified
+    // course or one whose GPS was hand-mapped (source==='manual'). Only force:'all' (a
+    // deliberate nuke) bypasses. Non-force runs already skip mapped courses via `attempted`.
+    // Explicit id-list runs (?osmimport=course:ID) are a deliberate single-course pick — allowed.
+    if (force && opts.force !== 'all' && !(Array.isArray(opts.ids) && opts.ids.length)) {
+      try { const _v = await getCourseVerified(); if (Array.isArray(_v)) _v.forEach(x => { try { _adminVerified.add(x); } catch(e){} }); } catch(e){}
+      const _manual = new Set();
+      try { if (await ensureSupa()) { let _f=0; const _pg=1000; while(true){ const {data,error}=await supa.from('course_gps').select('course_id,source').range(_f,_f+_pg-1); if(error||!data||!data.length) break; data.forEach(r=>{ if(r&&r.course_id&&r.source==='manual') _manual.add(r.course_id); }); if(data.length<_pg) break; _f+=_pg; } } } catch(e){}
+      const _before = lib.length;
+      lib = lib.filter(c => !((typeof _adminVerified!=='undefined' && _adminVerified.has(c.id)) || _manual.has(c.id)));
+      const _prot = _before - lib.length;
+      if (_prot > 0) { try { console.log('🔒 OSM crawl: left ' + _prot + ' verified/hand-mapped course(s) untouched'); } catch(e){} }
+      if (lib.length === 0) { showToast('All ' + (opts.state ? opts.state + ' ' : '') + 'courses here are verified/hand-mapped — nothing to re-map.'); return; }
+    }
+
     // Build the progress panel
     let panel = document.getElementById('gps-batch-panel');
     if (panel) panel.remove();
@@ -45799,7 +45814,7 @@ window.bgImportCourseContact = (st) => {
 // Writes per-hole GPS into course_gps, matched by name+state to the library
 // (same matcher as ratings/contacts). Mirrors flushDirtyCourseGps upsert.
 // NEVER touches rating/slope/par/SI. source='golfpass'.
-async function gpsDataImport(file, stateFilter) {
+async function gpsDataImport(file, stateFilter, force) {
   const log = (m,c)=>{ try{ let box=document.getElementById('gpsimport-log'); if(!box){ const p=document.createElement('div'); p.id='gpsimport-panel'; p.style.cssText='position:fixed;inset:8% 5% auto 5%;max-height:84%;z-index:9000;background:rgba(20,20,22,0.96);color:#fff;border-radius:14px;padding:14px;overflow:auto;font-size:13px'; p.innerHTML='<strong>Importing course GPS…</strong><div id="gpsimport-log" style="margin-top:8px;line-height:1.6"></div><button onclick="this.parentNode.remove()" style="position:absolute;top:10px;right:12px;background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button>'; document.body.appendChild(p); box=document.getElementById('gpsimport-log'); } const d=document.createElement('div'); if(c)d.style.color=c; d.innerHTML=m; box.appendChild(d); box.scrollTop=box.scrollHeight; }catch(e){} };
   try {
     if (typeof supa === 'undefined' || !supa) { try { await initSupabase(); } catch(e){} }
@@ -45811,7 +45826,15 @@ async function gpsDataImport(file, stateFilter) {
     const norm = s => (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
     const libState = c => (c.st || (((c.city||'').match(/,\s*([A-Za-z]{2})$/)||[])[1]) || '').toUpperCase();
     const byNameState = {}; lib.forEach(c=>{ byNameState[norm(c.name)+'|'+libState(c)]=c; });
-    let matched=0, skipped=0, holesTotal=0; const unmatched=[];
+    let matched=0, skipped=0, holesTotal=0, protectedSkips=0; const unmatched=[];
+    // v438 PROTECTION: never overwrite GPS for an admin-verified course or one whose
+    // existing course_gps row was hand-mapped (source==='manual'). ?gpsimport=ST&force=1 bypasses.
+    const _verSet = new Set(); const _manualSet = new Set();
+    if (!force) {
+      try { const _v = await getCourseVerified(); if (Array.isArray(_v)) _v.forEach(x => _verSet.add(x)); } catch(e){}
+      try { if (typeof _adminVerified!=='undefined') _adminVerified.forEach(x => _verSet.add(x)); } catch(e){}
+      try { if (supa) { let _f=0; const _pg=1000; while(true){ const {data,error}=await supa.from('course_gps').select('course_id,source').range(_f,_f+_pg-1); if(error||!data||!data.length) break; data.forEach(r=>{ if(r&&r.course_id&&r.source==='manual') _manualSet.add(r.course_id); }); if(data.length<_pg) break; _f+=_pg; } } } catch(e){}
+    }
     for (const r of recs) {
       if (!r) { continue; }
       const state = (r.state||stateFilter||'').toUpperCase();
@@ -45819,6 +45842,7 @@ async function gpsDataImport(file, stateFilter) {
       let id = r.course_id || r.courseId || '';
       if (!id) { const m = byNameState[norm(r.name)+'|'+state]; if (m) id = m.id; }
       if (!id) { skipped++; if (r.name) unmatched.push(r.name); continue; }
+      if (!force && (_verSet.has(id) || _manualSet.has(id))) { protectedSkips++; continue; }
       const holes = r.holes || {};
       const nH = Object.keys(holes).length;
       if (!nH) { skipped++; continue; }
@@ -45829,23 +45853,23 @@ async function gpsDataImport(file, stateFilter) {
         if (error) { skipped++; } else { matched++; holesTotal += nH; try{ localStorage.setItem('golf:course-gps-cache:'+id, JSON.stringify({holes:holes,source:'golfpass',updatedAt:Date.now()})); }catch(e){} }
       } catch(e){ skipped++; }
     }
-    log('✅ GPS written for <b>'+matched+'</b> course(s) ('+holesTotal+' holes). Skipped '+skipped+'.', 'var(--log-ok)');
+    log('✅ GPS written for <b>'+matched+'</b> course(s) ('+holesTotal+' holes). Skipped '+skipped+'.'+(protectedSkips?(' 🔒 <b>'+protectedSkips+'</b> verified/hand-mapped left untouched.'):''), 'var(--log-ok)');
     if (unmatched.length) log('⚠️ '+unmatched.length+' GPS records not matched to a library course (run the ratings import first).', 'var(--log-warn)');
     return { matched, skipped, holes: holesTotal };
   } catch(e) { log('GPS import failed: '+(e&&e.message?e.message:'error'),'var(--log-err)'); return {matched:0,skipped:0,holes:0}; }
 }
-window.bgImportCourseGps = (stateFilter) => {
+window.bgImportCourseGps = (stateFilter, force) => {
   let panel=document.getElementById('gpspick-panel'); if(panel)panel.remove();
   panel=document.createElement('div'); panel.id='gpspick-panel';
   panel.style.cssText='position:fixed;left:50%;top:16%;transform:translateX(-50%);z-index:9500;background:#fff;color:var(--text);border-radius:14px;padding:20px;width:min(440px,92%);box-shadow:0 12px 48px rgba(0,0,0,0.45);text-align:center';
   panel.innerHTML='<div style="font-weight:700;font-size:17px;margin-bottom:6px">Import course GPS</div><div style="font-size:13px;color:#555;margin-bottom:16px">Pick <b>gpsimport-'+(stateFilter||'ST')+'.json</b> (or .jsonl). Writes hole GPS only; ratings/pars untouched.</div><input id="gpspick-input" type="file" accept=".json,.jsonl,.txt,application/json" style="display:block;margin:0 auto 16px"><button id="gpspick-cancel" style="background:#eee;border:none;border-radius:8px;padding:9px 20px;cursor:pointer">Cancel</button>';
   document.body.appendChild(panel);
   document.getElementById('gpspick-cancel').onclick=()=>panel.remove();
-  document.getElementById('gpspick-input').onchange=(e)=>{ const f=e.target.files&&e.target.files[0]; if(f){ panel.remove(); gpsDataImport(f, stateFilter); } };
+  document.getElementById('gpspick-input').onchange=(e)=>{ const f=e.target.files&&e.target.files[0]; if(f){ panel.remove(); gpsDataImport(f, stateFilter, force); } };
 };
 {
   const _gm = location.search.match(/[?&]gpsimport=([A-Za-z0-9]+)/);
-  if (_gm) { const _gs = (_gm[1] && _gm[1] !== '1') ? _gm[1].toUpperCase() : ''; setTimeout(() => { window.bgImportCourseGps(_gs); }, 1500); }
+  if (_gm) { const _gs = (_gm[1] && _gm[1] !== '1') ? _gm[1].toUpperCase() : ''; const _gf = /[?&]force=1/.test(location.search); setTimeout(() => { window.bgImportCourseGps(_gs, _gf); }, 1500); }
 }
 
 // ---------- course removal (?courseremove=1 or =ST) ----- v389 -------------
@@ -46055,6 +46079,18 @@ async function sweepFinalize(stateFilter) {
     try { showToast('Starting '+_st+' sweep import — keep this tab open…'); } catch(e){}
     try {
       await bgEnsureAdmin();
+      // v438: refuse to re-run a FINISHED (already-verified) state unless the admin
+      // deliberately adds &force=1. Protects completed TX/AL mapping from accidental re-import.
+      const _sweepForce = /[?&]force=1/.test(location.search);
+      try {
+        try { const _v = await getCourseVerified(); if (Array.isArray(_v)) _v.forEach(x => { try { _adminVerified.add(x); } catch(e){} }); } catch(e){}
+        const _verInState = (COURSE_LIBRARY||[]).filter(c => c && c.id && ((c.st||'').toUpperCase()===_st) && (typeof _adminVerified!=='undefined' && _adminVerified.has(c.id))).length;
+        if (_verInState > 0 && !_sweepForce) {
+          try { showToast('⚠️ '+_st+' already has '+_verInState+' verified course(s) — re-import BLOCKED to protect your work. Add &force=1 to override.'); } catch(e){}
+          try { const d=document.createElement('div'); d.style.cssText='position:fixed;left:50%;top:10%;transform:translateX(-50%);z-index:100050;background:#a5183f;color:#fff;padding:14px 18px;border-radius:12px;font-weight:700;box-shadow:0 10px 40px rgba(0,0,0,.5);max-width:88%;text-align:center'; d.textContent='⚠️ '+_st+' already has '+_verInState+' verified course(s). Re-import blocked to protect finished mapping. Add &force=1 to the URL only if you really mean to.'; document.body.appendChild(d); setTimeout(()=>d.remove(),12000); } catch(e){}
+          return;
+        }
+      } catch(e){}
       const rat = await grab('course-ratings-'+_st+'-sweep.csv'); if (rat) { await courseDataImport(rat, _st, true); }
       const rem = await grab('course-remove-'+_st+'.csv'); if (rem) { await courseRemoveImport(rem, _st); }
       try { await sweepDedupeOrphans(_st); } catch(e){}
