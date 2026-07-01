@@ -6232,7 +6232,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.415';
+const BG_BUILD = 'v2026.11.416';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -6369,6 +6369,10 @@ async function initAuth() {
           try { subscribeToFriendRequests(); } catch (e) {}
           try { checkPendingInvites(); } catch (e) {}
           try { checkPendingFriendRequests(); } catch (e) {}
+          // Offer to rejoin a live round you're already a player in (e.g. you closed
+          // the app mid-round). Delay so any auto-restore can set state.game first.
+          try { setTimeout(() => { try { checkLiveRoundRejoin(); } catch (e) {} }, 1500); } catch (e) {}
+          if (!window._rejoinVisWired) { window._rejoinVisWired = true; try { document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { clearTimeout(window._rejoinVisT); window._rejoinVisT = setTimeout(() => { try { checkLiveRoundRejoin(); } catch (e) {} }, 800); } }); } catch (e) {} }
           // Tournament 2.0: complete a join link the user opened before signing
           // in — including across an OAuth redirect (stashed in localStorage).
           let _tjk = _pendingTjoin;
@@ -29913,6 +29917,74 @@ async function checkPendingInvites() {
   } catch (e) { /* non-fatal */ }
 }
 
+// Rejoin prompt: if you are a PLAYER in a round that is live right now but you are
+// not currently in it (e.g. you accidentally closed the app mid-round), offer to
+// jump straight back in. Works for EVERY player in the round — it checks your last
+// round on this device AND any live scheduled round that lists your name, so a
+// whole group gets the same "Join now / Dismiss" prompt when they reopen the app.
+// One prompt per round code per app session; Dismiss just closes it (it re-checks
+// the next time you open the app).
+let _rejoinPrompted = new Set();
+async function checkLiveRoundRejoin() {
+  try {
+    if (typeof uiConfirm !== 'function' || typeof state === 'undefined') return;
+    // Never interrupt an invite/other modal that is already up.
+    if (document.querySelector('.modal-overlay.show')) return;
+    let meName = null; try { meName = await getMeName(); } catch (e) {}
+    const norm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
+    const meN = norm(meName || '');
+    const nameOf = p => (typeof displayFirst === 'function') ? displayFirst(p) : (p && p.name) || '';
+    const iAmPlayer = g => {
+      if (!g || !Array.isArray(g.players)) return false;
+      if (!meN) return true;                       // solo/local round → it's mine
+      return g.players.some(p => norm(nameOf(p)) === meN || norm(p && p.name) === meN);
+    };
+    const declinedByMe = g => Array.isArray(g && g.declinedBy) && meN && g.declinedBy.some(n => norm(n) === meN);
+
+    // Candidate live-round codes I'm part of: my last round on this device + any
+    // LIVE scheduled round that lists my name (covers every player in the group).
+    const codes = [];
+    try { const last = await safeGet(KEY_LAST, false); if (last) codes.push(String(last)); } catch (e) {}
+    try {
+      const tourneys = await getTourneys();
+      (tourneys || []).forEach(t => {
+        if (!t || t.status !== 'live' || !t.activeCode) return;
+        const inP = !meN || (t.players || '').split(',').some(n => norm(n) === meN) || norm(t.createdBy) === meN;
+        if (inP) codes.push(t.activeCode);
+      });
+    } catch (e) {}
+
+    const seen = new Set();
+    for (const code of codes) {
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      if (_rejoinPrompted.has(code)) continue;
+      if (state.game && state.game.code === code && !state.viewOnlyMode) continue;  // already in it
+      let g = null; try { g = await loadGame(code); } catch (e) {}
+      if (!g || g.finishedAt) continue;                 // not live / finished
+      if (!iAmPlayer(g) || declinedByMe(g)) continue;   // not my round / I opted out
+      _rejoinPrompted.add(code);
+      const course = g.course || 'your course';
+      const who = Array.isArray(g.players) ? g.players.map(nameOf).filter(Boolean).join(', ') : '';
+      const ok = await uiConfirm(
+        'A round you\'re in is live right now at ' + course + '.' + (who ? '\n\n\uD83D\uDC65 ' + who : '') + '\n\nJump back in?',
+        { title: '\u26F3 Rejoin your round?', okLabel: 'Join now', cancelLabel: 'Dismiss', danger: false }
+      );
+      if (ok) {
+        state.game = g;
+        state.viewOnlyMode = false;
+        state.currentHole = (g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
+        try { await safeSet(KEY_LAST, code, false); } catch (e) {}
+        try { await addToRecent(g); } catch (e) {}
+        try { enableGameTabs(true); } catch (e) {}
+        try { switchTab('score'); } catch (e) {}
+        try { showToast('Rejoined the round'); } catch (e) {}
+      }
+      return; // one prompt at a time
+    }
+  } catch (e) { /* non-fatal */ }
+}
+
 // ---- Incoming friend requests — same popup as round invites ----------------
 // Per-device "seen" so Ignore dismisses without nagging again; the request stays
 // pending (still visible/acceptable in the Crew tab) per the chosen behavior.
@@ -37294,7 +37366,10 @@ function openTourneyActions(t) {
     metaHtml += `<br><span style="color:var(--text-muted)">✓ Completed</span>`;
   }
   $('tam-meta').innerHTML = metaHtml;
-  // Hide "Start round now" if already complete
+  // Hide "Start round now" if already complete. When a round is already LIVE for this
+  // tourney the button REJOINS it (see the onclick), so it must read "Join" not "Start".
+  { const _liveNow = (t.status === 'live' && t.activeCode);
+    const _sb = $('tam-start'); if (_sb) _sb.textContent = _liveNow ? '▶ Join round now' : '▶ Start round now'; }
   $('tam-start').style.display = (t.status === 'complete') ? 'none' : '';
   // CTP standings across all groups (loads async after the modal opens)
   const ctpDiv = $('tam-ctp');
