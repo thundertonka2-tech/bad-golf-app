@@ -6307,7 +6307,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.464';
+const BG_BUILD = 'v2026.11.466';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -16149,12 +16149,19 @@ function updateNaturalBoostVisibility() {
 
 function updateGameVisibilityForPlayerCount() {
   const count = effectiveGameGatingCount();
+  // Cup-team games (Team Match / Low Ball / Quota) in a TWO-TEAM tournament settle
+  // Team A vs Team B across the WHOLE field — not per cart group — so gate them on the
+  // full field size, not the smallest group (6 players -> 3+3 was wrongly hiding Team
+  // Quota). (Tyler, v466.)
+  const _fullN = getCurrentSetupPlayers().length;
+  const _teamTourney = !!(typeof state !== 'undefined' && state && state._t2DayConfig && typeof _t2Current !== 'undefined' && _t2Current && (((_t2Current.settings && _t2Current.settings.type) || 'team') === 'team'));
+  const _CUP_TEAM_GAMES = new Set(['game-team-match', 'game-team-lowball', 'game-team-quota']);
   GAME_PLAYER_MINIMUMS.forEach(({ id, min }) => {
     const cb = $(id);
     if (!cb) return;
     const toggle = cb.closest('.game-toggle');
     const opts   = $(id.replace('game-', 'opts-'));
-    const allowed = count >= min;
+    const allowed = ((_teamTourney && _CUP_TEAM_GAMES.has(id)) ? _fullN : count) >= min;
     if (toggle) {
       // HIDE unavailable games (too few players) to save screen space / scrolling —
       // they reappear automatically once enough players are added (Tyler's request).
@@ -32101,6 +32108,21 @@ function computeWagerLedger(wagers) {
   });
   return ledger;
 }
+function t2GenToken() {
+  try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+  return 'tk_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6);
+}
+// Ensure every UNCLAIMED player / open-seat row has an invite_token so the "tap your
+// name" + public-join flow can always claim it (v465, Tyler — this has bitten us before).
+// Idempotent; only writes rows missing a token. Runs in the commissioner's context.
+async function t2EnsureInviteTokens(tid) {
+  try {
+    const players = await t2GetPlayers(tid);
+    const missing = (players || []).filter(p => p && !p.invite_token && !p.claimed && !p.user_id);
+    for (const p of missing) { try { await supa.from('tournament_players').update({ invite_token: t2GenToken() }).eq('id', p.id); } catch (e) {} }
+    return missing.length;
+  } catch (e) { return 0; }
+}
 async function t2ClaimSlot(token) {
   if (!supa || !_authUser) return null;
   try {
@@ -33166,6 +33188,7 @@ async function submitT2Create() {
       const _slotRows = [];
       for (let _i = 1; _i <= _nSlots; _i++) _slotRows.push({ tournament_id: t.id, display_name: 'Open ' + _i, team: hasTeams ? (_i % 2 ? 'A' : 'B') : null, claimed: false });
       await supa.from('tournament_players').insert(_slotRows);
+      try { await t2EnsureInviteTokens(t.id); } catch (e) {}
     }
   } catch (e) { console.warn('open-slot seed', e); }
   document.getElementById('t2-create-modal').classList.remove('show');
@@ -33191,6 +33214,7 @@ async function openT2Home(id) {
   // user back on the setup screen — keep the cached tournament if it's the same
   // one. renderT2Home re-pulls players/groups/days fresh anyway.
   else if (!(_t2Current && _t2Current.id === id)) { showToast('Tournament not found'); return; }
+  try { if (_t2Current && (typeof t2CanManage !== 'function' || t2CanManage(_t2Current))) t2EnsureInviteTokens(id); } catch (e) {}
   await renderT2Home();
   document.getElementById('t2-home-modal').classList.add('show');
   // Open at the TOP — Configure Players (and re-opening the event) was landing the
@@ -33914,7 +33938,7 @@ async function openT2Carts(dayNumber, dayId) {
       const ordered = groups.slice().sort((a, b) => (_mins(a.tee_time) - _mins(b.tee_time)) || ((a.group_number || 0) - (b.group_number || 0)));
       h += '<div style="display:flex;align-items:center;gap:8px;margin:4px 0 2px"><div style="flex:1;font-weight:700">Groups · tee times · scorekeeper</div>' +
         (amCommish ? '<button class="small t2c-stagger" style="flex:0 0 auto">⏱ Auto-fill times</button>' : '') + '</div>' +
-        (amCommish ? '<div class="small-text" style="color:var(--text-muted);margin-bottom:2px">👑 = scorekeeper (one per group) · use a player’s dropdown to move them to another group. Auto-fill staggers a tee time per group.</div>' : '');
+        (amCommish ? '<div class="small-text" style="color:var(--text-muted);margin-bottom:2px">🔴 = scorekeeper (one per group) · use a player’s dropdown to move them to another group. Auto-fill staggers a tee time per group.</div>' : '');
       ordered.forEach(g => {
         const mem = (membersByGroup[g.id] || []).slice().sort((a, b) => (a.slot || 0) - (b.slot || 0));
         const capNorm = normalizeNameSegment(g.captain || '');
@@ -33929,8 +33953,8 @@ async function openT2Carts(dayNumber, dayId) {
             const p = pById[m.tournament_player_id]; const full = p ? p.display_name : '';
             const on = full && normalizeNameSegment(full) === capNorm;
             return '<div style="display:flex;align-items:center;gap:6px;padding:2px 0 2px 4px">' +
-              (amCommish ? '<button class="small t2c-cap" data-gid="' + g.id + '" data-nm="' + t2esc(full) + '" data-on="' + (on ? '1' : '') + '" title="Set scorekeeper" style="padding:1px 6px;font-size:13px;flex:0 0 auto' + (on ? ';border:1px solid var(--accent);color:var(--accent)' : ';color:var(--text-muted)') + '">👑</button>'
-                         : (on ? '<span style="flex:0 0 auto">👑</span>' : '')) +
+              (amCommish ? '<button class="t2c-cap" data-gid="' + g.id + '" data-nm="' + t2esc(full) + '" data-on="' + (on ? '1' : '') + '" title="' + (on ? 'Scorekeeper — tap to clear' : 'Set as scorekeeper') + '" style="flex:0 0 auto;width:22px;height:22px;border-radius:50%;padding:0;cursor:pointer;' + (on ? 'background:var(--danger);border:2px solid var(--danger)' : 'background:transparent;border:2px solid var(--border)') + '"></button>'
+                         : (on ? '<span style="flex:0 0 auto;width:18px;height:18px;border-radius:50%;background:var(--danger)"></span>' : '')) +
               '<span style="flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + fn(p) + hcpTxt(p) + '</span>' +
               (amCommish ? '<select class="t2c-move" data-mid="' + m.id + '" style="flex:0 0 auto;width:112px;padding:5px 8px;font-size:13px">' + moveOpts + '</select>' : '') +
               '</div>';
@@ -36101,6 +36125,7 @@ async function processPendingTclaim(tid) {
 async function openT2ClaimScreen(tid) {
   if (!isSignedIn()) { try { localStorage.setItem('golf:pending-tclaim', tid); } catch (e) {} const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); showToast('Sign in to join'); return; }
   let players = [], t = null;
+  try { await t2EnsureInviteTokens(tid); } catch (e) {}
   try { players = await t2GetPlayers(tid); } catch (e) {}
   try { t = await t2Get(tid); } catch (e) {}
   const myId = _authUser && _authUser.id;
