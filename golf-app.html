@@ -6274,7 +6274,46 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.445';
+const BG_BUILD = 'v2026.11.448';
+
+// ── localStorage quota guard (WKWebView has a small storage quota) ───────────
+// The app caches large course / GPS blobs in localStorage. On a device the store
+// can fill up, and then the NEXT write — critically the Supabase auth session on
+// sign-in — throws "The quota has been exceeded" and login fails (seen as
+// "Google error: The quota has been exceeded"). Wrap setItem so a quota error
+// evicts the big, cloud-backed caches and retries; the session write then
+// succeeds. Course/GPS caches are always re-read from Supabase, so evicting them
+// is safe. Installed here, before Supabase init, so it protects the first login.
+(function () {
+  try {
+    var proto = window.Storage && window.Storage.prototype;
+    if (!proto || proto.__bgQuotaWrapped) return;
+    var origSet = proto.setItem;
+    var EVICTABLE = /^(shared:courses|shared:course-library-additions|shared:course-gps|game:|coursegps|gps:|golf:dirty-)/;
+    function evictAll(store, exceptKey) {
+      var keys = [];
+      try { for (var i = 0; i < store.length; i++) { var k = store.key(i); if (k && k !== exceptKey && EVICTABLE.test(k)) keys.push(k); } } catch (e) {}
+      for (var j = 0; j < keys.length; j++) { try { store.removeItem(keys[j]); } catch (e) {} }
+      return keys.length;
+    }
+    proto.setItem = function (k, v) {
+      try { return origSet.call(this, k, v); }
+      catch (e) {
+        // Free the big caches and retry once — this is what lets the auth session
+        // (and any other essential write) go through when the store is full.
+        try { evictAll(this, k); } catch (e2) {}
+        try { return origSet.call(this, k, v); }
+        catch (e3) {
+          // Still no room: if this write is itself a big evictable cache, skip it
+          // (it will be re-read from the cloud). Otherwise surface the error.
+          try { if (EVICTABLE.test(k)) return; } catch (e4) {}
+          throw e3;
+        }
+      }
+    };
+    proto.__bgQuotaWrapped = true;
+  } catch (e) {}
+})();
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -8700,13 +8739,33 @@ async function deleteMyAccount() {
     }
     // Success — sign out and wipe everything local, then restart.
     try { await signOutUser(); } catch (e) {}
+    // Purge EVERY trace of the deleted session so the sign-in gate returns truly
+    // empty — a leftover Supabase token or an autofilled email otherwise makes it
+    // look like the account still exists / blocks creating a fresh one.
+    try { if (supa && supa.auth) await supa.auth.signOut({ scope: 'local' }); } catch (e) {}
+    try {
+      Object.keys(localStorage).forEach(function (k) {
+        if (/^sb-.*-auth-token/.test(k) || k.toLowerCase().indexOf('supabase') >= 0) { try { localStorage.removeItem(k); } catch (e) {} }
+      });
+    } catch (e) {}
     try { localStorage.clear(); } catch (e) {}
+    try { sessionStorage.clear(); } catch (e) {}
+    // Blank the sign-in fields so the deleted email isn't sitting there pre-filled.
+    try { ['auth-email','auth-password'].forEach(function (id) { var f = document.getElementById(id); if (f) f.value = ''; }); } catch (e) {}
     try {
       if (window.NativePrefs) ['bg_last_course','bg_unit','bg_player_id','bg_display_name']
         .forEach(function (k) { try { window.NativePrefs.remove(k); } catch (e) {} });
     } catch (e) {}
-    showToast('Your account has been deleted.');
-    setTimeout(function () { try { location.reload(); } catch (e) {} }, 1500);
+    // Cover the screen so no stale personal data is visible while we reset, then
+    // restart into the clean signed-out state (Apple review: it must look like a
+    // real delete — no leftover rounds behind the sign-in gate).
+    try {
+      var _cov = document.createElement('div');
+      _cov.style.cssText = 'position:fixed;inset:0;z-index:100090;background:var(--bg,#0b2a4a);color:#fff;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;font-size:18px;font-weight:700';
+      _cov.textContent = 'Your account has been deleted.';
+      document.body.appendChild(_cov);
+    } catch (e) {}
+    setTimeout(function () { try { location.replace(location.origin + location.pathname); } catch (e) { try { location.reload(); } catch (e2) {} } }, 1200);
   } catch (e) {
     try { console.error('deleteMyAccount', e); } catch (_) {}
     showToast('Something went wrong deleting your account.');
@@ -25472,6 +25531,10 @@ async function renderHomeInvites() {
   const card = document.getElementById('home-invites-card');
   const list = document.getElementById('home-invites-list');
   if (!card || !list) return;
+  // Login is mandatory. When signed out (e.g. right after account deletion) show
+  // nothing personal here — otherwise the previous scheduled rounds stay visible
+  // behind the sign-in gate and it looks like the data was never deleted.
+  if (typeof isSignedIn === 'function' && !isSignedIn()) { card.style.display = 'none'; list.innerHTML = ''; return; }
   let meName = null; try { meName = await getMeName(); } catch (e) {}
   const rows = [];
 
