@@ -6289,7 +6289,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.453';
+const BG_BUILD = 'v2026.11.454';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -23367,6 +23367,25 @@ function computeAllGameMoney(g) {
       byGame.push({ key, label: labels[key] || key, money: moneyForGame });
     }
   });
+  // ── GROUP SIDE GAMES (tournament foursomes) ────────────────────────────────
+  // A group inside a tournament can run its OWN games (g.groupGames) — even the
+  // SAME game TYPE the event runs — settling on THIS group's board only. They live
+  // in a SEPARATE object so they never collide with, or leak into, the tournament
+  // field game keyed in g.games. Reuse this same engine (recursion-guarded via
+  // _noGroupGames) and ADD each player's group money into their combined total.
+  // The event/field pools (loadTourneyMoney) build their vg WITHOUT groupGames, so
+  // nothing is ever double-counted. byGame entries are namespaced ('grp:') and
+  // labelled "(your group)" so the board/breakdown show them as their own rows.
+  try {
+    if (g && g.groupGames && !g._noGroupGames && typeof g.groupGames === 'object' && Object.keys(g.groupGames).length) {
+      const sub = {}; for (const k in g) { if (k === 'games' || k === 'groupGames') continue; sub[k] = g[k]; }
+      sub.games = g.groupGames; sub._noGroupGames = true;
+      const gm = computeAllGameMoney(sub);
+      g.players.forEach(p => { combined[p.id] = (combined[p.id] || 0) + ((gm.combined && gm.combined[p.id]) || 0); });
+      (gm.byGame || []).forEach(b => byGame.push({ key: 'grp:' + b.key, label: b.label + ' (your group)', money: b.money, group: true }));
+      Object.keys(gm.results || {}).forEach(k => { if (gm.results[k]) results['grp:' + k] = gm.results[k]; });
+    }
+  } catch (e) {}
   return { results, combined, byGame };
 }
 
@@ -23702,7 +23721,7 @@ function updateGpsMoneyMatch() {
   // at the end) → still give a tappable "Board" entry so the watcher can open the
   // betting summary and see who's winning.
   try {
-    const _hasGame = g.games && Object.keys(g.games).some(k => g.games[k]);
+    const _hasGame = (g.games && Object.keys(g.games).some(k => g.games[k])) || (g.groupGames && Object.keys(g.groupGames).some(k => g.groupGames[k]));
     if (!any && _hasGame && moneyEl) {   // any wagered game active → always a tappable Board path (#GPS audit)
       moneyEl.innerHTML = '<span class="mm-lbl">📊</span>Board';
       moneyEl.className = 'gps-mm even';
@@ -24355,6 +24374,9 @@ function renderBoard() {
     { key: 'Ryder Cup', r: ryderCup },
     { key: 'Scramble', r: scramble }
   ].filter(x => x.r).sort((a, b) => a.key.localeCompare(b.key));
+  // Group side games (g.groupGames) get their own columns so the breakdown still
+  // sums exactly to each player's Total. Their money is already in `money` (combined).
+  try { (moneyData.byGame || []).forEach(b => { if (b && b.group && b.money) games.push({ key: b.label, r: { money: b.money } }); }); games.sort((a, b) => a.key.localeCompare(b.key)); } catch (e) {}
 
   if (games.length > 1) {
     // Wrap in a horizontally scrollable container so 4+ games + Total column
@@ -33875,16 +33897,29 @@ function t2FilterDayConfigGames(hide) {
   } else if (note) { note.remove(); }
 }
 
-// Games a GROUP (foursome) inside a tournament may NOT run on its own round —
-// they'd skew the overall tournament scoring. Everything else (Banker, 6's, Wolf,
-// Skins, Split 6's, Stableford, Stroke Play Pot, Vegas, + side bets) is allowed.
-const T2_GROUP_HIDDEN = new Set(['scramble', 'dvegas', 'ryder-cup', 'team-match', 'team-lowball', 'team-quota', 'longdrive', 'ctp']);
+// A GROUP (foursome) inside a tournament can run its OWN games on its own board —
+// INCLUDING the same game TYPE the tournament is running (they settle in a separate
+// g.groupGames namespace, so there is no key collision with the field game). We no
+// longer blanket-block the team games. Two rules remain:
+//   • Long Drive is a field-wide, one-winner-per-day game (t2RemapGamesToGroup drops
+//     it), so it is never a per-group game.
+//   • When the tournament DAY format is SCRAMBLE or ALTERNATE-SHOT the field plays one
+//     ball per team, so individual-score games make no sense for the group — the menu
+//     is limited to TEAM / whole-ball bets only. state._t2GroupScramble drives this
+//     (set by openT2GroupGamesConfig from the day's format).
+const T2_GROUP_NEVER = new Set(['longdrive']);
+const T2_GROUP_SCRAMBLE_ALLOWED = new Set(['team-match', 'team-lowball', 'team-quota', 'scramble', 'ryder-cup', 'ctp', 'longputt']);
 function t2FilterGroupConfigGames(hide) {
+  const restricted = !!(hide && state._t2GroupScramble);
   document.querySelectorAll('input[type="checkbox"][id^="game-"]').forEach(cb => {
     const key = cb.id.slice(5);
     const card = cb.closest('.game-toggle');
     const opts = document.getElementById('opts-' + key);
-    const doHide = hide && T2_GROUP_HIDDEN.has(key);
+    let doHide = false;
+    if (hide) {
+      if (T2_GROUP_NEVER.has(key)) doHide = true;
+      else if (restricted && !T2_GROUP_SCRAMBLE_ALLOWED.has(key)) doHide = true;
+    }
     if (card) { if (doHide) card.style.display = 'none'; else card.style.removeProperty('display'); }
     if (opts) { if (doHide) opts.style.display = 'none'; else opts.style.removeProperty('display'); }
     if (doHide && cb.checked) cb.checked = false;
@@ -33898,10 +33933,12 @@ function t2FilterGroupConfigGames(hide) {
         note.id = 't2-groupconfig-gamenote';
         note.className = 'help-text';
         note.style.cssText = 'margin:0 0 10px;padding:8px 10px;background:var(--surface-2);border-radius:8px';
-        note.innerHTML = '⛳ <strong>Your group’s games</strong> — set any games for your foursome. They settle on your group’s Board only. (Scramble, Ryder Cup, Dynamic Vegas &amp; the tournament team games are set at the event level.)';
         firstCard.parentNode.insertBefore(note, firstCard);
       }
     }
+    if (note) note.innerHTML = restricted
+      ? '⛳ <strong>Your group’s games</strong> — this event is a <strong>scramble / alternate-shot</strong> (one ball per team), so your group can add <strong>team &amp; whole-ball bets only</strong> (Team Match, Best Ball, Team Quota, Scramble, Ryder Cup, CTP, Long Putt). They settle on your group’s Board only.'
+      : '⛳ <strong>Your group’s games</strong> — set ANY games for your foursome, even the same game the tournament is running. They settle on your group’s Board only, separate from the event.';
   } else if (note) { note.remove(); }
 }
 
@@ -34148,6 +34185,15 @@ async function openT2GroupGamesConfig(tid, gid, dayNumber) {
     const hcpRules = { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false };
     state._t2GroupGamesConfig = { tid: tid, gid: gid, dayNumber: dayNumber };
     state._t2GroupConfig = gid;        // drives the group-allowed game filter
+    // Scramble / alternate-shot days are one-ball-per-team → the group menu is limited
+    // to team / whole-ball bets. Detect from the day's format (fall back to a scramble
+    // configured in the day's games).
+    try {
+      let _gFmt = '';
+      try { const _dys = await t2GetDays(tid); const _dr = (_dys || []).find(x => x.day_number === dayNumber); _gFmt = (_dr && _dr.format) || ''; } catch (e) {}
+      try { const _dg = (t.settings && t.settings.dayGames && t.settings.dayGames[dayNumber]) || null; if (!_gFmt && _dg && _dg.scramble) _gFmt = 'scramble'; } catch (e) {}
+      state._t2GroupScramble = (_gFmt === 'scramble' || _gFmt === 'altshot');
+    } catch (e) { state._t2GroupScramble = false; }
     state._t2DayConfig = null;
     state.editingLiveRound = false;
     try { document.getElementById('t2-home-modal').classList.remove('show'); } catch (e) {}
@@ -34179,7 +34225,7 @@ async function saveT2GroupGames() {
   const setup = gatherSetup(); if (!setup) return false;   // validates participant counts etc.
   const ok = await t2MergeSettings(gc.tid, s => { s.groupGames = s.groupGames || {}; s.groupGames[gc.gid] = setup.games || {}; });
   if (!ok) { showToast('Save failed — check your connection'); return false; }
-  state._t2GroupGamesConfig = null; state._t2GroupConfig = null;
+  state._t2GroupGamesConfig = null; state._t2GroupConfig = null; state._t2GroupScramble = false;
   try { t2FilterGroupConfigGames(false); } catch (e) {}
   exitT2DayConfigButtons();
   $('setup-with-game').style.display = 'none';
@@ -34321,11 +34367,19 @@ async function t2LaunchDayRounds(courseId) {
         games.teamQuota = { mode: 'perpoint', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids };
       } // 'stroke' = leaderboard-only day: no game pre-configured
     }
-    // Merge the scorer's PRE-LAUNCH group games (set while the event was scheduled)
-    // onto this group's round — remapped to the group's players like the day games.
+    // The scorer's PRE-LAUNCH group games (set while the event was scheduled) go into
+    // a SEPARATE g.groupGames namespace — NOT merged into g.games — so a group can run
+    // the SAME game TYPE as the tournament (e.g. field Team Quota + this group's own
+    // Team Quota, different players) with no key collision. They settle on this group's
+    // board only (computeAllGameMoney sums g.groupGames into each player's total) and
+    // never enter the event/field pools.
+    let groupGamesObj = null;
     try {
       const _grpGames = (t.settings && t.settings.groupGames && t.settings.groupGames[grp.id]) || null;
-      if (_grpGames && Object.keys(_grpGames).length) Object.assign(games, t2RemapGamesToGroup(_grpGames, gp, Aids, Bids));
+      if (_grpGames && Object.keys(_grpGames).length) {
+        const _rm = t2RemapGamesToGroup(_grpGames, gp, Aids, Bids);
+        if (_rm && Object.keys(_rm).length) groupGamesObj = _rm;
+      }
     } catch (e) {}
     // Side games are PER-GROUP now: each group's scorekeeper adds their own money
     // games on the group's round (💰 Side games) — no tournament-wide forcing.
@@ -34337,6 +34391,7 @@ async function t2LaunchDayRounds(courseId) {
       pars: pars, sis: sis, tees: tees,
       players: gp.map(p => { const c2 = Object.assign({}, p); delete c2._team; return c2; }),
       games: games,
+      groupGames: (groupGamesObj && Object.keys(groupGamesObj).length) ? groupGamesObj : undefined,
       hcpRules: (t.settings && t.settings.dayHcpRules && t.settings.dayHcpRules[ctx.dayNumber]) || { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false },
       unranked: false,
       scores: {},
