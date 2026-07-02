@@ -6307,7 +6307,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.459';
+const BG_BUILD = 'v2026.11.461';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -30771,6 +30771,18 @@ async function t2ListMine() {
     return Object.values(byId).sort((a, b) => (new Date(b.created_at || 0)) - (new Date(a.created_at || 0)));
   } catch (e) { return []; }
 }
+// Public events anyone can discover + join (v460): public tournaments the signed-in user
+// isn't already in. Reads are open, so we pull recent rows and filter client-side.
+async function t2ListPublicJoinable() {
+  if (!supa || !_authUser) return [];
+  try {
+    const uid = _authUser.id;
+    const mine = new Set();
+    try { const { data: mp } = await supa.from('tournament_players').select('tournament_id').eq('user_id', uid); (mp || []).forEach(r => { if (r.tournament_id) mine.add(r.tournament_id); }); } catch (e) {}
+    const { data } = await supa.from('tournaments').select('*').order('created_at', { ascending: false }).limit(200);
+    return (data || []).filter(t => t && t.settings && t.settings.public && t.commissioner_id !== uid && !mine.has(t.id) && !/^(complete|completed|final|done)$/i.test(String(t.status || '')));
+  } catch (e) { return []; }
+}
 async function t2Get(id) {
   if (!supa) return null;
   try { const { data } = await supa.from('tournaments').select('*').eq('id', id).maybeSingle(); return data; }
@@ -30855,6 +30867,34 @@ async function t2AddPlayer(tid, p) {
     if (error) { console.warn('t2AddPlayer', error); return null; }
     return data;
   } catch (e) { return null; }
+}
+// Open seats (v460, Tyler): a tournament created for N players pre-creates N unclaimed
+// "Open n" rows so groups / tee times / scorekeepers can be assigned before every name is
+// known. A joining player claims one via the normal "tap your name" screen.
+function t2IsOpenSlot(p) { return !!(p && !p.user_id && !p.claimed && /^Open \d+$/i.test(String(p.display_name || '').trim())); }
+async function t2FillOrAddPlayer(tid, p) {
+  if (p && p.force) return await t2AddPlayer(tid, p);
+  try {
+    const ex = await t2GetPlayers(tid);
+    const dup = (ex || []).find(x => !t2IsOpenSlot(x) && _t2NameKey(x.display_name) === _t2NameKey(p.displayName));
+    if (dup) { if (p.userId && !dup.user_id) { await t2AdoptSlot(dup.id, p.userId); return Object.assign({}, dup, { user_id: p.userId, claimed: true }); } return dup; }
+    const slots = (ex || []).filter(t2IsOpenSlot).sort((a, b) => (a.display_name || '').localeCompare(b.display_name || '', undefined, { numeric: true }));
+    const slot = slots.length ? ((p.team ? slots.find(s => s.team === p.team) : null) || slots[0]) : null;
+    if (slot) {
+      const upd = { display_name: p.displayName, handicap: (p.handicap != null ? p.handicap : null), user_id: p.userId || null, claimed: !!p.userId };
+      if (p.team) upd.team = p.team;
+      try { const { data, error } = await supa.from('tournament_players').update(upd).eq('id', slot.id).select().single(); if (!error && data) return data; } catch (e) {}
+    }
+  } catch (e) {}
+  return await t2AddPlayer(tid, p);
+}
+async function t2FillSlotPrompt(pid) {
+  const nm = await uiPrompt('Name for this seat:', { title: 'Fill open seat', okLabel: 'Save' });
+  if (!nm || !nm.trim()) return;
+  let uid = null; try { uid = await t2ResolveUserIdByName(nm.trim()); } catch (e) {}
+  try { await supa.from('tournament_players').update({ display_name: nm.trim(), user_id: uid || null, claimed: !!uid }).eq('id', pid); } catch (e) {}
+  showToast('Seat filled ✓');
+  try { await renderT2Home(); } catch (e) {}
 }
 async function t2GetPlayers(tid) {
   try { const { data } = await supa.from('tournament_players').select('*').eq('tournament_id', tid).order('created_at'); return data || []; }
@@ -32608,6 +32648,15 @@ async function renderT2List() {
   const _toggleHtml = _pastN ? ('<button class="small" id="t2-toggle-past" style="width:100%;margin-top:8px;color:var(--text-muted)">' + (_t2ShowPast ? '\u25B4 Hide ' : '\u25BE Show ') + _pastN + ' past event' + (_pastN === 1 ? '' : 's') + '</button>') : '';
   listEl.innerHTML = (list.length ? (_anyVisible ? _rowsHtml : '<div class="help-text" style="margin-top:4px">No current tournaments — tap below to see past ones.</div>') : '<div class="help-text" style="margin-top:4px">No tournaments yet.</div>') + _toggleHtml;
   { const _tp = document.getElementById('t2-toggle-past'); if (_tp) _tp.onclick = () => { _t2ShowPast = !_t2ShowPast; renderT2List(); }; }
+  try {
+    const _pub = await t2ListPublicJoinable();
+    if (_pub.length) {
+      const _ph = '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 4px">🌎 Public events you can join</div>' +
+        _pub.slice(0, 12).map(pt => '<div class="card" style="margin-bottom:6px;padding:8px 10px;display:flex;align-items:center;gap:8px"><div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + t2esc(pt.name || 'Tournament') + '</div>' + ((pt.settings && pt.settings.location) ? ('<div class="small-text" style="color:var(--text-muted)">📍 ' + t2esc(pt.settings.location) + '</div>') : '') + '</div><button class="small t2-pub-join" data-id="' + pt.id + '" style="flex:0 0 auto;background:var(--accent);color:#fff;border:none;font-weight:700;padding:8px 12px">Join</button></div>').join('');
+      listEl.insertAdjacentHTML('beforeend', _ph);
+      listEl.querySelectorAll('.t2-pub-join').forEach(b => b.onclick = () => openT2ClaimScreen(b.dataset.id));
+    }
+  } catch (e) {}
   const _byId = {}; list.forEach(tt => _byId[tt.id] = tt);
   const _fullT = async id => { let tf = _byId[id]; try { const f = await t2Get(id); if (f) tf = f; } catch (e) {} return tf; };
   document.querySelectorAll('#t2-list .t2-row').forEach(b => b.onclick = () => openT2Home(b.dataset.id));
@@ -32821,7 +32870,7 @@ async function openT2InviteSheet() {
   ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100061';
   const close = () => ov.remove();
   ov.innerHTML = '<div class="modal" style="max-width:440px"><h2 style="margin-bottom:4px">📣 Publish & invite</h2>'
-    + '<div class="card" style="padding:12px;margin-bottom:10px"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><div style="min-width:0"><div style="font-weight:700">' + (isPublic ? '🌎 Public' : '🔒 Private') + '</div><div class="small-text" style="color:var(--text-muted)">' + (isPublic ? 'Anyone with the link can find & join.' : 'Invite only — only people you invite can join.') + '</div></div>'
+    + '<div class="card" style="padding:12px;margin-bottom:10px"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><div style="min-width:0"><div style="font-weight:700">' + (isPublic ? '🌎 Public' : '🔒 Private') + '</div><div class="small-text" style="color:var(--text-muted)">' + (isPublic ? 'Listed under “Public events you can join” — crew can find & join.' : 'Invite only — only people you invite can join.') + '</div></div>'
     + '<button class="small" id="t2is-toggle" style="flex:0 0 auto">' + (isPublic ? 'Make private' : 'Make public') + '</button></div></div>'
     + '<button class="full" id="t2is-all" style="margin-bottom:8px;background:var(--accent);color:#fff;border:none;font-weight:700;border-radius:12px;padding:13px">📣 Invite all ' + players.length + ' added players</button>'
     + '<button class="full" id="t2is-others" style="margin-bottom:8px">➕ Invite others (not added yet)</button>'
@@ -33109,6 +33158,16 @@ async function submitT2Create() {
   const days = [];
   for (let i = 1; i <= numDays; i++) days.push({ dayNumber: i, format: dayFormat, playDate: (i === 1 ? startDate : null) });
   await t2SetDays(t.id, days);
+  // Pre-create the open seats from the player count (v460) so groups/scorekeepers can be
+  // assigned before names are known; a joiner claims one via "tap your name".
+  try {
+    const _nSlots = Math.min(numPlayers || 0, 100);
+    if (_nSlots > 0) {
+      const _slotRows = [];
+      for (let _i = 1; _i <= _nSlots; _i++) _slotRows.push({ tournament_id: t.id, display_name: 'Open ' + _i, team: hasTeams ? (_i % 2 ? 'A' : 'B') : null, claimed: false });
+      await supa.from('tournament_players').insert(_slotRows);
+    }
+  } catch (e) { console.warn('open-slot seed', e); }
   document.getElementById('t2-create-modal').classList.remove('show');
   showToast(hasTeams ? 'Tournament created' : (isGroup ? 'Group event created' : 'Event created'));
   await renderT2List();
@@ -33119,6 +33178,7 @@ async function openT2Home(id) {
   wireT2();
   _t2WizStep = null;   // fresh open -> wizard resumes at first incomplete step
   _t2LegacyPickerOpen = false;
+  _t2WizAutoCourse = null;
   // Recognize the commissioner reliably: refresh the login session so _authUser.id
   // is current before we compute manage rights. Fixes a creator being locked out of
   // their own event's settings when the cached auth user was stale/null. (Tyler, Jul 2026.)
@@ -33169,6 +33229,13 @@ async function t2ToggleWithdraw(pid) {
 }
 
 function t2PlayerRow(p, amCommish, od, teeLabel) {
+  if (amCommish && typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p)) {
+    return '<div style="display:flex;flex-wrap:nowrap;align-items:center;gap:6px;padding:6px 0;border-top:1px dashed var(--border);opacity:.85">' +
+      '<div style="flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-muted)">🪑 ' + t2esc(p.display_name) + ' <span class="small-text">— open seat</span></div>' +
+      '<button class="small t2-fill-slot" data-pid="' + p.id + '" style="flex:0 0 auto;padding:6px 10px">Name it</button>' +
+      '<button class="small t2-remove-btn" data-pid="' + p.id + '" style="flex:0 0 34px;padding-left:0;padding-right:0;color:var(--danger);border-color:var(--danger)">×</button>' +
+      '</div>';
+  }
   const other = p.team === 'A' ? 'B' : 'A';
   const claimed = p.claimed ? ' <span class="small-text" style="color:var(--accent)">✓ joined</span>' : '';
   const wd = t2WithdrawnSet(_t2Current).has(p.id);
@@ -33272,7 +33339,7 @@ async function renderT2RosterPick() {
       else { try { const _cp = await t2GetPlayers(_t2Current.id); const _a = _cp.filter(p => p.team === 'A').length, _b = _cp.filter(p => p.team === 'B').length; _team = (_a <= _b) ? 'A' : 'B'; } catch (e) { _team = 'A'; } }
     }
     try {
-      await t2AddPlayer(_t2Current.id, {
+      await t2FillOrAddPlayer(_t2Current.id, {
         displayName: name,
         team: _team,
         handicap: (hv !== '' && hv != null) ? parseFloat(hv) : null,
@@ -35024,7 +35091,7 @@ function openT2AddPlayer(tId, od) {
       if (dup && !(await uiConfirm('"' + nm + '" is already in this event. Add a second player with the same name anyway?', { title: 'Duplicate name?', okLabel: 'Add anyway', cancelLabel: 'Cancel', danger: false }))) {
         saveEl.disabled = false; saveEl.textContent = 'Add player'; return;
       }
-      await t2AddPlayer(tId, { displayName: nm, team: team, handicap: hv !== '' ? parseFloat(hv) : null, force: !!dup });
+      await t2FillOrAddPlayer(tId, { displayName: nm, team: team, handicap: hv !== '' ? parseFloat(hv) : null, force: !!dup });
       close();
       await renderT2Home();
     } catch (e) {
@@ -35038,6 +35105,7 @@ function openT2AddPlayer(tId, od) {
 let _t2TeeDay = 1;   // which day's tees show on the player rows / Assign Tees targets
 let _t2WizStep = null;   // one-screen-per-step setup wizard: current step index (null = resume at first incomplete)
 let _t2WizAdvance = false;   // armed by a step's action -> auto-jump to the next incomplete step (v455)
+let _t2WizAutoCourse = null;   // day whose course picker we've already auto-opened (v461)
 let _t2WizActive = false;   // true while the setup wizard is the current render (drives picker re-render)
 let _t2WizPickerOpen = false;   // keep the roster picker open across wizard re-renders
 let _t2LegacyPickerOpen = false;   // keep the roster picker open across LEGACY (individual/live) re-renders (v458)
@@ -35381,6 +35449,7 @@ async function renderT2Home() {
         if (_t2WizPickerOpen) { _openPick(true); } }
       body.querySelectorAll('.t2-team-btn').forEach(b => b.onclick = async () => { await t2SetPlayerTeam(b.dataset.pid, b.dataset.team); await renderT2Home(); });
       body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { await t2RemovePlayer(b.dataset.pid); await renderT2Home(); });
+      body.querySelectorAll('.t2-fill-slot').forEach(b => b.onclick = () => t2FillSlotPrompt(b.dataset.pid));
       body.querySelectorAll('.t2-hcp-input').forEach(inp => {
         const _save = async (toast) => { const v = inp.value; const ok = await t2SetPlayerHcp(inp.dataset.pid, v !== '' ? parseFloat(v) : null); if (toast) showToast(ok ? 'Handicap saved' : 'Could not save handicap'); return ok; };
         let _tm; inp.oninput = () => { _t2HcpPending[inp.dataset.pid] = inp.value; clearTimeout(_tm); _tm = setTimeout(() => _save(false), 700); };
@@ -35395,6 +35464,7 @@ async function renderT2Home() {
       });
     } else if (cur.k === 'course') {
       { const cb = document.getElementById('t2-wiz-course'); if (cb) cb.onclick = () => { _t2WizAdvance = true; _t2TeeDay = curDay; t2PickDayCourse(curDay); }; }
+      if (!cid && _t2WizAutoCourse !== curDay) { _t2WizAutoCourse = curDay; _t2WizAdvance = true; _t2TeeDay = curDay; setTimeout(() => { try { t2PickDayCourse(curDay); } catch (e) {} }, 60); }
     } else if (cur.k === 'tees') {
       { const tb = document.getElementById('t2-wiz-tees'); if (tb) tb.onclick = () => { if (!cid) { showToast('Pick the course first'); return; } _t2WizAdvance = true; t2AssignDayTees(curDay, cid); }; }
     } else if (cur.k === 'date') {
@@ -35864,6 +35934,7 @@ async function renderT2Home() {
     body.querySelectorAll('.t2-team-btn').forEach(b => b.onclick = async () => { await t2SetPlayerTeam(b.dataset.pid, b.dataset.team); await renderT2Home(); });
     body.querySelectorAll('.t2-grp-team').forEach(ch => ch.onclick = async () => { await t2SetMemberTeam(ch.dataset.mid, ch.dataset.team === 'B' ? 'A' : 'B'); await renderT2Home(); });
     body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { await t2RemovePlayer(b.dataset.pid); await renderT2Home(); });
+    body.querySelectorAll('.t2-fill-slot').forEach(b => b.onclick = () => t2FillSlotPrompt(b.dataset.pid));
   body.querySelectorAll('.t2-wd-btn').forEach(b => b.onclick = () => t2ToggleWithdraw(b.dataset.pid));
     // Inline handicap edits — AUTO-SAVE as you type (debounced ~0.7s) AND on blur,
     // so a value can't be lost by navigating away before a change event fires.
