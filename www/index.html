@@ -6280,7 +6280,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.442';
+const BG_BUILD = 'v2026.11.445';
 // Public website URL — used for SHAREABLE invite links. Inside the native app
 // location.origin is https://localhost (unreachable by recipients), so links must
 // point here. Universal Links open the native app from this URL when installed,
@@ -38159,12 +38159,84 @@ function bnavGo(tab) {
   if (tab === 'score' && state.game && state.game.code) { try { openScoreEditCard(); } catch (e) {} return; }
   try { switchTab(tab); } catch (e) {}
 }
-function bnavCenter() {
+// Locate the live round the user is currently in — their last-opened round, or a
+// scheduled/live tournament round that lists them — WITHOUT changing screens.
+// Returns the loaded game (live, mine) or null. Mirrors the finder in
+// checkLiveRoundRejoin(); used by the center nav button for one-tap re-entry.
+async function findMyLiveRound() {
+  try {
+    if (typeof loadGame !== 'function' || typeof state === 'undefined') return null;
+    let meName = null; try { meName = await getMeName(); } catch (e) {}
+    const norm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
+    const meN = norm(meName || '');
+    const nameOf = p => (typeof displayFirst === 'function') ? displayFirst(p) : (p && p.name) || '';
+    const iAmPlayer = g => { if (!g || !Array.isArray(g.players)) return false; if (!meN) return true; return g.players.some(p => norm(nameOf(p)) === meN || norm(p && p.name) === meN); };
+    const declinedByMe = g => Array.isArray(g && g.declinedBy) && meN && g.declinedBy.some(n => norm(n) === meN);
+    const codes = [];
+    try { const last = await safeGet(KEY_LAST, false); if (last) codes.push(String(last)); } catch (e) {}
+    try {
+      const tourneys = await getTourneys();
+      (tourneys || []).forEach(t => {
+        if (!t || t.isTemplate) return;
+        if (t.status === 'complete' || t.status === 'open' || t.openRound) return;
+        let inP = !meN;
+        if (!inP && t.players) inP = String(t.players).split(',').some(n => norm(n) === meN);
+        if (!inP && t.savedConfig && Array.isArray(t.savedConfig.players)) inP = t.savedConfig.players.some(p => norm(nameOf(p)) === meN || norm(p && p.name) === meN);
+        if (!inP && norm(t.createdBy) === meN) inP = true;
+        if (!inP) return;
+        if (t.activeCode) codes.push(t.activeCode);
+        if (t.plannedCode && t.plannedCode !== t.activeCode) codes.push(t.plannedCode);
+      });
+    } catch (e) {}
+    const seen = new Set();
+    for (const code of codes) {
+      if (!code || seen.has(code)) continue; seen.add(code);
+      let g = null; try { g = await loadGame(code); } catch (e) {}
+      if (!g || g.finishedAt || g.scheduled === true) continue;
+      if (!iAmPlayer(g) || declinedByMe(g)) continue;
+      return g;
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function bnavCenter() {
   try { bnavCloseMore(); } catch (e) {}
-  const g = state.game;
-  const live = !!(g && g.code && !state.viewOnlyMode && !g.finishedAt);
-  if (live) { try { switchTab('score'); } catch (e) {} return; }   // jump to the live round
-  // No round → start a fresh one, same as the old "Play now" button.
+  let g = state.game;
+  let live = !!(g && g.code && !state.viewOnlyMode && !g.finishedAt);
+  let onScore = false;
+  try { const a = document.querySelector('.tab.active'); onScore = !!(a && a.dataset && a.dataset.tab === 'score'); } catch (e) {}
+  // Nothing live loaded (e.g. the app was force-closed mid-round) — look up the
+  // user's in-progress round in the cloud so they can get back in with one tap.
+  if (!live) {
+    let found = null; try { found = await findMyLiveRound(); } catch (e) {}
+    if (found) { g = found; live = true; }
+  }
+  if (live) {
+    // Prompt before jumping in, unless they're already actively scoring this round.
+    if (!(state.game && state.game.code === g.code && onScore && !state.viewOnlyMode)) {
+      let ok = true;
+      try {
+        ok = await uiConfirm('You have a live game in progress at ' + (g.course || 'your course') + '.\n\nJump back in?',
+          { title: '⛳ Live game in progress', okLabel: 'Join now', cancelLabel: 'Not now', danger: false });
+      } catch (e) { ok = true; }
+      if (!ok) return;
+    }
+    // Load the round into memory if needed, and position on the hole in play.
+    if (!(state.game && state.game.code === g.code) || state.viewOnlyMode) {
+      state.game = g; state.viewOnlyMode = false;
+      state.currentHole = (g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
+      try { await safeSet(KEY_LAST, g.code, false); } catch (e) {}
+      try { await addToRecent(g); } catch (e) {}
+      try { enableGameTabs(true); } catch (e) {}
+      try { if (state.currentHole === 1 && !(g.t2 && g.t2.tournamentId) && typeof findNextUnscoredHole === 'function') { const nh = findNextUnscoredHole(g); if (nh > 1) state.currentHole = nh; } } catch (e) {}
+    }
+    state._scoreResumeAsked = true;                 // don't nag the resume prompt on the score tab
+    try { switchTab('score'); } catch (e) {}        // set the underlying screen
+    try { await openPlayGps(); } catch (e) {}       // open the GPS map for the hole they're on
+    return;
+  }
+  // No live round anywhere → start a fresh one, same as the old "Play now" button.
   const nb = document.getElementById('btn-new-game');
   if (nb) { nb.click(); } else { try { switchTab('setup'); } catch (e) {} }
 }
@@ -40207,7 +40279,11 @@ async function init() {
     g.reopenedAt = Date.now();
     state.viewOnlyMode = false;
     try { await saveGame(g); } catch (e) { console.warn('saveGame on reopen failed:', e); }
-    renderBoard();
+    // Reopen should drop the user straight into SCORING, not the Board/settle-up
+    // screen. The round is live again now, so mark the resume prompt as already
+    // answered and jump to the score tab (renderBoard was leaving them on the Board).
+    state._scoreResumeAsked = true;
+    try { switchTab('score'); } catch (e) { renderBoard(); }
     showToast('Round reactivated — edits will be tracked and payouts recalculated');
   };
 
@@ -42007,8 +42083,8 @@ const gpsView = (() => {
       if (!_approach && Array.isArray(target) && target.length === 2) b.extend(target); // current aim
       map.fitBounds(b, {
         bearing: brg,
-        padding: _approach ? { top: 90, bottom: 120, left: 40, right: 40 } : { top: 120, bottom: 150, left: 52, right: 52 },
-        maxZoom: maxZoomClamp || 17.4,                                    // don't over-zoom when you're on/near the green
+        padding: _approach ? { top: 64, bottom: 150, left: 34, right: 34 } : { top: 120, bottom: 150, left: 52, right: 52 },
+        maxZoom: _approach ? 20.8 : (maxZoomClamp || 17.4),                                    // don't over-zoom when you're on/near the green
         duration: animate ? 650 : 0
       });
     } catch (e) {}
@@ -42059,6 +42135,17 @@ const gpsView = (() => {
       // as the golfer moves. Re-frame whenever the dot climbs above the mid-screen
       // band (walked toward the target → zoom in), drops too low (→ zoom out), or
       // the dot/target drifts off entirely.
+      // Near the green, keep zooming IN as you walk up: if the player + green no
+      // longer fill a good chunk of the screen, re-frame tight (frameHole's approach
+      // branch). This is what makes the view fill the screen when you're close in.
+      try {
+        const _dGreenY = distM(ball, hd.mid) * YD;
+        if (_dGreenY <= 75) {
+          const gp = map.project(hd.mid);
+          const spanPx = Math.hypot(bp.x - gp.x, bp.y - gp.y);
+          if (spanPx < vh * 0.55 && (map.getZoom ? map.getZoom() : 0) < 20.6) { frameHole(true); return; }
+        }
+      } catch (e) {}
       if (bp.y < vh * 0.52 || bp.y > vh * 0.94 || off(bp) || off(tp)) frameHole(true);
     } catch (e) {}
   }
