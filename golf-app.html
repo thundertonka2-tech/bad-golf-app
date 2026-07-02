@@ -6302,7 +6302,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.455';
+const BG_BUILD = 'v2026.11.456';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -33900,14 +33900,25 @@ function t2DayGamesSummary(games) {
 // + Scramble + Vegas. Blocked at tournament level (group-only): banker, sixes (6's),
 // wolf (Captains), dvegas (Dynamic Vegas), ryder-cup, splix-sixes (Split 6's).
 const T2_FIELD_GAMES = new Set(['stroke', 'stableford', 'quota', 'skins', 'ctp', 'longputt', 'longdrive', 'scramble', 'vegas', 'team-match', 'team-lowball', 'team-quota']);
+// Games offered at tournament level depend on the tournament TYPE (v455, Tyler):
+//   Individual -> no team games; Group -> scramble/team formats only; Team -> full field set.
+function t2DayTypeAllowed() {
+  try {
+    const t = _t2Current; if (!t) return null;
+    if (typeof t2IsOneDay === 'function' && t2IsOneDay(t)) return new Set(['stroke','stableford','quota','skins','ctp','longputt','longdrive']);
+    if (typeof t2IsGroup === 'function' && t2IsGroup(t)) return new Set(['scramble','team-match','team-lowball','team-quota','ctp','longputt','longdrive']);
+  } catch (e) {}
+  return null;
+}
 function t2FilterDayConfigGames(hide) {
+  const _typeAllow = t2DayTypeAllowed();
   const SKIP = new Set(['banners', 'results-card', 'results-list', 'help-close']);
   document.querySelectorAll('input[type="checkbox"][id^="game-"]').forEach(cb => {
     const key = cb.id.slice(5);
     if (SKIP.has(key)) return;
     const card = cb.closest('.game-toggle');
     const opts = document.getElementById('opts-' + key);
-    const doHide = hide && !T2_FIELD_GAMES.has(key);
+    const doHide = hide && (!T2_FIELD_GAMES.has(key) || (_typeAllow && !_typeAllow.has(key)));
     if (card) { if (doHide) card.style.display = 'none'; else card.style.removeProperty('display'); }
     if (opts) { if (doHide) opts.style.display = 'none'; else opts.style.removeProperty('display'); }
     if (doHide && cb.checked) cb.checked = false;
@@ -34872,6 +34883,7 @@ function openT2AddPlayer(tId, od) {
 
 let _t2TeeDay = 1;   // which day's tees show on the player rows / Assign Tees targets
 let _t2WizStep = null;   // one-screen-per-step setup wizard: current step index (null = resume at first incomplete)
+let _t2WizAdvance = false;   // armed by a step's action -> auto-jump to the next incomplete step (v455)
 let _t2WizActive = false;   // true while the setup wizard is the current render (drives picker re-render)
 let _t2WizPickerOpen = false;   // keep the roster picker open across wizard re-renders
 // Pending handicap edits (pid → typed string). A re-render must never show a value
@@ -34955,7 +34967,7 @@ async function renderT2Home() {
   // left UNGATED on purpose: they pick their course inside Configure Day, so the
   // course->date->configure-day chain would deadlock. (Tyler, June 2026.)
   const _wfPlayersDone = players.length >= 2;
-  const _wfAssigned = od ? players.slice() : players.filter(p => p.team === 'A' || p.team === 'B');
+  const _wfAssigned = (od || (typeof t2IsGroup === 'function' && t2IsGroup(t))) ? players.slice() : players.filter(p => p.team === 'A' || p.team === 'B');
   const _wfDayNums = days.map(d => d.day_number);
   const _wfTeeCounts = {};
   await Promise.all(days.map(async d => {
@@ -35004,19 +35016,37 @@ async function renderT2Home() {
   if (amCommish && !od && (t.status !== 'live')) {
    try {
     _t2WizActive = true;
-    const wSteps = [{ k: 'players', d: 0 }];
+    const t2Type = (t.settings && t.settings.type) || 'team';
+    const wNoTeams = (t2Type === 'group');
+    // Order (Tyler, v455): [team names+logos: team only] -> players -> per day
+    // (course -> date -> tees -> carts/groups -> scorekeepers -> games) -> review.
+    const wSteps = [];
+    if (t2Type === 'team') wSteps.push({ k: 'team', d: 0 });
+    wSteps.push({ k: 'players', d: 0 });
     for (let _wd = 1; _wd <= _numDays; _wd++) {
-      wSteps.push({ k: 'course', d: _wd }, { k: 'tees', d: _wd }, { k: 'date', d: _wd }, { k: 'games', d: _wd }, { k: 'carts', d: _wd }, { k: 'scorer', d: _wd });
+      wSteps.push({ k: 'course', d: _wd }, { k: 'date', d: _wd }, { k: 'tees', d: _wd }, { k: 'carts', d: _wd }, { k: 'scorer', d: _wd }, { k: 'games', d: _wd });
     }
     wSteps.push({ k: 'review', d: 0 });
     const wDone = (s) => {
+      if (s.k === 'team') return true;
       if (s.k === 'players') return _wfPlayersDone;
       if (s.k === 'review') return _wfEventReady;
       const st = _wfDayState(s.d); return !!st[s.k + 'Done'];
     };
     let wFirst = wSteps.findIndex(s => !wDone(s));
     if (wFirst < 0) wFirst = wSteps.length - 1;
-    if (_t2WizStep == null) _t2WizStep = wFirst;
+    if (_t2WizStep == null) {
+      // Fresh setup lands on the FIRST step (team names / players) so nothing is
+      // skipped; a partially-built event resumes at the first incomplete step.
+      const _fresh = !(t.settings && t.settings.dayCourses && t.settings.dayCourses[1] && t.settings.dayCourses[1].id);
+      _t2WizStep = _fresh ? 0 : wFirst;
+    }
+    // Auto-advance: after a step's editor finishes, jump straight to the next
+    // incomplete step - no "Next" tap (Tyler, v455). Armed by the step's action.
+    if (_t2WizAdvance) {
+      _t2WizAdvance = false;
+      try { const _cs = wSteps[_t2WizStep]; if (_cs && _cs.k !== 'review' && wDone(_cs)) _t2WizStep = wFirst; } catch (e) {}
+    }
     _t2WizStep = Math.max(0, Math.min(_t2WizStep, wFirst, wSteps.length - 1));
     const cur = wSteps[_t2WizStep];
     const curDay = cur.d;
@@ -35025,8 +35055,8 @@ async function renderT2Home() {
     const dayId = dayObj.id || '';
     const dc = curDay ? ((t.settings && t.settings.dayCourses && t.settings.dayCourses[curDay]) || null) : null;
     const cid = (dc && dc.id) || '';
-    const _titles = { players: 'Players & teams', course: 'Pick the course', tees: 'Assign tees', date: 'Set the date', games: 'Configure games', carts: 'Carts & teams', scorer: 'Scorekeepers', review: 'Review & start' };
-    const _icons = { players: '👥', course: '⛳', tees: '🎯', date: '📅', games: '⚙️', carts: '🛺', scorer: '👑', review: '🚀' };
+    const _titles = { team: 'Team names & logos', players: 'Players & teams', course: 'Pick the course', tees: 'Assign tees', date: 'Set the date', games: 'Configure games', carts: 'Carts & teams', scorer: 'Scorekeepers', review: 'Review & start' };
+    const _icons = { team: '🎨', players: '👥', course: '⛳', tees: '🎯', date: '📅', games: '⚙️', carts: '🛺', scorer: '👑', review: '🚀' };
 
     // ---- progress dots (tap-back to any completed step) ----
     let _dots = '<div class="t2-wiz-dots">';
@@ -35048,9 +35078,10 @@ async function renderT2Home() {
         const logo = teamKey ? t2TeamLogo(t, teamKey) : null;
         let h = '<div style="font-weight:600;margin:12px 0 2px;display:flex;align-items:center;gap:6px">' + (logo ? t2LogoHtml(logo, 26) : '') + '<span>' + t2esc(label) + '</span> <span class="small-text" style="color:var(--text-muted)">(' + arr.length + ')</span></div>';
         if (!arr.length) h += '<div class="help-text" style="margin-bottom:4px">No players yet.</div>';
-        h += arr.map(p => t2PlayerRow(p, amCommish, od, _teeMap[p.id])).join('');
+        h += arr.map(p => t2PlayerRow(p, amCommish, (od || wNoTeams), _teeMap[p.id])).join('');
         return h;
       };
+      if (wNoTeams) { sb += wTeam('Players', players, null); if (!_wfPlayersDone) sb += '<div class="small-text" style="color:var(--text-muted);margin-top:10px">Add at least 2 players to continue.</div>'; } else {
       // Column headers so names/HCP/team buttons are self-explaining (Tyler). Commish-only (steppers/team btns only render then).
       if (amCommish && (teamA.length + teamB.length + unassigned.length)) {
         sb += '<div style="display:flex;flex-wrap:nowrap;align-items:center;gap:6px;padding:2px 0 3px;font-size:10px;font-weight:700;letter-spacing:.03em;color:var(--text-muted)">'
@@ -35065,6 +35096,19 @@ async function renderT2Home() {
       if (unassigned.length) sb += wTeam('Unassigned', unassigned);
       if (!_wfPlayersDone) sb += '<div class="small-text" style="color:var(--text-muted);margin-top:10px">Add at least 2 players to continue.</div>';
       else if (unassigned.length) sb += '<div class="small-text" style="color:var(--danger);margin-top:10px">⚠️ ' + unassigned.length + ' not on a team yet — tap the “→ Team” button to assign. Unassigned players can’t be grouped.</div>';
+      }
+    } else if (cur.k === 'team') {
+      const _trow = (teamKey) => {
+        const nm = teamKey === 'A' ? (t.team_a_name || 'Team A') : (t.team_b_name || 'Team B');
+        const logo = t2TeamLogo(t, teamKey);
+        return '<div class="card" style="padding:12px;margin-bottom:10px"><div style="display:flex;align-items:center;gap:10px">'
+          + '<button type="button" class="t2-team-logo-btn" data-team="' + teamKey + '" style="flex:0 0 auto;border:1px solid var(--border);background:var(--surface-2);border-radius:12px;width:54px;height:54px;font-size:24px;cursor:pointer">' + (logo ? t2LogoHtml(logo, 40) : '🎨') + '</button>'
+          + '<div style="flex:1;min-width:0"><label class="small-text" style="color:var(--text-muted);display:block;margin-bottom:3px">Team ' + teamKey + ' name</label>'
+          + '<input type="text" class="t2-team-name" data-team="' + teamKey + '" value="' + t2esc(nm) + '" style="width:100%;font-size:16px;padding:8px"></div></div></div>';
+      };
+      sb += _trow('A');
+      sb += _trow('B');
+      sb += '<div class="small-text" style="color:var(--text-muted)">Name both teams and tap a badge to set a logo (or photo). They show on leaderboards and scorecards. Tap Next when ready.</div>';
     } else if (cur.k === 'course') {
       if (dc && dc.name) sb += '<div class="card" style="padding:12px;margin-bottom:10px"><div style="font-weight:700">✓ ' + t2esc(dc.name) + '</div></div>';
       sb += '<button class="full" id="t2-wiz-course" style="background:var(--accent);color:#fff;border:none;font-weight:700;padding:14px">⛳ ' + (dc && dc.name ? 'Change course' : 'Pick the course') + '</button>';
@@ -35094,7 +35138,7 @@ async function renderT2Home() {
       if (gs.length) {
         sb += '<div style="margin-top:12px">' + gs.map(g2 => {
           const mem = (membersByGroup[g2.id] || []).slice().sort((a, b) => (a.slot || 0) - (b.slot || 0));
-          const names = mem.map(m => { const p = pById[m.tournament_player_id]; const nm = p ? p.display_name.split(/\s+/)[0] : '?'; return (od ? '' : (m.team === 'A' ? '🔵' : '🔴')) + nm; }).join(' ');
+          const names = mem.map(m => { const p = pById[m.tournament_player_id]; const nm = p ? p.display_name.split(/\s+/)[0] : '?'; return ((od || wNoTeams) ? '' : (m.team === 'A' ? '🔵' : '🔴')) + nm; }).join(' ');
           return '<div style="padding:6px 0;border-top:1px solid var(--border)"><div style="font-weight:600;font-size:13px">Group ' + g2.group_number + '</div><div style="font-size:13px;color:var(--text-muted)">' + t2esc(names) + '</div></div>';
         }).join('') + '</div>';
       }
@@ -35187,10 +35231,16 @@ async function renderT2Home() {
         inp.onchange = () => { _t2HcpPending[inp.dataset.pid] = inp.value; clearTimeout(_tm); _save(true); };
       });
       body.querySelectorAll('.t2-hcp-step').forEach(b => b.onclick = () => { try { const wrap = b.parentNode; const inp = wrap && wrap.querySelector('.t2-hcp-input'); if (!inp) return; let v = parseFloat(inp.value); if (!isFinite(v)) v = 0; v = Math.max(-9, Math.min(54, v + (b.dataset.dir === '-1' ? -1 : 1))); inp.value = String(v); inp.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {} });
+    } else if (cur.k === 'team') {
+      body.querySelectorAll('.t2-team-logo-btn').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
+      body.querySelectorAll('.t2-team-name').forEach(inp => {
+        const _sv = async () => { const v = (inp.value || '').trim() || ('Team ' + inp.dataset.team); const f = inp.dataset.team === 'A' ? { team_a_name: v } : { team_b_name: v }; const ok = await t2Update(t.id, f); if (ok) { if (inp.dataset.team === 'A') { t.team_a_name = v; if (_t2Current) _t2Current.team_a_name = v; } else { t.team_b_name = v; if (_t2Current) _t2Current.team_b_name = v; } } };
+        inp.onchange = _sv; inp.addEventListener('blur', _sv);
+      });
     } else if (cur.k === 'course') {
-      { const cb = document.getElementById('t2-wiz-course'); if (cb) cb.onclick = () => { _t2TeeDay = curDay; t2PickDayCourse(curDay); }; }
+      { const cb = document.getElementById('t2-wiz-course'); if (cb) cb.onclick = () => { _t2WizAdvance = true; _t2TeeDay = curDay; t2PickDayCourse(curDay); }; }
     } else if (cur.k === 'tees') {
-      { const tb = document.getElementById('t2-wiz-tees'); if (tb) tb.onclick = () => { if (!cid) { showToast('Pick the course first'); return; } t2AssignDayTees(curDay, cid); }; }
+      { const tb = document.getElementById('t2-wiz-tees'); if (tb) tb.onclick = () => { if (!cid) { showToast('Pick the course first'); return; } _t2WizAdvance = true; t2AssignDayTees(curDay, cid); }; }
     } else if (cur.k === 'date') {
       { const de = body.querySelector('.t2-day-date'); if (de) de.addEventListener('change', async () => {
         const arr = [];
@@ -35199,12 +35249,12 @@ async function renderT2Home() {
           const _pd = (_dn === curDay) ? (de.value || null) : ((_dRec && _dRec.play_date) || null);
           arr.push({ dayNumber: _dn, format: (_dRec && _dRec.format) || 'stroke', playDate: _pd });
         }
-        try { await t2SetDays(t.id, arr); await renderT2Home(); } catch (e) {}
+        try { await t2SetDays(t.id, arr); _t2WizAdvance = true; await renderT2Home(); } catch (e) {}
       }); }
     } else if (cur.k === 'games') {
-      { const gb = document.getElementById('t2-wiz-games'); if (gb) gb.onclick = () => openT2DayConfig(curDay); }
+      { const gb = document.getElementById('t2-wiz-games'); if (gb) gb.onclick = () => { _t2WizAdvance = true; openT2DayConfig(curDay); }; }
     } else if (cur.k === 'carts') {
-      { const cb = document.getElementById('t2-wiz-carts'); if (cb) cb.onclick = () => { if (!dayId) { showToast('Set the date first (save the day)'); return; } openT2Carts(curDay, dayId); }; }
+      { const cb = document.getElementById('t2-wiz-carts'); if (cb) cb.onclick = () => { if (!dayId) { showToast('Set the date first (save the day)'); return; } _t2WizAdvance = true; openT2Carts(curDay, dayId); }; }
     } else if (cur.k === 'scorer') {
       body.querySelectorAll('.t2-pick-captain').forEach(b => b.onclick = () => t2PickGroupCaptain(b.dataset.gid, (b.dataset.mem || '').split('|').filter(Boolean), b.dataset.cap || ''));
     } else if (cur.k === 'review') {
