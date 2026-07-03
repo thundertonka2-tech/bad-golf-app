@@ -4161,6 +4161,10 @@
       <!-- Re-Map Hole: only shown for manually-mapped courses, and only until
            the course has 3+ completed rounds since mapping (then it locks). -->
       <div style="margin-top:10px">
+        <!-- Leave round: removes THIS user's stats for the round (recalcs their
+             handicap); everyone else keeps the round. Hidden for tournament rounds
+             in renderScoreEntry — those are managed from Events. -->
+        <button class="full" id="btn-leave-round" style="background:var(--surface);color:var(--danger);border:1px solid var(--danger);border-radius:12px;padding:12px;font-size:14px;font-weight:700">🚪 Leave round</button>
         <!-- Re-Map Hole removed — course re-mapping is handled from the Admin tool now. -->
         <button id="btn-delete-round" style="width:100%;margin-top:8px;background:var(--danger);color:#fff;border:1px solid var(--danger);border-radius:12px;padding:12px;font-size:14px;font-weight:700">🗑️ Delete round</button>
       </div>
@@ -6487,7 +6491,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.484';
+const BG_BUILD = 'v2026.11.485';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -18306,6 +18310,11 @@ function renderScoreEntry() {
       else { _delBtn.disabled = false; _delBtn.style.opacity = ''; _delBtn.style.pointerEvents = ''; _delBtn.title = ''; }
     }
   }
+  // "Leave round" is a personal exit (drops only MY stats). Never offered on
+  // tournament rounds — those are run from Events — so hide it entirely there.
+  { const _leaveBtn = $('btn-leave-round');
+    if (_leaveBtn) _leaveBtn.style.display = _isTourneyScore ? 'none' : '';
+  }
 }
 
 // Render the running money totals strip on the Score tab. One pill per
@@ -26079,9 +26088,13 @@ function buildHomeKpiHtml(player, isMe) {
     const older = calcHandicapIndex(validDiffs.slice(5));
     if (older.index != null) {
       const delta = calc.index - older.index;
+      // A LOWER index is better, so the arrow follows the NUMBER's direction:
+      // improving = index went DOWN = ▼ (green); declining = index went UP = ▲ (red).
+      // (Was a green ▲ for "improving", which looked backwards — the number drops
+      // when you improve. Tyler, Jul 2026.)
       if (Math.abs(delta) < 0.3) trendHtml = '<span style="color:var(--text-muted)">→ Stable</span>';
-      else if (delta < 0) trendHtml = '<span style="color:var(--money-pos)">▲ Improving (' + Math.abs(delta).toFixed(1) + ' better)</span>';
-      else trendHtml = '<span style="color:var(--danger)">▼ Declining (' + delta.toFixed(1) + ' worse)</span>';
+      else if (delta < 0) trendHtml = '<span style="color:var(--money-pos)">▼ Improving (' + Math.abs(delta).toFixed(1) + ' better)</span>';
+      else trendHtml = '<span style="color:var(--danger)">▲ Declining (' + delta.toFixed(1) + ' worse)</span>';
     }
   }
   const validGross = history.filter(s => s.gross != null);
@@ -29746,9 +29759,15 @@ async function openCrewProfile(name) {
       (Array.isArray(base.scoreHistory) ? base.scoreHistory : []).forEach(s => { if (s && s.gameCode) _codes.add(s.gameCode); });
       const _cands = Array.from(_codes).filter(c => c && !window._crewHealedCodes.has(c)).slice(0, 18);
       let _did = false;
+      window._crewLoadedGames = window._crewLoadedGames || {};
       for (const _code of _cands) {
         try {
           const g = await loadGame(_code);
+          // Cache the fresh shared round so the display can reconcile each player's
+          // gross against the REAL scorecard below (Tyler: Pat's card read 74 but
+          // the group card was 79). Cache any round that carries scores, not just
+          // finished ones — a stale self-archive can lag a still-open card too.
+          if (g && Array.isArray(g.players) && g.players.length && g.scores) window._crewLoadedGames[_code] = g;
           if (g && g.finishedAt && Array.isArray(g.players) && g.players.length) { await archiveScoresFromRound(g); window._crewHealedCodes.add(_code); _did = true; }
         } catch (e) {}
       }
@@ -29758,6 +29777,31 @@ async function openCrewProfile(name) {
   // Pull the player's real rounds from their per-user cloud backup — fixes a friend
   // who played on their own device showing 0 because the shared roster blob is stale.
   const p = Object.assign({}, base, { scoreHistory: await mergedPlayerHistory(base) });
+  // v484 — the card must show the SHARED scorecard total, never a player's stale
+  // self-saved gross. Pat's own phone stored 74 for a round the group card shows as
+  // 79; the two never reconciled. For any round we loaded fresh above, recompute THIS
+  // player's gross straight from the shared scores so both the tiles (avg/best) and
+  // the recent-rounds column always match the real card. Only overrides when the
+  // shared card is COMPLETE (18 holes) — never fabricates or lowers real data.
+  try {
+    const _lg = window._crewLoadedGames || {};
+    (Array.isArray(p.scoreHistory) ? p.scoreHistory : []).forEach(h => {
+      if (!h || !h.gameCode) return;
+      const g = _lg[h.gameCode];
+      if (!g || !Array.isArray(g.players) || !g.scores) return;
+      const pl = g.players.find(x => x && normalizeNameSegment(x.name) === normalizeNameSegment(p.name));
+      if (!pl) return;
+      const arr = g.scores[pl.id] || [];
+      if (arr.filter(v => v != null).length !== 18) return;   // only trust a complete shared card
+      const trueGross = arr.reduce((a, b) => a + (b || 0), 0);
+      if (typeof trueGross === 'number' && trueGross > 0 && trueGross !== h.gross) {
+        h.gross = trueGross;                                   // authoritative scorecard total
+        if (h.rating != null && h.slope && typeof calcDifferential === 'function') {
+          try { h.differential = calcDifferential(trueGross, h.rating, h.slope, (typeof h.ca === 'number' ? h.ca : 0)); } catch (e) {}
+        }
+      }
+    });
+  } catch (e) {}
   // Friend's profile photo lives on THEIR account (profiles.avatar), not in my
   // local roster — pull it so their picture shows instead of just initials.
   if (!p.avatar) {
@@ -41736,6 +41780,28 @@ async function init() {
       let hcpAffected = false;
       try { hcpAffected = await removeRoundForMe(code); } catch (e) {}
       showToast(hcpAffected ? 'Removed — your handicap was recalculated' : 'Round removed from your list');
+      try { await loadRounds(); } catch (e) {}
+      switchTab('home');
+    }; }
+
+  // Leave round — a personal exit that drops ONLY this user's stats for the round
+  // (removeRoundForMe deletes my score record + recalculates my handicap); everyone
+  // else keeps the round and their stats. Blocked on tournament rounds (the button
+  // is hidden there too — this is defense-in-depth).
+  { const _lr = $('btn-leave-round'); if (_lr) _lr.onclick = async () => {
+      const g = state.game;
+      if (!g || !g.code) { showToast('No active round'); return; }
+      if (g.t2 && g.t2.tournamentId) { showToast('Tournament rounds are managed from Events'); return; }
+      const code = g.code;
+      const ok = await uiConfirm(
+        'Are you sure you want to leave this round?\n\nLeaving removes ALL your stats for this round and recalculates your handicap. Everyone else keeps the round and their stats. This only affects you.',
+        { title: 'Leave round?', okLabel: 'Yes', cancelLabel: 'No', danger: true });
+      if (!ok) return;
+      // Tear the active round DOWN FIRST so an autosave / realtime echo can't
+      // re-save it and re-add it to your Rounds list right after we remove it.
+      try { await discardActiveRound(); } catch (e) {}
+      try { await removeRoundForMe(code); } catch (e) {}
+      showToast('You left the round — your stats for it were removed');
       try { await loadRounds(); } catch (e) {}
       switchTab('home');
     }; }
