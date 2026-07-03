@@ -24,7 +24,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         super.init()
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = 3   // meters; recompute on meaningful movement, not a tight timer
+        manager.distanceFilter = 5   // meters; recompute on meaningful movement, not a tight timer
         manager.allowsBackgroundLocationUpdates = false  // when-in-use only for v1
     }
 
@@ -38,7 +38,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         acquiring = true
         manager.requestWhenInUseAuthorization()      // idempotent — make sure we're authorized
         manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = 3
+        manager.distanceFilter = 5
         manager.startUpdatingLocation()
         startWatchdog()
     }
@@ -63,7 +63,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
             if self.location == nil { self.acquiring = true }
             self.manager.stopUpdatingLocation()
             self.manager.desiredAccuracy = kCLLocationAccuracyBest
-            self.manager.distanceFilter = 3
+            self.manager.distanceFilter = 5
             self.manager.startUpdatingLocation()
         }
     }
@@ -77,7 +77,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     func fullPower() {
         guard active else { return }
         manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = 3
+        manager.distanceFilter = 5
     }
 
     // MARK: CLLocationManagerDelegate
@@ -104,10 +104,23 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         // confidence dot still shows green/yellow, but we no longer feed it a bad spot.
         guard loc.horizontalAccuracy >= 0 else { return }
         if abs(loc.timestamp.timeIntervalSinceNow) > 5 { return }   // stale / cached fix
-        let acceptMeters = 50.0                                       // reject worse-than-50 m fixes
+        // Tightened 50 m → 30 m. The watch's own receiver is noisier than the phone's,
+        // and accepting weak 30-50 m fixes was the "bad distance that keeps changing"
+        // Tyler saw: a poor fix lands, the yardage jumps 20-40 yds, then a good fix
+        // pulls it back. Under 30 m we trust it; worse than that we keep the last good
+        // fix (or show "acquiring" if we have nothing yet).
+        let acceptMeters = 30.0
         if loc.horizontalAccuracy > acceptMeters {
             if location == nil { acquiring = true }                  // nothing usable yet → "acquiring", not a wrong number
             return                                                   // already have a good fix → keep it, ignore this one
+        }
+        // Anti-jitter hysteresis: if we already have a RECENT fix (< 4 s old) that's
+        // clearly more accurate than this one, keep it instead of swapping to a noisier
+        // reading. Stops the hero yardage from bouncing while standing over the ball.
+        if let cur = location, let curAt = lastFixAt,
+           Date().timeIntervalSince(curAt) < 4,
+           cur.horizontalAccuracy + 8 < loc.horizontalAccuracy {
+            return
         }
         location = loc
         lastFixAt = Date()
