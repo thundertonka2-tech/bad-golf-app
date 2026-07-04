@@ -6660,7 +6660,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.497';
+const BG_BUILD = 'v2026.11.498';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -29142,6 +29142,55 @@ async function removeRoundForMe(code) {
 // list, so a removed round stops counting toward your handicap and the
 // Home/profile round count matches the Rounds tab. Safe — only removes rounds
 // you explicitly hid; legitimately-added past rounds (never hidden) are kept.
+// Money-safe score heal. For each history entry whose SHARED saved card (in
+// loadedGames, keyed by gameCode) has THIS player's 18 holes complete, correct the
+// stored gross + hole-by-hole (+ pars / complete / differential) to the real card.
+// NEVER touches money, never lowers a complete card, never invents data (acts only
+// on an 18-complete shared card). Returns true if anything changed. (v498 — the fix
+// for Stats/round-card showing a stale gross the crew profile had already corrected.)
+function healHistoryFromCards(history, loadedGames, playerName) {
+  if (!Array.isArray(history) || !loadedGames) return false;
+  const nk = (typeof normalizeNameSegment === 'function') ? normalizeNameSegment : (x => String(x || '').toLowerCase());
+  let changed = false;
+  history.forEach(h => {
+    try {
+      if (!h || !h.gameCode) return;
+      const g = loadedGames[h.gameCode];
+      if (!g || !Array.isArray(g.players) || !g.scores) return;
+      const pl = g.players.find(x => x && nk(x.name) === nk(playerName));
+      if (!pl) return;
+      const arr = g.scores[pl.id] || [];
+      if (arr.filter(v => v != null).length !== 18) return;      // only trust a complete card
+      const trueGross = arr.reduce((a, b) => a + (b || 0), 0);
+      if (!(trueGross > 0)) return;
+      const holes = arr.slice(0, 18).map(v => (v == null ? null : v));
+      const sameHoles = Array.isArray(h.holeScores) && h.holeScores.length === 18 && h.holeScores.every((v, i) => v === holes[i]);
+      if (h.gross === trueGross && h.complete === true && (h.holesScored | 0) === 18 && sameHoles) return; // already right
+      h.gross = trueGross; h.holeScores = holes; h.complete = true; h.holesScored = 18;
+      try { const gp = (Array.isArray(g.pars) && g.pars.length >= 18) ? g.pars : ((g.course && Array.isArray(g.course.pars)) ? g.course.pars : null); if (gp) h.pars = gp.slice(0, 18); } catch (e) {}
+      if (h.rating != null && h.slope && typeof calcDifferential === 'function') {
+        try { h.differential = calcDifferential(trueGross, h.rating, h.slope, (typeof h.ca === 'number' ? h.ca : 0)); } catch (e) {}
+      }
+      changed = true;
+    } catch (e) {}
+  });
+  return changed;
+}
+// Drop CONFIRMED ghost rounds only: an entry with NO gross, NO hole scores AND NO
+// money is a re-archive artifact (e.g. an empty "Pines 7/3" row). Keeps every round
+// that carries a real score OR money (Frank's money-only rounds stay) and every
+// intentional manual past-round. Never deletes a played round. (v498)
+function dropGhostRounds(history) {
+  if (!Array.isArray(history)) return history;
+  return history.filter(h => {
+    if (!h) return false;
+    if (h.manual) return true;
+    const hasGross = (h.gross != null);
+    const hasHoles = Array.isArray(h.holeScores) && h.holeScores.some(v => v != null);
+    const hasMoney = (typeof h.money === 'number' && h.money !== 0);
+    return hasGross || hasHoles || hasMoney;
+  });
+}
 async function reconcileMyScoreHistory() {
   try {
     const me = await getMeName(); if (!me) return;
@@ -29172,6 +29221,26 @@ async function reconcileMyScoreHistory() {
         if (_healed) { roster = await getPlayerRoster(); entry = findMyRosterPlayer(roster, me); if (!entry || !Array.isArray(entry.scoreHistory)) return; }
       }
     } catch (e) {}
+    // 0b) Money-safe heal: pull each round's real 18-hole card from the saved game
+    //     and correct this player's stored gross + hole-by-hole so the Stats box /
+    //     round card never flash a stale total. Parallel loads (was the slow part),
+    //     then heal; persisted below so it's instant + right on next open.
+    let _myHealed = false;
+    try {
+      const _codes = Array.from(new Set((entry.scoreHistory || [])
+        .filter(h => h && h.gameCode && !(h.complete === true && Array.isArray(h.holeScores) && h.holeScores.filter(v => v != null).length === 18))
+        .map(h => h.gameCode))).slice(0, 12);
+      if (_codes.length) {
+        const _lg = {};
+        const _res = await Promise.all(_codes.map(async c => { try { return { c: c, g: await loadGame(c) }; } catch (e) { return { c: c, g: null }; } }));
+        _res.forEach(function (o) { if (o.g && Array.isArray(o.g.players) && o.g.scores) _lg[o.c] = o.g; });
+        _myHealed = healHistoryFromCards(entry.scoreHistory, _lg, me);
+      }
+    } catch (e) {}
+    // 0c) Drop confirmed ghost rounds (no gross, no holes, no money).
+    const _preGhost = entry.scoreHistory.length;
+    try { entry.scoreHistory = dropGhostRounds(entry.scoreHistory); } catch (e) {}
+    if (entry.scoreHistory.length !== _preGhost) _myHealed = true;
     const before = entry.scoreHistory.length;
     // 1) Always drop rounds you explicitly hid/deleted (the × on the Rounds tab).
     let hiddenSet = new Set();
@@ -29207,7 +29276,7 @@ async function reconcileMyScoreHistory() {
       }
     } catch (e) {}
     try { entry.scoreHistory = dedupeScoreHistory(entry.scoreHistory); } catch (e) {}
-    if (entry.scoreHistory.length !== before) await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
+    if (entry.scoreHistory.length !== before || _myHealed) await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
   } catch (e) {}
 }
 
@@ -30103,13 +30172,12 @@ async function openCrewProfile(name) {
       const _cands = Array.from(_codes).filter(c => c && !window._crewHealedCodes.has(c)).slice(0, 18);
       let _did = false;
       window._crewLoadedGames = window._crewLoadedGames || {};
-      for (const _code of _cands) {
+      // Load every candidate round's shared card IN PARALLEL (was sequential — the
+      // main cause of the slow profile/stats load), then process them in order.
+      const _loaded = await Promise.all(_cands.map(async _code => { try { return { code: _code, g: await loadGame(_code) }; } catch (e) { return { code: _code, g: null }; } }));
+      for (const _o of _loaded) {
+        const _code = _o.code, g = _o.g;
         try {
-          const g = await loadGame(_code);
-          // Cache the fresh shared round so the display can reconcile each player's
-          // gross against the REAL scorecard below (Tyler: Pat's card read 74 but
-          // the group card was 79). Cache any round that carries scores, not just
-          // finished ones — a stale self-archive can lag a still-open card too.
           if (g && Array.isArray(g.players) && g.players.length && g.scores) window._crewLoadedGames[_code] = g;
           if (g && g.finishedAt && Array.isArray(g.players) && g.players.length) { await archiveScoresFromRound(g); window._crewHealedCodes.add(_code); _did = true; }
         } catch (e) {}
@@ -30126,24 +30194,19 @@ async function openCrewProfile(name) {
   // player's gross straight from the shared scores so both the tiles (avg/best) and
   // the recent-rounds column always match the real card. Only overrides when the
   // shared card is COMPLETE (18 holes) — never fabricates or lowers real data.
+  // Heal the DISPLAY copy AND persist to the roster, so every surface (this profile,
+  // the Stats tab, and the tap-in round card — all read getPlayerRoster()) shows the
+  // same corrected gross + hole-by-hole, not just this view. Money-safe. (v498)
   try {
     const _lg = window._crewLoadedGames || {};
-    (Array.isArray(p.scoreHistory) ? p.scoreHistory : []).forEach(h => {
-      if (!h || !h.gameCode) return;
-      const g = _lg[h.gameCode];
-      if (!g || !Array.isArray(g.players) || !g.scores) return;
-      const pl = g.players.find(x => x && normalizeNameSegment(x.name) === normalizeNameSegment(p.name));
-      if (!pl) return;
-      const arr = g.scores[pl.id] || [];
-      if (arr.filter(v => v != null).length !== 18) return;   // only trust a complete shared card
-      const trueGross = arr.reduce((a, b) => a + (b || 0), 0);
-      if (typeof trueGross === 'number' && trueGross > 0 && trueGross !== h.gross) {
-        h.gross = trueGross;                                   // authoritative scorecard total
-        if (h.rating != null && h.slope && typeof calcDifferential === 'function') {
-          try { h.differential = calcDifferential(trueGross, h.rating, h.slope, (typeof h.ca === 'number' ? h.ca : 0)); } catch (e) {}
-        }
-      }
-    });
+    healHistoryFromCards(p.scoreHistory, _lg, p.name);
+    const rEntry = (roster || []).find(x => x && x.name && normalizeNameSegment(x.name) === normalizeNameSegment(name));
+    if (rEntry && Array.isArray(rEntry.scoreHistory)) {
+      const _ch = healHistoryFromCards(rEntry.scoreHistory, _lg, rEntry.name);
+      const _b4 = rEntry.scoreHistory.length;
+      rEntry.scoreHistory = dropGhostRounds(rEntry.scoreHistory);
+      if (_ch || rEntry.scoreHistory.length !== _b4) { try { await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false); } catch (e) {} }
+    }
   } catch (e) {}
   // Friend's profile photo lives on THEIR account (profiles.avatar), not in my
   // local roster — pull it so their picture shows instead of just initials.
