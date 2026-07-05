@@ -28439,11 +28439,11 @@ async function t2InjectTourneySummaryLink(g, container) {
   (async () => {
     const inlineEl = div.querySelector('.t2-tourney-inline'); if (!inlineEl) return;
     let myName = ''; try { myName = (await getMeName()) || ''; } catch (e) {}
-    let money = null, skins = null, cross = null, scores = null, fieldStbl = null;
+    let money = null, skins = null, cross = null, scores = null, fieldStbl = null, fieldQuota = null;
     try {
       const now = Date.now();
       if (_t2BoardMoneyCache.tid === tid && (now - _t2BoardMoneyCache.at) < 20000) {
-        money = _t2BoardMoneyCache.money; skins = _t2BoardMoneyCache.skins; cross = _t2BoardMoneyCache.cross; scores = _t2BoardMoneyCache.scores; fieldStbl = _t2BoardMoneyCache.fieldStbl;
+        money = _t2BoardMoneyCache.money; skins = _t2BoardMoneyCache.skins; cross = _t2BoardMoneyCache.cross; scores = _t2BoardMoneyCache.scores; fieldStbl = _t2BoardMoneyCache.fieldStbl; fieldQuota = _t2BoardMoneyCache.fieldQuota;
       } else {
         const t = await t2Get(tid);
         money = await loadTourneyMoney(t);
@@ -28468,7 +28468,8 @@ async function t2InjectTourneySummaryLink(g, container) {
           scores = Object.values(_agg).sort((a, b) => (a.net - b.net) || (a.gross - b.gross));
         } catch (e) {}
         try { fieldStbl = t2ComputeFieldStableford(raw, t); } catch (e) {}
-        _t2BoardMoneyCache = { tid: tid, at: now, money: money, skins: skins, cross: cross, scores: scores, fieldStbl: fieldStbl };
+        try { const _evp = await t2GetPlayers(t.id).catch(() => []); fieldQuota = t2ComputeFieldQuota(raw, t, _evp); } catch (e) {}
+        _t2BoardMoneyCache = { tid: tid, at: now, money: money, skins: skins, cross: cross, scores: scores, fieldStbl: fieldStbl, fieldQuota: fieldQuota };
       }
     } catch (e) {}
     if (!div.isConnected) return;
@@ -28514,6 +28515,14 @@ async function t2InjectTourneySummaryLink(g, container) {
       let _fl = 'Stableford (whole field): <strong>' + _fpts + ' pts</strong>' + (_fi >= 0 ? ' · #' + (_fi + 1) + ' of ' + fieldStbl.standings.length : '') + ' · Pool $' + fieldStbl.pool;
       _fl += (fieldStbl.complete && _fnet) ? (' · <strong style="color:' + col(_fnet) + '">' + fmt(_fnet) + '</strong>') : ' <span class="small-text" style="color:var(--text-muted)">(pays at the end)</span>';
       lines += '<div>' + _fl + '</div>';
+    }
+    if (fieldQuota && Array.isArray(fieldQuota.standings) && fieldQuota.standings.length) {
+      const _qi = fieldQuota.standings.findIndex(x => nm(x.name) === myKey || nm(x.first) === myKey);
+      const _qres = _qi >= 0 ? fieldQuota.standings[_qi].result : 0;
+      const _qnet = fieldQuota.money ? (fieldQuota.money[myKey] || 0) : 0;
+      let _ql = 'Quota (whole field): <strong>' + (_qres >= 0 ? '+' + _qres : _qres) + ' vs quota</strong>' + (_qi >= 0 ? ' · #' + (_qi + 1) + ' of ' + fieldQuota.standings.length : '') + ' · Pool $' + fieldQuota.pool;
+      _ql += (fieldQuota.complete && _qnet) ? (' · <strong style="color:' + col(_qnet) + '">' + fmt(_qnet) + '</strong>') : ' <span class="small-text" style="color:var(--text-muted)">(pays at the end)</span>';
+      lines += '<div>' + _ql + '</div>';
     }
     // Cross-group 1v1s (match + Nassau) — my net, on the tournament side.
     let crossNet = 0;
@@ -40461,6 +40470,71 @@ function t2ComputeFieldStableford(rows, t, fieldPlayers) {
     return { standings: standings, pool: pool, buyin: buyin, payout: payout, complete: allComplete, money: money };
   } catch (e) { return null; }
 }
+// Whole-field QUOTA pool — mirrors t2ComputeFieldStableford but ranks by result
+// (points - quota). In a tournament, Quota is ONE field pool decided at the end;
+// it never settles per group (calcQuota zeroes group money via _isFieldQ). (Tyler, Jul 2026)
+function t2ComputeFieldQuota(rows, t, fieldPlayers) {
+  try {
+    if (!Array.isArray(rows) || !rows.length || !t || !t.settings || !t.settings.dayGames) return null;
+    const nmk = s => normalizeNameSegment(String(s || ''));
+    let cfg = null;
+    Object.keys(t.settings.dayGames).forEach(d => {
+      const dg = t.settings.dayGames[d];
+      if (dg && dg.quota && (dg.quota.mode || 'pool') !== 'perpoint') cfg = dg.quota;
+    });
+    if (!cfg) return null;
+    const buyin = cfg.buyin != null ? cfg.buyin : (cfg.value || 0);
+    const payout = cfg.payout || 'winner';
+    const byName = {}; let allComplete = true; let anyScores = false;
+    rows.forEach(row => {
+      const g = row && row.data ? row.data : row;
+      if (!g || !Array.isArray(g.players) || !g.games || !g.games.quota) return;
+      let res = null; try { res = calcQuota(g); } catch (e) {}
+      const resultMap = (res && res.result) ? res.result : {};
+      const ptsMap = (res && res.points) ? res.points : {};
+      const done = !!(g.finishedAt) || (typeof allHolesScored === 'function' && allHolesScored(g));
+      g.players.forEach(p => {
+        if (!p || !p.name) return;
+        const k = nmk(p.name);
+        if (!byName[k]) byName[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), result: 0, points: 0 };
+        byName[k].result += (resultMap[p.id] || 0);
+        byName[k].points += (ptsMap[p.id] || 0); anyScores = true;
+      });
+      if (!done) allComplete = false;
+    });
+    const _scoredCount = Object.keys(byName).length;
+    if (Array.isArray(fieldPlayers)) {
+      fieldPlayers.forEach(p => {
+        const nmF = (p && (p.display_name || p.name)) || ''; if (!nmF) return;
+        const k = nmk(nmF); if (!byName[k]) byName[k] = { name: nmF, first: String(nmF).split(/\s+/)[0], result: 0, points: 0 };
+      });
+    }
+    const standings = Object.values(byName).sort((a, b) => b.result - a.result);
+    if (!standings.length || !anyScores) return null;
+    const N = (Array.isArray(fieldPlayers) && fieldPlayers.length) ? fieldPlayers.length : standings.length;
+    if (N > _scoredCount) allComplete = false;
+    const pool = N * buyin, money = {};
+    standings.forEach(x => money[nmk(x.name)] = 0);
+    if (allComplete && buyin > 0 && N >= 2) {
+      standings.forEach(x => money[nmk(x.name)] = -buyin);
+      const top = standings[0].result;
+      if (payout === '8020') {
+        const firsts = standings.filter(x => x.result === top);
+        if (firsts.length >= 2) { const sh = pool / firsts.length; firsts.forEach(x => money[nmk(x.name)] += sh); }
+        else {
+          money[nmk(standings[0].name)] += pool * 0.8;
+          const secondRes = standings[1].result;
+          const seconds = standings.filter(x => x.result === secondRes);
+          const sh = (pool * 0.2) / seconds.length; seconds.forEach(x => money[nmk(x.name)] += sh);
+        }
+      } else {
+        const winners = standings.filter(x => x.result === top);
+        const sh = pool / winners.length; winners.forEach(x => money[nmk(x.name)] += sh);
+      }
+    }
+    return { standings: standings, pool: pool, buyin: buyin, payout: payout, complete: allComplete, money: money };
+  } catch (e) { return null; }
+}
 // ===== FIELD-WIDE POOL NASSAU =====
 // One whole-field NET pool: best net Front 9 / Back 9 / (optional) Overall 18.
 // Each segment is its OWN pot (ante = cfg.value per player). Places paid scale
@@ -40918,6 +40992,7 @@ async function openEventLeaderboard(t) {
     try { const _freshT = await t2Get(t.id); if (_freshT) { if (_freshT.settings) t.settings = _freshT.settings; if (_freshT.status) t.status = _freshT.status; } } catch (e) {}
     const [list, money, teamStand, evPlayers, _rawRounds] = await Promise.all([loadTourneyScores(t), loadTourneyMoney(t), loadTourneyTeamStandings(t), t2GetPlayers(t.id).catch(() => []), loadTourneyRawRounds(t).catch(() => [])]);
     let _fieldStbl = null; try { _fieldStbl = t2ComputeFieldStableford(_rawRounds, t, evPlayers); } catch (e) {}
+    let _fieldQuota = null; try { _fieldQuota = t2ComputeFieldQuota(_rawRounds, t, evPlayers); } catch (e) {}
     let html = '';
     // Whole field = every registered tournament player, not just those who've started.
     let _fieldList = Array.isArray(list) ? list.slice() : [];
@@ -40996,6 +41071,16 @@ async function openEventLeaderboard(t) {
         html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:60px;text-align:right;font-weight:700">' + r.points + ' pts</span>' + (moneyStr ? '<span>' + moneyStr + '</span>' : '') + '</div>';
       });
       html += '</div>' + (_fieldStbl.complete ? '' : '<div class="small-text" style="color:var(--text-muted)">Pool pays out once every group finishes.</div>');
+    }
+    if (_fieldQuota && Array.isArray(_fieldQuota.standings) && _fieldQuota.standings.length) {
+      html += '<h3 style="margin:14px 0 4px">\uD83C\uDFAF Quota <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field \u00b7 Pool $' + _fieldQuota.pool + ' \u00b7 $' + _fieldQuota.buyin + ' buy-in)</span></h3><div style="font-size:13px">';
+      _fieldQuota.standings.forEach((r, i) => {
+        const m = _fieldQuota.money ? (_fieldQuota.money[normalizeNameSegment(String(r.name || ''))] || 0) : 0;
+        const moneyStr = (_fieldQuota.complete && m) ? ' \u00b7 <strong style="color:' + (m >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(m) + '</strong>' : '';
+        const _rstr = (r.result >= 0 ? '+' + r.result : r.result);
+        html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:96px;text-align:right;font-weight:700">' + _rstr + ' vs quota</span>' + (moneyStr ? '<span>' + moneyStr + '</span>' : '') + '</div>';
+      });
+      html += '</div>' + (_fieldQuota.complete ? '' : '<div class="small-text" style="color:var(--text-muted)">Pool pays out once every group finishes.</div>');
     }
     // Long Drive — ONE field-wide individual winner per day, set by the commissioner.
     const _amCommish = t2CanManage(t);
