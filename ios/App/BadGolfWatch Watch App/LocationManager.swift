@@ -93,6 +93,11 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 
     func locationManager(_ m: CLLocationManager, didUpdateLocations locs: [CLLocation]) {
         guard let loc = locs.last else { return }
+        // Reject invalid or "null-island" (0,0) fixes outright — CoreLocation can hand
+        // one back after a signal drop, and it reads as ZERO / garbage yardage (Tyler,
+        // Jul 2026: watch showing 0 yds). Keep the last good fix instead.
+        guard CLLocationCoordinate2DIsValid(loc.coordinate),
+              !(loc.coordinate.latitude == 0 && loc.coordinate.longitude == 0) else { return }
         // Reject fixes that would flash a WRONG yardage and then "self-correct" — the
         // exact flaky behaviour of a false reading that comes back right a moment later:
         //   * negative horizontalAccuracy = an invalid fix
