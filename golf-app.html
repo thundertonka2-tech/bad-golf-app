@@ -6791,7 +6791,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.517';
+const BG_BUILD = 'v2026.11.518';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -19989,7 +19989,15 @@ function renderScoreEntry() {
       endEarlyBtn.classList.remove('primary');
       endEarlyBtn.classList.add('danger');
       endEarlyBtn.dataset.mode = 'early';
-      if (_isTourneyScore) { endEarlyBtn.disabled = true; endEarlyBtn.style.opacity = '0.45'; endEarlyBtn.style.pointerEvents = 'none'; endEarlyBtn.title = 'Tournament rounds play all 18 — they can’t be ended early.'; }
+      if (_isTourneyScore) {
+        // Tournaments can't drop holes, but the scorer must still be able to FINISH:
+        // a ghost/duplicate roster row can leave a hole blank forever. Turn this into
+        // a Finish-round shortcut; the finish handler warns about blanks. (Tyler, Jul 2026)
+        endEarlyBtn.textContent = '🏁 Finish round';
+        endEarlyBtn.classList.remove('danger'); endEarlyBtn.classList.add('primary');
+        endEarlyBtn.dataset.mode = 'finish';
+        endEarlyBtn.disabled = false; endEarlyBtn.style.opacity = ''; endEarlyBtn.style.pointerEvents = ''; endEarlyBtn.title = '';
+      }
       else { endEarlyBtn.disabled = false; endEarlyBtn.style.opacity = ''; endEarlyBtn.style.pointerEvents = ''; endEarlyBtn.title = ''; }
     }
   }
@@ -25230,6 +25238,7 @@ function calcLongDrive(g) {
 function calcCtp(g) {
   if (!g.games || !g.games.ctp) return null;
   const cfg = g.games.ctp;
+  if (cfg.fieldOnly) return null;   // tournament-wide CTP: settles across the whole field (t2ComputeFieldCtp), never per-group
   // Only the SELECTED participants ante + can win (falls back to everyone when
   // no participants are set — older rounds + per-group tournament launches).
   const participants = (typeof getParticipants === 'function') ? getParticipants(g, cfg) : g.players;
@@ -26645,12 +26654,14 @@ function renderBoard() {
       if (abandonBtn) abandonBtn.style.display = 'none';
       if (_homeRow) _homeRow.style.display = '';
       if (finishBtn) {
-        const _allDone = (typeof allHolesScored === 'function') ? !!allHolesScored(g) : true;
-        finishBtn.disabled = !_allDone;
-        finishBtn.style.opacity = _allDone ? '' : '0.45';
-        finishBtn.style.pointerEvents = _allDone ? '' : 'none';
+        // Always allow finishing. A ghost/duplicate roster row missing a hole used to
+        // hard-lock this (tournaments can't End early) so the scorer had no way out.
+        // The finish handler warns about blank holes instead. (Tyler, Jul 2026)
+        finishBtn.disabled = false;
+        finishBtn.style.opacity = '';
+        finishBtn.style.pointerEvents = '';
         finishBtn.style.flex = '1';
-        finishBtn.title = _allDone ? '' : 'Finish unlocks once every hole is scored';
+        finishBtn.title = '';
       }
     } else {
       if (_homeRow) _homeRow.style.display = 'none';
@@ -37510,6 +37521,11 @@ async function t2LaunchDayRounds(courseId) {
       // The day's Stableford is a WHOLE-FIELD pool, not a per-group bet: tag it so the
       // group round shows points only and never settles per-group (the field settles).
       if (games.stableford) { games.stableford._t2field = true; games.stableford._t2fieldCount = (players || []).length; }
+      // Closest to the Pin set at the tournament level is a WHOLE-FIELD pool: the
+      // closest ball on each CTP hole across ALL groups wins that hole's pot. Tag it
+      // fieldOnly so the scorer can still LOG a winner per hole, but it never settles
+      // per-group — t2ComputeFieldCtp settles it across the field. (Tyler, Jul 2026)
+      if (games.ctp) { games.ctp.fieldOnly = true; }
     } else {
       games = {};
       if (fmt === 'singles') {
@@ -37591,6 +37607,10 @@ async function openT2Round(code) {
       // so the scorer can log the longest made putt even if the group didn't run its own
       // long-putt game. value 0 + fieldOnly = no group ante; it feeds the event pool only.
       try { const _tlpOn = _tt && _tt.settings && _tt.settings.tourneyLongPutt && _tt.settings.tourneyLongPutt.on; if (_tlpOn && !(g.games && g.games.longPutt)) { g.games = g.games || {}; g.games.longPutt = { value: 0, fieldOnly: true }; try { await saveGame(g); } catch (e) {} } } catch (e) {}
+      // Field-wide CTP: CTP stamped onto a tournament group round from the day config
+      // is a WHOLE-FIELD pool — tag it fieldOnly so it never settles per-group (fixes
+      // rounds launched before this build too). (Tyler, Jul 2026)
+      try { if (g.games && g.games.ctp && !g.games.ctp.fieldOnly) { g.games.ctp.fieldOnly = true; try { await saveGame(g); } catch (e) {} } } catch (e) {}
     }
   } catch (e) {}
   state.viewOnlyMode = !!g.finishedAt;
@@ -40907,6 +40927,61 @@ function t2ComputeFieldLongPutt(rows, cfg) {
   return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net) };
 }
 
+// Tournament Closest to the Pin — FIELD-WIDE pool. On each CTP hole, the closest
+// ball across ALL groups wins that hole's pot. Every player in the field antes
+// `value` per CTP hole (so a $10/hole value over 2 holes = a $20 buy-in); the hole
+// winner collects the whole hole pot. SEPARATE from any group's own CTP. Mirrors
+// t2ComputeFieldLongPutt. Read-only aggregation over the raw field rounds.
+function t2ComputeFieldCtp(rows) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const nmk = s => normalizeNameSegment(String(s || ''));
+  const byDay = {};
+  rows.forEach(row => {
+    const g = row && row.data ? row.data : row;
+    if (!g || !Array.isArray(g.players)) return;
+    if (!(g.games && g.games.ctp && g.games.ctp.fieldOnly)) return;   // only field-wide tournament CTP
+    const day = (g.t2 && g.t2.day) || 1;
+    const cfg = g.games.ctp;
+    const holes = Array.isArray(cfg.holes) ? cfg.holes : [];
+    const val = Number(cfg.value) || 0;
+    byDay[day] = byDay[day] || { names: {}, holes: {}, value: 0, holeSet: {} };
+    if (val && !byDay[day].value) byDay[day].value = val;
+    holes.forEach(h => { byDay[day].holeSet[h] = 1; });
+    g.players.forEach(p => { if (p && p.name) byDay[day].names[nmk(p.name)] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name) }; });
+    const data = g.ctpData || {};
+    Object.keys(data).forEach(h => {
+      const e = data[h]; if (!e || e.pid == null || e.ft == null) return;
+      const w = g.players.find(p => p.id === e.pid); if (!w) return;
+      const inch = (Number(e.ft) || 0) * 12 + (Number(e.in) || 0);
+      const cur = byDay[day].holes[h];
+      if (!cur || inch < cur.inch) byDay[day].holes[h] = { name: w.name, first: (typeof displayFirst === 'function' ? displayFirst(w) : w.name), inch: inch, ft: Number(e.ft) || 0, in: Number(e.in) || 0 };
+    });
+  });
+  const perDay = [], totalsByName = {};
+  Object.keys(byDay).sort((a, b) => a - b).forEach(day => {
+    const d = byDay[day];
+    const players = Object.values(d.names), N = players.length, val = Number(d.value) || 0;
+    if (N < 2 || !val) return;
+    const holeList = Object.keys(d.holes).filter(h => d.holeSet[h]).sort((a, b) => a - b);
+    if (!holeList.length) return;
+    const holeRows = [];
+    holeList.forEach(h => {
+      const best = d.holes[h]; if (!best) return;
+      const pot = val * N;
+      players.forEach(p => {
+        const isW = nmk(p.name) === nmk(best.name);
+        const net = (isW ? pot : 0) - val;
+        const tk = nmk(p.name); totalsByName[tk] = totalsByName[tk] || { first: p.first, net: 0 };
+        totalsByName[tk].net += net;
+      });
+      holeRows.push({ hole: Number(h), pot: pot, winnerFirst: best.first, dist: best.ft + "' " + best.in + '"' });
+    });
+    if (holeRows.length) perDay.push({ day: Number(day), holes: holeRows });
+  });
+  if (!perDay.length) return null;
+  return { perDay: perDay, totals: Object.values(totalsByName).filter(t => t.net !== 0).sort((a, b) => b.net - a.net) };
+}
+
 // Phase 4 — 4-man TEAM standings "vs the field": each group plays as one team
 // (Scramble / Best Ball / Team Quota in 4-man mode); rank every group's team
 // total against the rest of the field, per day. Read-only aggregation.
@@ -41373,6 +41448,26 @@ async function openEventLeaderboard(t) {
         }
       }
     }
+    // Tournament Closest to the Pin — FIELD-WIDE pot: the closest ball on each CTP
+    // hole across ALL groups wins that hole's pot. Shown when any group ran a
+    // tournament-level (field) CTP. Separate from any group's own CTP.
+    try {
+      let _ctpRows = []; try { _ctpRows = await loadTourneyRawRounds(t); } catch (e) {}
+      const _fc = t2ComputeFieldCtp(_ctpRows);
+      if (_fc && _fc.perDay.length) {
+        html += '<h3 style="margin:14px 0 4px">\U0001F4CD Tournament Closest to the Pin <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3><div style="font-size:13px">';
+        _fc.perDay.forEach(dd => {
+          dd.holes.forEach(hr => {
+            html += '<div style="margin-top:2px">Day ' + dd.day + ' · Hole ' + hr.hole + ' · pot $' + hr.pot.toFixed(0) + ' · \U0001F3C6 ' + escapeHtml(hr.winnerFirst) + ' (' + hr.dist + ')</div>';
+          });
+        });
+        _fc.totals.forEach(r => {
+          html += '<div>' + escapeHtml(r.first) + ': <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>';
+        });
+        html += '<div class="small-text" style="color:var(--text-muted)">Closest ball on each CTP hole across all groups wins that hole’s pot.</div></div>';
+      }
+    } catch (e) {}
+
     // ⚔️ Cross-group 1v1 matches — players who set up a head-to-head against someone
     // in a DIFFERENT cart group. Settled here from the field rounds (net per hole).
     try {
@@ -44157,6 +44252,14 @@ async function init() {
         `Finish anyway?`
       , { title: 'Wolf pick missing', okLabel: 'Finish anyway', cancelLabel: 'Go back', danger: true }))) return;
     }
+    // Incomplete-holes guard: a ghost/duplicate roster row (or a player never scored)
+    // can leave holes blank. Don't hard-block — warn and let the scorer finish with
+    // the holes that ARE scored. (Tyler, Jul 2026)
+    try {
+      if (typeof allHolesScored === 'function' && !allHolesScored(g)) {
+        if (!(await uiConfirm('Some players have blank holes. Finish the round with the scores entered so far? Blank holes won\u2019t count.', { title: 'Finish round?', okLabel: 'Finish', cancelLabel: 'Go back', danger: false }))) return;
+      }
+    } catch (e) {}
     // Open the summary modal — actual archive happens on "Save & return home"
     const dateStr = new Date(g.updatedAt || Date.now()).toLocaleDateString();
     let holesCompleted = 0;
