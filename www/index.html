@@ -6810,7 +6810,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.527';
+const BG_BUILD = 'v2026.11.528';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -15133,6 +15133,75 @@ function roundHoles(g){
   return 18;
 }
 function isNineRating(r){ return typeof r==='number' && isFinite(r) && r > 25 && r < 46; }
+// ===== 9-HOLE "PLAY 18 (twice around)" SUPPORT (v527) =======================
+// A regulation 9-hole course can be set up to play 18 holes (the same nine
+// twice). Modeled as a composite id "<baseId>:x2" so the doubled round keeps
+// its own saved card + stats, exactly like a three-nine combo id. Nothing
+// changes unless a round explicitly opts into :x2, so 18-hole and single-9
+// play stay byte-for-byte identical.
+function nineDoubleSpecFromId(id){
+  try { if (!id || typeof id!=='string' || id.slice(-3)!==':x2') return null;
+    var base=id.slice(0,-3); return base ? { base: base } : null; } catch(e){ return null; }
+}
+// Build an 18-hole card from a 9-hole card: pars looped; stroke index split
+// (loop-1 hole i -> 2*si-1, loop-2 -> 2*si = standard USGA 9->18 method); each
+// tee rated as two nines. If the tee looks like a 9-hole rating (25-46) it is
+// doubled to the 18 rating; an explicit tee.rating18/slope18 wins when present.
+function bg9DoubleCard(pars9, sis9, tees9){
+  var p9=(pars9||[]).slice(0,9), s9=(sis9||[]).slice(0,9);
+  var pars=p9.concat(p9), sis=[];
+  for (var i=0;i<9;i++){ var s=parseInt(s9[i])||(i+1); sis[i]=2*s-1; sis[9+i]=2*s; }
+  var tees=(tees9||[]).map(function(t){
+    var r9=(t.rating!=null)?Number(t.rating):null;
+    var isNine=(r9!=null && r9>25 && r9<46);
+    var r18=(t.rating18!=null)?Number(t.rating18):((r9==null)?null:(isNine?Math.round(r9*2*10)/10:r9));
+    var sl=(t.slope18!=null)?t.slope18:(t.slope!=null?t.slope:null);
+    var y=(t.yardage!=null)?Number(t.yardage):null;
+    var y18=(y==null)?null:(isNine?y*2:y);
+    return { label:t.label, rating:r18, slope:sl, yardage:y18 };
+  });
+  return { pars: pars, sis: sis, tees: tees };
+}
+async function applyNineDouble(base){
+  var lib=(typeof COURSE_LIBRARY!=='undefined')?COURSE_LIBRARY.find(function(c){return c&&c.id===base;}):null;
+  var saved=null; try { saved=await getCourseScorecard(base); } catch(e){}
+  var pars9=(saved&&saved.pars)||(lib&&lib.pars)||[];
+  var sis9 =(saved&&saved.sis) ||(lib&&lib.sis) ||[];
+  var tees9=(saved&&saved.tees)||(lib&&lib.tees)||[];
+  if (!(pars9 && pars9.filter(function(p){return p!=null;}).length>=9)){ selectCourseById(base); return; }
+  var dbl=bg9DoubleCard(pars9, sis9, tees9);
+  var status=$('course-status'), editor=$('scorecard-editor');
+  var nm=((lib&&lib.name)||(saved&&saved.name)||'Course');
+  $('course-name').value=nm;
+  $('course-name').dataset.courseId=base+':x2';
+  if ($('course-search')) $('course-search').value=nm+' — 18 (play twice)';
+  if ($('course-list')) $('course-list').style.display='none';
+  status.className='course-status verified';
+  status.querySelector('.icon').textContent='✓';
+  status.querySelector('.text').textContent='9-hole course set to play 18 (twice around). Tap "9 holes" to switch back.';
+  status.style.display='flex'; editor.style.display='block';
+  try { if (typeof rebuildParSiGrids==='function') rebuildParSiGrids(18); } catch(e){}
+  $('par-grid').querySelectorAll('input').forEach(function(inp,i){ inp.value=dbl.pars[i]||4; });
+  $('si-grid').querySelectorAll('input').forEach(function(inp,i){ inp.value=dbl.sis[i]||(i+1); });
+  renderTeesList(dbl.tees);
+  collapseScorecardSummary(dbl.pars, dbl.sis, dbl.tees);
+  renderNineDoubleToggle(base, true);
+  updateSetupGates();
+}
+function renderNineDoubleToggle(base, is18){
+  try {
+    var editor=$('scorecard-editor'); if(!editor) return;
+    var box=document.getElementById('nine-double-toggle');
+    if(!box){ box=document.createElement('div'); box.id='nine-double-toggle';
+      box.style.cssText='display:flex;gap:8px;margin:8px 0'; editor.insertBefore(box, editor.firstChild); }
+    box.innerHTML='<button type="button" data-nd="9" class="'+(!is18?'primary':'')+'" style="flex:1;padding:8px;border-radius:8px">9 holes</button>'+
+      '<button type="button" data-nd="18" class="'+(is18?'primary':'')+'" style="flex:1;padding:8px;border-radius:8px">18 (play twice)</button>';
+    box.style.display='flex';
+    box.querySelector('[data-nd="9"]').onclick=function(){ selectCourseById(base); };
+    box.querySelector('[data-nd="18"]').onclick=function(){ applyNineDouble(base); };
+  } catch(e){}
+}
+function hideNineDoubleToggle(){ try { var b=document.getElementById('nine-double-toggle'); if(b) b.style.display='none'; } catch(e){} }
 function rebuildParSiGrids(n){
   try {
     n = (n === 9) ? 9 : 18;
@@ -16954,7 +17023,9 @@ async function selectCourseById(id) {
     $('course-name').value = '';
     $('course-name').dataset.courseId = '';
     { const rb = document.getElementById('btn-rename-course'); if (rb) rb.style.display = 'none'; }
+    try { hideNineDoubleToggle(); } catch(e){}
     updateSetupGates(); // course cleared → re-evaluate Bets reveal
+    return;    updateSetupGates(); // course cleared → re-evaluate Bets reveal
     return;
   }
   const _csSel = comboSpecFromId(id);
@@ -16965,6 +17036,8 @@ async function selectCourseById(id) {
     updateSetupGates();
     return;
   }
+  const _x2Sel = (typeof nineDoubleSpecFromId==='function') ? nineDoubleSpecFromId(id) : null;
+  if (_x2Sel) { applyNineDouble(_x2Sel.base); return; }
   const lib = COURSE_LIBRARY.find(c => c.id === id);
   if (!lib) return;
 
@@ -17010,6 +17083,7 @@ async function selectCourseById(id) {
     // Collapse par+SI grids AND tees into compact summaries — saved scorecards
     // rarely need editing, so the big grids and tee table are visual clutter.
     collapseScorecardSummary(saved.pars, saved.sis, teesToShow);
+    try { if (cardHoles(saved)===9) renderNineDoubleToggle(id, false); else hideNineDoubleToggle(); } catch(e){}
   } else {
     // First time playing this course — prompt to create
     status.className = 'course-status needs-card';
@@ -17026,6 +17100,7 @@ async function selectCourseById(id) {
     renderTeesList([]);
     // No saved scorecard → show full grids so user can enter par+SI
     expandScorecardGrids();
+    try { hideNineDoubleToggle(); } catch(e){}
   }
 }
 
@@ -45269,7 +45344,19 @@ const gpsView = (() => {
         return;
       }
     }
+    {
+      const _x2 = (typeof nineDoubleSpecFromId==='function') ? nineDoubleSpecFromId(cid) : null;
+      if (_x2) {
+        await loadCourse(_x2.base);
+        const bH = (courseGps[_x2.base] && courseGps[_x2.base].holes) || {};
+        const holes = {};
+        for (let i = 1; i <= 9; i++) { if (bH[i]) { holes[i] = bH[i]; holes[9 + i] = bH[i]; } }
+        courseGps[cid] = { holes: holes, source: 'nine-x2', updatedAt: Date.now(), osmTried: true };
+        return;
+      }
+    }
     if (!cid || courseGps[cid]) return;
+    // CACHE-FIRST:    if (!cid || courseGps[cid]) return;
     // CACHE-FIRST: if this course is cached locally, use it immediately so the
     // map paints without waiting on a network round trip, then refresh from the
     // cloud in the BACKGROUND (picks up holes a partner mapped since last time).
