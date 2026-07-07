@@ -6810,7 +6810,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.526';
+const BG_BUILD = 'v2026.11.527';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -48294,6 +48294,223 @@ const gpsView = (() => {
     { const _ex = el('gps-setup-expand'); if (_ex) _ex.onclick = () => { const p = el('gps-setup-panel'); if (p) p.classList.remove('collapsed'); }; }
     // (Imagery toggle removed — Google is the imagery, Esri is silent fallback.)
   }
+
+  /* ===== Mapping HUD redesign (satellite-first admin map screen) =====
+     Additive: builds top hole-tabs + a Mapping/Targets/Reverse/Trash row and
+     reuses the existing handlers (wizardStart/fwcStart/reverseNines/clearHole/
+     osmImport/showHole). Shows only during an admin map session; edits nothing. */
+  (function () {
+    'use strict';
+    // Only wire up if we're inside the app (these must be in scope).
+    if (typeof document === 'undefined') return;
+  
+    var STYLE_ID = 'bg-maphud-style';
+    function injectCss() {
+      if (document.getElementById(STYLE_ID)) return;
+      var s = document.createElement('style');
+      s.id = STYLE_ID;
+      s.textContent = [
+        /* While the HUD is active, hide the old popup chrome but keep the map clear. */
+        '#gps-overlay.map-hud #gps-setup-panel{display:none !important;}',
+  
+        /* ---- top hole tabs ---- */
+        '#gps-map-tabs{position:absolute;left:0;right:0;top:0;z-index:34;display:none;',
+        '  align-items:center;gap:6px;padding:calc(env(safe-area-inset-top,0px) + 8px) 6px 8px;',
+        '  background:linear-gradient(rgba(0,0,0,.55),rgba(0,0,0,0));pointer-events:auto;}',
+        '#gps-map-tabs .gmt-nav{flex:0 0 auto;width:34px;height:40px;border:none;border-radius:10px;',
+        '  background:rgba(30,36,32,.9);color:#fff;font-size:20px;font-weight:800;line-height:1;',
+        '  display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px);cursor:pointer;}',
+        '#gps-map-tabscroll{flex:1 1 auto;display:flex;gap:6px;overflow-x:auto;padding:2px;',
+        '  -webkit-overflow-scrolling:touch;scrollbar-width:none;}',
+        '#gps-map-tabscroll::-webkit-scrollbar{display:none;}',
+        '#gps-map-tabscroll .gmt-tab{flex:0 0 auto;min-width:42px;height:40px;border-radius:10px;',
+        '  border:1px solid rgba(255,255,255,.16);background:rgba(18,22,20,.82);color:#c7d0ca;',
+        '  font-size:15px;font-weight:800;line-height:1;display:flex;flex-direction:column;',
+        '  align-items:center;justify-content:center;backdrop-filter:blur(6px);cursor:pointer;position:relative;}',
+        '#gps-map-tabscroll .gmt-tab small{font-size:8px;font-weight:700;opacity:.7;margin-top:1px;}',
+        '#gps-map-tabscroll .gmt-tab.cur{background:#2f6fd6;border-color:#3f86f0;color:#fff;box-shadow:0 0 0 1px #3f86f0;}',
+        '#gps-map-tabscroll .gmt-tab.done::after{content:"";position:absolute;top:4px;right:5px;',
+        '  width:6px;height:6px;border-radius:50%;background:#2bbd58;}',
+        '#gps-map-tabscroll .gmt-tab.cur.done::after{background:#fff;}',
+  
+        /* ---- bottom control row (sits just above the #gps-mapdone bottom bar) ---- */
+        '#gps-map-ctrls{position:absolute;left:0;right:0;z-index:34;display:none;',
+        '  bottom:calc(max(env(safe-area-inset-bottom,0px),8px) + 74px);',
+        '  gap:8px;padding:0 12px;align-items:stretch;justify-content:center;pointer-events:auto;}',
+        '#gps-map-ctrls .gmc{flex:1 1 0;max-width:150px;height:52px;border-radius:13px;',
+        '  border:1px solid rgba(255,255,255,.16);background:rgba(30,36,32,.9);color:#c7d0ca;',
+        '  font-size:14px;font-weight:800;display:flex;flex-direction:column;align-items:center;',
+        '  justify-content:center;gap:2px;backdrop-filter:blur(6px);cursor:pointer;line-height:1.05;}',
+        '#gps-map-ctrls .gmc span{font-size:18px;}',
+        '#gps-map-ctrls .gmc.mode.on-map{background:#2f6fd6;border-color:#3f86f0;color:#fff;box-shadow:0 3px 14px rgba(47,111,214,.47);}',
+        '#gps-map-ctrls .gmc.mode.on-tgt{background:#f0a53f;border-color:#ffbf66;color:#231400;box-shadow:0 3px 14px rgba(240,165,63,.47);}',
+        '#gps-map-ctrls .gmc.trash{flex:0 0 56px;max-width:56px;font-size:22px;',
+        '  border-color:rgba(224,86,86,.4);background:rgba(60,20,20,.72);color:#e05656;}',
+        '#gps-map-ctrls .gmc-import{flex:0 0 46px;max-width:46px;height:52px;border-radius:13px;',
+        '  border:1px dashed rgba(255,255,255,.3);background:rgba(18,22,20,.7);color:#c7d0ca;',
+        '  font-size:18px;font-weight:800;display:flex;align-items:center;justify-content:center;',
+        '  backdrop-filter:blur(6px);cursor:pointer;}'
+      ].join('');
+      (document.head || document.documentElement).appendChild(s);
+    }
+  
+    function byId(id) { return document.getElementById(id); }
+    function call(fn) { try { if (typeof fn === 'function') fn(); } catch (e) {} }
+  
+    // Read the app's current hole number if available (falls back gracefully).
+    function curHole() {
+      try { if (typeof hole === 'number' && hole >= 1) return hole; } catch (e) {}
+      try { var n = parseInt((byId('gps-hole-num') || {}).textContent, 10); if (n >= 1) return n; } catch (e) {}
+      return 1;
+    }
+    function mappedHoles() {
+      try { var c = courseGps && courseGps[courseId]; return (c && c.holes) ? c.holes : {}; } catch (e) { return {}; }
+    }
+    function physOf(n) { try { return (typeof physHole === 'function') ? physHole(n) : n; } catch (e) { return n; } }
+    function inMapSession() { try { return !!(state && state._mapSession); } catch (e) { return false; } }
+    function inFwc() { try { return !!(state && state._fwcSession); } catch (e) { return false; } }
+    function go(n) { try { if (typeof showHole === 'function') showHole(Math.min(18, Math.max(1, n))); } catch (e) {} }
+  
+    function buildDom() {
+      var overlay = byId('gps-overlay');
+      if (!overlay) return null;
+  
+      // Tabs
+      var tabs = byId('gps-map-tabs');
+      if (!tabs) {
+        tabs = document.createElement('div');
+        tabs.id = 'gps-map-tabs';
+        tabs.innerHTML =
+          '<button type="button" class="gmt-nav" data-step="-1" aria-label="Previous hole">‹</button>' +
+          '<div id="gps-map-tabscroll"></div>' +
+          '<button type="button" class="gmt-nav" data-step="1" aria-label="Next hole">›</button>';
+        overlay.appendChild(tabs);
+        // prev/next
+        var navs = tabs.querySelectorAll('.gmt-nav');
+        for (var i = 0; i < navs.length; i++) {
+          (function (b) {
+            b.addEventListener('click', function () { go(curHole() + (parseInt(b.getAttribute('data-step'), 10) || 0)); });
+          })(navs[i]);
+        }
+        // 1..18 tabs
+        var scroll = tabs.querySelector('#gps-map-tabscroll');
+        for (var h = 1; h <= 18; h++) {
+          (function (n) {
+            var t = document.createElement('button');
+            t.type = 'button';
+            t.className = 'gmt-tab';
+            t.setAttribute('data-hole', n);
+            t.innerHTML = n + '<small>HOLE</small>';
+            t.addEventListener('click', function () { go(n); });
+            scroll.appendChild(t);
+          })(h);
+        }
+      }
+  
+      // Control row
+      var ctrls = byId('gps-map-ctrls');
+      if (!ctrls) {
+        ctrls = document.createElement('div');
+        ctrls.id = 'gps-map-ctrls';
+        ctrls.innerHTML =
+          '<button type="button" class="gmc mode on-map" id="gmc-map"><span>✏️</span>Mapping</button>' +
+          '<button type="button" class="gmc mode" id="gmc-tgt"><span>🎯</span>Targets</button>' +
+          '<button type="button" class="gmc" id="gmc-rev"><span>🔄</span>Reverse</button>' +
+          '<button type="button" class="gmc trash" id="gmc-clr" title="Clear this hole & re-map">🗑️</button>' +
+          '<button type="button" class="gmc-import" id="gmc-import" title="Auto-import from OpenStreetMap">⬇</button>';
+        overlay.appendChild(ctrls);
+        byId('gmc-map').addEventListener('click', function () { call(typeof wizardStart === 'function' ? wizardStart : null); });
+        byId('gmc-tgt').addEventListener('click', function () { call(typeof fwcStart === 'function' ? fwcStart : null); });
+        byId('gmc-rev').addEventListener('click', function () { call(typeof reverseNines === 'function' ? reverseNines : null); });
+        byId('gmc-clr').addEventListener('click', function () { call(typeof clearHole === 'function' ? clearHole : null); });
+        byId('gmc-import').addEventListener('click', function () { call(typeof osmImport === 'function' ? osmImport : null); });
+      }
+  
+      return { overlay: overlay, tabs: tabs, ctrls: ctrls, scroll: tabs.querySelector('#gps-map-tabscroll') };
+    }
+  
+    // Show the HUD only while the ADMIN map-session setup screen is the resting view.
+    // Hidden during the wizard/fairway banner (they own the top) and in normal play.
+    function refresh() {
+      try {
+        var overlay = byId('gps-overlay');
+        if (!overlay) return;
+  
+        var panel = byId('gps-setup-panel');
+        var panelShown = !!(panel && panel.style.display !== 'none' && getComputedishDisplay(panel));
+        var active = inMapSession() && panelShown;
+  
+        overlay.classList.toggle('map-hud', active);
+  
+        var dom = buildDom();
+        if (!dom) return;
+  
+        if (!active) {
+          dom.tabs.style.display = 'none';
+          dom.ctrls.style.display = 'none';
+          return;
+        }
+  
+        dom.tabs.style.display = 'flex';
+        dom.ctrls.style.display = 'flex';
+  
+        // Mode highlight: a guided fairway-target session lights up Targets, else Mapping.
+        var mMap = byId('gmc-map'), mTgt = byId('gmc-tgt');
+        var tgtMode = inFwc();
+        if (mMap) { mMap.classList.toggle('on-map', !tgtMode); }
+        if (mTgt) { mTgt.classList.toggle('on-tgt', tgtMode); }
+  
+        // Import chip only until OSM has been tried for this course.
+        try {
+          var c = courseGps && courseGps[courseId];
+          var imp = byId('gmc-import');
+          if (imp) imp.style.display = (c && c.osmTried) ? 'none' : 'flex';
+        } catch (e) {}
+  
+        // Highlight current hole, dot the mapped ones, scroll current into view.
+        var cur = curHole();
+        var ms = mappedHoles();
+        if (dom.scroll) {
+          var kids = dom.scroll.children;
+          for (var i = 0; i < kids.length; i++) {
+            var tb = kids[i];
+            var n = parseInt(tb.getAttribute('data-hole'), 10);
+            var isCur = (n === cur);
+            tb.classList.toggle('cur', isCur);
+            tb.classList.toggle('done', !!ms[physOf(n)]);
+            if (isCur) { try { tb.scrollIntoView({ inline: 'center', block: 'nearest' }); } catch (e) {} }
+          }
+        }
+      } catch (e) {}
+    }
+  
+    // getComputedStyle guard (element may be detached during teardown).
+    function getComputedishDisplay(elm) {
+      try { return getComputedStyle(elm).display !== 'none'; } catch (e) { return true; }
+    }
+  
+    // Drive refresh() off the setup panel's own show/hide + content changes.
+    // One observer, no edits to app code. Falls back to a light poll if needed.
+    function wire() {
+      injectCss();
+      var panel = byId('gps-setup-panel');
+      if (!panel) { setTimeout(wire, 400); return; }
+      try {
+        var mo = new MutationObserver(function () { refresh(); });
+        mo.observe(panel, { attributes: true, attributeFilter: ['style'], childList: true, subtree: true });
+      } catch (e) {}
+      // Safety net: cheap periodic sync (covers state flips that don't touch the panel).
+      try { setInterval(refresh, 700); } catch (e) {}
+      refresh();
+    }
+  
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', wire);
+    } else {
+      wire();
+    }
+  })();
+
   function stopWatchSilent() { /* keep GPS running across holes; ball resets per hole if too far */ }
   document.addEventListener('DOMContentLoaded', wire);
   if (document.readyState !== 'loading') wire();
