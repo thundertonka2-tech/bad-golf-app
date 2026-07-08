@@ -2265,6 +2265,8 @@
     box-shadow: 0 4px 18px rgba(31,138,59,0.5), 0 2px 8px rgba(0,0,0,0.4);
   }
   #gps-overlay.map-only #gps-mapdone { display: block; }
+  #gps-holes9 { display: none; }
+  #gps-overlay.map-only #gps-holes9 { display: block; position: absolute; top: calc(8px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 60; padding: 7px 14px; border-radius: 20px; border: none; font-size: 12px; font-weight: 800; cursor: pointer; background: rgba(255,255,255,0.94); color: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
   /* Settings gear — mirrors the map's info button: same small size, lower-LEFT
      instead of lower-right. Opens game settings (the Play/Setup screen). */
   #gps-settings {
@@ -6424,6 +6426,7 @@
     <div class="num" id="gps-strokes-num">—</div>
   </div>
 
+  <button id="gps-holes9" type="button">⛳ Mark as 9-hole</button>
   <div class="gps-bottombar">
     <div class="gps-flank"><div class="lbl">HOLE</div><div class="big" id="gps-hole-num">1</div></div>
     <button id="gps-score">Score</button>
@@ -6834,7 +6837,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.537';
+const BG_BUILD = 'v2026.11.538';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8790,6 +8793,76 @@ function adminToggleNineHole() {
     updateAdminHolesBtn();
   } catch (e) { try { showToast('Could not switch hole count'); } catch (_) {} }
 }
+// v538: shared 9<->18 card reshapers + a standalone toggle usable from the
+// course-detail screen and the GPS admin map (not only the pars editor).
+function _bg9CardTo9(pars, sis, tees) {
+  var pars9 = (pars || []).slice(0, 9);
+  var front = (sis || []).slice(0, 9).map(function (v, i) { return (v != null) ? v : (i + 1); });
+  var sis9 = _bg9RankCompress(front);
+  var tees9 = (tees || []).map(function (t) {
+    var o = {}; for (var k in t) o[k] = t[k];
+    if (typeof o.rating === 'number' && o.rating >= 46) o.rating = Math.round(o.rating / 2 * 10) / 10;
+    if (typeof o.ratingW === 'number' && o.ratingW >= 46) o.ratingW = Math.round(o.ratingW / 2 * 10) / 10;
+    if (typeof o.yards === 'number') o.yards = Math.round(o.yards / 2);
+    return o;
+  });
+  return { pars: pars9, sis: sis9, tees: tees9 };
+}
+function _bg9CardTo18(pars, sis, tees) {
+  var p9 = (pars || []).slice(0, 9);
+  var pars18 = p9.concat(p9);
+  var sis18 = [];
+  for (var i = 0; i < 9; i++) { var s = parseInt((sis || [])[i], 10) || (i + 1); sis18[i] = 2 * s - 1; sis18[9 + i] = 2 * s; }
+  var tees18 = (tees || []).map(function (t) {
+    var o = {}; for (var k in t) o[k] = t[k];
+    if (typeof o.rating === 'number' && o.rating < 46) o.rating = Math.round(o.rating * 2 * 10) / 10;
+    if (typeof o.ratingW === 'number' && o.ratingW < 46) o.ratingW = Math.round(o.ratingW * 2 * 10) / 10;
+    if (typeof o.yards === 'number') o.yards = o.yards * 2;
+    return o;
+  });
+  return { pars: pars18, sis: sis18, tees: tees18 };
+}
+// Load a course's saved card, flip 9<->18, persist. Reversible. onDone(newCard, isNow9).
+async function adminToggleNineHoleCourse(courseId, onDone) {
+  try {
+    var sc = null; try { sc = await getCourseScorecard(courseId); } catch (e) {}
+    var lib = (COURSE_LIBRARY || []).find(function (c) { return c && c.id === courseId; }) || {};
+    var name = (sc && sc.name) || lib.name || '';
+    var pars = (sc && Array.isArray(sc.pars)) ? sc.pars.slice() : [];
+    var sis = (sc && Array.isArray(sc.sis)) ? sc.sis.slice() : [];
+    var tees = (sc && Array.isArray(sc.tees)) ? sc.tees.slice() : [];
+    if (!(pars.length === 9 || pars.length === 18)) { showToast('Add the scorecard (pars) first'); return; }
+    var is9 = (typeof cardHoles === 'function') ? (cardHoles(sc) === 9) : (pars.length === 9);
+    var res = is9 ? _bg9CardTo18(pars, sis, tees) : _bg9CardTo9(pars, sis, tees);
+    var ok = false;
+    try { ok = await persistCourseScorecard(courseId, name, res.pars, res.sis, res.tees); } catch (e) {}
+    try { audit(is9 ? 'set_18hole' : 'set_9hole', courseId, ''); } catch (e) {}
+    showToast(ok ? (is9 ? 'Set to 18 holes ✓' : 'Set to 9 holes ✓ — map the 9 greens to finish') : 'Saved on this device — syncing');
+    if (typeof onDone === 'function') onDone(res, !is9);
+  } catch (e) { showToast('Could not switch hole count'); }
+}
+// Wire the 9-hole toggle button that lives in the GPS admin map HUD (shown only
+// in .map-only). Reflects/updates the live map session's hole count too.
+function _bgWireMapHolesToggle(courseId) {
+  try {
+    var b = document.getElementById('gps-holes9'); if (!b) return;
+    var refresh = function () {
+      var is9 = false; try { is9 = !!(state.game && Array.isArray(state.game.pars) && state.game.pars.length === 9); } catch (e) {}
+      b.textContent = is9 ? '⛳ 9-hole ✓ · tap for 18' : '⛳ Mark as 9-hole';
+    };
+    refresh();
+    b.onclick = async function () {
+      var is9 = false; try { is9 = !!(state.game && state.game.pars && state.game.pars.length === 9); } catch (e) {}
+      var ok = true;
+      try { ok = await uiConfirm(is9 ? 'Switch this course back to 18 holes?' : 'Mark this as a 9-hole course? Mapping the 9 greens will complete it.'); } catch (e) {}
+      if (!ok) return;
+      await adminToggleNineHoleCourse(courseId, function (res) {
+        try { if (res) { state.game.pars = res.pars; state.game.sis = res.sis; state.game.tees = res.tees; } } catch (e) {}
+        refresh();
+      });
+    };
+  } catch (e) {}
+}
 function renderAdminParsGrid() {
   const el = document.getElementById('admin-pars-grid');
   if (!el || !_adminPars) return;
@@ -8947,6 +9020,7 @@ async function adminMapCourse(courseId, opts) {
     if (typeof gpsView !== 'undefined' && gpsView.open) {
       await gpsView.open({});
       const ov = document.getElementById('gps-overlay'); if (ov) ov.classList.add('map-only');
+      try { _bgWireMapHolesToggle(courseId); } catch (e) {}
       showToast(opts.missingOnly ? 'Finishing the holes still missing a green — tap tee, front & back' : 'Map each hole — tap tee, front & back of the green', 4000);
     }
   } catch (e) { showToast('Could not open the map'); }
@@ -12570,7 +12644,8 @@ async function fetchCourseGpsDetail(courseId, pars) {
   try { if (!supaReady) await initSupabase(); if (supa && supaOnline) { const { data, error } = await supa.from('course_gps').select('holes').eq('course_id', courseId).maybeSingle(); if (!error) { row = data; ok = true; } } } catch (e) {}
   if (!ok) return null;   // couldn't read (offline) — caller falls back to cached counts
   const hs = (row && row.holes) || {};
-  for (let h = 1; h <= 18; h++) {
+  const _nH = (Array.isArray(pars) && pars.length === 9) ? 9 : 18;
+  for (let h = 1; h <= _nH; h++) {
     const hd = hs[String(h)] || hs[h] || null;
     const green = !!(hd && (hd.tee || hd.front || hd.back || hd.mid));
     const par = (pars && pars[h - 1]) || 4;
@@ -12593,6 +12668,7 @@ async function adminMappingChecklist(courseId) {
   let sc = null; try { sc = await getCourseScorecard(courseId); } catch (e) {}
   const pars = (sc && Array.isArray(sc.pars) && (sc.pars.length === 18 || sc.pars.length === 9)) ? sc.pars : new Array(18).fill(4);
   const det = await fetchCourseGpsDetail(courseId, pars);
+  const _nH = (Array.isArray(pars) && pars.length === 9) ? 9 : 18;
   if (!det) { showToast('Couldn’t load mapping — check your connection'); openCourseDetail(courseId); return; }
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;z-index:10004;background:rgba(0,0,0,0.6);display:flex;align-items:flex-start;justify-content:center;padding:5vh 14px 16px;overflow:auto';
@@ -12603,7 +12679,7 @@ async function adminMappingChecklist(courseId) {
   // centered on that feature, so the admin can adjust it.
   const goCell = (h, focus, label, inner) => '<button class="amc-go" data-hole="' + h + '" data-focus="' + focus + '" style="flex:1;text-align:left;background:transparent;border:none;padding:0;font:inherit;color:var(--accent);font-weight:600;cursor:pointer">' + label + ' ' + inner + ' <span style="font-size:11px;opacity:0.55">›</span></button>';
   let rows = '';
-  for (let h = 1; h <= 18; h++) {
+  for (let h = 1; h <= _nH; h++) {
     const d = det.perHole[h];
     rows += '<div style="display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--border);font-size:13px">'
       + '<div style="flex:0 0 auto;width:56px;font-weight:700">H' + h + ' <span style="color:var(--text-muted);font-weight:500">p' + d.par + '</span></div>'
@@ -12615,9 +12691,9 @@ async function adminMappingChecklist(courseId) {
     '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:4px">'
     + '<div style="font-weight:800;font-size:17px;line-height:1.25">GPS mapping — ' + esc(lib.name) + '</div>'
     + '<button id="amc-x" style="flex:0 0 auto;background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:6px 12px;font-size:16px;cursor:pointer">✕</button></div>'
-    + '<div class="small-text" style="color:var(--text-muted);margin-bottom:8px">Greens <b>' + det.greens + '/18</b> · Fairway targets <b>' + det.targetsDone + '/' + det.targetsNeeded + '</b>. Par 3s don\'t need a target. Tap any green or target to open it on the map and adjust.</div>'
+    + '<div class="small-text" style="color:var(--text-muted);margin-bottom:8px">Greens <b>' + det.greens + '/' + _nH + '</b> · Fairway targets <b>' + det.targetsDone + '/' + det.targetsNeeded + '</b>. Par 3s don\'t need a target. Tap any green or target to open it on the map and adjust.</div>'
     + '<div style="max-height:42vh;overflow:auto;margin-bottom:12px">' + rows + '</div>'
-    + (det.greens < 18 ? '<button id="amc-greens" class="primary" style="width:100%;padding:12px;margin-bottom:8px">🗺️ Finish the missing greens (' + (18 - det.greens) + ')</button>' : '')
+    + (det.greens < _nH ? '<button id="amc-greens" class="primary" style="width:100%;padding:12px;margin-bottom:8px">🗺️ Finish the missing greens (' + (_nH - det.greens) + ')</button>' : '')
     + (det.targetsDone < det.targetsNeeded ? '<button id="amc-targets" class="primary" style="width:100%;padding:12px;margin-bottom:8px">🎯 Finish fairway targets (' + (det.targetsNeeded - det.targetsDone) + ' left)</button>' : '')
     + '<button id="amc-remap" style="width:100%;padding:12px;margin-bottom:8px;border-radius:10px;border:2px solid var(--accent);background:var(--surface-2,#fff);color:var(--accent);font-weight:800;cursor:pointer">🗺️ Open map editor — remap holes</button>'
     + '<button id="amc-back" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--text);font-weight:600;cursor:pointer">‹ Back to course</button>';
@@ -12887,6 +12963,7 @@ async function openCourseDetail(id) {
     + step(1, 'Name / city / state', true, 'edit', 'Edit')
     + step(2, 'Rating, slope &amp; tees', hasRSnow, 'rate', hasRSnow ? 'Edit' : 'Add')
     + step(3, 'Pars &amp; stroke index', parsSet, 'pars', 'Edit')
+    + (function(){ var _is9=false; try{ _is9=(typeof cardHoles==='function'&&_sc)?(cardHoles(_sc)===9):false; }catch(e){} return '<button data-act="holes9" style="width:100%;padding:12px;margin-top:8px;border-radius:11px;border:2px solid var(--accent);background:'+(_is9?'var(--accent)':'var(--surface-2,#fff)')+';color:'+(_is9?'#fff':'var(--accent)')+';font-size:14px;font-weight:800;cursor:pointer">'+(_is9?'⛳ 9-hole course ✓ — tap to make it 18':'⛳ This is a 9-hole course')+'</button>'; })()
     + step(4, 'GPS — greens ' + greens + '/' + libHoles(null, _sc, id) + ' · targets ' + targetsDone + '/' + targetsNeeded, gpsDone, 'viewmap', 'Review')
     + '<button data-act="gpsadmin" style="width:100%;padding:13px;margin-top:8px;border-radius:11px;border:2px solid var(--accent,var(--accent));background:var(--surface-2,#fff);color:var(--accent,var(--accent));font-size:15px;font-weight:800;cursor:pointer">🛰️ Open GPS admin map — fix a hole</button>'
     + (verified
@@ -12917,6 +12994,7 @@ async function openCourseDetail(id) {
     if (act === 'usga') { closeOv(); try { await adminUsgaLookup(id, it.name); } catch (e) {} openCourseDetail(id); return; }
     if (act === 'bluegolf') { closeOv(); try { await adminBlueGolfLookup(id, it.name); } catch (e) {} openCourseDetail(id); return; }
     if (act === 'viewmap') { closeOv(); if (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]) { state._thenReopenDetailId = id; adminPickLoop(id, cid => adminMapCourse(cid)); } else { adminMappingChecklist(id); } return; }
+    if (act === 'holes9') { const _c9 = (typeof cardHoles === 'function' && _sc) ? (cardHoles(_sc) === 9) : false; const _ok = await uiConfirm(_c9 ? 'Switch this course back to 18 holes?' : 'Mark this as a 9-hole course? The scorecard becomes the front 9; mapping the 9 greens will complete it.'); if (_ok) { await adminToggleNineHoleCourse(id, () => {}); closeOv(); openCourseDetail(id); } return; }
     if (act === 'gpsadmin') { state._thenReopenDetailId = id; closeOv(); if (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]) { adminPickLoop(id, cid => adminMapCourse(cid)); } else { adminMapCourse(id); } return; }
     if (act === 'scimg') { closeOv(); await showScorecardImageFor(id, it.name); openCourseDetail(id); return; }
     if (act === 'verify') {
