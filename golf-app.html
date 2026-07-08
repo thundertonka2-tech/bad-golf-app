@@ -6831,7 +6831,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.539';
+const BG_BUILD = 'v2026.11.540';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8318,6 +8318,7 @@ async function renderAdmin() {
   html += '<input id="adm-search" type="text" placeholder="Search ANY course (or state)…" value="' + ea(_adminSearch) + '" style="width:100%;margin-bottom:8px;padding:13px 14px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">';
   // Map view — plots the in-scope courses so duplicates / mislabeled locations
   // are obvious; tap a pin to open that course. Collapsed by default for speed.
+  html += '<div style="display:flex;gap:8px;margin-bottom:8px"><button id="adm-cr-queue" class="adm-act" style="flex:1;padding:11px">🔎 Code Review queue</button><button id="adm-cr-missing" class="adm-act" style="flex:1;padding:11px">＋ Report missing course</button></div>';
   html += '<button id="adm-map-toggle" class="adm-act map" style="width:100%;margin-bottom:8px;padding:11px">🗺️ Show map view</button>';
   html += '<div id="adm-map-wrap" style="display:none;margin-bottom:12px">'
     + '<div id="adm-map" style="width:100%;height:380px;border-radius:12px;overflow:hidden;border:1px solid var(--border)"></div>'
@@ -8360,6 +8361,8 @@ async function renderAdmin() {
     renderAdminWorklist();
     renderAdminMap();   // keep the map in sync with the chosen state
   };
+  { const _crq=document.getElementById('adm-cr-queue'); if(_crq){ _crq.onclick=function(){ try{ openCodeReviewQueue(); }catch(e){} }; (async function(){ try{ const _n=(await crReadQueue()).filter(function(e){return e&&e.status!=='resolved';}).length; if(_n) _crq.textContent='🔎 Code Review queue ('+_n+')'; }catch(e){} })(); } }
+  { const _crm=document.getElementById('adm-cr-missing'); if(_crm) _crm.onclick=function(){ try{ openCodeReviewModal(null); }catch(e){} }; }
   const mt = document.getElementById('adm-map-toggle');
   if (mt) mt.onclick = async () => {
     const w = document.getElementById('adm-map-wrap');
@@ -9788,7 +9791,7 @@ const SHARED_SINGLETONS = ['golf:courses', 'golf:recent-games', 'golf:tourneys',
   // too, or a course Kevin deletes/renames on one device reappears for everyone
   // else (and re-syncs back). The deletes list is the authoritative "never show
   // this course again" record, so it has to be shared like the additions.
-  'golf:course-deletes', 'golf:course-name-overrides', 'golf:course-detail-overrides'];
+  'golf:course-deletes', 'golf:course-name-overrides', 'golf:course-detail-overrides', 'golf:code-review-queue'];
 function singletonRowCode(key) { return 'shared:' + key.replace(/^golf:/, ''); }
 
 // Track online/offline so the sync indicator can reflect reality
@@ -9912,7 +9915,8 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:course-verified': 'stringSet',          // admin verified set (accumulate)
   'golf:course-name-overrides': 'objectMap',    // { id: name }
   'golf:course-detail-overrides': 'objectMap',  // { id: {name,city,st} }
-  'golf:state-import-progress': 'objectMap'      // { state: progress }
+  'golf:state-import-progress': 'objectMap',      // { state: progress }
+  'golf:code-review-queue': 'arrayById'          // Kevin's code-review flags (union by entry id, no lost flags)
 };
 const _MERGE_READ_FAILED = '__BG_MERGE_READ_FAILED__';  // cloud read FAILED (vs. cloud genuinely empty)
 async function _mergeSharedSingletonValue(key, local) {
@@ -12883,6 +12887,137 @@ async function adminUsgaLookup(courseId, courseName) {
 
 // Course detail screen — the guided "verify" hub. Walk the steps (details →
 // rating/tees → pars → GPS hole-by-hole), then Verify (only once 100% complete).
+// ===== Code Review queue (v540) =====================================================
+// Kevin flags a course (or an entirely-missing course) from admin -> it lands in a
+// shared DB queue that Claude reads on command from a chat ("check the code review
+// queue"). Registered as an arrayById merge singleton so concurrent submits union by
+// entry id and no flag is ever lost. Claude updates status via direct REST.
+const CODE_REVIEW_KEY = 'golf:code-review-queue';
+const CR_CATS = [['missing','Missing course'],['wrong-pars','Wrong pars'],['should-be-9','Should be 9-hole'],['doubled-9','Doubled 9 (reads as 18)'],['wrong-rating','Wrong rating/slope'],['gps','GPS / mapping issue'],['duplicate','Duplicate'],['other','Other']];
+function crEsc(x){ return (typeof escapeHtml==='function')?escapeHtml(x==null?'':String(x)):String(x==null?'':x); }
+function crEa(x){ return (typeof escAttr==='function')?escAttr(x==null?'':String(x)):String(x==null?'':x); }
+function crNewId(){ return 'cr-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7); }
+function crSnapshotLine(c){ if(!c) return ''; var pp=(Array.isArray(c.pars)&&c.pars.some(function(p){return p;}))?'pars set':'no pars'; var h=c.holes||18; return h+' holes · '+pp+' · '+(c.ratingTees||0)+' rated tee'+((c.ratingTees===1)?'':'s')+' · GPS '+(c.gpsGreens!=null?c.gpsGreens:'?')+'/'+h+' · targets '+(c.gpsTargets!=null?c.gpsTargets:0)+'/'+(c.gpsTargetsNeeded!=null?c.gpsTargetsNeeded:0); }
+async function crReadQueue(){
+  try{
+    if(!supaReady) await initSupabase();
+    if(supa && supaOnline){
+      const r = await supa.from('games').select('data').eq('code', singletonRowCode(CODE_REVIEW_KEY)).maybeSingle();
+      if(!r.error){ const arr=(r.data&&Array.isArray(r.data.data))?r.data.data:[]; try{ localStorage.setItem(CODE_REVIEW_KEY, JSON.stringify(arr)); }catch(e){} return arr; }
+    }
+  }catch(e){}
+  try{ const s=await safeGet(CODE_REVIEW_KEY,true); const a=s?JSON.parse(s):[]; return Array.isArray(a)?a:[]; }catch(e){ return []; }
+}
+async function crSubmitEntry(entry){ const arr=await crReadQueue(); arr.push(entry); await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true); }
+async function crSetStatus(entryId, status){ const arr=await crReadQueue(); const e=arr.find(function(x){return x&&x.id===entryId;}); if(!e) return; e.status=status; if(status==='resolved'){ e.resolvedAt=new Date().toISOString(); e.resolvedBy=(currentUserEmail()||'admin'); } else { e.resolvedAt=null; e.resolvedBy=null; } await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true); }
+function openCodeReviewModal(ctx){
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.55);display:flex;align-items:flex-start;justify-content:center;padding:5vh 14px 16px;overflow:auto';
+  const card=document.createElement('div');
+  card.style.cssText='background:var(--surface,var(--surface-2));color:var(--text);border-radius:16px;padding:18px;max-width:440px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.45)';
+  let snap='';
+  if(ctx){
+    snap='<div style="background:var(--surface-2,#fff);border:1px solid var(--border);border-radius:11px;padding:11px 12px;margin:10px 0">'
+      +'<div style="font-weight:800;font-size:15px">'+crEsc(ctx.name)+'</div>'
+      +'<div class="small-text" style="color:var(--text-muted);margin-top:2px">'+crEsc([ctx.city,ctx.st].filter(Boolean).join(', ')||'No location')+'</div>'
+      +'<div class="small-text" style="color:var(--text-muted);margin-top:6px">'+crEsc(crSnapshotLine({holes:ctx.holes,pars:ctx.pars,ratingTees:ctx.ratingTees,gpsGreens:ctx.greens,gpsTargets:ctx.targetsDone,gpsTargetsNeeded:ctx.targetsNeeded}))+'</div>'
+      +'</div>';
+  } else {
+    snap='<div style="margin:10px 0">'
+      +'<input id="cr-mname" type="text" placeholder="Course name *" style="width:100%;margin-bottom:8px;padding:12px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">'
+      +'<input id="cr-mloc" type="text" placeholder="City, State *" style="width:100%;padding:12px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">'
+      +'</div>';
+  }
+  const chips=CR_CATS.map(function(c){ return '<button type="button" class="cr-chip" data-cat="'+c[0]+'" style="padding:7px 12px;border-radius:16px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-size:13px;font-weight:600;cursor:pointer">'+crEsc(c[1])+'</button>'; }).join('');
+  card.innerHTML=
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><div style="font-weight:800;font-size:18px">🔎 Send to Code Review</div><button id="cr-x" style="background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:6px 12px;font-size:16px;cursor:pointer">✕</button></div>'
+    +'<div class="small-text" style="color:var(--text-muted);margin-top:4px">Flags this for Tyler + Claude to investigate.</div>'
+    +snap
+    +'<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;font-size:11px;margin:6px 0 4px">What is wrong? (tap all that apply)</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:6px">'+chips+'</div>'
+    +'<input id="cr-url" type="text" placeholder="GolfPass link (optional, but helps)" style="width:100%;margin-top:10px;padding:12px;font-size:15px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">'
+    +'<textarea id="cr-note" rows="3" placeholder="What did you see? *" style="width:100%;margin-top:8px;padding:12px;font-size:15px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;resize:vertical"></textarea>'
+    +'<button id="cr-submit" style="width:100%;margin-top:12px;padding:14px;border-radius:11px;border:none;background:var(--accent);color:#fff;font-size:15px;font-weight:800;cursor:pointer">File flag ›</button>';
+  ov.appendChild(card); document.body.appendChild(ov);
+  const close=function(){ try{ov.remove();}catch(e){} };
+  ov.onclick=function(e){ if(e.target===ov) close(); };
+  card.querySelector('#cr-x').onclick=close;
+  const sel=new Set();
+  card.querySelectorAll('.cr-chip').forEach(function(b){ b.onclick=function(){ const c=b.dataset.cat; if(sel.has(c)){ sel.delete(c); b.style.background='var(--surface-2)'; b.style.color='var(--text)'; b.style.borderColor='var(--border)'; } else { sel.add(c); b.style.background='var(--accent)'; b.style.color='#fff'; b.style.borderColor='var(--accent)'; } }; });
+  card.querySelector('#cr-submit').onclick=async function(){
+    const note=(card.querySelector('#cr-note').value||'').trim();
+    if(!note){ showToast('Add a quick note first'); return; }
+    let missing=null;
+    if(!ctx){
+      const mn=(card.querySelector('#cr-mname').value||'').trim();
+      const ml=(card.querySelector('#cr-mloc').value||'').trim();
+      if(!mn){ showToast('Course name required'); return; }
+      missing={ name:mn, cityState:ml };
+      if(!sel.has('missing')) sel.add('missing');
+    }
+    const url=(card.querySelector('#cr-url').value||'').trim();
+    const entry={
+      id:crNewId(), createdAt:new Date().toISOString(),
+      submittedBy:(_authUser&&_authUser.id)||null, submittedByName:(currentUserEmail()||'admin'),
+      status:'new', categories:Array.from(sel), golfpassUrl:url, note:note,
+      course: ctx ? { id:ctx.id, name:ctx.name, city:ctx.city, state:ctx.st, holes:ctx.holes, pars:ctx.pars||null, sis:ctx.sis||null, ratingTees:ctx.ratingTees||0, gpsGreens:(ctx.greens!=null?ctx.greens:null), gpsTargets:(ctx.targetsDone!=null?ctx.targetsDone:null), gpsTargetsNeeded:(ctx.targetsNeeded!=null?ctx.targetsNeeded:null) } : null,
+      missing:missing, resolvedAt:null, resolvedBy:null, resolutionNote:null
+    };
+    const btn=card.querySelector('#cr-submit'); btn.disabled=true; btn.textContent='Filing…';
+    try{ await crSubmitEntry(entry); showToast('Filed for code review ✓'); close(); }
+    catch(e){ btn.disabled=false; btn.textContent='File flag ›'; showToast('Could not file — try again'); }
+  };
+}
+async function openCodeReviewQueue(){
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.55);display:flex;align-items:flex-start;justify-content:center;padding:5vh 14px 16px;overflow:auto';
+  const card=document.createElement('div');
+  card.style.cssText='background:var(--surface,var(--surface-2));color:var(--text);border-radius:16px;padding:18px;max-width:460px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.45)';
+  card.innerHTML='<div class="bg-inline-load"><span class="sp"></span>Loading queue…</div>';
+  ov.appendChild(card); document.body.appendChild(ov);
+  const close=function(){ try{ov.remove();}catch(e){} };
+  ov.onclick=function(e){ if(e.target===ov) close(); };
+  let showResolved=false;
+  const badge=function(s){ const m={ 'new':['🆕 new','var(--money-pos)'], 'investigating':['🔍 investigating','#d98a2b'], 'resolved':['✅ resolved','var(--text-muted)'] }; const b=m[s]||m['new']; return '<span class="adm-flag" style="background:'+b[1]+'">'+b[0]+'</span>'; };
+  const crText=function(e){ const c=e.course; const head=e.missing?('MISSING: '+e.missing.name+(e.missing.cityState?(' — '+e.missing.cityState):'')):((c?c.name:'?')+(c&&c.city?(' — '+c.city+(c.state?(', '+c.state):'')):'')+(c&&c.id?(' (id: '+c.id+')'):'')); let t='['+e.status+'] '+head+'\n'; if(e.categories&&e.categories.length) t+='   categories: '+e.categories.join(', ')+'\n'; if(e.golfpassUrl) t+='   golfpass: '+e.golfpassUrl+'\n'; if(e.note) t+='   note: '+e.note+'\n'; if(c) t+='   snapshot: '+crSnapshotLine(c)+'\n'; return t; };
+  const copyText=function(txt){ try{ if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt); showToast('Copied ✓'); return; } }catch(e){} try{ const ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); showToast('Copied ✓'); }catch(e){ showToast('Copy failed'); } };
+  const render=async function(){
+    const arr=await crReadQueue();
+    const ord={ 'new':0,'investigating':1,'resolved':2 };
+    const rows=arr.slice().sort(function(a,b){ const d=(ord[a.status]||0)-(ord[b.status]||0); if(d) return d; return (b.createdAt||'').localeCompare(a.createdAt||''); }).filter(function(e){ return showResolved||e.status!=='resolved'; });
+    const pending=arr.filter(function(e){ return e&&e.status!=='resolved'; });
+    let html='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><div style="font-weight:800;font-size:18px">🔎 Code Review queue</div><button id="crq-x" style="background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:6px 12px;font-size:16px;cursor:pointer">✕</button></div>';
+    html+='<div class="small-text" style="color:var(--text-muted);margin-top:4px">'+pending.length+' pending · '+arr.length+' total. Say “check the code review queue” in a chat and Claude works the list.</div>';
+    html+='<div style="display:flex;gap:8px;margin:10px 0"><button id="crq-copy" class="adm-act" style="flex:1;padding:10px">📋 Copy pending for Claude</button><button id="crq-toggle" class="adm-act" style="flex:0 0 auto;padding:10px 14px">'+(showResolved?'Hide resolved':'Show resolved')+'</button></div>';
+    if(!rows.length){ html+='<div class="small-text" style="color:var(--text-muted);padding:14px 0;text-align:center">Nothing here 🎉</div>'; }
+    rows.forEach(function(e){
+      const c=e.course;
+      const head=e.missing?('MISSING: '+crEsc(e.missing.name)):crEsc(c?c.name:'Unknown course');
+      const loc=e.missing?crEsc(e.missing.cityState||''):crEsc(c?[c.city,c.state].filter(Boolean).join(', '):'');
+      html+='<div style="border:1px solid var(--border);border-radius:11px;padding:11px 12px;margin-top:8px;background:var(--surface-2,#fff)">'
+        +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div style="min-width:0"><div style="font-weight:700;font-size:14px">'+head+'</div>'+(loc?'<div class="small-text" style="color:var(--text-muted)">'+loc+'</div>':'')+'</div>'+badge(e.status)+'</div>'
+        +((e.categories&&e.categories.length)?'<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">'+e.categories.map(function(x){ return '<span class="adm-flag" style="background:var(--accent)">'+crEsc(x)+'</span>'; }).join('')+'</div>':'')
+        +(e.note?'<div class="small-text" style="margin-top:6px">'+crEsc(e.note)+'</div>':'')
+        +(e.golfpassUrl?'<div class="small-text" style="margin-top:4px"><a href="'+crEa(e.golfpassUrl)+'" target="_blank" rel="noopener" style="color:var(--accent);font-weight:700;text-decoration:none">🔗 GolfPass ›</a></div>':'')
+        +'<div class="small-text" style="color:var(--text-muted);margin-top:5px">'+crEsc(e.submittedByName||'admin')+' · '+crEsc((e.createdAt||'').slice(0,10))+'</div>'
+        +'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
+          +'<button class="crq-st" data-id="'+crEa(e.id)+'" data-st="new" title="Mark new" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer">🆕</button>'
+          +'<button class="crq-st" data-id="'+crEa(e.id)+'" data-st="investigating" title="Mark investigating" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer">🔍</button>'
+          +'<button class="crq-st" data-id="'+crEa(e.id)+'" data-st="resolved" title="Mark resolved" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer">✅</button>'
+          +'<button class="crq-copy1" data-id="'+crEa(e.id)+'" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;margin-left:auto">📋 Copy</button>'
+        +'</div>'
+      +'</div>';
+    });
+    card.innerHTML=html;
+    card.querySelector('#crq-x').onclick=close;
+    card.querySelector('#crq-toggle').onclick=function(){ showResolved=!showResolved; render(); };
+    card.querySelector('#crq-copy').onclick=function(){ const t='CODE REVIEW QUEUE — '+pending.length+' pending\n\n'+pending.map(function(e,i){ return (i+1)+') '+crText(e); }).join('\n'); copyText(t); };
+    card.querySelectorAll('.crq-copy1').forEach(function(b){ b.onclick=function(){ const e=arr.find(function(x){return x&&x.id===b.dataset.id;}); if(e) copyText(crText(e)); }; });
+    card.querySelectorAll('.crq-st').forEach(function(b){ b.onclick=async function(){ b.disabled=true; try{ await crSetStatus(b.dataset.id, b.dataset.st); }catch(e){} render(); }; });
+  };
+  render();
+}
+// ===== end Code Review queue ========================================================
 async function openCourseDetail(id) {
   let it = (_adminWork || []).find(x => x.id === id);
   if (!it) {
@@ -12978,6 +13113,7 @@ async function openCourseDetail(id) {
     + (verified
         ? '<button data-act="unverify" style="width:100%;padding:14px;margin-top:10px;border-radius:11px;border:none;background:var(--accent);color:#fff;font-size:15px;font-weight:800;cursor:pointer">☑️ Verified — tap to unverify</button>'
         : '<button data-act="verify"' + (completeNow ? '' : ' disabled') + ' style="width:100%;padding:14px;margin-top:10px;border-radius:11px;border:none;background:' + (completeNow ? 'var(--accent)' : 'var(--text-muted,#999)') + ';color:#fff;font-size:15px;font-weight:800;cursor:' + (completeNow ? 'pointer' : 'default') + ';opacity:' + (completeNow ? '1' : '0.6') + '">' + (completeNow ? '☑️ Verify &amp; finish ›' : '☑️ Verify (finish every step first)') + '</button>')
+    + '<button data-act="codereview" style="width:100%;padding:13px;margin-top:8px;border-radius:11px;border:2px solid #d98a2b;background:var(--surface-2,#fff);color:#d98a2b;font-size:15px;font-weight:800;cursor:pointer">🔎 Send to Code Review</button>'
     + '<button data-act="del" style="width:100%;padding:14px;margin-top:8px;border-radius:11px;border:none;background:var(--danger,var(--money-neg));color:#fff;font-size:15px;font-weight:800;cursor:pointer">🗑️ Delete course</button>'
     + '<details style="margin-top:12px"><summary style="cursor:pointer;color:var(--text-muted);font-size:13px;padding:4px 0">More tools</summary>'
       + btn('remapfull', '🗺️ Remap full course (greens + fairways)')
@@ -13006,6 +13142,7 @@ async function openCourseDetail(id) {
     if (act === 'holes9') { const _c9 = (typeof cardHoles === 'function' && _sc) ? (cardHoles(_sc) === 9) : false; const _ok = await uiConfirm(_c9 ? 'Switch this course back to 18 holes?' : 'Mark this as a 9-hole course? The scorecard becomes the front 9; mapping the 9 greens will complete it.'); if (_ok) { await adminToggleNineHoleCourse(id, () => {}); closeOv(); openCourseDetail(id); } return; }
     if (act === 'gpsadmin') { state._thenReopenDetailId = id; closeOv(); if (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]) { adminPickLoop(id, cid => adminMapCourse(cid)); } else { adminMapCourse(id); } return; }
     if (act === 'scimg') { closeOv(); await showScorecardImageFor(id, it.name); openCourseDetail(id); return; }
+    if (act === 'codereview') { const _crt=(_sc&&Array.isArray(_sc.tees))?_sc.tees.filter(function(t){return t&&t.rating!=null;}).length:0; openCodeReviewModal({ id:id, name:it.name, city:it.city||'', st:it.st||'', holes:((typeof cardHoles==='function'&&_sc)?cardHoles(_sc):((_sc&&_sc.pars&&_sc.pars.length)||18)), pars:(_sc&&_sc.pars)||_pars, sis:(_sc&&_sc.sis)||null, ratingTees:_crt, greens:greens, targetsDone:targetsDone, targetsNeeded:targetsNeeded }); return; }
     if (act === 'verify') {
       if (!completeNow) { showToast('Finish GPS + rating first'); return; }
       _adminVerified.add(id);
