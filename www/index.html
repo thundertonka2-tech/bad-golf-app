@@ -5445,6 +5445,14 @@
         </div>
       </details>
 
+      <details class="card bet-section" id="payment-handles-card" style="margin-top:16px">
+        <summary style="font-weight:700;cursor:pointer">💵 Payment handles</summary>
+        <div style="margin-top:12px">
+          <div class="small-text" style="color:var(--text-muted);margin-bottom:10px">Save your Venmo, Cash App, or PayPal so buddies can pay you in one tap on the settle-up screen after a round. All optional — add or change any time. Only your crew in a round can see them, and only to pay you. Bad Golf never processes payments.</div>
+          <button class="full" id="btn-edit-my-pay" onclick="try{openPaySetup();}catch(e){}" style="font-weight:600">✏️ Edit my payment handles</button>
+        </div>
+      </details>
+
       <!-- Handicap hero + quick stats -->
       <div class="card" id="stats-kpi-card" style="display:none"></div>
 
@@ -6863,7 +6871,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.545';
+const BG_BUILD = 'v2026.11.546';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -11207,7 +11215,7 @@ function mergeRosters(base, incoming, removals) {
     ex.scoreHistory = hist;
     // Profile fields: the active edit (incoming) wins when it has a real value.
     if (preferIncoming) {
-      ['firstName','lastName','name','hcp','gender','avatar','phone'].forEach(f => { if (p[f] !== undefined && p[f] !== null && p[f] !== '') ex[f] = p[f]; });
+      ['firstName','lastName','name','hcp','gender','avatar','phone','pay'].forEach(f => { if (p[f] !== undefined && p[f] !== null && p[f] !== '') ex[f] = p[f]; });
     }
     ex.lastUsed = Math.max(ex.lastUsed || 0, p.lastUsed || 0);
   };
@@ -17855,6 +17863,8 @@ function dismissWelcomeModal() {
   try { localStorage.setItem(KEY_WELCOME_SEEN, '1'); } catch (e) {}
   // Now that the welcome is dismissed, show the sign-in prompt (deferred above).
   try { maybeShowAuthPrompt(); } catch (e) {}
+  // Optional one-time nudge to add payment handles (self-defers if sign-in modal is up).
+  try { maybePromptPaySetup(); } catch (e) {}
 }
 
 // ============================================================
@@ -23784,6 +23794,191 @@ function _renderCelebration(item, done){
 // ============================================================
 
 // Settle-up: given net money per player, return minimal payments.
+// ============================================================
+// TAP-TO-PAY — Venmo / Cash App / PayPal deep-link settle-up (v545+)
+// Handles live on the roster player record (p.pay {venmo,cashapp,paypal,preferred})
+// so they sync via mergeRosters; the signed-in user's own handles also mirror to a
+// local key. We NEVER move money — links open the payee's payment app pre-filled and
+// the user confirms there. Everything is additive + try/catch wrapped.
+// ============================================================
+const KEY_MY_PAY = 'golf:my-pay';
+const KEY_PAY_ONBOARD_SEEN = 'golf:pay-onboard-seen-v1';
+const PAY_METHODS = [
+  { id:'venmo',   label:'Venmo',    emoji:'💸', ph:'@username (without the @)',    clean:v=>String(v||'').replace(/^@/,'').trim() },
+  { id:'cashapp', label:'Cash App', emoji:'💵', ph:'$cashtag (without the $)',      clean:v=>String(v||'').replace(/^\$/,'').trim() },
+  { id:'paypal',  label:'PayPal',   emoji:'🅿️', ph:'paypal.me name or full link',   clean:v=>String(v||'').trim() }
+];
+function _payClean(id, v){ const m = PAY_METHODS.find(x=>x.id===id); return m ? m.clean(v) : String(v||'').trim(); }
+function _payHasAny(h){ return !!(h && (h.venmo || h.cashapp || h.paypal)); }
+
+// Build a pre-filled deep link. amount = number, note = short string.
+function buildPayLink(method, handle, amount, note){
+  handle = _payClean(method, handle);
+  if (!handle) return '';
+  const amt = (Math.round((Number(amount)||0)*100)/100).toFixed(2);
+  const n = encodeURIComponent(note || 'Bad Golf');
+  if (method === 'venmo')   return 'https://venmo.com/' + encodeURIComponent(handle) + '?txn=pay&amount=' + amt + '&note=' + n;
+  if (method === 'cashapp') return 'https://cash.app/$' + encodeURIComponent(handle) + '/' + amt;
+  if (method === 'paypal'){
+    let base = handle;
+    if (/paypal\.me\//i.test(base)){ base = base.replace(/^https?:\/\//i,'').replace(/\/+$/,''); return 'https://' + base + '/' + amt; }
+    return 'https://paypal.me/' + encodeURIComponent(base) + '/' + amt;
+  }
+  return '';
+}
+
+// My own handles (local mirror). Returns {venmo,cashapp,paypal,preferred}.
+function getMyPay(){ try { return JSON.parse(localStorage.getItem(KEY_MY_PAY)||'{}') || {}; } catch(e){ return {}; } }
+
+// Resolve a payee's handles: live game player.pay -> roster record.pay -> (if me) local.
+async function resolvePayHandles(payeePlayer){
+  if (!payeePlayer) return {};
+  if (_payHasAny(payeePlayer.pay)) return payeePlayer.pay;
+  try {
+    const roster = await getPlayerRoster();
+    const key = rosterPlayerKey(payeePlayer);
+    const rp = Array.isArray(roster) ? roster.find(x => rosterPlayerKey(x) === key) : null;
+    if (rp && _payHasAny(rp.pay)) return rp.pay;
+    const me = await getMeName();
+    if (me && rosterPlayerKey({ name: me }) === key){ const mine = getMyPay(); if (_payHasAny(mine)) return mine; }
+  } catch(e){}
+  return {};
+}
+
+// Persist handles for any roster player (by key). Mirrors to local if it's me,
+// and stamps the live game player so settle-up reflects it immediately.
+async function savePayHandlesForPlayer(payeePlayer, handles){
+  try {
+    const roster = await getPlayerRoster();
+    const key = rosterPlayerKey(payeePlayer);
+    let rp = Array.isArray(roster) ? roster.find(x => rosterPlayerKey(x) === key) : null;
+    if (!rp){ rp = { name: displayFull(payeePlayer) || payeePlayer.name || '', firstName: payeePlayer.firstName, lastName: payeePlayer.lastName, scoreHistory: [] }; roster.push(rp); }
+    rp.pay = Object.assign({}, rp.pay, handles);
+    await savePlayerRoster(roster);
+    const me = await getMeName();
+    if (me && rosterPlayerKey({ name: me }) === key){ try { localStorage.setItem(KEY_MY_PAY, JSON.stringify(rp.pay)); } catch(e){} }
+  } catch(e){ console.warn('savePayHandlesForPlayer', e); }
+  try { if (state && state.game && Array.isArray(state.game.players)){ const gp = state.game.players.find(p => rosterPlayerKey(p) === rosterPlayerKey(payeePlayer)); if (gp) gp.pay = Object.assign({}, gp.pay, handles); } } catch(e){}
+}
+
+// Save MY handles (onboarding + Additional-settings editor).
+async function saveMyPay(handles){
+  handles = handles || {};
+  try { localStorage.setItem(KEY_MY_PAY, JSON.stringify(handles)); } catch(e){}
+  try {
+    const me = await getMeName();
+    if (me){ const roster = await getPlayerRoster(); const p = findMyRosterPlayer(roster, me); if (p){ p.pay = Object.assign({}, p.pay, handles); await savePlayerRoster(roster); } }
+  } catch(e){ console.warn('saveMyPay', e); }
+}
+
+// Dynamic editor modal. opts: { player, onboarding }. No static HTML needed.
+async function openPaySetup(opts){
+  opts = opts || {};
+  const player = opts.player || null;
+  let cur = {};
+  try {
+    if (player) cur = await resolvePayHandles(player);
+    else { cur = getMyPay(); if (!_payHasAny(cur)){ const me = await getMeName(); if (me){ const r = await getPlayerRoster(); const p = findMyRosterPlayer(r, me); if (p && _payHasAny(p.pay)) cur = p.pay; } } }
+  } catch(e){ cur = {}; }
+  cur = cur || {};
+  const who = player ? (displayFull(player) || player.name || 'this player') : 'you';
+  const markSeen = ()=>{ if (opts.onboarding){ try { localStorage.setItem(KEY_PAY_ONBOARD_SEEN, '1'); } catch(e){} } };
+  let ov = document.getElementById('pay-setup-modal');
+  if (ov) ov.remove();
+  ov = document.createElement('div'); ov.className = 'modal-overlay'; ov.id = 'pay-setup-modal'; ov.style.zIndex = '100060';
+  const fields = PAY_METHODS.map(m => `
+    <div class="field" style="margin-top:10px">
+      <label>${m.emoji} ${m.label}</label>
+      <input type="text" id="pay-in-${m.id}" placeholder="${m.ph}" value="${escapeHtml(cur[m.id]||'')}" autocapitalize="none" autocorrect="off" spellcheck="false">
+    </div>`).join('');
+  ov.innerHTML = `<div class="modal" style="max-width:420px">
+    <h2>💵 ${player ? 'Payment info' : 'Your payment handles'}</h2>
+    <p class="help-text" style="margin-bottom:6px">Add ${player ? (escapeHtml(who) + "'s") : 'your'} Venmo, Cash App, or PayPal so ${player ? 'you can pay them' : 'buddies can pay you'} in one tap after a round. All optional.</p>
+    <p class="help-text" style="margin:0 0 4px;font-size:11px;color:var(--text-muted)">Only your crew in a round can see these, and only to pay ${player ? 'them' : 'you'}. Bad Golf never processes payments.</p>
+    ${fields}
+    <div class="field" style="margin-top:10px">
+      <label>Preferred method</label>
+      <select id="pay-in-preferred"><option value="">No preference</option>${PAY_METHODS.map(m=>`<option value="${m.id}">${m.label}</option>`).join('')}</select>
+    </div>
+    <div class="actions" style="margin-top:16px">
+      <button id="pay-skip" style="flex:1">${opts.onboarding ? 'Skip for now' : 'Cancel'}</button>
+      <button id="pay-save" class="primary" style="flex:1">Save</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const prefSel = ov.querySelector('#pay-in-preferred'); if (prefSel) prefSel.value = cur.preferred || '';
+  ov.classList.add('show');
+  ov.onclick = (e)=>{ if (e.target === ov){ ov.classList.remove('show'); markSeen(); } };
+  ov.querySelector('#pay-skip').onclick = ()=>{ ov.classList.remove('show'); markSeen(); };
+  ov.querySelector('#pay-save').onclick = async ()=>{
+    const h = { preferred: (prefSel && prefSel.value) || '' };
+    PAY_METHODS.forEach(m=>{ const el = ov.querySelector('#pay-in-'+m.id); h[m.id] = _payClean(m.id, el ? el.value : ''); });
+    try { if (player) await savePayHandlesForPlayer(player, h); else await saveMyPay(h); } catch(e){}
+    markSeen();
+    ov.classList.remove('show');
+    try { showToast('Payment info saved ✓'); } catch(e){}
+    try { if (state && state.game) renderBoard(); } catch(e){}
+  };
+}
+
+// Onboarding: gently prompt a new user once to add their handles (optional/skippable).
+// Self-defers if another modal is open (e.g. sign-in) so it never stacks.
+function maybePromptPaySetup(attempt){
+  try {
+    if (localStorage.getItem(KEY_PAY_ONBOARD_SEEN)) return;
+    if (_payHasAny(getMyPay())){ localStorage.setItem(KEY_PAY_ONBOARD_SEEN, '1'); return; }
+    attempt = attempt || 0;
+    setTimeout(()=>{
+      try {
+        if (document.querySelector('.modal-overlay.show')){ if (attempt < 1) maybePromptPaySetup(attempt + 1); return; }
+        openPaySetup({ onboarding: true });
+      } catch(e){}
+    }, attempt === 0 ? 900 : 6000);
+  } catch(e){}
+}
+
+// Populate one settle-up row's pay controls (async — handles may need roster lookup).
+async function _renderSettlePayRow(wrap, g, fromId, toId, amount){
+  try {
+    if (!wrap || !g) return;
+    const payee = g.players.find(p => p.id === toId);
+    if (!payee) return;
+    const note = 'Bad Golf' + (g.course ? (' — ' + g.course) : '');
+    const paidKey = fromId + '>' + toId;
+    const isPaid = !!(g.paidFlags && g.paidFlags[paidKey]);
+    wrap.innerHTML = '';
+    wrap.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:0 2px 10px;margin-top:-4px';
+    const paidBtn = document.createElement('button');
+    paidBtn.className = 'small';
+    paidBtn.textContent = isPaid ? '✓ Paid' : 'Mark paid';
+    paidBtn.style.cssText = 'padding:4px 10px;font-size:12px;' + (isPaid ? 'background:rgba(26,127,55,0.12);color:#1a7f37;border-color:#1a7f37' : '');
+    paidBtn.onclick = async ()=>{ if (!g.paidFlags) g.paidFlags = {}; g.paidFlags[paidKey] = !g.paidFlags[paidKey]; try { await saveGame(g); } catch(e){} try { renderBoard(); } catch(e){} };
+    wrap.appendChild(paidBtn);
+    if (isPaid) return;
+    const handles = await resolvePayHandles(payee);
+    const methods = [];
+    if (handles.preferred && handles[handles.preferred]) methods.push(handles.preferred);
+    PAY_METHODS.forEach(m=>{ if (handles[m.id] && methods.indexOf(m.id) < 0) methods.push(m.id); });
+    if (methods.length === 0){
+      const add = document.createElement('button');
+      add.className = 'small'; add.textContent = '+ Payment info';
+      add.style.cssText = 'padding:4px 10px;font-size:12px;color:var(--text-muted)';
+      add.onclick = ()=> openPaySetup({ player: payee });
+      wrap.appendChild(add);
+      return;
+    }
+    methods.forEach(mid=>{
+      const m = PAY_METHODS.find(x=>x.id===mid); if (!m) return;
+      const link = buildPayLink(mid, handles[mid], amount, note); if (!link) return;
+      const b = document.createElement('a');
+      b.href = link; b.target = '_blank'; b.rel = 'noopener';
+      b.textContent = m.emoji + ' ' + m.label;
+      b.style.cssText = 'padding:4px 10px;font-size:12px;text-decoration:none;border:1px solid var(--accent);border-radius:8px;color:var(--accent);white-space:nowrap';
+      wrap.appendChild(b);
+    });
+  } catch(e){ console.warn('_renderSettlePayRow', e); }
+}
+
 function calculateSettlements(money, players) {
   const list = [];
   players.forEach(p => {
@@ -28062,6 +28257,13 @@ function renderBoard() {
         <div class="amt">$${s.amount.toFixed(2)}</div>
       `;
       sl.appendChild(row);
+      // Tap-to-pay controls (Venmo / Cash App / PayPal) + Mark-paid for this line.
+      try {
+        const payWrap = document.createElement('div');
+        payWrap.className = 'settle-pay-wrap';
+        sl.appendChild(payWrap);
+        _renderSettlePayRow(payWrap, g, s.fromId, s.toId, s.amount);
+      } catch (e) {}
     });
     const totalFlow = settlements.reduce((sum, s) => sum + s.amount, 0);
     const summary = document.createElement('div');
