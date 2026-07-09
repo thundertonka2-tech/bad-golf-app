@@ -3125,8 +3125,8 @@
             Enter each player's course handicap. Names are saved automatically when you start a round.
           </p>
           <div style="display:flex;gap:6px;margin-bottom:12px">
-            <button class="full" id="btn-pick-roster" style="flex:1">👥 Bad Golf Users</button>
-            <button class="full" id="btn-add-player" style="flex:1">+ Add player</button>
+            <button class="full" id="btn-pick-roster" style="flex:1">👥 Select a Player</button>
+            <button class="full" id="btn-add-player" style="flex:1">➕ Add a Player</button>
           </div>
           <div id="players-list"></div>
           </div><!-- /setup-players-block -->
@@ -6831,7 +6831,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.542';
+const BG_BUILD = 'v2026.11.543';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -7010,6 +7010,7 @@ async function initAuth() {
           try { subscribeToFriendRequests(); } catch (e) {}
           try { checkPendingInvites(); } catch (e) {}
           try { checkPendingFriendRequests(); } catch (e) {}
+          try { ensureMyNameSet(); } catch (e) {}
           // Offer to rejoin a live round you're already a player in (e.g. you closed
           // the app mid-round). Delay so any auto-restore can set state.game first.
           try { setTimeout(() => { try { checkLiveRoundRejoin(); } catch (e) {} }, 1500); } catch (e) {}
@@ -7165,6 +7166,7 @@ let _adminShow = 0;         // how many worklist rows to show (0 = the default p
 let _adminSkipped = new Set(); // course ids parked "skip for later" (synced overlay; their own bucket)
 let _adminVerified = new Set(); // course ids an admin has manually verified (synced overlay)
 let _adminWork = [];
+let _crPendingIds = new Set();   // course ids currently sitting in the code-review queue (for the admin status badge)
 let _adminOrder = [];   // ids in current worklist display order — drives Next/Skip sweep in the detail screen
 let _adminUsers = [];
 let _adminUserSearch = '';
@@ -8155,7 +8157,8 @@ function renderAdminWorklist() {
       const mapLabel = it.hasGPS ? '🗺️ Re-map course'
         : (it.holes > 0 ? '🗺️ Map ' + left + ' more hole' + (left === 1 ? '' : 's') : '🗺️ Map this course');
       const badge = '<span class="adm-flag ' + it.flag + '"' + (it.flag === 'done' ? ' style="background:var(--money-pos)"' : '') + '>' + lbl[it.flag] + '</span>'
-        + (_adminVerified.has(it.id) ? ' <span class="adm-flag" style="background:var(--accent)">☑️ Verified</span>' : '');
+        + (_adminVerified.has(it.id) ? ' <span class="adm-flag" style="background:var(--accent)">☑️ Verified</span>' : '')
+        + ((_crPendingIds && _crPendingIds.has(it.id)) ? ' <span class="adm-flag" style="background:#d98a2b">🔎 Code Review</span>' : '');
       // Clean tappable card — the whole card opens the course detail screen
       // (all edit/map tools live there now, instead of a row of buttons per card).
       return '<div class="adm-card" data-open="' + ea(it.id) + '" style="cursor:pointer">'
@@ -8211,6 +8214,7 @@ async function ensureAdminData() {
   const playCount = {};
   try { (recent || []).forEach(r => { const nm = (r.course || '').trim().toLowerCase(); if (nm) playCount[nm] = (playCount[nm] || 0) + 1; }); } catch (e) {}
   _adminWork = buildAdminWorklist(saves, mapped, playCount);
+  try { const _cr = await crReadQueue(); _crPendingIds = new Set((_cr || []).filter(function (e) { return e && e.status !== 'resolved' && e.course && e.course.id; }).map(function (e) { return e.course.id; })); } catch (e) {}
   _adminScopeKey = key;
   _adminDataReady = true;
 }
@@ -12929,7 +12933,26 @@ async function adminCardCodeReview(id){
   let sc=null; try{ sc=await getCourseScorecard(id); }catch(e){}
   const tees=(sc&&Array.isArray(sc.tees))?sc.tees.filter(function(t){return t&&t.rating!=null;}).length:0;
   const holes=(typeof cardHoles==='function'&&sc)?cardHoles(sc):((sc&&sc.pars&&sc.pars.length)||it.expHoles||18);
-  openCodeReviewModal({ id:id, name:it.name||(sc&&sc.name)||id, city:it.city||'', st:it.st||'', holes:holes, pars:(sc&&sc.pars)||null, sis:(sc&&sc.sis)||null, ratingTees:tees, greens:(it.holes!=null?it.holes:null), targetsDone:(it.fwcCount!=null?it.fwcCount:null), targetsNeeded:null });
+  await crQuickFile({ id:id, name:it.name||(sc&&sc.name)||id, city:it.city||'', st:it.st||'', holes:holes, pars:(sc&&sc.pars)||null, sis:(sc&&sc.sis)||null, ratingTees:tees, greens:(it.holes!=null?it.holes:null), targetsDone:(it.fwcCount!=null?it.fwcCount:null), targetsNeeded:null });
+}
+// One-tap code-review filing for Kevin: no form, no typing — flag the course and
+// show "Submitted". (The full modal with categories/notes still exists for the
+// "Report missing course" path, which genuinely needs the name typed in.)
+async function crQuickFile(ctx){
+  if(!ctx || !ctx.id){ try{ openCodeReviewModal(ctx); }catch(e){} return; }
+  try{
+    const entry={
+      id:crNewId(), createdAt:new Date().toISOString(),
+      submittedBy:(_authUser&&_authUser.id)||null, submittedByName:(currentUserEmail()||'admin'),
+      status:'new', categories:['other'], golfpassUrl:'', note:'Flagged for code review from admin.',
+      course:{ id:ctx.id, name:ctx.name, city:ctx.city, state:ctx.st, holes:ctx.holes, pars:ctx.pars||null, sis:ctx.sis||null, ratingTees:ctx.ratingTees||0, gpsGreens:(ctx.greens!=null?ctx.greens:null), gpsTargets:(ctx.targetsDone!=null?ctx.targetsDone:null), gpsTargetsNeeded:(ctx.targetsNeeded!=null?ctx.targetsNeeded:null) },
+      missing:null, resolvedAt:null, resolvedBy:null, resolutionNote:null
+    };
+    await crSubmitEntry(entry);
+    try{ if(!_crPendingIds) _crPendingIds=new Set(); _crPendingIds.add(ctx.id); }catch(e){}
+    showToast('Submitted \u2713');
+    try{ renderAdminWorklist(); }catch(e){}
+  }catch(e){ showToast('Could not submit \u2014 try again'); }
 }
 function openCodeReviewModal(ctx){
   const ov=document.createElement('div');
@@ -13163,7 +13186,7 @@ async function openCourseDetail(id) {
     if (act === 'holes9') { const _c9 = (typeof cardHoles === 'function' && _sc) ? (cardHoles(_sc) === 9) : false; const _ok = await uiConfirm(_c9 ? 'Switch this course back to 18 holes?' : 'Mark this as a 9-hole course? The scorecard becomes the front 9; mapping the 9 greens will complete it.'); if (_ok) { await adminToggleNineHoleCourse(id, () => {}); closeOv(); openCourseDetail(id); } return; }
     if (act === 'gpsadmin') { state._thenReopenDetailId = id; closeOv(); if (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]) { adminPickLoop(id, cid => adminMapCourse(cid)); } else { adminMapCourse(id); } return; }
     if (act === 'scimg') { closeOv(); await showScorecardImageFor(id, it.name); openCourseDetail(id); return; }
-    if (act === 'codereview') { const _crt=(_sc&&Array.isArray(_sc.tees))?_sc.tees.filter(function(t){return t&&t.rating!=null;}).length:0; openCodeReviewModal({ id:id, name:it.name, city:it.city||'', st:it.st||'', holes:((typeof cardHoles==='function'&&_sc)?cardHoles(_sc):((_sc&&_sc.pars&&_sc.pars.length)||18)), pars:(_sc&&_sc.pars)||_pars, sis:(_sc&&_sc.sis)||null, ratingTees:_crt, greens:greens, targetsDone:targetsDone, targetsNeeded:targetsNeeded }); return; }
+    if (act === 'codereview') { const _crt=(_sc&&Array.isArray(_sc.tees))?_sc.tees.filter(function(t){return t&&t.rating!=null;}).length:0; crQuickFile({ id:id, name:it.name, city:it.city||'', st:it.st||'', holes:((typeof cardHoles==='function'&&_sc)?cardHoles(_sc):((_sc&&_sc.pars&&_sc.pars.length)||18)), pars:(_sc&&_sc.pars)||_pars, sis:(_sc&&_sc.sis)||null, ratingTees:_crt, greens:greens, targetsDone:targetsDone, targetsNeeded:targetsNeeded }); return; }
     if (act === 'verify') {
       if (!completeNow) { showToast('Finish GPS + rating first'); return; }
       _adminVerified.add(id);
@@ -30318,6 +30341,26 @@ async function setMeName(name) {
   }
   return await safeSet(KEY_ME, name || '', false);
 }
+// Mandatory name gate: a signed-in user with no real name (blank, or the "Player"
+// fallback) shows up as a trash "Player" row in the admin Users list and in
+// rosters. Force first name + last initial before they can use the app.
+// Fail-safe: never traps a user who already has a name; any error just returns.
+let _nameRequired = false;
+async function ensureMyNameSet() {
+  try {
+    if (typeof isSignedIn !== 'function' || !isSignedIn()) return;
+    if (!supa || !_authUser) return;
+    let me = null; try { me = await getMeName(); } catch (e) { return; }
+    if (me && String(me).trim() && !/^player$/i.test(String(me).trim())) return;
+    const modal = document.getElementById('edit-name-modal');
+    if (!modal || modal.classList.contains('show')) return;
+    _nameRequired = true;
+    const fEl = document.getElementById('edit-name-first'); if (fEl) fEl.value = '';
+    const lEl = document.getElementById('edit-name-last');  if (lEl) lEl.value = '';
+    try { wireEditName(); } catch (e) {}
+    modal.classList.add('show');
+  } catch (e) {}
+}
 // Resolve the signed-in user's roster player. The cloud `my_player` string can
 // drift from the roster's `name` by punctuation/case (e.g. stored "Tyler
 // O'Connor" vs the roster's derived "Tyler OConnor" after first/last migration),
@@ -33432,7 +33475,7 @@ try { setInterval(function () { checkCrewRoundAlerts(); }, 60000); setTimeout(fu
 // Realtime can silently miss a delivery in the native app, leaving an invite or
 // friend request stuck. Poll every 25s so any still-pending one resurfaces as the
 // forcing modal until the user responds.
-try { setInterval(function () { try { checkPendingInvites(); } catch (e) {} try { checkPendingFriendRequests(); } catch (e) {} }, 25000); } catch (e) {}
+try { setInterval(function () { try { checkPendingInvites(); } catch (e) {} try { checkPendingFriendRequests(); } catch (e) {} try { ensureMyNameSet(); } catch (e) {} }, 25000); } catch (e) {}
 
 // When a round YOU placed a wager on goes live (first score entered), ping you
 // in-app with Spectate / Ignore. Lets you pre-set a bet on a scheduled round and
@@ -33713,8 +33756,8 @@ function wireEditName() {
   _editNameWired = true;
   const modal = document.getElementById('edit-name-modal');
   const cancel = document.getElementById('edit-name-cancel');
-  if (cancel) cancel.onclick = () => modal.classList.remove('show');
-  if (modal) modal.onclick = (e) => { if (e.target.id === 'edit-name-modal') modal.classList.remove('show'); };
+  if (cancel) cancel.onclick = () => { if (_nameRequired) { showToast('Please enter your name to continue'); return; } modal.classList.remove('show'); };
+  if (modal) modal.onclick = (e) => { if (e.target.id === 'edit-name-modal') { if (_nameRequired) return; modal.classList.remove('show'); } };
   const save = document.getElementById('edit-name-save');
   if (save) save.onclick = () => saveMyName();
 }
@@ -33722,7 +33765,10 @@ function wireEditName() {
 async function saveMyName() {
   const first = (document.getElementById('edit-name-first').value || '').trim();
   const last = (document.getElementById('edit-name-last').value || '').trim();
-  if (!first) { showToast('Enter at least a first name'); return; }
+  if (!first) { showToast('Enter your first name'); return; }
+  if (!last) { showToast('Add your last name (or at least a last initial)'); return; }
+  if (/^player$/i.test(first)) { showToast('Please enter your real name'); return; }
+  _nameRequired = false;   // a valid name is being saved — clear the mandatory gate
   const newName = combineName(first, last);
   const oldMe = await getMeName();
   const roster = await getPlayerRoster();
@@ -34113,7 +34159,18 @@ function subscribeToInvites() {
         { event: 'INSERT', schema: 'public', table: 'game_invites', filter: 'to_user=eq.' + _authUser.id },
         (payload) => {
           const inv = payload.new;
-          if (inv && inv.status === 'pending') { showIncomingInvite(inv); try { renderIncomingWagers(); } catch (e) {} }
+          if (inv && inv.status === 'pending') {
+            const _c = String(inv.game_code || '');
+            const _isWager = (_c.indexOf('W:') === 0 || _c.indexOf('WB:') === 0);
+            if (_isWager) {
+              // A wager that arrives next to a game invite must not jump the queue:
+              // give the matching game invite a beat to land, then drain the
+              // highest-priority pending invite (game invite first).
+              setTimeout(function () { try { checkPendingInvites(); } catch (e) {} try { renderIncomingWagers(); } catch (e) {} }, 1200);
+            } else {
+              showIncomingInvite(inv); try { renderIncomingWagers(); } catch (e) {}
+            }
+          }
         })
       .subscribe();
   } catch (e) { console.warn('subscribeToInvites failed', e); }
@@ -34152,9 +34209,14 @@ async function checkPendingInvites() {
       .select('*').eq('to_user', _authUser.id).eq('status', 'pending')
       .order('created_at', { ascending: false }).limit(5);
     if (data && data.length) {
-      // Show the newest invite that's still joinable; finished ones get expired
-      // inside showIncomingInvite and we move on, so over rounds never nag.
-      for (const inv of data) {
+      // Game / tournament / open-round invites ALWAYS outrank wager proposals
+      // (W: / WB:) so a bet notification can never bury the actual game invite.
+      // Rank joinable invites first, newest-first within each rank.
+      const _invRank = function (iv) { const c = String(iv.game_code || ''); return (c.indexOf('W:') === 0 || c.indexOf('WB:') === 0) ? 1 : 0; };
+      const _ordered = data.slice().sort(function (a, b) { const d = _invRank(a) - _invRank(b); if (d) return d; return String(b.created_at || '').localeCompare(String(a.created_at || '')); });
+      // Show the highest-priority invite that's still joinable; finished ones get
+      // expired inside showIncomingInvite and we move on, so old rounds never nag.
+      for (const inv of _ordered) {
         const shown = await showIncomingInvite(inv);
         if (shown) break;
       }
@@ -34387,6 +34449,7 @@ async function showIncomingInvite(inv) {
 async function acceptIncomingInvite() {
   const inv = _pendingInvite;
   document.getElementById('incoming-invite-modal').classList.remove('show');
+  setTimeout(function () { try { checkPendingInvites(); } catch (e) {} }, 700);   // surface the next pending invite (e.g. the wager) once this one is handled
   if (!inv) return;
   try { await supa.from('game_invites').update({ status: 'accepted' }).eq('id', inv.id); } catch (e) {}
   if (String(inv.game_code || '').indexOf('T2:') === 0) {
@@ -34455,6 +34518,7 @@ async function acceptIncomingInvite() {
 async function declineIncomingInvite() {
   const inv = _pendingInvite;
   document.getElementById('incoming-invite-modal').classList.remove('show');
+  setTimeout(function () { try { checkPendingInvites(); } catch (e) {} }, 700);   // surface the next pending invite (e.g. the wager) once this one is handled
   _pendingInvite = null;
   if (!inv) return;
   try { await supa.from('game_invites').update({ status: 'declined' }).eq('id', inv.id); } catch (e) {}
@@ -47150,12 +47214,13 @@ const gpsView = (() => {
       // set — they dwelled at the tee, then moved well away, which IS the drive.
       // While still on the tee it shows nothing (0). (Tyler, Jul 2026: "should have
       // been zero, I was parked at the tee box.")
-      if (!_driveLocked) return hide();
+      // Anchor is the player's OWN frozen tee fix, so it reads ~0 while standing at
+      // the tee and counts up as they move down the hole (Tyler, Jul 2026: "set to
+      // zero at the tee box" + "stop displaying once you get past 450 yds").
       const _driveAnchor = _holeStartPos;
       let yds = ydsBetween(_driveAnchor, ball);
-      if (yds < 50) return hide();                      // still on/near the tee — nothing meaningful yet
-      if (yds > 600) return hide();                     // clearly GPS drift — not a real drive
-      if (yds > 400) yds = 400;                         // cap the estimate at 400y (Tyler, June 2026)
+      if (yds < 0) yds = 0;                             // never negative — baseline is 0 at the tee
+      if (yds > 450) return hide();                     // past 450y — stop displaying (Tyler, Jul 2026)
       const v = b.querySelector('.val'); if (v) v.textContent = yds + 'y';
       b.dataset.yds = yds;
       b.style.display = 'block';
@@ -47350,15 +47415,22 @@ const gpsView = (() => {
     const dGreenY = distM(ball, hd.mid) * YD;
     // Par 3, or green within range → aim at the middle of the green.
     if (par === 3 || dGreenY <= GREEN_TARGET_YDS) return hd.mid.slice();
-    // Prefer the imported GolfPass fairway center (the real driver-landing target) so the
-    // live aim matches GolfPass instead of a naive halfway point — but only while that
-    // point is still AHEAD of the player (closer to the green than the ball). Once you've
-    // driven past it, fall back to halfway-to-green (which recomputes as you walk in).
+    // 18Birdies-style progressive aim: on a par 5 the GolfPass lay-up is the first
+    // aim after the drive, then the fairway center, then the green — but each is
+    // used ONLY while it's still meaningfully AHEAD of you. The moment you're on
+    // top of a target (within ~30y) it stops being the aim (that's what gave the
+    // "weird readings when right on it"); we advance to the next point, and once
+    // nothing is meaningfully ahead the aim is simply the green.
+    const AHEAD_MIN_M = 27;   // ~30y — must be at least this far ahead to be a useful aim point
+    if (par === 5 && Array.isArray(hd.layup) && hd.layup.length === 2) {
+      const ballToGreen = distM(ball, hd.mid), layToGreen = distM(hd.layup, hd.mid);
+      if (layToGreen < ballToGreen - AHEAD_MIN_M) return hd.layup.slice();
+    }
     if (Array.isArray(hd.fwc) && hd.fwc.length === 2) {
       const ballToGreen = distM(ball, hd.mid), fwcToGreen = distM(hd.fwc, hd.mid);
-      if (fwcToGreen < ballToGreen - 5) return hd.fwc.slice();
+      if (fwcToGreen < ballToGreen - AHEAD_MIN_M) return hd.fwc.slice();
     }
-    return midOf(ball, hd.mid);
+    return hd.mid.slice();   // nothing meaningful ahead → aim at the green, never a point you're on top of
   }
 
   // Bubble clarity on zoom: programmatic frames/auto-follow set the baseline
@@ -47383,12 +47455,12 @@ const gpsView = (() => {
       const brg = brgBetween(ball, hd.mid);
       const b = new maplibregl.LngLatBounds(ball, ball);
       b.extend(hd.mid);                                                   // the green — never drops off
-      // APPROACH ZOOM: once you're within ~150y of the green, zoom in tight on just the
-      // player + green (ignore any far fairway target) so both are large on screen —
-      // ball sits just above the Score tab, green/target up under the yardage bar.
-      // (Tyler, Jul 2026: kick in sooner — 150y felt too zoomed-out at ~130y.)
+      // APPROACH ZOOM: hold the wide "whole hole" framing (player → target → green
+      // all in view) for essentially the whole hole, and only zoom in tight once
+      // you're basically AT the green. (Tyler, Jul 2026, w/ 18Birdies reference
+      // screenshot: "keep it at this zoom until we get to the green.")
       const _dGreenY = distM(ball, hd.mid) * YD;
-      const _approach = _dGreenY <= 150;
+      const _approach = _dGreenY <= 50;
       if (!_approach && Array.isArray(target) && target.length === 2) b.extend(target); // current aim
       map.fitBounds(b, {
         bearing: brg,
@@ -47449,13 +47521,28 @@ const gpsView = (() => {
       // branch). This is what makes the view fill the screen when you're close in.
       try {
         const _dGreenY = distM(ball, hd.mid) * YD;
-        if (_dGreenY <= 150) {
+        if (_dGreenY <= 50) {
           const gp = map.project(hd.mid);
           const spanPx = Math.hypot(bp.x - gp.x, bp.y - gp.y);
           if (spanPx < vh * 0.55 && (map.getZoom ? map.getZoom() : 0) < 20.6) { frameHole(true); return; }
         }
       } catch (e) {}
-      if (bp.y < vh * 0.52 || bp.y > vh * 0.94 || off(bp) || off(tp)) frameHole(true);
+      if (bp.y < vh * 0.52 || bp.y > vh * 0.94 || off(bp) || off(tp)) {
+        // HOLD the current zoom and just PAN to re-center the player + aim
+        // (18Birdies-style steady scale while you move) instead of re-fitting
+        // bounds, which made the zoom jump around as you walked up the hole.
+        // The approach zoom-in near the green is still handled above. As you walk
+        // toward the aim the two points only get closer, so a held zoom keeps both
+        // comfortably on screen.
+        try {
+          const _aim = target || hd.mid;
+          const _c = midOf(ball, _aim);
+          const _brg = brgBetween(ball, _aim);
+          const _z = (map.getZoom ? map.getZoom() : null);
+          if (_z != null) map.easeTo({ center: _c, bearing: _brg, zoom: _z, duration: 500 });
+          else frameHole(true);
+        } catch (e) { frameHole(true); }
+      }
     } catch (e) {}
   }
 
@@ -49750,6 +49837,11 @@ const gpsView = (() => {
         if (c.st === st || cityStr.endsWith(', ' + st) || cityStr === st) existsNameInState.add(nm);
       });
 
+      // Never let an OSM sweep re-add a course an admin has deleted. A deleted
+      // course isn't in COURSE_LIBRARY, so without this it looks "new" and comes
+      // back on the next import (Kevin's deletions kept resurrecting overnight).
+      let _delSet = new Set();
+      try { const _d = await getCourseDeletes(); if (Array.isArray(_d)) _delSet = new Set(_d); } catch (e) {}
       const batch = [], batchIds = new Set(), seenInBatch = new Set();
       let skipped = 0;
       elements.forEach(e => {
@@ -49759,6 +49851,7 @@ const gpsView = (() => {
         const city = cityRaw ? cityRaw + ', ' + st : st;
         const key = nm + '|' + city.toLowerCase();
         if (seenInBatch.has(key) || existsKey.has(key) || existsNameInState.has(nm)) { skipped++; return; }
+        if (_delSet.has(slugifyCourseName(name))) { skipped++; return; }   // admin-deleted — keep it gone
         seenInBatch.add(key);
         const c = e.center || { lat: e.lat, lon: e.lon };
         let id = slugifyCourseName(name), n = 1;

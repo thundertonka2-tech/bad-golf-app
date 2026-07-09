@@ -26,6 +26,10 @@ struct DistanceView: View {
     // number from a different hole.
     struct LastKnownDistance { var hole: Int; var dist: Geo.Distances; var at: Date }
     @State private var lastKnown: LastKnownDistance?
+    // Tap the "?" in the header to reveal a raw GPS diagnostic you can screenshot
+    // (helps track down the "0 yards" bug — shows the live fix, the green coord,
+    // and the computed distances the watch is actually using).
+    @State private var showDiag = false
 
     // What the screen actually renders: live distance if we have one, else the
     // last-known reading for this hole.
@@ -85,6 +89,7 @@ struct DistanceView: View {
         ZStack {
             Color.badGolfNavy.ignoresSafeArea()
             screen
+            if showDiag { diagPanel }
         }
         .focusable(true)
         .digitalCrownRotation(
@@ -113,6 +118,12 @@ struct DistanceView: View {
                 Spacer()
                 windIndicator
                 gpsDot
+                Button { showDiag.toggle() } label: {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.badGolfBlue)
             }
             .font(.system(size: 14, weight: .medium))
             .foregroundStyle(Color.white.opacity(0.7))
@@ -244,5 +255,47 @@ struct DistanceView: View {
         Circle()
             .fill(loc.acquiring ? Color.gray : (loc.accuracyGood ? Color.green : Color.yellow))
             .frame(width: 8, height: 8)
+    }
+
+    // Raw GPS diagnostic overlay — toggled by the "?" in the header. Everything
+    // here is the live data the watch is using to compute the yardage, so a photo
+    // of this screen tells us exactly why a distance reads 0 / "—".
+    @ViewBuilder private var diagPanel: some View {
+        let l = loc.location
+        let g = greenCoord
+        let d = distances
+        ScrollView {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("⛳ Watch GPS diagnostic")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.badGolfAmber)
+                Text("hole \(store.currentHole)/\(store.holeCount) · par \(store.par.map(String.init) ?? "—")")
+                Text("conf: \(confidenceText)")
+                Text("gps: \(loc.acquiring ? "acquiring" : (loc.accuracyGood ? "good" : "weak"))")
+                Text("acc: \(l.map { String(format: "%.0fm", $0.horizontalAccuracy) } ?? "nil")")
+                Text("me: \(l.map { String(format: "%.5f,%.5f", $0.coordinate.latitude, $0.coordinate.longitude) } ?? "nil")")
+                Text("green: \(g.map { String(format: "%.5f,%.5f", $0.latitude, $0.longitude) } ?? "nil")")
+                Text("C/F/B: \(d?.center.map(String.init) ?? "—")/\(d?.front.map(String.init) ?? "—")/\(d?.back.map(String.init) ?? "—")")
+                Text("lastKnown: \(showingLastKnown ? "yes" : "no")")
+                Button("Close") { showDiag = false }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.badGolfBlue)
+                    .padding(.top, 4)
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+        }
+        .background(Color.black.opacity(0.92))
+    }
+
+    private var confidenceText: String {
+        guard let c = store.hole?.confidence else { return "no-hole" }
+        switch c {
+        case .full:       return "full"
+        case .centerOnly: return "centerOnly"
+        case .none:       return "none (unmapped)"
+        }
     }
 }
