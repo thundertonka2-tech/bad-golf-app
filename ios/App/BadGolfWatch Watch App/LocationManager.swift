@@ -23,7 +23,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     override init() {
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         manager.distanceFilter = 5   // meters; recompute on meaningful movement, not a tight timer
         manager.allowsBackgroundLocationUpdates = false  // when-in-use only for v1
     }
@@ -37,7 +37,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         active = true
         acquiring = true
         manager.requestWhenInUseAuthorization()      // idempotent — make sure we're authorized
-        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         manager.distanceFilter = 5
         manager.startUpdatingLocation()
         startWatchdog()
@@ -62,7 +62,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
             guard stale else { return }
             if self.location == nil { self.acquiring = true }
             self.manager.stopUpdatingLocation()
-            self.manager.desiredAccuracy = kCLLocationAccuracyBest
+            self.manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
             self.manager.distanceFilter = 5
             self.manager.startUpdatingLocation()
         }
@@ -76,7 +76,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     }
     func fullPower() {
         guard active else { return }
-        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         manager.distanceFilter = 5
     }
 
