@@ -6887,7 +6887,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.573';
+const BG_BUILD = 'v2026.11.574';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -9581,6 +9581,7 @@ function wireAuthUI() {
     const em = (document.getElementById('auth-email').value || '').trim();
     const pw = document.getElementById('auth-password').value || '';
     if (!em || !pw) { showErr('Enter an email and a password (6+ characters).'); return; }
+    if (!isValidEmailFormat(em)) { showErr('Enter a valid email address (like you@example.com).'); return; }
     const err = await signUpWithEmail(em, pw);
     if (err) { showErr(err); return; }
     close(); showToast('Almost there — check your email to confirm your account');
@@ -11242,7 +11243,7 @@ function mergeRosters(base, incoming, removals) {
     ex.scoreHistory = hist;
     // Profile fields: the active edit (incoming) wins when it has a real value.
     if (preferIncoming) {
-      ['firstName','lastName','name','hcp','gender','avatar','phone','pay'].forEach(f => { if (p[f] !== undefined && p[f] !== null && p[f] !== '') ex[f] = p[f]; });
+      ['firstName','lastName','name','hcp','gender','avatar','phone','pay','email'].forEach(f => { if (p[f] !== undefined && p[f] !== null && p[f] !== '') ex[f] = p[f]; });
     }
     ex.lastUsed = Math.max(ex.lastUsed || 0, p.lastUsed || 0);
   };
@@ -33210,7 +33211,7 @@ async function saveProfilePhone() {
 async function saveProfileEmail() {
   if (!supa || !_authUser) { showToast('Sign in first'); return; }
   const email = (document.getElementById('edit-profile-emailinput').value || '').trim();
-  if (!email || email.indexOf('@') < 1) { showToast('Enter a valid email'); return; }
+  if (!isValidEmailFormat(email)) { showToast('Enter a valid email address (like you@example.com)'); return; }
   try {
     const { error } = await supa.auth.updateUser({ email });
     if (error) throw error;
@@ -34210,27 +34211,62 @@ function wireEditName() {
   if (save) save.onclick = () => saveMyName();
 }
 
+/* --- Data-quality guards: keep user names + emails clean --- */
+function isValidEmailFormat(s){ s=(s||'').trim(); if(!s||s.length>254) return false; return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s); }
+function _nameHasBadWord(raw){
+  var s=(raw||'').toLowerCase().replace(/[^a-z]/g,''); if(!s) return false;
+  var strong=['fuck','cunt','asshole','pussy','whore','nigg','faggot','retard','jackoff','jerkoff','dildo','kike','chink','wetback','tranny','molest','pedo','jizz','handjob','blowjob','butthole','dickhead','cocksuck','motherfuck','shithead','bullshit','fuckface','fuckyou','fuckoff','coochie','queefer'];
+  for(var i=0;i<strong.length;i++){ if(s.indexOf(strong[i])>=0) return true; }
+  var exact=['ass','shit','bitch','slut','twat','wank','tits','boobs','penis','vagina','anus','scrotum','cock','turd','fart','poop','fag','skank','queef','douche','hoe'];
+  if(exact.indexOf(s)>=0) return true;
+  return false;
+}
+function looksLikeJunkName(raw, isLast){
+  var s=(raw||'').trim(); if(!s) return true;
+  if(_nameHasBadWord(s)) return true;
+  if(!/^[A-Za-z][A-Za-z '\.\-]*$/.test(s)) return true;
+  var letters=s.replace(/[^A-Za-z]/g,''); if(!letters) return true;
+  if(!isLast && letters.length<2) return true;
+  if(/([A-Za-z])\1\1/.test(letters)) return true;
+  if(letters.length>=4 && !/[aeiouy]/i.test(letters)) return true;
+  var low=letters.toLowerCase();
+  var mash=['asdf','qwer','qwert','qwerty','wert','zxcv','sdfg','dfgh','fghj','ghjk','hjkl','yuiop','asdfgh'];
+  for(var i=0;i<mash.length;i++){ if(low.indexOf(mash[i])>=0) return true; }
+  var words=['test','testing','fake','none','null','player','unknown','abc','abcd','abcde','xxx','xxxx','asdfjkl','qwertyuiop'];
+  if(words.indexOf(low)>=0) return true;
+  return false;
+}
 async function saveMyName() {
   const first = (document.getElementById('edit-name-first').value || '').trim();
   const last = (document.getElementById('edit-name-last').value || '').trim();
   if (!first) { showToast('Enter your first name'); return; }
   if (!last) { showToast('Add your last name (or at least a last initial)'); return; }
   if (/^player$/i.test(first)) { showToast('Please enter your real name'); return; }
+  if (looksLikeJunkName(first, false)) { showToast('Please enter a real first name'); return; }
+  if (looksLikeJunkName(last, true)) { showToast('Please enter a real last name'); return; }
   _nameRequired = false;   // a valid name is being saved — clear the mandatory gate
   const newName = combineName(first, last);
   const oldMe = await getMeName();
   const roster = await getPlayerRoster();
   let entry = oldMe ? roster.find(p => p.name === oldMe) : null;
-  // Block renaming onto another existing player.
+  // Same-name detection. Only offer to merge with UNCLAIMED players (no email).
+  // A roster player that already carries an email belongs to a registered
+  // account, so we must NEVER merge into it (that would hijack their identity).
   const fNorm = normalizeNameSegment(first), lNorm = normalizeNameSegment(last);
-  const collision = roster.find(p => p !== entry &&
+  const _hasEmail = p => !!(p && p.email && String(p.email).trim());
+  const sameName = roster.filter(p => p !== entry &&
     normalizeNameSegment(p.firstName) === fNorm && normalizeNameSegment(p.lastName) === lNorm);
+  const collision = sameName.find(p => !_hasEmail(p));   // only no-email players are mergeable
+  if (!collision && sameName.some(_hasEmail)) {
+    // The only same-name match already belongs to a registered account — decline.
+    showToast('That name is already registered to another account. Try adding a middle initial or a different spelling.');
+    return;
+  }
   if (collision) {
-    // Same name already in the roster — almost always the SAME person who
-    // signed in before their crew player was linked (e.g. an email-username
-    // entry + the real one). Offer a merge instead of blocking.
-    const ok = await uiConfirm('"' + collision.name + '" is already in the roster. Is that you?\n\nMerging combines your history into that player — rounds combine, duplicates are removed, and your handicap recalculates from the combined history.', { title: 'Is that you?', okLabel: 'Merge', cancelLabel: 'Cancel', danger: false });
-    if (!ok) { showToast('Pick a different name, or merge with the existing player'); return; }
+    // Same name, no email — almost always the SAME person, played as a guest
+    // before they signed up. Offer to merge (claim) that player.
+    const ok = await uiConfirm('"' + collision.name + '" is already in the crew roster. Is this you?\n\nMerging pulls that player\'s rounds and history into your account — duplicates are removed and your handicap recalculates.', { title: 'Is this you?', okLabel: 'Yes, merge', cancelLabel: 'Cancel', danger: false });
+    if (!ok) { showToast('No problem — pick a different name if that is not you'); return; }
     const histA = Array.isArray(collision.scoreHistory) ? collision.scoreHistory : [];
     const histB = (entry && Array.isArray(entry.scoreHistory)) ? entry.scoreHistory : [];
     const seen = new Set(); const combined = [];
@@ -34244,6 +34280,7 @@ async function saveMyName() {
     if ((collision.hcp == null || collision.hcp === 0) && entry && entry.hcp) collision.hcp = entry.hcp;
     if (!collision.avatar && entry && entry.avatar) collision.avatar = entry.avatar;
     collision.lastUsed = Date.now();
+    collision.email = currentUserEmail() || collision.email || '';   // this account now owns the player
     const idx2 = entry ? roster.indexOf(entry) : -1;
     if (idx2 >= 0) roster.splice(idx2, 1);
     await savePlayerRoster(roster);
@@ -34261,13 +34298,14 @@ async function saveMyName() {
     return;
   }
   if (!entry) {
-    entry = { firstName: first, lastName: last, name: newName, hcp: 0, lastUsed: Date.now(), scoreHistory: [] };
+    entry = { firstName: first, lastName: last, name: newName, hcp: 0, lastUsed: Date.now(), scoreHistory: [], email: (currentUserEmail() || '') };
     roster.push(entry);
   } else {
     entry.firstName = first;
     entry.lastName = last;
     entry.name = newName;
     entry.lastUsed = Date.now();
+    if (currentUserEmail()) entry.email = currentUserEmail();
   }
   await savePlayerRoster(roster);
   await setMeName(newName); // also updates profiles.my_player
@@ -51138,15 +51176,40 @@ function _timesPushInvite(uid, t, added){
 
 /* ---- add a player to an EXISTING tee time (friend picker + free text) ---- */
 async function timesAddPlayerPrompt(id){
+  var roster=[]; try{ roster=await getPlayerRoster(); }catch(e){}
   var friends=await _timesEnsureFriends();
-  var flist = friends.length ? friends.map(function(f){
-      return '<button class="times-act times-act-ghost" style="display:flex;justify-content:space-between" onclick="timesDoAddFriend(\''+_timesEsc(id)+'\',\''+_timesEsc(f.id)+'\',\''+_timesEsc(_timesFriendName(f))+'\')">'+_timesEsc(_timesFriendName(f))+' <b>Add</b></button>';
-    }).join('') : '';
+  var pool=[]; try{ pool=_timesBuildNamePool(roster, friends); }catch(e){}
+  var seated={}; try{ var items=await timesGetItems(); var t=(items||[]).find(function(x){return String(x.id)===String(id);}); (t?_timesPlayers(t):[]).forEach(function(p){ if(p&&p.name) seated[normalizeNameSegment(p.name)]=1; }); }catch(e){}
+  pool=(pool||[]).filter(function(pr){ return pr && !seated[normalizeNameSegment(pr.name)]; });
+  pool.sort(function(a,b){ if((b.crew?1:0)!==(a.crew?1:0)) return (b.crew?1:0)-(a.crew?1:0); if((b.lastPlayed||0)!==(a.lastPlayed||0)) return (b.lastPlayed||0)-(a.lastPlayed||0); return (a.name||'').localeCompare(b.name||''); });
+  window._timesAddPool=pool; window._timesAddId=id;
   _timesSheet('<div class="times-sheet-h"><b>Add a player</b><button class="times-x" onclick="timesCloseSheet()">✕</button></div>'+
     '<div class="times-hint">They’re added right away — no need to accept. Crew members also get a notification.</div>'+
-    (flist?'<div class="times-actions" style="margin-top:10px">'+flist+'</div><div class="times-hint" style="text-align:center;margin:12px 0 6px">— or type any name —</div>':'<div style="height:8px"></div>')+
+    '<input class="times-inp" id="tt-add-search" placeholder="Search players…" autocomplete="off" oninput="timesAddPlayerFilter()" style="margin:10px 0 8px">'+
+    '<div id="tt-add-list" class="times-userpick"></div>'+
+    '<div class="times-hint" style="text-align:center;margin:10px 0 6px">— or add someone new —</div>'+
     '<div class="times-form"><input class="times-inp" id="tt-addp" placeholder="Type a name" autocomplete="off">'+
     '<button class="times-save" onclick="timesDoAddPlayer(\''+_timesEsc(id)+'\')">Add player</button></div>');
+  timesAddPlayerFilter();
+}
+function timesAddPlayerFilter(){
+  try{
+    var list=document.getElementById('tt-add-list'); if(!list) return;
+    var q=(((document.getElementById('tt-add-search')||{}).value)||'').trim().toLowerCase();
+    var pool=window._timesAddPool||[];
+    var avail=[]; pool.forEach(function(pr,i){ if(q && (pr.name||'').toLowerCase().indexOf(q)<0) return; avail.push({pr:pr,i:i}); });
+    if(!avail.length){ list.innerHTML='<div class="times-hint" style="padding:10px 12px">'+(pool.length?'No matches — add them as someone new below.':'No saved players yet — add friends on the Crew tab.')+'</div>'; return; }
+    list.innerHTML=avail.map(function(a){ return _timesPickRowHtml(a.pr, 'onclick="timesAddFromPool('+a.i+')"', '＋'); }).join('');
+  }catch(e){}
+}
+async function timesAddFromPool(i){
+  try{
+    var pool=window._timesAddPool||[]; var pr=pool[i]; if(!pr) return;
+    var id=window._timesAddId;
+    var uid=''; if(pr.crew){ var friends=[]; try{ friends=Array.isArray(_friendsCache)?_friendsCache:[]; }catch(e){} uid=_timesFriendUidByName(friends, pr.name)||''; }
+    await _timesAddNamed(id, pr.name, uid);
+    timesCloseSheet(); renderTimes(); timesOpenDetail(id);
+  }catch(e){}
 }
 async function _timesAddNamed(id, name, uid){
   var t=null;
@@ -51305,13 +51368,22 @@ function _timesRosterEntry(roster, first, last){
     return e||null;
   }catch(e){ return null; }
 }
+function _timesHcpLine(sh, rawHcp){
+  try{
+    var calc=calcHandicapIndex(sh||[]);
+    if(calc&&calc.index!=null) return 'HCP '+fmtHcp(calc.index)+' · GHIN-calc, '+calc.n+' round'+(calc.n>1?'s':'');
+    var n=(sh||[]).length;
+    if(n>0) return 'HCP '+((rawHcp!=null)?fmtHcp(rawHcp):0)+' · '+n+'/3 rounds for auto-calc';
+  }catch(e){}
+  return 'HCP '+((rawHcp!=null)?fmtHcp(rawHcp):0);
+}
 function _timesBuildNamePool(roster, friends){
   var pool=[];
   try{
-    (roster||[]).forEach(function(p){ if(!p) return; var first=p.firstName||'', last=p.lastName||''; var nm=((first+' '+last).trim())||p.name||''; if(!nm) return; var hcp=''; try{ var calc=calcHandicapIndex(p.scoreHistory||[]); if(calc&&calc.index!=null) hcp=fmtHcp(calc.index); else if(p.hcp!=null) hcp=fmtHcp(p.hcp); }catch(e){} var m=_timesHistMeta(p); pool.push({first:first,last:last,name:nm,hcp:hcp,avatar:p.avatar||null,firstName:first,lastName:last,homeCourse:m.home,lastPlayed:m.last}); });
+    (roster||[]).forEach(function(p){ if(!p) return; var first=p.firstName||'', last=p.lastName||''; var nm=((first+' '+last).trim())||p.name||''; if(!nm) return; var hcp=''; try{ var calc=calcHandicapIndex(p.scoreHistory||[]); if(calc&&calc.index!=null) hcp=fmtHcp(calc.index); else if(p.hcp!=null) hcp=fmtHcp(p.hcp); }catch(e){} var m=_timesHistMeta(p); pool.push({first:first,last:last,name:nm,hcp:hcp,hcpLine:_timesHcpLine(p.scoreHistory,p.hcp),avatar:p.avatar||null,firstName:first,lastName:last,homeCourse:m.home,lastPlayed:m.last}); });
     // Crew (Bad Golf users) by their FULL name (my_player), so seating fills the real first/last
     // and the roster handicap lookup matches. Skip email-looking values.
-    (friends||[]).forEach(function(f){ var nm=(f&&(f.my_player||f.display_name))||''; nm=String(nm).trim(); if(!nm || nm.indexOf('@')>=0) return; var ex=pool.some(function(x){return normalizeNameSegment(x.name)===normalizeNameSegment(nm);}); if(ex) return; var q=nm.split(/\s+/); var first=q[0]||'', last=q.slice(1).join(' ')||''; var re=_timesRosterEntry(roster, first, last); var hcp=''; try{ if(re){ var c2=calcHandicapIndex(re.scoreHistory||[]); hcp=(c2&&c2.index!=null)?fmtHcp(c2.index):((re.hcp!=null)?fmtHcp(re.hcp):''); } }catch(e){} var m2=re?_timesHistMeta(re):{home:'',last:0}; pool.push({first:first,last:last,name:nm,hcp:hcp,crew:true,avatar:(f&&f.avatar)||null,firstName:first,lastName:last,homeCourse:m2.home,lastPlayed:m2.last}); });
+    (friends||[]).forEach(function(f){ var nm=(f&&(f.my_player||f.display_name))||''; nm=String(nm).trim(); if(!nm || nm.indexOf('@')>=0) return; var ex=pool.some(function(x){return normalizeNameSegment(x.name)===normalizeNameSegment(nm);}); if(ex) return; var q=nm.split(/\s+/); var first=q[0]||'', last=q.slice(1).join(' ')||''; var re=_timesRosterEntry(roster, first, last); var hcp=''; try{ if(re){ var c2=calcHandicapIndex(re.scoreHistory||[]); hcp=(c2&&c2.index!=null)?fmtHcp(c2.index):((re.hcp!=null)?fmtHcp(re.hcp):''); } }catch(e){} var m2=re?_timesHistMeta(re):{home:'',last:0}; pool.push({first:first,last:last,name:nm,hcp:hcp,hcpLine:(re?_timesHcpLine(re.scoreHistory,re.hcp):(hcp!==''?('HCP '+hcp):'')),crew:true,avatar:(f&&f.avatar)||null,firstName:first,lastName:last,homeCourse:m2.home,lastPlayed:m2.last}); });
   }catch(e){}
   return pool;
 }
@@ -51322,6 +51394,14 @@ function _timesSeatedSet(){
   var seated={}; try{ (document.querySelectorAll('#tt-players-list .times-prow')||[]).forEach(function(row){ var f=(row.querySelector('.tt-p-first')||{}).value||''; var l=(row.querySelector('.tt-p-last')||{}).value||''; var nm=(f+' '+l).trim(); if(nm) seated[normalizeNameSegment(nm)]=1; }); }catch(e){}
   return seated;
 }
+function _timesPickRowHtml(pr, onclickAttr, sym){
+  var av=''; try{ av=(typeof crewAvatarHtml==='function')?crewAvatarHtml(pr,false):''; }catch(e){}
+  if(!av){ var ini=((pr.first||pr.name||'?').charAt(0)||'?').toUpperCase(); av='<div class="crew-avatar">'+_timesEsc(ini)+'</div>'; }
+  var sub=pr.hcpLine||((pr.hcp!==''&&pr.hcp!=null)?('HCP '+pr.hcp):'');
+  return '<div class="times-pick-row" '+(onclickAttr||'')+'>'+av+
+    '<div class="tpn"><div class="tpn-name">'+_timesEsc(pr.name)+'</div>'+(sub?('<div class="tpn-sub">'+_timesEsc(sub)+'</div>'):'')+'</div>'+
+    '<div class="times-pick-add">'+(sym||'＋')+'</div></div>';
+}
 function timesUserFilter(){
   try{
     var list=document.getElementById('tt-user-list'); if(!list) return;
@@ -51330,14 +51410,7 @@ function timesUserFilter(){
     var pf=window._timesPickFilter||'all';
     var avail=[]; pool.forEach(function(pr,i){ if(pf==='friends' && !pr.crew) return; if(seated[normalizeNameSegment(pr.name)]) return; if(q && (pr.name||'').toLowerCase().indexOf(q)<0) return; avail.push({pr:pr,i:i}); });
     if(!avail.length){ list.innerHTML='<div class="times-hint" style="padding:10px 12px">'+(pf==='friends'?'No friends match — add friends on the Crew tab, or switch to All.':(pool.length?'No matches — use “+ add someone new”.':'No saved players yet — add friends on the Crew tab.'))+'</div>'; return; }
-    list.innerHTML=avail.map(function(a){ var pr=a.pr;
-      var av=''; try{ av=(typeof crewAvatarHtml==='function')?crewAvatarHtml(pr,false):''; }catch(e){}
-      if(!av){ var ini=((pr.first||pr.name||'?').charAt(0)||'?').toUpperCase(); av='<div class="crew-avatar">'+_timesEsc(ini)+'</div>'; }
-      var sub=[]; if(pr.crew) sub.push('<span class="tpc">crew</span>'); if(pr.homeCourse) sub.push(_timesEsc(pr.homeCourse)); if(pr.hcp!==''&&pr.hcp!=null) sub.push('HCP '+_timesEsc(pr.hcp));
-      return '<div class="times-pick-row" onclick="timesSeatByIndex('+a.i+')">'+av+
-        '<div class="tpn"><div class="tpn-name">'+_timesEsc(pr.name)+'</div>'+(sub.length?('<div class="tpn-sub">'+sub.slice(0,2).join(' · ')+'</div>'):'')+'</div>'+
-        '<div class="times-pick-add">＋</div></div>';
-    }).join('');
+    list.innerHTML=avail.map(function(a){ return _timesPickRowHtml(a.pr, 'onclick="timesSeatByIndex('+a.i+')"', '＋'); }).join('');
   }catch(e){}
 }
 function _timesSeatPlayerObj(pr){
