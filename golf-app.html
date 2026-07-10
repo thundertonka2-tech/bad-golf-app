@@ -6881,7 +6881,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.581';
+const BG_BUILD = 'v2026.11.582';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -9888,7 +9888,11 @@ const SHARED_SINGLETONS = ['golf:courses', 'golf:recent-games', 'golf:tourneys',
   // too, or a course Kevin deletes/renames on one device reappears for everyone
   // else (and re-syncs back). The deletes list is the authoritative "never show
   // this course again" record, so it has to be shared like the additions.
-  'golf:course-deletes', 'golf:course-name-overrides', 'golf:course-detail-overrides', 'golf:code-review-queue'];
+  // course-deletes-locked = ids an ADMIN explicitly deleted. Unlike plain
+  // course-deletes (which the v402 sweep un-tombstones when a course still has
+  // ratings), a locked id is NEVER auto-restored. This is the fix for admin
+  // deletes silently coming back after a sweep (Kevin's MS/TX deletes).
+  'golf:course-deletes', 'golf:course-deletes-locked', 'golf:course-name-overrides', 'golf:course-detail-overrides', 'golf:code-review-queue'];
 function singletonRowCode(key) { return 'shared:' + key.replace(/^golf:/, ''); }
 
 // Track online/offline so the sync indicator can reflect reality
@@ -10008,6 +10012,7 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:courses': 'objectMap',                  // scorecards keyed by course id
   'golf:course-library-additions': 'arrayById', // user-added courses
   'golf:course-deletes': 'stringSet',           // deleted course ids (accumulate)
+  'golf:course-deletes-locked': 'stringSet',    // admin-locked deletes (accumulate, never auto-restored)
   'golf:course-skipped': 'stringSet',           // admin skip set (accumulate)
   'golf:course-verified': 'stringSet',          // admin verified set (accumulate)
   'golf:course-name-overrides': 'objectMap',    // { id: name }
@@ -13375,6 +13380,15 @@ async function getCourseDeletes() {
   if (!v) return [];
   try { return JSON.parse(v) || []; } catch (e) { return []; }
 }
+// Admin-locked deletes: ids an admin explicitly removed. The v402 sweep must
+// NEVER un-tombstone these even when a course still has ratings/slope, so admin
+// deletes stay deleted instead of resurrecting on the next finalize pass.
+const KEY_COURSE_DELETES_LOCKED = 'golf:course-deletes-locked';
+async function getCourseDeletesLocked() {
+  const v = await safeGet(KEY_COURSE_DELETES_LOCKED, true);
+  if (!v) return [];
+  try { return JSON.parse(v) || []; } catch (e) { return []; }
+}
 async function deleteCourse(courseId) {
   if (!courseId) return false;
   if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can delete courses'); return false; }
@@ -13384,6 +13398,12 @@ async function deleteCourse(courseId) {
   const dels = await getCourseDeletes();
   try { invalidateCourseLibraryCache(); } catch (e) {}
   if (!dels.includes(courseId)) { dels.push(courseId); await safeSet(KEY_COURSE_DELETES, JSON.stringify(dels), true); }
+  // LOCK the delete so the v402 sweep can't resurrect it if the course still has
+  // ratings. This is what makes an admin delete permanent (Kevin's MS/TX fix).
+  try {
+    const locked = await getCourseDeletesLocked();
+    if (!locked.includes(courseId)) { locked.push(courseId); await safeSet(KEY_COURSE_DELETES_LOCKED, JSON.stringify(locked), true); }
+  } catch (e) {}
   // Pull from the user-added store if present.
   try {
     const additions = await getCourseLibraryAdditions();
@@ -53662,8 +53682,12 @@ async function sweepFinalize(stateFilter) {
       const _s = await getCourseSaves();
       const _hasRS = id => { const x=_s[id]; return !!(x&&Array.isArray(x.tees)&&x.tees.some(t=>t&&t.rating!=null&&t.slope!=null)) || !!(x&&x.rating!=null&&x.slope!=null); };
       const _wired = (typeof THREE_NINE_COURSES==='object') ? Object.keys(THREE_NINE_COURSES) : [];
+      // Admin-locked deletes are permanent: they must survive this restore pass
+      // even though they still carry ratings. Pull them straight from the cloud
+      // row so a stale local cache can't drop the lock.
+      let _locked=new Set(); try { const _lr=await supa.from('games').select('data').eq('code','shared:course-deletes-locked').maybeSingle(); if(_lr&&_lr.data&&Array.isArray(_lr.data.data)) _locked=new Set(_lr.data.data); } catch(e){}
       let _cur=[]; try { const _r=await supa.from('games').select('data').eq('code','shared:course-deletes').maybeSingle(); if(_r&&_r.data&&Array.isArray(_r.data.data)) _cur=_r.data.data; } catch(e){}
-      const _keep=_cur.filter(id=>!(_wired.indexOf(id)>=0 || _hasRS(id)));
+      const _keep=_cur.filter(id=>_locked.has(id) || !(_wired.indexOf(id)>=0 || _hasRS(id)));
       if (_keep.length!==_cur.length) {
         try { await supa.from('games').upsert({code:'shared:course-deletes',data:_keep,updated_at:new Date().toISOString()}); } catch(e){}
         try { if (typeof invalidateCourseLibraryCache==='function') invalidateCourseLibraryCache(); } catch(e){}
