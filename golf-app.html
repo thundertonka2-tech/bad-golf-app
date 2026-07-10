@@ -6881,7 +6881,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.578';
+const BG_BUILD = 'v2026.11.579';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -7119,9 +7119,18 @@ async function signInWithEmail(email, password) {
 }
 async function signUpWithEmail(email, password) {
   if (!supa) { await initSupabase(); }
-  const { error } = await supa.auth.signUp({ email, password,
+  const { data, error } = await supa.auth.signUp({ email, password,
     options: { emailRedirectTo: location.origin + location.pathname } });
-  return error ? error.message : null;
+  if (error) return error.message;
+  // Supabase returns a user with an EMPTY identities array when that email is
+  // already registered (enumeration protection). Block the duplicate instead of
+  // silently pretending to create a second account under the same email.
+  try {
+    if (data && data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      return 'An account already exists for that email. Try signing in, or use \u201CForgot password\u201D.';
+    }
+  } catch (e) {}
+  return null;
 }
 async function resetPasswordEmail(email) {
   if (!supa) { await initSupabase(); }
@@ -9620,7 +9629,7 @@ function wireAuthUI() {
 function isMaintenanceLink() {
   try {
     const src = (location.search || '') + ' ' + (location.hash || '');
-    return /[?&](courseimport|courseoverride|stateimport|osmimport|nextstate|coursecheck|coursegaps|courselist|contactimport|coursecleanup|multinine|dupcleanup|cleanup|statsreset|statecheck|statefill)=/.test(src);
+    return /[?&](courseimport|courseoverride|stateimport|osmimport|nextstate|coursecheck|coursegaps|courselist|contactimport|coursecleanup|multinine|dupcleanup|mergeplayer|cleanup|statsreset|statecheck|statefill)=/.test(src);
   } catch (e) { return false; }
 }
 
@@ -54432,6 +54441,84 @@ window.bgDupCleanup = () => dupCleanup();
 {
   if (/[?&]dupcleanup=/.test(location.search)) setTimeout(() => { window.bgDupCleanup(); }, 2500);
 }
+
+// ---------- player merge (?mergeplayer=SURVIVOR|name1,name2) ---------------
+// Admin one-shot: consolidate several roster entries + their linked accounts into
+// ONE surviving player. Unions score history (deduped), keeps the best handicap,
+// removes the duplicates (tombstoned so they can't resync back), and repoints every
+// account whose name matched onto the survivor. Preview + explicit confirm first.
+// URL: ?mergeplayer=Tar%20Heel%20Boy|Charlie%20Baucom,Charlie%20B.
+function _pmNorm(s){ try{ return (typeof normalizeNameSegment==='function')?normalizeNameSegment(String(s||'')):String(s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }catch(e){ return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,''); } }
+async function playerMerge(){
+  var panel=document.getElementById('pm-panel'); if(panel) panel.remove();
+  panel=document.createElement('div'); panel.id='pm-panel';
+  panel.style.cssText='position:fixed;inset:6% 4% auto 4%;max-height:88%;z-index:9000;background:rgba(20,20,22,0.97);color:#fff;border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;font-size:13px';
+  panel.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong id="pm-title">Player merge…</strong><button id="pm-close" style="background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button></div><div id="pm-actions" style="margin-bottom:8px"></div><div id="pm-log" style="overflow:auto;flex:1;line-height:1.6"></div>';
+  document.body.appendChild(panel);
+  document.getElementById('pm-close').onclick=function(){ panel.remove(); };
+  var log=function(m,c){ var b=document.getElementById('pm-log'); if(!b) return; var d=document.createElement('div'); if(c) d.style.color=c; d.innerHTML=m; b.appendChild(d); b.scrollTop=b.scrollHeight; };
+  try{
+    if(typeof supa!=='undefined' && supa){
+      for(var i=0;i<12 && !_authUser;i++){ try{ var s=await supa.auth.getSession(); _authUser=(s&&s.data&&s.data.session)?s.data.session.user:null; }catch(e){} if(!_authUser) await new Promise(function(r){setTimeout(r,500);}); }
+      if(_authUser && _authRole!=='admin' && _authRole!=='commissioner' && typeof fetchMyRole==='function'){ try{ await fetchMyRole(); }catch(e){} }
+    }
+    if(typeof isAdmin==='function' && !isAdmin()){ log('Only admins can run a player merge. Add <b>&cleanup=1</b> for the override.','#ff8'); return; }
+    var raw=''; try{ raw=new URLSearchParams(location.search||'').get('mergeplayer')||''; }catch(e){}
+    try{ raw=decodeURIComponent(raw); }catch(e){}
+    var parts=raw.split('|'); var survivor=(parts[0]||'').replace(/\s+/g,' ').trim();
+    var losers=(parts[1]||'').split(',').map(function(x){return x.replace(/\s+/g,' ').trim();}).filter(Boolean);
+    if(!survivor){ log('No survivor name. Use <b>?mergeplayer=Survivor|Name1,Name2</b>','#f88'); return; }
+    var allNames=[survivor].concat(losers);
+    var normSet={}; allNames.forEach(function(n){ if(n) normSet[_pmNorm(n)]=1; });
+    var roster=await getPlayerRoster();
+    var rnm=function(p){ return (((p.firstName||'')+' '+(p.lastName||'')).trim())||p.name||''; };
+    var matches=(roster||[]).filter(function(p){ return p && normSet[_pmNorm(rnm(p))]; });
+    document.getElementById('pm-title').textContent='Player merge → '+survivor;
+    if(matches.length===0){ log('No roster entries match: '+escapeHtml(allNames.join(', ')),'#f88'); return; }
+    var base=matches.slice().sort(function(a,b){ var ha=(a.scoreHistory||[]).length, hb=(b.scoreHistory||[]).length; if(hb!==ha) return hb-ha; return (b.lastUsed||0)-(a.lastUsed||0); })[0];
+    var totalRounds=0; matches.forEach(function(m){ totalRounds+=(m.scoreHistory||[]).length; });
+    log('<b>Found '+matches.length+' roster entr'+(matches.length===1?'y':'ies')+' to merge into "'+escapeHtml(survivor)+'":</b>','#fd8');
+    matches.forEach(function(m){ log('• '+escapeHtml(rnm(m))+' <span style="color:#9ab">('+(m.scoreHistory||[]).length+' round'+((m.scoreHistory||[]).length===1?'':'s')+(m===base?' — survivor base':'')+')</span>'); });
+    var accts=[];
+    try{ if(supa){ var pr=await supa.from('profiles').select('id,email,my_player'); ((pr&&pr.data)||[]).forEach(function(a){ if(a&&a.my_player && normSet[_pmNorm(a.my_player)]) accts.push(a); }); } }catch(e){}
+    if(accts.length){ log('<br><b>'+accts.length+' account(s) will be renamed to "'+escapeHtml(survivor)+'":</b>','#fd8'); accts.forEach(function(a){ log('• '+escapeHtml(a.email||a.id)+' <span style="color:#9ab">(was '+escapeHtml(a.my_player||'')+')</span>'); }); }
+    var actions=document.getElementById('pm-actions');
+    actions.innerHTML='<button id="pm-go" style="background:#2b8a3e;border:none;color:#fff;border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:700">✔ Merge '+matches.length+' → '+escapeHtml(survivor)+' ('+totalRounds+' rounds)</button><button id="pm-cancel" style="margin-left:8px;background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:8px;padding:9px 16px;cursor:pointer">Cancel</button>';
+    document.getElementById('pm-cancel').onclick=function(){ log('<br>Cancelled — nothing changed.','#9ab'); actions.innerHTML=''; };
+    document.getElementById('pm-go').onclick=async function(){
+      actions.innerHTML='Merging…';
+      try{
+        var sv=survivor; var toks=sv.split(' ');
+        var sFirst=toks.length>1?toks.slice(0,-1).join(' '):sv;
+        var sLast=toks.length>1?toks[toks.length-1]:'';
+        var seen={}, hist=[];
+        matches.forEach(function(m){ (m.scoreHistory||[]).forEach(function(r){ if(!r) return; var k=(typeof rosterRoundKey==='function')?rosterRoundKey(r):((r.gameCode||'')+'|'+(r.date||'')+'|'+(r.course||'')); if(seen[k]) return; seen[k]=1; hist.push(r); }); });
+        var bestHcp=null, latest=0, avatar='';
+        matches.forEach(function(m){ if((bestHcp==null||bestHcp===0)&&m.hcp!=null&&m.hcp!==0) bestHcp=m.hcp; if((m.lastUsed||0)>latest) latest=m.lastUsed||0; if(!avatar&&m.avatar) avatar=m.avatar; });
+        var winner=Object.assign({}, base, { firstName:sFirst, lastName:sLast, name:sv, scoreHistory:hist.slice(0,200), hcp:(bestHcp!=null?bestHcp:(base.hcp||0)), lastUsed:latest||Date.now() });
+        if(avatar) winner.avatar=avatar;
+        var matchKeys={}; matches.forEach(function(m){ matchKeys[rosterKey(m)]=1; });
+        var kept=(roster||[]).filter(function(p){ return !matchKeys[rosterKey(p)]; });
+        kept.push(winner);
+        var removeKeys=new Set(); matches.forEach(function(m){ removeKeys.add(rosterPlayerKey(m)); });
+        try{ removeKeys.delete(rosterPlayerKey(winner)); }catch(e){}
+        await savePlayerRoster(kept.slice(0,400), { removals: { players: removeKeys } });
+        log('✔ Roster merged — survivor "'+escapeHtml(sv)+'" now holds '+hist.length+' round'+(hist.length===1?'':'s')+'.','#8f8');
+        var okA=0;
+        if(supa){ for(var j=0;j<accts.length;j++){ try{ var er=await supa.from('profiles').update({my_player:sv}).eq('id',accts[j].id); if(!er.error) okA++; }catch(x){} } }
+        if(accts.length) log('✔ Repointed '+okA+'/'+accts.length+' account(s) → "'+escapeHtml(sv)+'".','#8f8');
+        try{ if(typeof audit==='function') audit('player_merge', rosterPlayerKey(winner), sv+' <- '+allNames.join(', ')); }catch(e){}
+        try{ if(typeof renderCrewFriends==='function') renderCrewFriends(); }catch(e){}
+        document.getElementById('pm-title').textContent='Player merge — done';
+        log('<br><b>Done.</b> Reload the app to see it everywhere.','#8f8');
+        actions.innerHTML='';
+      }catch(e){ log('Merge failed: '+((e&&e.message)||'error'),'#f88'); console.error('playerMerge go',e); actions.innerHTML=''; }
+    };
+  }catch(e){ log('Player merge failed: '+((e&&e.message)||'error'),'#f88'); console.error('playerMerge crashed',e); }
+}
+window.bgPlayerMerge=function(){ playerMerge(); };
+{ if(/[?&]mergeplayer=/.test(location.search)) setTimeout(function(){ window.bgPlayerMerge(); }, 2500); }
+
 
 // ---------- licensed course-data import: tee rating / slope / yardage --------
 // Fills tee RATING + SLOPE (+ yardage) from a purchased course dataset CSV,
