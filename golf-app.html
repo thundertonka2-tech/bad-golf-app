@@ -6881,7 +6881,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.582';
+const BG_BUILD = 'v2026.11.581';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8271,12 +8271,29 @@ function adminScopeLibIds() {
   return out;
 }
 let _adminScopeKey = null;
+// v581: the admin worklist must reflect LIVE course data, not the cache-first local
+// copy. readSharedSingleton returns the stale local blob and only refreshes in the
+// background, so a just-imported batch of ratings shows as "missing rating" until a
+// reload. Do a DIRECT cloud read of the whole course blob for the admin stats only.
+// Read-only (no localStorage write, so it can't clobber an unsynced local edit);
+// falls back to the cache-first read when offline.
+async function getCourseSavesFreshForAdmin() {
+  try {
+    if (typeof initSupabase === 'function' && !supaReady) await initSupabase();
+    if (supa && supaOnline) {
+      const rowCode = (typeof singletonRowCode === 'function') ? singletonRowCode(KEY_COURSE_DATA) : 'shared:courses';
+      const r = await supa.from('games').select('data').eq('code', rowCode).maybeSingle();
+      if (r && !r.error && r.data && r.data.data && typeof r.data.data === 'object' && !Array.isArray(r.data.data)) return r.data.data;
+    }
+  } catch (e) {}
+  try { return await getCourseSaves(); } catch (e) { return {}; }
+}
 async function ensureAdminData() {
   const key = (_adminStateFilter || '') + '|' + (_adminSearch || '');
   if (_adminDataReady && _adminScopeKey === key) return;
   const scopeIds = adminScopeLibIds();
   const [saves, mapped, recent] = await Promise.all([
-    getCourseSaves().catch(() => ({})),
+    getCourseSavesFreshForAdmin().catch(() => ({})),
     getMappedCourseIdSet(scopeIds).catch(() => { const m = new Map(); m.fwc = new Map(); m.center = new Map(); m.has = () => false; return m; }),
     getRecent().catch(() => [])
   ]);
@@ -8566,8 +8583,8 @@ async function renderAdmin() {
       const name = pick.trim();
       if (!name) { showToast('No name entered'); return; }
       try {
-        const _ok = await _bgAdminSetName(u.id, name);
-        if (!_ok) { showToast('Relink failed (admin RLS may block this)'); }
+        const { error } = await supa.from('profiles').update({ my_player: name }).eq('id', u.id);
+        if (error) { showToast('Relink failed (admin RLS may block this)'); }
         else { showToast('Relinked → ' + name); try { audit('relink_player', u.id, name); } catch (e2) {} _adminUsersLoaded = false; renderAdmin(); }
       } catch (e2) { showToast('Relink failed'); }
       return;
@@ -11751,7 +11768,7 @@ async function mergeRosterPlayers(winnerKey, loserKeys) {
       for (const pr of (profs || [])) {
         const pn = pr && pr.my_player ? normalizeNameSegment(pr.my_player) : '';
         if (pn && normLosers.has(pn) && pn !== wNorm) {
-          try { await _bgAdminSetName(pr.id, winnerName); } catch (e) {}
+          try { await supa.from('profiles').update({ my_player: winnerName }).eq('id', pr.id); } catch (e) {}
         }
       }
     }
@@ -12762,8 +12779,8 @@ async function fetchCourseGpsDetail(courseId, pars) {
   for (let h = 1; h <= _nH; h++) {
     const hd = hs[String(h)] || hs[h] || null;
     const green = !!(hd && (hd.tee || hd.front || hd.back || hd.mid));
-    const par = Number((pars && pars[h - 1]) || 0);
-    const needTarget = (par === 4 || par === 5);   // only real par 4/5 need a fairway target — matches the mapping tool (won't demand one on par 3s or holes whose par isn't set yet)
+    const par = (pars && pars[h - 1]) || 4;
+    const needTarget = par !== 3;
     const target = !!(hd && Array.isArray(hd.fwc) && hd.fwc.length === 2);
     res.perHole[h] = { green, target, par, needTarget };
     if (green) res.greens++;
@@ -13199,7 +13216,7 @@ async function openCourseDetail(id) {
   // Live status (fresh — not the cached worklist scan) so the steps and the gated
   // Verify button reflect edits made moments ago in this same flow.
   let _sc = null; try { _sc = await getCourseScorecard(id); } catch (e) {}
-  const _pars = (_sc && Array.isArray(_sc.pars) && (_sc.pars.length === 18 || _sc.pars.length === 9)) ? _sc.pars : null;   // no fabricated par-4s — unknown pars must not demand fairway targets
+  const _pars = (_sc && Array.isArray(_sc.pars) && (_sc.pars.length === 18 || _sc.pars.length === 9)) ? _sc.pars : new Array(18).fill(4);
   // Three-nine: rating/slope + pars/SI come from the wired THREE_NINE_COURSES config (per nine),
   // NOT from saves[id]. So treat those steps as DONE for a wired facility (v402).
   const _isTN = (typeof THREE_NINE_COURSES === 'object') && !!THREE_NINE_COURSES[id];
@@ -13213,7 +13230,7 @@ async function openCourseDetail(id) {
   const gpsComplete = greens >= libHoles(null, _sc, id);
   const targetsComplete = (targetsNeeded === 0) || (targetsDone >= targetsNeeded);
   const gpsDone = gpsComplete && targetsComplete;          // greens AND every fairway target
-  const completeNow = gpsDone && hasRSnow && parsSet;   // pars must be set too — needed to know which holes require a fairway target
+  const completeNow = gpsDone && hasRSnow;
   const step = (n, title, done, act, actLabel) => '<div style="display:flex;align-items:center;gap:10px;padding:11px 12px;margin-top:8px;border-radius:11px;border:1px solid var(--border);background:var(--surface-2,#fff)">'
     + '<span style="flex:0 0 auto;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;background:' + (done ? 'var(--money-pos)' : 'var(--text-muted)') + ';color:#fff">' + (done ? '✓' : n) + '</span>'
     + '<div style="flex:1;min-width:0;font-size:14px;font-weight:600">' + title + '</div>'
@@ -15748,7 +15765,44 @@ const BINDERPARK_NINES = {
   },
   searchCombos: [ ['marsh','preserve'], ['preserve','natural'], ['natural','marsh'] ]
 };
+const TWINLAKES_NINES = {
+  _label: 'Twin Lakes Golf & Swim Club',
+  estates: { name: 'Estates',
+    pars:[4,3,4,4,5,3,5,4,4], hdcp:[6,9,3,8,2,7,1,5,4],
+    tees:[
+      { label:'Black', rating:36.5, slope:125, yds:[] },
+      { label:'Gold', rating:35.6, slope:123, yds:[] },
+      { label:'Blue', rating:34.9, slope:120, yds:[] },
+      { label:'White', rating:33.8, slope:117, yds:[] },
+      { label:'Silver', rating:31.8, slope:113, yds:[] },
+    ] },
+  links: { name: 'Links',
+    pars:[4,3,4,5,3,4,3,4,5], hdcp:[7,1,5,6,8,2,9,4,3],
+    tees:[
+      { label:'Black', rating:35.2, slope:123, yds:[382,216,392,516,182,414,178,394,569] },
+      { label:'Gold', rating:34.1, slope:119, yds:[354,200,361,482,171,393,167,352,535] },
+      { label:'Blue', rating:33.3, slope:116, yds:[339,185,334,468,146,380,146,343,508] },
+      { label:'White', rating:32.2, slope:111, yds:[309,171,294,426,122,355,126,297,448] },
+      { label:'Silver', rating:30.6, slope:97, yds:[283,82,217,401,87,260,109,262,412] },
+    ] },
+  woods: { name: 'Woods',
+    pars:[5,4,4,3,4,5,4,3,4], hdcp:[4,9,8,5,7,1,6,3,2],
+    tees:[
+      { label:'Black', rating:36.9, slope:145, yds:[] },
+      { label:'Gold', rating:35.6, slope:143, yds:[] },
+      { label:'Blue', rating:34.7, slope:136, yds:[] },
+      { label:'White', rating:34, slope:121, yds:[] },
+      { label:'Silver', rating:31.5, slope:103, yds:[] },
+    ] },
+  combos: {
+    'links+woods': [ {label:'Black',rating:72.1,slope:134}, {label:'Black/Gold',rating:71.6,slope:133}, {label:'Gold',rating:69.7,slope:131}, {label:'Blue',rating:68,slope:126}, {label:'White',rating:66.2,slope:116}, {label:'Silver',rating:62.1,slope:100} ],
+    'estates+woods': [ {label:'Black',rating:73.4,slope:135}, {label:'Gold',rating:71.2,slope:133}, {label:'Blue',rating:69.6,slope:128}, {label:'White',rating:67.8,slope:119}, {label:'Silver',rating:63.3,slope:108} ],
+    'estates+links': [ {label:'Black',rating:71.7,slope:124}, {label:'Gold',rating:69.7,slope:121}, {label:'Blue',rating:68.2,slope:118}, {label:'White',rating:66,slope:114}, {label:'Silver',rating:62.4,slope:105} ],
+  },
+  searchCombos: [ ['links','woods'], ['woods','estates'], ['estates','links'] ]
+};
 const THREE_NINE_COURSES = {
+  'twin-lakes-golf-swim-club': TWINLAKES_NINES,
   'binder-park-golf-course-2': BINDERPARK_NINES,
   'royal-tee-golf-club': ROYALTEEGOLFCLUB_NINES,
   'saddlebrook': SADDLEBROOK_NINES,
@@ -34533,7 +34587,6 @@ async function renderAddFriendList(filter) {
   const f = (filter || '').trim().toLowerCase();
   const people = profiles
     .filter(p => p.id !== meId)
-    .filter(p => friendFullName(p) !== 'Player')   // hide nameless/abandoned signups (the "Player" clutter)
     .filter(p => !f || friendFullName(p).toLowerCase().includes(f))
     .sort((a, b) => friendFullName(a).localeCompare(friendFullName(b)));
   if (people.length === 0) {
@@ -54506,7 +54559,7 @@ async function playerMerge(){
         await savePlayerRoster(kept.slice(0,400), { removals: { players: removeKeys } });
         log('✔ Roster merged — survivor "'+escapeHtml(sv)+'" now holds '+hist.length+' round'+(hist.length===1?'':'s')+'.','#8f8');
         var okA=0;
-        if(supa){ for(var j=0;j<accts.length;j++){ if(await _bgAdminSetName(accts[j].id, sv)) okA++; } }
+        if(supa){ for(var j=0;j<accts.length;j++){ try{ var er=await supa.from('profiles').update({my_player:sv}).eq('id',accts[j].id); if(!er.error) okA++; }catch(x){} } }
         if(accts.length) log('✔ Repointed '+okA+'/'+accts.length+' account(s) → "'+escapeHtml(sv)+'".','#8f8');
         try{ if(typeof audit==='function') audit('player_merge', rosterPlayerKey(winner), sv+' <- '+allNames.join(', ')); }catch(e){}
         try{ if(typeof renderCrewFriends==='function') renderCrewFriends(); }catch(e){}
@@ -54516,12 +54569,6 @@ async function playerMerge(){
       }catch(e){ log('Merge failed: '+((e&&e.message)||'error'),'#f88'); console.error('playerMerge go',e); actions.innerHTML=''; }
     };
   }catch(e){ log('Player merge failed: '+((e&&e.message)||'error'),'#f88'); console.error('playerMerge crashed',e); }
-}
-async function _bgAdminSetName(id, name){
-  if(!supa||!id) return false;
-  try{ var r=await supa.rpc('admin_set_my_player',{p_id:id,p_name:name}); if(!r||!r.error) return true; }catch(e){}
-  try{ var u=await supa.from('profiles').update({my_player:name}).eq('id',id); return !(u&&u.error); }catch(e){}
-  return false;
 }
 window.bgPlayerMerge=function(){ playerMerge(); };
 { if(/[?&]mergeplayer=/.test(location.search)) setTimeout(function(){ window.bgPlayerMerge(); }, 2500); }
