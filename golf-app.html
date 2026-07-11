@@ -6881,7 +6881,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.583';
+const BG_BUILD = 'v2026.11.584';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8271,12 +8271,29 @@ function adminScopeLibIds() {
   return out;
 }
 let _adminScopeKey = null;
+// v581: the admin worklist must reflect LIVE course data, not the cache-first local
+// copy. readSharedSingleton returns the stale local blob and only refreshes in the
+// background, so a just-imported batch of ratings shows as "missing rating" until a
+// reload. Do a DIRECT cloud read of the whole course blob for the admin stats only.
+// Read-only (no localStorage write, so it can't clobber an unsynced local edit);
+// falls back to the cache-first read when offline.
+async function getCourseSavesFreshForAdmin() {
+  try {
+    if (typeof initSupabase === 'function' && !supaReady) await initSupabase();
+    if (supa && supaOnline) {
+      const rowCode = (typeof singletonRowCode === 'function') ? singletonRowCode(KEY_COURSE_DATA) : 'shared:courses';
+      const r = await supa.from('games').select('data').eq('code', rowCode).maybeSingle();
+      if (r && !r.error && r.data && r.data.data && typeof r.data.data === 'object' && !Array.isArray(r.data.data)) return r.data.data;
+    }
+  } catch (e) {}
+  try { return await getCourseSaves(); } catch (e) { return {}; }
+}
 async function ensureAdminData() {
   const key = (_adminStateFilter || '') + '|' + (_adminSearch || '');
   if (_adminDataReady && _adminScopeKey === key) return;
   const scopeIds = adminScopeLibIds();
   const [saves, mapped, recent] = await Promise.all([
-    getCourseSaves().catch(() => ({})),
+    getCourseSavesFreshForAdmin().catch(() => ({})),
     getMappedCourseIdSet(scopeIds).catch(() => { const m = new Map(); m.fwc = new Map(); m.center = new Map(); m.has = () => false; return m; }),
     getRecent().catch(() => [])
   ]);
@@ -8566,8 +8583,8 @@ async function renderAdmin() {
       const name = pick.trim();
       if (!name) { showToast('No name entered'); return; }
       try {
-        const _ok = await _bgAdminSetName(u.id, name);
-        if (!_ok) { showToast('Relink failed (admin RLS may block this)'); }
+        const { error } = await supa.from('profiles').update({ my_player: name }).eq('id', u.id);
+        if (error) { showToast('Relink failed (admin RLS may block this)'); }
         else { showToast('Relinked → ' + name); try { audit('relink_player', u.id, name); } catch (e2) {} _adminUsersLoaded = false; renderAdmin(); }
       } catch (e2) { showToast('Relink failed'); }
       return;
@@ -9871,7 +9888,11 @@ const SHARED_SINGLETONS = ['golf:courses', 'golf:recent-games', 'golf:tourneys',
   // too, or a course Kevin deletes/renames on one device reappears for everyone
   // else (and re-syncs back). The deletes list is the authoritative "never show
   // this course again" record, so it has to be shared like the additions.
-  'golf:course-deletes', 'golf:course-name-overrides', 'golf:course-detail-overrides', 'golf:code-review-queue'];
+  // course-deletes-locked = ids an ADMIN explicitly deleted. Unlike plain
+  // course-deletes (which the v402 sweep un-tombstones when a course still has
+  // ratings), a locked id is NEVER auto-restored. This is the fix for admin
+  // deletes silently coming back after a sweep (Kevin's MS/TX deletes).
+  'golf:course-deletes', 'golf:course-deletes-locked', 'golf:course-name-overrides', 'golf:course-detail-overrides', 'golf:code-review-queue'];
 function singletonRowCode(key) { return 'shared:' + key.replace(/^golf:/, ''); }
 
 // Track online/offline so the sync indicator can reflect reality
@@ -9991,6 +10012,7 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:courses': 'objectMap',                  // scorecards keyed by course id
   'golf:course-library-additions': 'arrayById', // user-added courses
   'golf:course-deletes': 'stringSet',           // deleted course ids (accumulate)
+  'golf:course-deletes-locked': 'stringSet',    // admin-locked deletes (accumulate, never auto-restored)
   'golf:course-skipped': 'stringSet',           // admin skip set (accumulate)
   'golf:course-verified': 'stringSet',          // admin verified set (accumulate)
   'golf:course-name-overrides': 'objectMap',    // { id: name }
@@ -11751,7 +11773,7 @@ async function mergeRosterPlayers(winnerKey, loserKeys) {
       for (const pr of (profs || [])) {
         const pn = pr && pr.my_player ? normalizeNameSegment(pr.my_player) : '';
         if (pn && normLosers.has(pn) && pn !== wNorm) {
-          try { await _bgAdminSetName(pr.id, winnerName); } catch (e) {}
+          try { await supa.from('profiles').update({ my_player: winnerName }).eq('id', pr.id); } catch (e) {}
         }
       }
     }
@@ -12762,8 +12784,8 @@ async function fetchCourseGpsDetail(courseId, pars) {
   for (let h = 1; h <= _nH; h++) {
     const hd = hs[String(h)] || hs[h] || null;
     const green = !!(hd && (hd.tee || hd.front || hd.back || hd.mid));
-    const par = Number((pars && pars[h - 1]) || 0);
-    const needTarget = (par === 4 || par === 5);   // only real par 4/5 need a fairway target — matches the mapping tool (won't demand one on par 3s or holes whose par isn't set yet)
+    const par = (pars && pars[h - 1]) || 4;
+    const needTarget = par !== 3;
     const target = !!(hd && Array.isArray(hd.fwc) && hd.fwc.length === 2);
     res.perHole[h] = { green, target, par, needTarget };
     if (green) res.greens++;
@@ -13027,7 +13049,6 @@ const CR_REVIEW_OPTS = [
   { key: 'should-be-9',     label: '9 hole only' },
   { key: 'wrong-course-mapped', label: 'Wrong course mapped' },
   { key: 'needs-gps',       label: 'Needs GPS Data' },
-  { key: 'target-review',   label: 'Target Review' },
   { key: 'missing-extra-nine',  label: 'Missing Extra Nine' },
   { key: 'multi-nine',      label: 'Multi-nine' }
 ];
@@ -13200,7 +13221,7 @@ async function openCourseDetail(id) {
   // Live status (fresh — not the cached worklist scan) so the steps and the gated
   // Verify button reflect edits made moments ago in this same flow.
   let _sc = null; try { _sc = await getCourseScorecard(id); } catch (e) {}
-  const _pars = (_sc && Array.isArray(_sc.pars) && (_sc.pars.length === 18 || _sc.pars.length === 9)) ? _sc.pars : null;   // no fabricated par-4s — unknown pars must not demand fairway targets
+  const _pars = (_sc && Array.isArray(_sc.pars) && (_sc.pars.length === 18 || _sc.pars.length === 9)) ? _sc.pars : new Array(18).fill(4);
   // Three-nine: rating/slope + pars/SI come from the wired THREE_NINE_COURSES config (per nine),
   // NOT from saves[id]. So treat those steps as DONE for a wired facility (v402).
   const _isTN = (typeof THREE_NINE_COURSES === 'object') && !!THREE_NINE_COURSES[id];
@@ -13214,7 +13235,7 @@ async function openCourseDetail(id) {
   const gpsComplete = greens >= libHoles(null, _sc, id);
   const targetsComplete = (targetsNeeded === 0) || (targetsDone >= targetsNeeded);
   const gpsDone = gpsComplete && targetsComplete;          // greens AND every fairway target
-  const completeNow = gpsDone && hasRSnow && parsSet;   // pars must be set too — needed to know which holes require a fairway target
+  const completeNow = gpsDone && hasRSnow;
   const step = (n, title, done, act, actLabel) => '<div style="display:flex;align-items:center;gap:10px;padding:11px 12px;margin-top:8px;border-radius:11px;border:1px solid var(--border);background:var(--surface-2,#fff)">'
     + '<span style="flex:0 0 auto;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;background:' + (done ? 'var(--money-pos)' : 'var(--text-muted)') + ';color:#fff">' + (done ? '✓' : n) + '</span>'
     + '<div style="flex:1;min-width:0;font-size:14px;font-weight:600">' + title + '</div>'
@@ -13359,6 +13380,15 @@ async function getCourseDeletes() {
   if (!v) return [];
   try { return JSON.parse(v) || []; } catch (e) { return []; }
 }
+// Admin-locked deletes: ids an admin explicitly removed. The v402 sweep must
+// NEVER un-tombstone these even when a course still has ratings/slope, so admin
+// deletes stay deleted instead of resurrecting on the next finalize pass.
+const KEY_COURSE_DELETES_LOCKED = 'golf:course-deletes-locked';
+async function getCourseDeletesLocked() {
+  const v = await safeGet(KEY_COURSE_DELETES_LOCKED, true);
+  if (!v) return [];
+  try { return JSON.parse(v) || []; } catch (e) { return []; }
+}
 async function deleteCourse(courseId) {
   if (!courseId) return false;
   if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can delete courses'); return false; }
@@ -13368,6 +13398,12 @@ async function deleteCourse(courseId) {
   const dels = await getCourseDeletes();
   try { invalidateCourseLibraryCache(); } catch (e) {}
   if (!dels.includes(courseId)) { dels.push(courseId); await safeSet(KEY_COURSE_DELETES, JSON.stringify(dels), true); }
+  // LOCK the delete so the v402 sweep can't resurrect it if the course still has
+  // ratings. This is what makes an admin delete permanent (Kevin's MS/TX fix).
+  try {
+    const locked = await getCourseDeletesLocked();
+    if (!locked.includes(courseId)) { locked.push(courseId); await safeSet(KEY_COURSE_DELETES_LOCKED, JSON.stringify(locked), true); }
+  } catch (e) {}
   // Pull from the user-added store if present.
   try {
     const additions = await getCourseLibraryAdditions();
@@ -15749,7 +15785,165 @@ const BINDERPARK_NINES = {
   },
   searchCombos: [ ['marsh','preserve'], ['preserve','natural'], ['natural','marsh'] ]
 };
+const TWINLAKES_NINES = {
+  _label: 'Twin Lakes Golf & Swim Club',
+  estates: { name: 'Estates',
+    pars:[4,3,4,4,5,3,5,4,4], hdcp:[6,9,3,8,2,7,1,5,4],
+    tees:[
+      { label:'Black', rating:36.5, slope:125, yds:[] },
+      { label:'Gold', rating:35.6, slope:123, yds:[] },
+      { label:'Blue', rating:34.9, slope:120, yds:[] },
+      { label:'White', rating:33.8, slope:117, yds:[] },
+      { label:'Silver', rating:31.8, slope:113, yds:[] },
+    ] },
+  links: { name: 'Links',
+    pars:[4,3,4,5,3,4,3,4,5], hdcp:[7,1,5,6,8,2,9,4,3],
+    tees:[
+      { label:'Black', rating:35.2, slope:123, yds:[382,216,392,516,182,414,178,394,569] },
+      { label:'Gold', rating:34.1, slope:119, yds:[354,200,361,482,171,393,167,352,535] },
+      { label:'Blue', rating:33.3, slope:116, yds:[339,185,334,468,146,380,146,343,508] },
+      { label:'White', rating:32.2, slope:111, yds:[309,171,294,426,122,355,126,297,448] },
+      { label:'Silver', rating:30.6, slope:97, yds:[283,82,217,401,87,260,109,262,412] },
+    ] },
+  woods: { name: 'Woods',
+    pars:[5,4,4,3,4,5,4,3,4], hdcp:[4,9,8,5,7,1,6,3,2],
+    tees:[
+      { label:'Black', rating:36.9, slope:145, yds:[] },
+      { label:'Gold', rating:35.6, slope:143, yds:[] },
+      { label:'Blue', rating:34.7, slope:136, yds:[] },
+      { label:'White', rating:34, slope:121, yds:[] },
+      { label:'Silver', rating:31.5, slope:103, yds:[] },
+    ] },
+  combos: {
+    'links+woods': [ {label:'Black',rating:72.1,slope:134}, {label:'Black/Gold',rating:71.6,slope:133}, {label:'Gold',rating:69.7,slope:131}, {label:'Blue',rating:68,slope:126}, {label:'White',rating:66.2,slope:116}, {label:'Silver',rating:62.1,slope:100} ],
+    'estates+woods': [ {label:'Black',rating:73.4,slope:135}, {label:'Gold',rating:71.2,slope:133}, {label:'Blue',rating:69.6,slope:128}, {label:'White',rating:67.8,slope:119}, {label:'Silver',rating:63.3,slope:108} ],
+    'estates+links': [ {label:'Black',rating:71.7,slope:124}, {label:'Gold',rating:69.7,slope:121}, {label:'Blue',rating:68.2,slope:118}, {label:'White',rating:66,slope:114}, {label:'Silver',rating:62.4,slope:105} ],
+  },
+  searchCombos: [ ['links','woods'], ['woods','estates'], ['estates','links'] ]
+};
+// ============================================================
+// VA three-nine facilities (v584) — per-nine pars + factored 9-hole
+// ratings (rating = linear factor of the 3 combos; slope = mean of the
+// two combos containing the nine). Combos carry the authoritative 18-hole
+// VSGA/GolfPass ratings. Per-nine GPS still needs on-device mapping.
+// ============================================================
+const ROANOKECC_NINES = {
+  _label: "Roanoke Country Club",
+  redbud: { name: "Redbud",
+    pars:[4,3,4,4,5,4,3,5,4], hdcp:[13,15,3,9,1,7,17,5,11],
+    tees:[
+      { label:"Blue", rating:36.4, slope:132, yds:[] },
+      { label:"White", rating:35.4, slope:129, yds:[] },
+      { label:"Gold", rating:34.4, slope:121, yds:[] },
+      { label:"Green", rating:33.9, slope:118, yds:[] },
+      { label:"Red", rating:32.1, slope:111, yds:[] },
+      { label:"Blue (L)", rating:39.4, slope:137, yds:[] },
+      { label:"White (L)", rating:38.2, slope:132, yds:[] },
+      { label:"Gold (L)", rating:36.9, slope:128, yds:[] },
+      { label:"Green (L)", rating:36.1, slope:126, yds:[] },
+      { label:"Red (L)", rating:34.5, slope:116, yds:[] },
+    ] },
+  crabapple: { name: "Crabapple",
+    pars:[4,4,5,4,3,4,4,4,3], hdcp:[12,10,2,6,18,14,8,4,16],
+    tees:[
+      { label:"Blue", rating:34.3, slope:133, yds:[] },
+      { label:"White", rating:33.6, slope:128, yds:[] },
+      { label:"Gold", rating:33.1, slope:122, yds:[] },
+      { label:"Green", rating:32.3, slope:119, yds:[] },
+      { label:"Red", rating:31.2, slope:113, yds:[] },
+      { label:"Blue (L)", rating:37.5, slope:136, yds:[] },
+      { label:"White (L)", rating:36.2, slope:132, yds:[] },
+      { label:"Gold (L)", rating:35.4, slope:128, yds:[] },
+      { label:"Green (L)", rating:34.9, slope:125, yds:[] },
+      { label:"Red (L)", rating:33.2, slope:116, yds:[] },
+    ] },
+  dogwood: { name: "Dogwood",
+    pars:[4,5,3,4,3,4,3,5,4], hdcp:[10,2,18,8,16,6,14,4,12],
+    tees:[
+      { label:"Blue", rating:35.8, slope:132, yds:[] },
+      { label:"White", rating:34.8, slope:129, yds:[] },
+      { label:"Gold", rating:33.4, slope:123, yds:[] },
+      { label:"Green", rating:33, slope:120, yds:[] },
+      { label:"Red", rating:31.4, slope:113, yds:[] },
+      { label:"Blue (L)", rating:39, slope:137, yds:[] },
+      { label:"White (L)", rating:37.8, slope:132, yds:[] },
+      { label:"Gold (L)", rating:36.3, slope:127, yds:[] },
+      { label:"Green (L)", rating:35.7, slope:125, yds:[] },
+      { label:"Red (L)", rating:33.3, slope:116, yds:[] },
+    ] },
+  combos: {
+    "redbud+crabapple": [ {label:"Blue",rating:70.7,slope:133}, {label:"White",rating:69,slope:128}, {label:"Gold",rating:67.5,slope:120}, {label:"Green",rating:66.2,slope:117}, {label:"Red",rating:63.3,slope:111}, {label:"Blue (L)",rating:76.9,slope:136}, {label:"White (L)",rating:74.4,slope:132}, {label:"Gold (L)",rating:72.3,slope:128}, {label:"Green (L)",rating:71,slope:125}, {label:"Red (L)",rating:67.7,slope:115} ],
+    "crabapple+dogwood": [ {label:"Blue",rating:70.1,slope:132}, {label:"White",rating:68.4,slope:128}, {label:"Gold",rating:66.5,slope:123}, {label:"Green",rating:65.3,slope:121}, {label:"Red",rating:62.6,slope:114}, {label:"Blue (L)",rating:76.5,slope:136}, {label:"White (L)",rating:74,slope:132}, {label:"Gold (L)",rating:71.7,slope:127}, {label:"Green (L)",rating:70.6,slope:124}, {label:"Red (L)",rating:66.5,slope:116} ],
+    "redbud+dogwood": [ {label:"Blue",rating:72.2,slope:131}, {label:"White",rating:70.2,slope:129}, {label:"Gold",rating:67.8,slope:122}, {label:"Green",rating:66.9,slope:118}, {label:"Red",rating:63.5,slope:111}, {label:"Blue (L)",rating:78.4,slope:137}, {label:"White (L)",rating:76,slope:132}, {label:"Gold (L)",rating:73.2,slope:127}, {label:"Green (L)",rating:71.8,slope:126}, {label:"Red (L)",rating:67.8,slope:116} ],
+  },
+  searchCombos: [ ["redbud","crabapple"], ["crabapple","dogwood"], ["redbud","dogwood"] ]
+};
+const HAMPTONS_NINES = {
+  _label: "The Hamptons Golf Course",
+  woods: { name: "Woods",
+    pars:[4,4,4,3,4,4,5,3,4], hdcp:[2,8,4,9,7,6,1,5,3],
+    tees:[
+      { label:"Blue", rating:34.1, slope:108, yds:[] },
+      { label:"White", rating:33, slope:102, yds:[] },
+    ] },
+  links: { name: "Links",
+    pars:[4,4,3,5,4,4,4,3,4], hdcp:[2,8,4,9,7,6,1,5,3],
+    tees:[
+      { label:"Blue", rating:33.6, slope:108, yds:[] },
+      { label:"White", rating:32.3, slope:103, yds:[] },
+    ] },
+  lakes: { name: "Lakes",
+    pars:[4,4,5,3,4,4,3,5,4], hdcp:[1,7,2,5,9,8,6,3,4],
+    tees:[
+      { label:"Blue", rating:35.8, slope:110, yds:[] },
+      { label:"White", rating:35.3, slope:107, yds:[] },
+    ] },
+  combos: {
+    "woods+lakes": [ {label:"Blue",rating:69.9,slope:110}, {label:"White",rating:68.3,slope:106}, {label:"Gold",rating:65.3,slope:110}, {label:"Red (L)",rating:70,slope:111} ],
+    "lakes+links": [ {label:"Blue",rating:69.4,slope:110}, {label:"White",rating:67.6,slope:107}, {label:"Gold",rating:64.5,slope:105}, {label:"Red",rating:62.8,slope:102} ],
+    "woods+links": [ {label:"Blue",rating:67.8,slope:106}, {label:"White",rating:65.3,slope:98}, {label:"Red (L)",rating:66.4,slope:101} ],
+  },
+  searchCombos: [ ["woods","lakes"], ["lakes","links"], ["woods","links"] ]
+};
+const PINESEUSTIS_NINES = {
+  _label: "The Pines Golf Course at Fort Eustis",
+  virginia: { name: "Virginia Pines",
+    pars:[4,4,4,5,3,5,4,3,4], hdcp:[9,6,8,1,5,2,4,7,3],
+    tees:[
+      { label:"Black", rating:36.6, slope:130, yds:[] },
+      { label:"Gold", rating:35.4, slope:125, yds:[] },
+      { label:"Blue", rating:34.2, slope:119, yds:[] },
+      { label:"Blue (L)", rating:37.2, slope:135, yds:[] },
+      { label:"White", rating:31.8, slope:114, yds:[] },
+    ] },
+  ponderosa: { name: "Ponderosa Pines",
+    pars:[5,4,4,4,3,4,4,3,5], hdcp:[5,6,2,1,3,7,8,9,4],
+    tees:[
+      { label:"Black", rating:36.7, slope:127, yds:[] },
+      { label:"Gold", rating:35.9, slope:124, yds:[] },
+      { label:"Blue", rating:34, slope:118, yds:[] },
+      { label:"Blue (L)", rating:37.3, slope:132, yds:[] },
+      { label:"White", rating:33.2, slope:113, yds:[] },
+    ] },
+  shortleaf: { name: "Shortleaf Pines",
+    pars:[4,4,3,4,4,5,3,4,4], hdcp:[1,7,5,6,9,8,3,2,4],
+    tees:[
+      { label:"Black", rating:34, slope:125, yds:[] },
+      { label:"Gold", rating:33.3, slope:123, yds:[] },
+      { label:"Blue", rating:32.1, slope:116, yds:[] },
+      { label:"Blue (L)", rating:34.6, slope:131, yds:[] },
+      { label:"White", rating:31.6, slope:112, yds:[] },
+    ] },
+  combos: {
+    "virginia+ponderosa": [ {label:"Black",rating:73.3,slope:132}, {label:"Gold",rating:71.3,slope:125}, {label:"Blue",rating:68.2,slope:121}, {label:"Blue (L)",rating:74.5,slope:136}, {label:"White",rating:65,slope:115}, {label:"White (L)",rating:71.1,slope:123} ],
+    "ponderosa+shortleaf": [ {label:"Black",rating:70.7,slope:122}, {label:"Gold",rating:69.2,slope:122}, {label:"Blue",rating:66.1,slope:114}, {label:"Blue (L)",rating:71.9,slope:128}, {label:"White",rating:64.8,slope:111}, {label:"White (L)",rating:70.4,slope:124} ],
+    "virginia+shortleaf": [ {label:"Black",rating:70.6,slope:127}, {label:"Gold",rating:68.7,slope:124}, {label:"Blue",rating:66.3,slope:117}, {label:"Blue (L)",rating:71.8,slope:134}, {label:"White",rating:63.4,slope:112}, {label:"Red (L)",rating:68.7,slope:121} ],
+  },
+  searchCombos: [ ["virginia","ponderosa"], ["ponderosa","shortleaf"], ["virginia","shortleaf"] ]
+};
+
 const THREE_NINE_COURSES = {
+  'twin-lakes-golf-swim-club': TWINLAKES_NINES,
   'binder-park-golf-course-2': BINDERPARK_NINES,
   'royal-tee-golf-club': ROYALTEEGOLFCLUB_NINES,
   'saddlebrook': SADDLEBROOK_NINES,
@@ -15795,7 +15989,10 @@ const THREE_NINE_COURSES = {
   'sugar-creek-country-club': SUGARCREEK_NINES,
   'pine-forest-country-club-2': PINEFOREST_NINES,
   'hearthstone-country-club': HEARTHSTONE_NINES,
-  'south-shore-harbour': SOUTHSHORE_NINES
+  'south-shore-harbour': SOUTHSHORE_NINES,
+  'roanoke-country-club': ROANOKECC_NINES,
+  'the-hamptons-golf-course': HAMPTONS_NINES,
+  'the-pines-golf-course-3': PINESEUSTIS_NINES
 };
 
 // ============================================================
@@ -34534,7 +34731,6 @@ async function renderAddFriendList(filter) {
   const f = (filter || '').trim().toLowerCase();
   const people = profiles
     .filter(p => p.id !== meId)
-    .filter(p => friendFullName(p) !== 'Player')   // hide nameless/abandoned signups (the "Player" clutter)
     .filter(p => !f || friendFullName(p).toLowerCase().includes(f))
     .sort((a, b) => friendFullName(a).localeCompare(friendFullName(b)));
   if (people.length === 0) {
@@ -53610,8 +53806,12 @@ async function sweepFinalize(stateFilter) {
       const _s = await getCourseSaves();
       const _hasRS = id => { const x=_s[id]; return !!(x&&Array.isArray(x.tees)&&x.tees.some(t=>t&&t.rating!=null&&t.slope!=null)) || !!(x&&x.rating!=null&&x.slope!=null); };
       const _wired = (typeof THREE_NINE_COURSES==='object') ? Object.keys(THREE_NINE_COURSES) : [];
+      // Admin-locked deletes are permanent: they must survive this restore pass
+      // even though they still carry ratings. Pull them straight from the cloud
+      // row so a stale local cache can't drop the lock.
+      let _locked=new Set(); try { const _lr=await supa.from('games').select('data').eq('code','shared:course-deletes-locked').maybeSingle(); if(_lr&&_lr.data&&Array.isArray(_lr.data.data)) _locked=new Set(_lr.data.data); } catch(e){}
       let _cur=[]; try { const _r=await supa.from('games').select('data').eq('code','shared:course-deletes').maybeSingle(); if(_r&&_r.data&&Array.isArray(_r.data.data)) _cur=_r.data.data; } catch(e){}
-      const _keep=_cur.filter(id=>!(_wired.indexOf(id)>=0 || _hasRS(id)));
+      const _keep=_cur.filter(id=>_locked.has(id) || !(_wired.indexOf(id)>=0 || _hasRS(id)));
       if (_keep.length!==_cur.length) {
         try { await supa.from('games').upsert({code:'shared:course-deletes',data:_keep,updated_at:new Date().toISOString()}); } catch(e){}
         try { if (typeof invalidateCourseLibraryCache==='function') invalidateCourseLibraryCache(); } catch(e){}
@@ -54507,7 +54707,7 @@ async function playerMerge(){
         await savePlayerRoster(kept.slice(0,400), { removals: { players: removeKeys } });
         log('✔ Roster merged — survivor "'+escapeHtml(sv)+'" now holds '+hist.length+' round'+(hist.length===1?'':'s')+'.','#8f8');
         var okA=0;
-        if(supa){ for(var j=0;j<accts.length;j++){ if(await _bgAdminSetName(accts[j].id, sv)) okA++; } }
+        if(supa){ for(var j=0;j<accts.length;j++){ try{ var er=await supa.from('profiles').update({my_player:sv}).eq('id',accts[j].id); if(!er.error) okA++; }catch(x){} } }
         if(accts.length) log('✔ Repointed '+okA+'/'+accts.length+' account(s) → "'+escapeHtml(sv)+'".','#8f8');
         try{ if(typeof audit==='function') audit('player_merge', rosterPlayerKey(winner), sv+' <- '+allNames.join(', ')); }catch(e){}
         try{ if(typeof renderCrewFriends==='function') renderCrewFriends(); }catch(e){}
@@ -54517,12 +54717,6 @@ async function playerMerge(){
       }catch(e){ log('Merge failed: '+((e&&e.message)||'error'),'#f88'); console.error('playerMerge go',e); actions.innerHTML=''; }
     };
   }catch(e){ log('Player merge failed: '+((e&&e.message)||'error'),'#f88'); console.error('playerMerge crashed',e); }
-}
-async function _bgAdminSetName(id, name){
-  if(!supa||!id) return false;
-  try{ var r=await supa.rpc('admin_set_my_player',{p_id:id,p_name:name}); if(!r||!r.error) return true; }catch(e){}
-  try{ var u=await supa.from('profiles').update({my_player:name}).eq('id',id); return !(u&&u.error); }catch(e){}
-  return false;
 }
 window.bgPlayerMerge=function(){ playerMerge(); };
 { if(/[?&]mergeplayer=/.test(location.search)) setTimeout(function(){ window.bgPlayerMerge(); }, 2500); }
