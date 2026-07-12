@@ -6905,7 +6905,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.594';
+const BG_BUILD = 'v2026.11.595';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -54636,9 +54636,9 @@ async function sweepFinalize(stateFilter) {
       // Admin-locked deletes are permanent: they must survive this restore pass
       // even though they still carry ratings. Pull them straight from the cloud
       // row so a stale local cache can't drop the lock.
-      let _locked=new Set(); try { const _lr=await supa.from('games').select('data').eq('code','shared:course-deletes-locked').maybeSingle(); if(_lr&&_lr.data&&Array.isArray(_lr.data.data)) _locked=new Set(_lr.data.data); } catch(e){}
+      let _locked=new Set(), _lockOk=false; try { const _lr=await supa.from('games').select('data').eq('code','shared:course-deletes-locked').maybeSingle(); if(_lr&&_lr.data&&Array.isArray(_lr.data.data)){ _locked=new Set(_lr.data.data); _lockOk=true; } } catch(e){}
       let _cur=[]; try { const _r=await supa.from('games').select('data').eq('code','shared:course-deletes').maybeSingle(); if(_r&&_r.data&&Array.isArray(_r.data.data)) _cur=_r.data.data; } catch(e){}
-      const _keep=_cur.filter(id=>_locked.has(id) || !(_wired.indexOf(id)>=0 || _hasRS(id)));
+      const _keep = _lockOk ? _cur.filter(id=>_locked.has(id) || !(_wired.indexOf(id)>=0 || _hasRS(id))) : _cur.slice();  // v595: never drop tombstones if the lock set couldn't be confirmed
       if (_keep.length!==_cur.length) {
         try { await supa.from('games').upsert({code:'shared:course-deletes',data:_keep,updated_at:new Date().toISOString()}); } catch(e){}
         try { if (typeof invalidateCourseLibraryCache==='function') invalidateCourseLibraryCache(); } catch(e){}
@@ -55749,11 +55749,14 @@ async function courseDataImport(file, stateFilter, override) {
     // when the import auto-runs at boot (?courseoverride=1) before the overlay finished
     // loading. Verified / hand-entered courses are NEVER overwritten (Tyler's rule).
     try { const _vids = await getCourseVerified(); if (Array.isArray(_vids)) _vids.forEach(id => { try { _adminVerified.add(id); } catch (e) {} }); } catch (e) {}
+    // v595: never import onto an admin-locked-deleted course (stops Kevin's deletes reappearing).
+    let _lockedDel = new Set();
+    try { const _ld = await getCourseDeletesLocked(); if (Array.isArray(_ld)) _lockedDel = new Set(_ld); } catch (e) {}
     let matched = 0, filledTees = 0, preserved = 0, filledPars = 0, protectedSkips = 0;
     const unmatched = [['name', 'state', 'city', 'tees']];
     const byStateMatched = {};
     const usedLibIds = new Set(); // one library course can't be claimed twice
-    const toCreate = []; let createdCount = 0; // v387: override sweep CREATES missing courses
+    const toCreate = []; let createdCount = 0; let lockedSkips = 0; // v387: override sweep CREATES missing courses  (v595: lockedSkips)
     groupList.forEach(g => {
       const n = norm(g.name);
       let lib = byNameState[n + '|' + g.state];                       // 1. exact name + state
@@ -55769,6 +55772,7 @@ async function courseDataImport(file, stateFilter, override) {
           if (uniq.length === 1) lib = uniq[0];
         }
       }
+      if (lib && _lockedDel.has(lib.id)) { protectedSkips++; return; }  // v595: never re-fill an admin-locked-deleted course
       if (!lib) {
         if (override && Array.isArray(g.tees) && g.tees.some(t => t && t.rating != null && t.slope != null)) { toCreate.push(g); }
         else { unmatched.push([g.name, g.state, g.city || '', g.tees.length]); }
@@ -55849,6 +55853,8 @@ async function courseDataImport(file, stateFilter, override) {
     // v387: CREATE courses that matched nothing in the library (override sweep only).
     for (const g of toCreate) {
       try {
+        const _bid = (g.name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+        if (_lockedDel.has(_bid)) { lockedSkips++; continue; }  // v595: never re-create an admin-locked-deleted course
         const created = await addCourseToLibrary(g.name, g.city || '', '', { st: g.state });
         if (!created) { unmatched.push([g.name, g.state, g.city || '', g.tees.length]); continue; }
         if (g.state && !created.st) { try { created.st = g.state; } catch (e) {} }
@@ -55865,6 +55871,7 @@ async function courseDataImport(file, stateFilter, override) {
     await saveCourseSaves(saves);
     log('✅ Filled <b>' + matched + '</b> courses (' + filledTees + ' tees rating/slope, ' + filledPars + ' with per-hole par+SI). Synced to everyone.', 'var(--log-ok)');
     if (createdCount) log('🆕 Created <b>' + createdCount + '</b> new course(s) that were not in the library.', 'var(--log-ok)');
+    if (lockedSkips) log('🔒 Skipped <b>' + lockedSkips + '</b> admin-deleted course(s) — not re-created (v595).', 'var(--log-info)');
     if (protectedSkips) log('🔒 Left <b>' + protectedSkips + '</b> verified / hand-entered course(s) untouched (protected).', 'var(--log-info)');
     Object.keys(byStateMatched).sort().forEach(st => log('   ' + st + ': ' + byStateMatched[st] + ' courses'));
     if (unmatched.length > 1) {
