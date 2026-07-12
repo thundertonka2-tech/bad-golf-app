@@ -10928,16 +10928,7 @@ async function addToRecent(game) {
   // First names only so it fits a mobile row; players with no holes entered yet
   // are skipped. Falls back to the names string for older records without this.
   let scoreLine = '';
-  try {
-    const parts = (game.players || []).map(p => {
-      const arr = (game.scores && game.scores[p.id]) || [];
-      if (!arr.some(s => s != null)) return null;
-      const gross = arr.reduce((a, b) => a + (b || 0), 0);
-      const nm = ((p.name || '').trim().split(/\s+/)[0]) || p.name || '?';
-      return nm + ' ' + gross;
-    }).filter(Boolean);
-    scoreLine = parts.join(' · ');
-  } catch (e) {}
+  try { scoreLine = grossScoreLineFor(game); } catch (e) {}
   recent.unshift({
     code: game.code,
     course: game.course || 'Untitled course',
@@ -10960,6 +10951,69 @@ async function getRecent() {
   const v = await safeGet(KEY_RECENT, true);
   if (!v) return [];
   try { return JSON.parse(v); } catch (e) { return []; }
+}
+
+// Rebuild a round's per-player "scoreLine" as GROSS from a saved game (same
+// first-name + gross-total format addToRecent uses). Kept as a shared helper so
+// both addToRecent and the heal below produce an identical line.
+function grossScoreLineFor(game) {
+  try {
+    const parts = (game.players || []).map(p => {
+      const arr = (game.scores && game.scores[p.id]) || [];
+      if (!arr.some(s => s != null)) return null;
+      const gross = arr.reduce((a, b) => a + (b || 0), 0);
+      const nm = ((p.name || '').trim().split(/\s+/)[0]) || p.name || '?';
+      return nm + ' ' + gross;
+    }).filter(Boolean);
+    return parts.join(' · ');
+  } catch (e) { return ''; }
+}
+
+// Heal stale/NET "scoreLine" display strings on recorded rounds. The per-hole
+// scores are always stored GROSS and are correct (handicaps read from them are
+// unaffected) — but older builds sometimes cached the display line as NET, or as
+// a mid-round PARTIAL snapshot that was never refreshed after the round finished.
+// Fix: for any FINISHED round whose cached line disagrees with MY recorded gross
+// (from scoreHistory), reload the saved game and rewrite the line as true gross.
+// Cheap + safe: only mismatched rounds are reloaded (bounded), display-only,
+// wrapped in try/catch, and it never touches scores, stats, money or handicap.
+async function healRecentScoreLines() {
+  try {
+    const me = await getMeName(); if (!me) return false;
+    const recent = await getRecent();
+    if (!Array.isArray(recent) || !recent.length) return false;
+    const roster = await getPlayerRoster();
+    const entry = findMyRosterPlayer(roster, me);
+    // My trusted gross per game (complete 18-hole rounds only).
+    const myGross = {};
+    if (entry && Array.isArray(entry.scoreHistory)) {
+      entry.scoreHistory.forEach(s => { if (s && s.gameCode && s.complete === true && s.gross != null) myGross[s.gameCode] = s.gross; });
+    }
+    const myFirst = (String(me).trim().split(/\s+/)[0] || String(me)).toLowerCase();
+    const esc = myFirst.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const myRe = new RegExp('(?:^|·\\s*)' + esc + '\\s+(\\d+)', 'i');
+    const suspects = recent.filter(r => {
+      if (!r || !r.code || !r.finishedAt) return false;
+      const g = myGross[r.code]; if (g == null) return false;          // no trusted gross to compare against
+      const line = String(r.scoreLine || '');
+      if (!line) return true;                                          // finished but blank line — rebuild
+      const m = line.match(myRe);
+      if (!m) return false;                                            // can't locate my number — leave it alone
+      return parseInt(m[1], 10) !== g;                                 // my shown number != my gross => net/stale
+    }).slice(0, 8);
+    if (!suspects.length) return false;
+    let changed = false;
+    for (const r of suspects) {
+      try {
+        const g = await loadGame(r.code);
+        if (!g || !Array.isArray(g.players) || !g.scores) continue;
+        const line = grossScoreLineFor(g);
+        if (line && line !== r.scoreLine) { r.scoreLine = line; changed = true; }
+      } catch (e) {}
+    }
+    if (changed) { try { await safeSet(KEY_RECENT, JSON.stringify(recent), true); } catch (e) {} }
+    return changed;
+  } catch (e) { return false; }
 }
 
 // Styled in-app confirm (replaces native confirm() for destructive actions).
@@ -33414,6 +33468,7 @@ async function loadRounds() {
   const T = _roundsTarget || { empty:'rounds-empty-card', listCard:'rounds-list-card', list:'rounds-list', search:'rounds-search', showmore:'rounds-showmore', sched:'rounds-scheduled-card', schedList:'rounds-scheduled-list' };
   _roundsTarget = null;
   try { await reconcileMyScoreHistory(); } catch (e) {}
+  try { await healRecentScoreLines(); } catch (e) {}   // repair any NET/partial cached score lines to true gross
   // Only rounds YOU played in. Spectating other groups lives on the Crew tab
   // (Live now / recent feed) — this list is your personal round history.
   let meName = null;
