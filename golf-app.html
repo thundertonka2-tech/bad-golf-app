@@ -6901,6 +6901,16 @@ const KEY_TOURNEYS = 'golf:tourneys';
 const KEY_COURSE_DATA = 'golf:courses';
 const KEY_COURSE_LIBRARY = 'golf:course-library-additions';
 const KEY_PLAYER_ROSTER = 'golf:player-roster';
+// v603 — PER-USER ROSTER. The roster used to live in ONE global row
+// ('shared:player-roster') that every account read-merge-wrote, which (a) leaked
+// every user's players/stats into one shared blob and (b) was the top write-
+// contention bottleneck at 5,000 users. It now lives in a per-user row
+// (roster:<uid>). LEGACY_ROSTER_ROW is the old global row; during the transition
+// we keep it mirrored (see _mirrorRosterToLegacy) so devices still on an older
+// build keep working. Flip ROSTER_DUAL_WRITE_LEGACY to false once every client is
+// updated to stop touching the global row entirely (removes the last contention).
+const LEGACY_ROSTER_ROW = 'shared:player-roster';
+const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // ============================================================
 // SUPABASE BACKEND
@@ -6912,7 +6922,7 @@ const KEY_PLAYER_ROSTER = 'golf:player-roster';
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.602';
+const BG_BUILD = 'v2026.11.603';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -7095,6 +7105,7 @@ async function initAuth() {
         // Phase 2 (Cloud): on a real sign-in, link this account to a roster
         // player if it isn't already. No-op (one quick read) once linked.
         if (_event === 'SIGNED_IN' || _event === 'INITIAL_SESSION') {
+          try { migrateRosterToPerUser(); } catch (e) {}   // v603: seed the per-user roster row promptly on sign-in
           autoLinkMyPlayer();
           // Repopulate THIS account's stats backup + saved shots (idempotent) so the
           // new user's own data shows immediately instead of the cleared/old caches.
@@ -10080,7 +10091,15 @@ const SHARED_SINGLETONS = ['golf:courses', 'golf:recent-games', 'golf:tourneys',
   // ratings), a locked id is NEVER auto-restored. This is the fix for admin
   // deletes silently coming back after a sweep (Kevin's MS/TX deletes).
   'golf:course-deletes', 'golf:course-deletes-locked', 'golf:course-name-overrides', 'golf:course-detail-overrides', 'golf:code-review-queue'];
-function singletonRowCode(key) { return 'shared:' + key.replace(/^golf:/, ''); }
+function singletonRowCode(key) {
+  // v603: the roster is now a PER-USER row (roster:<uid>) instead of the single
+  // global 'shared:player-roster'. Every roster read/write funnels through this,
+  // so redirecting here moves them all at once. Falls back to the legacy global
+  // code only when there's no signed-in user id (guest/pre-auth) — guests are
+  // localStorage-only anyway, so that row is never actually written.
+  if (key === KEY_PLAYER_ROSTER) return rosterRowCode();
+  return 'shared:' + key.replace(/^golf:/, '');
+}
 
 // Track online/offline so the sync indicator can reflect reality
 window.addEventListener('online', () => { supaOnline = true; updateSyncIndicator(); });
@@ -10276,6 +10295,7 @@ async function writeSharedSingleton(key, value) {
       // funnels through here, so union it into the FRESHEST cloud roster and apply the
       // shared tombstones, exactly like savePlayerRoster's main path.
       if (key === KEY_PLAYER_ROSTER) {
+        try { await migrateRosterToPerUser(); } catch (e) {}   // v603: seed the per-user row before merge-write
         try {
           const { data: _rrow, error: _rerr } = await supa.from('games').select('data').eq('code', singletonRowCode(key)).maybeSingle();
           if (!_rerr && _rrow && Array.isArray(_rrow.data) && Array.isArray(parsed)) {
@@ -10310,6 +10330,7 @@ async function writeSharedSingleton(key, value) {
           else { console.warn('Supabase singleton write error (' + key + ', try ' + (attempt + 1) + '):', error); if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1))); }
         } catch (e2) { console.warn('Supabase singleton write threw (' + key + ', try ' + (attempt + 1) + '):', e2); if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1))); }
       }
+      if (key === KEY_PLAYER_ROSTER && committed) { try { await _mirrorRosterToLegacy(parsed); } catch (e) {} }   // v603 dual-write mirror to the legacy global row
     }
     _singletonWroteAt[key] = Date.now();                  // re-shield after the (possibly slow) write
   } catch (e) {
@@ -11348,6 +11369,9 @@ async function getPlayerRoster() {
     const lv = localStorage.getItem(KEY_PLAYER_ROSTER);
     if (lv) (JSON.parse(lv) || []).forEach(p => { if (p && p.avatar) _localAvatars[normalizeNameSegment(p.name || '')] = p.avatar; });
   } catch (e) {}
+  // v603: make sure this account's per-user roster row is seeded from the legacy
+  // global row before we read, so an upgrading user never sees an empty roster.
+  try { await migrateRosterToPerUser(); } catch (e) {}
   const v = await safeGet(KEY_PLAYER_ROSTER, false);
   if (!v) return [];
   try {
@@ -11591,6 +11615,59 @@ function applyTombstonesToRoster(roster, tomb) {
   } catch (e) { return roster; }
 }
 
+// v603 — per-user roster row code. roster:<uid> when signed in; the legacy global
+// row only as a guest/pre-auth fallback (never actually written for guests).
+function rosterRowCode() {
+  try { if (typeof _authUser !== 'undefined' && _authUser && _authUser.id) return 'roster:' + _authUser.id; } catch (e) {}
+  return LEGACY_ROSTER_ROW;
+}
+// One-time-per-device SEED of this account's per-user roster row from the legacy
+// global row (+ whatever is in local). Idempotent and SAFE: it only writes the
+// per-user row when that row does not exist yet, it UNIONS legacy+local (never
+// drops a player/round), and it applies the shared tombstones. It NEVER deletes
+// the legacy row. Runs before the first roster read/write (see getPlayerRoster /
+// savePlayerRoster), so an upgrading user's players appear in their new row.
+let _rosterMigrated = false;
+async function migrateRosterToPerUser() {
+  if (_rosterMigrated) return;
+  try {
+    if (!isSignedIn() || !_authUser || !_authUser.id) return;
+    if (!supaReady) await initSupabase();
+    if (!(supa && supaOnline)) return;
+    const per = rosterRowCode();
+    if (per === LEGACY_ROSTER_ROW) return;                 // no uid — nothing to migrate
+    // If a per-user row already exists (any prior device/session seeded it), we're done.
+    const { data: pRow, error: pErr } = await supa.from('games').select('data').eq('code', per).maybeSingle();
+    if (pErr) return;                                      // read failed — retry on the next call
+    if (pRow && Array.isArray(pRow.data)) { _rosterMigrated = true; return; }
+    // Seed = union(legacy global, local) with tombstones applied.
+    let legacy = [];
+    try { const { data: lRow, error: lErr } = await supa.from('games').select('data').eq('code', LEGACY_ROSTER_ROW).maybeSingle(); if (!lErr && lRow && Array.isArray(lRow.data)) legacy = lRow.data; } catch (e) {}
+    let local = [];
+    try { const _l = JSON.parse(localStorage.getItem(KEY_PLAYER_ROSTER) || '[]'); if (Array.isArray(_l)) local = _l; } catch (e) {}
+    let seed = mergeRosters(legacy, local);
+    try { seed = applyTombstonesToRoster(seed, await getSharedTombstones()); } catch (e) {}
+    const { error: wErr } = await supa.from('games').upsert({ code: per, data: seed, updated_at: new Date().toISOString() });
+    if (!wErr) { _rosterMigrated = true; try { localStorage.setItem(KEY_PLAYER_ROSTER, JSON.stringify(seed)); } catch (e) {} }
+  } catch (e) { console.warn('migrateRosterToPerUser', e); }
+}
+// Transitional DUAL-WRITE: mirror the just-saved roster into the legacy global row
+// (merged, so a still-on-old-build device's players are never dropped) so those
+// devices keep seeing the data until everyone updates. No-op once
+// ROSTER_DUAL_WRITE_LEGACY is turned off.
+async function _mirrorRosterToLegacy(rows) {
+  try {
+    if (!ROSTER_DUAL_WRITE_LEGACY) return;
+    if (!(supa && supaOnline) || !Array.isArray(rows)) return;
+    if (rosterRowCode() === LEGACY_ROSTER_ROW) return;     // legacy IS the primary (guest) — nothing to mirror
+    let legacy = [];
+    try { const { data, error } = await supa.from('games').select('data').eq('code', LEGACY_ROSTER_ROW).maybeSingle(); if (!error && data && Array.isArray(data.data)) legacy = data.data; } catch (e) {}
+    let merged = mergeRosters(legacy, rows);
+    try { merged = applyTombstonesToRoster(merged, await getSharedTombstones()); } catch (e) {}
+    await supa.from('games').upsert({ code: LEGACY_ROSTER_ROW, data: merged, updated_at: new Date().toISOString() });
+  } catch (e) { /* mirror is best-effort; per-user row is the source of truth */ }
+}
+
 async function savePlayerRoster(roster, opts) {
   opts = opts || {};
   // Capture the prior known-full roster BEFORE overwriting the local cache, so a
@@ -11606,6 +11683,10 @@ async function savePlayerRoster(roster, opts) {
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
+      // v603: seed this account's per-user roster row from the legacy global row
+      // before the read-merge-write, so the very first save unions onto the real
+      // data instead of an empty row.
+      try { await migrateRosterToPerUser(); } catch (e) {}
       // Read the freshest cloud roster. cloudReadOk distinguishes a genuine empty
       // row from a FAILED read (v284) — we must never merge against [] on a failure,
       // or one dropped request overwrites the cloud with only THIS device's players.
@@ -11644,7 +11725,7 @@ async function savePlayerRoster(roster, opts) {
         try { const { error } = await supa.from('games').upsert({ code: singletonRowCode(KEY_PLAYER_ROSTER), data: merged, updated_at: new Date().toISOString() }); if (!error) _wrote = true; } catch (e) {}
         if (!_wrote) await new Promise(r => setTimeout(r, 400 * (_wa + 1)));
       }
-      if (_wrote) { _singletonDirty[KEY_PLAYER_ROSTER] = false; _persistDirty(); }
+      if (_wrote) { _singletonDirty[KEY_PLAYER_ROSTER] = false; _persistDirty(); try { await _mirrorRosterToLegacy(merged); } catch (e) {} }
       else { _singletonDirty[KEY_PLAYER_ROSTER] = true; _persistDirty(); }
     } else {
       _singletonDirty[KEY_PLAYER_ROSTER] = true; _persistDirty(); // offline: queue a re-merge for reconnect

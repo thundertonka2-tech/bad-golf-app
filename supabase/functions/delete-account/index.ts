@@ -125,6 +125,16 @@ Deno.serve(async (req) => {
     } catch (e) { report[table] = "skip:" + (e as Error).message; }
   }
 
+  // 1b) v603: hard-delete this user's PER-USER roster row (roster:<uid>) — their
+  //     personal players + lifetime stats. The roster moved off the shared global
+  //     row into a per-user row, which has no user_id set, so the anonymize step
+  //     above never touches it. Without this a deleted account's roster would be
+  //     orphaned in the games table (Apple/GDPR: account deletion must remove it).
+  try {
+    await admin.from("games").delete().eq("code", "roster:" + uid);
+    report["roster"] = "deleted";
+  } catch (e) { report["roster"] = "skip:" + (e as Error).message; }
+
   // 2) Hard-delete personal-only rows.
   for (const table of ["friendships", "game_invites", "profiles"]) {
     try {
