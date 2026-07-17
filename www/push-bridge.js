@@ -46,6 +46,13 @@
               return;
             }
           }
+          if (type === 'round_added') {
+            // Added-to-a-round consent push (v626): land on Home — the incoming
+            // invite modal (Accept / Decline) surfaces there on its own. This
+            // type is deliberately NOT in the edge function's pref map, so it is
+            // ALWAYS delivered (action-required, not an FYI).
+            if (typeof window.switchTab === 'function') return window.switchTab('home');
+          }
           if (type === 'friend_request') {
             if (typeof window.switchTab === 'function') return window.switchTab('crew');
           }
