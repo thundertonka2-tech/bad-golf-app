@@ -6949,7 +6949,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.628';
+const BG_BUILD = 'v2026.11.630';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -11591,29 +11591,43 @@ async function getSharedTombstones() {
     if (typeof isSignedIn === 'function' && isSignedIn() && typeof readSharedSingleton === 'function') v = await readSharedSingleton(KEY_ROSTER_TOMBSTONES);
     else { try { v = localStorage.getItem(KEY_ROSTER_TOMBSTONES); } catch (e) {} }
     const o = v ? JSON.parse(v) : {};
-    _tombCache = { players: new Set(Array.isArray(o.players) ? o.players : []), rounds: new Set(Array.isArray(o.rounds) ? o.rounds : []) };
-  } catch (e) { if (!_tombCache) _tombCache = { players: new Set(), rounds: new Set() }; }
+    _tombCache = { players: new Set(Array.isArray(o.players) ? o.players : []), rounds: new Set(Array.isArray(o.rounds) ? o.rounds : []), playersLocked: new Set(Array.isArray(o.playersLocked) ? o.playersLocked : []) };
+  } catch (e) { if (!_tombCache) _tombCache = { players: new Set(), rounds: new Set(), playersLocked: new Set() }; }
   return _tombCache;
 }
 async function _writeSharedTombstones(out) {
-  _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds) };
+  _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds), playersLocked: new Set(out.playersLocked || []) };
   try { localStorage.setItem(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
   try { if (typeof isSignedIn === 'function' && isSignedIn() && typeof writeSharedSingleton === 'function') await writeSharedSingleton(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
 }
-async function addSharedTombstones(players, rounds) {
+async function addSharedTombstones(players, rounds, lockPlayers) {
   try {
     const t = await getSharedTombstones();
-    (players || []).forEach(k => { if (k) t.players.add(k); });
+    const locked = t.playersLocked || new Set();
+    (players || []).forEach(k => { if (k) { t.players.add(k); if (lockPlayers) locked.add(k); } });
     (rounds || []).forEach(k => { if (k) t.rounds.add(k); });
-    await _writeSharedTombstones({ players: Array.from(t.players).slice(-3000), rounds: Array.from(t.rounds).slice(-5000) });
+    await _writeSharedTombstones({ players: Array.from(t.players).slice(-3000), rounds: Array.from(t.rounds).slice(-5000), playersLocked: Array.from(locked).slice(-3000) });
   } catch (e) { console.warn('addSharedTombstones', e); }
 }
 async function unTombstonePlayers(players) {
   try {
     const t = await getSharedTombstones();
+    const locked = t.playersLocked || new Set();
+    // v630: LOCKED deletes (admin danger-zone) cannot be cleared by passive
+    // re-adds — sign-in self-upserts and round-start upserts un-deleted players
+    // for months (Tyler: "Tyler Test still appearing after multiple deletes").
+    // Only an ADMIN session may clear a locked delete (deliberate re-add).
+    const admin = (typeof isAdmin === 'function' && isAdmin());
     let changed = false;
-    (players || []).forEach(k => { if (k && t.players.delete(k)) changed = true; });
-    if (changed) await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds) });
+    (players || []).forEach(k => {
+      if (!k) return;
+      if (locked.has(k)) {
+        if (!admin) return;
+        locked.delete(k); changed = true;
+      }
+      if (t.players.delete(k)) changed = true;
+    });
+    if (changed) await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds), playersLocked: Array.from(locked) });
   } catch (e) {}
 }
 // Drop tombstoned players + rounds from a roster array. Failsafe: returns the
@@ -11808,6 +11822,8 @@ async function deletePlayerFromRoster(firstName, lastName) {
   // copy would otherwise re-add them on union).
   const rmKey = rosterPlayerKey({ firstName, lastName });
   await savePlayerRoster(filtered, { removals: { players: new Set([rmKey]) } });
+  // v630: an ADMIN's delete is LOCKED — no passive path can resurrect it.
+  try { if (typeof isAdmin === 'function' && isAdmin()) await addSharedTombstones([rmKey], null, true); } catch (e) {}
 }
 
 // ============================================================
@@ -34879,6 +34895,27 @@ async function renderCrewLeaderboard() {
       allowed.forEach(nm => { if (nm && !_have.has(nm)) pool.push({ name: nm }); });
     } catch (e) { console.warn('leaderboard friends filter failed', e); pool = roster; }
   }
+  // v629: collapse duplicate roster entries that are the same person under
+  // different capitalization/spelling ("Frank LoNigro" vs "Frank Lonigro").
+  // Roster keys are exact-cased on purpose (until an admin merge), but the
+  // leaderboard must show ONE row per person — histories union by round key so
+  // shared rounds never double-count. (Tyler: Frank showed twice.)
+  try {
+    const _byN = {};
+    const _keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+    pool.forEach(p => {
+      if (!p || !p.name) return;
+      const k = normalizeNameSegment(p.name);
+      if (!_byN[k]) { _byN[k] = Object.assign({}, p, { scoreHistory: Array.isArray(p.scoreHistory) ? p.scoreHistory.slice() : [] }); return; }
+      const tgt = _byN[k];
+      const have = new Set((tgt.scoreHistory || []).map(_keyOf));
+      (Array.isArray(p.scoreHistory) ? p.scoreHistory : []).forEach(s => { const kk = _keyOf(s); if (s && kk && !have.has(kk)) { tgt.scoreHistory.push(s); have.add(kk); } });
+      if (!tgt.avatar && p.avatar) tgt.avatar = p.avatar;
+      if ((!tgt.firstName || !tgt.lastName) && p.firstName && p.lastName) { tgt.firstName = p.firstName; tgt.lastName = p.lastName; tgt.name = p.name; }
+    });
+    const _collapsed = Object.values(_byN);
+    if (_collapsed.length && _collapsed.length < pool.length) pool = _collapsed;
+  } catch (e) {}
   // v628: leaderboard money/rounds now use the SAME data a player's PROFILE
   // shows — local roster history UNIONED with their cloud backup (player_stats).
   // ONE fetch for the whole board (the profile does this per player), union by
