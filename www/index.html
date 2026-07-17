@@ -6942,7 +6942,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.610';
+const BG_BUILD = 'v2026.11.611';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -32340,7 +32340,13 @@ async function visiblePlayersForStats(list, meName) {
     edges.filter(e => e.status === 'accepted' && (e.requester === meId || e.addressee === meId))
       .map(e => byId[e.requester === meId ? e.addressee : e.requester])
       .filter(Boolean)
-      .forEach(pr => { if (pr.my_player) friendNames.add(normalizeNameSegment(pr.my_player)); });
+      .forEach(pr => {
+        if (pr.my_player) friendNames.add(normalizeNameSegment(pr.my_player));
+        // v611: fallback — friends who never linked a player (or whose link
+        // differs from the roster name) still match by profile display name,
+        // so their roster entry shows in the stats picker.
+        try { const dn = String(pr.display_name || ''); if (dn && dn.indexOf('@') < 0 && !/\d/.test(dn)) friendNames.add(normalizeNameSegment(dn)); } catch (e) {}
+      });
     let visByName = null; const accountNames = new Set();
     try {
       const { data: vp, error } = await supa.from('profiles').select('my_player,stats_visibility');
@@ -34790,10 +34796,25 @@ async function renderCrewLeaderboard() {
   }
 }
 
+// Resolve a friend's linked player name to THIS device's roster entry.
+// Exact match first, then normalized (case/spacing/punctuation-insensitive):
+// friend profiles' my_player often differs from the local roster casing, which
+// made friend taps land on "Player not found" (v611 fix).
+function resolveRosterPlayerByName(roster, name) {
+  if (!Array.isArray(roster) || !name) return null;
+  let hit = roster.find(x => x && x.name === name);
+  if (hit) return hit;
+  try {
+    const want = normalizeNameSegment(String(name));
+    if (want) hit = roster.find(x => x && x.name && normalizeNameSegment(x.name) === want);
+  } catch (e) {}
+  return hit || null;
+}
+
 async function openCrewProfile(name) {
   let roster = await getPlayerRoster();
-  let base = roster.find(x => x.name === name);
-  if (!base) { showToast('Player not found'); return; }
+  let base = resolveRosterPlayerByName(roster, name);
+  if (!base) { showToast('No rounds together yet — stats show up after you play a synced round with them'); return; }
   // Self-heal this player's bet money: re-archive any recent FINISHED round that
   // includes them but isn't yet in their history WITH money. archiveScoresFromRound
   // writes EVERY player's money to the shared roster (idempotent), so the profile
@@ -35832,8 +35853,24 @@ async function renderCrewFriends() {
   const [profiles, edges, roster] = await Promise.all([fetchProfiles(), fetchFriendships(), getPlayerRoster()]);
   const byId = {}; profiles.forEach(p => byId[p.id] = p);
   const rosterByName = {}; roster.forEach(p => { if (p && p.name) rosterByName[p.name] = p; });
+  // v611: normalized lookup + display-name fallback. my_player often differs from
+  // the local roster's casing/spacing (or is unset while the display name matches
+  // a roster entry), which broke the avatar, the HCP stat line, and tap-to-open.
+  const rosterByNorm = {}; roster.forEach(p => { try { if (p && p.name) rosterByNorm[normalizeNameSegment(p.name)] = p; } catch (e) {} });
+  const rosterFor = (profile) => {
+    if (!profile) return null;
+    const cands = [profile.my_player, profile.display_name];
+    for (const c of cands) {
+      const nm = String(c || '').trim();
+      if (!nm) continue;
+      let hit = rosterByName[nm];
+      if (!hit) { try { hit = rosterByNorm[normalizeNameSegment(nm)]; } catch (e) {} }
+      if (hit) return hit;
+    }
+    return null;
+  };
   const avatarFor = (profile) => {
-    const rp = rosterByName[(profile && profile.my_player) || ''];
+    const rp = rosterFor(profile);
     if (rp && rp.avatar) return rp;
     if (profile && profile.avatar) return { name: friendDisplayName(profile), avatar: profile.avatar };
     return rp || { name: friendDisplayName(profile) };
@@ -35883,18 +35920,19 @@ async function renderCrewFriends() {
   if (_friendsCache.length === 0) {
     listEl.innerHTML = '<div class="help-text">No friends yet — tap + Add.</div>';
   } else {
-    listEl.innerHTML = _friendsCache.map((p, i) =>
-      '<div class="crew-friend-row" data-player="' + ((p && p.my_player) || '').replace(/"/g, '&quot;') + '" ' +
+    listEl.innerHTML = _friendsCache.map((p, i) => {
+      const _rp = rosterFor(p);   // v611: resolved roster entry (normalized + display-name fallback)
+      return '<div class="crew-friend-row" data-player="' + (((_rp && _rp.name) || (p && p.my_player) || '')).replace(/"/g, '&quot;') + '" ' +
       'style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:8px 0;border-top:' + (i ? '1px solid var(--border)' : 'none') + '">' +
       crewAvatarHtml(avatarFor(p), false) +
       '<div style="flex:1;min-width:0;overflow:hidden">' +
         '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500">' + friendDisplayName(p) + '</div>' +
-        '<div style="font-size:11.5px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">' + friendStatLineHtml(rosterByName[(p && p.my_player) || '']) + '</div>' +
+        '<div style="font-size:11.5px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">' + friendStatLineHtml(_rp) + '</div>' +
       '</div>' +
       '<button class="fr-remove" data-edge="' + (edgeByFriendId[p.id] || '') + '" title="Remove friend" aria-label="Remove friend" style="background:transparent;border:none;color:var(--text-muted);font-size:17px;line-height:1;padding:4px 8px;cursor:pointer;flex:0 0 auto">✕</button>' +
       '<div style="color:var(--text-muted)">›</div>' +
-      '</div>'
-    ).join('');
+      '</div>';
+    }).join('');
     listEl.querySelectorAll('.crew-friend-row').forEach(row => {
       row.onclick = () => {
         const nm = row.dataset.player;
