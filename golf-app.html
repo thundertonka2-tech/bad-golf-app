@@ -6943,7 +6943,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.623';
+const BG_BUILD = 'v2026.11.624';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -12291,6 +12291,19 @@ async function archiveScoresFromRound(g) {
     // Declined the invite → NOTHING from this round counts for them:
     // no rounds-played, no average, no money, no handicap differential.
     if (Array.isArray(g.declinedBy) && g.declinedBy.includes(p.name)) return;
+    // v624 CONSENT GATE: a registered user someone ELSE added by name never has
+    // this round archived to their stats until they accepted/joined it (invite
+    // Accept, join-by-code, or join link). Applies only to v624+ rounds (ones
+    // that carry consentReq), so old history is untouched.
+    try {
+      if (Array.isArray(g.consentReq) && g.consentReq.length) {
+        const _pn = normalizeNameSegment(p.name || '');
+        if (g.consentReq.indexOf(_pn) >= 0) {
+          const _acc = (Array.isArray(g.acceptedBy) ? g.acceptedBy : []).some(n => normalizeNameSegment(n) === _pn);
+          if (!_acc) return;
+        }
+      }
+    } catch (e) {}
     // Invited but never joined (ignored the invite) → same treatment for ME:
     // it can't count until I reopen the round and join it.
     if (iSkipThisRound && p.name === meName) return;
@@ -18461,7 +18474,6 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
       <input type="text" class="first-name" placeholder="First" value="${esc(firstName)}">
       <input type="text" class="last-name" placeholder="Last" value="${esc(lastName)}">
     </div>
-    <button type="button" class="invite-player-btn" title="Share the join link (text, email…)" style="align-self:flex-start;border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:7px 8px;cursor:pointer;font-size:13px">📤</button>
     <button type="button" class="remove player-remove-top" title="Remove player">×</button>
     <div class="hcp-row">
       <label>HCP</label>
@@ -18492,11 +18504,6 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
       list.insertBefore(next, row);
       refreshAfterReorder();
     }
-  };
-  row.querySelector('.invite-player-btn').onclick = () => {
-    const fn2 = row.querySelector('.first-name');
-    const ln2 = row.querySelector('.last-name');
-    shareGameInvite(combineName(fn2 ? fn2.value.trim() : '', ln2 ? ln2.value.trim() : ''));
   };
   row.querySelector('.remove').onclick = () => {
     if (list.children.length > 1) row.remove();
@@ -36235,6 +36242,52 @@ async function openProposeWager(code) {
   }
   if (modal) modal.classList.add('show');
 }
+// v624 CONSENT: a registered Bad Golf user added to a round BY SOMEONE ELSE
+// must accept or join before the round counts on their account. At round start
+// this stamps g.consentReq with the normalized names of registered users the
+// creator added, auto-sends each one a round invite (the existing incoming-
+// invite modal handles Accept/Decline → acceptedBy/declinedBy) and a push.
+// Guests (non-users) are unaffected. archiveScoresFromRound enforces the gate.
+async function notifyAddedRegisteredUsers(g) {
+  try {
+    if (!g || !g.code || !Array.isArray(g.players) || !supa || !_authUser) return;
+    // ADMIN EXEMPTION (Tyler): rounds STARTED BY AN ADMIN skip the consent gate
+    // entirely — no consentReq stamp, no auto-invites, no pushes — so testing
+    // with dummy accounts works without each one having to accept. Normal
+    // users' rounds always gate.
+    try { if (typeof isAdmin === 'function' && isAdmin()) return; } catch (e) {}
+    let me = null; try { me = await getMeName(); } catch (e) {}
+    const meN = me ? normalizeNameSegment(me) : '';
+    const profiles = await fetchProfiles();
+    const byNorm = {};
+    (profiles || []).forEach(pr => {
+      try {
+        if (!pr || pr.id === _authUser.id) return;   // never gate the creator himself
+        if (pr.my_player) byNorm[normalizeNameSegment(pr.my_player)] = pr;
+        const dn = String(pr.display_name || '');
+        if (dn && dn.indexOf('@') < 0 && !/\d/.test(dn)) { const k = normalizeNameSegment(dn); if (!byNorm[k]) byNorm[k] = pr; }
+      } catch (e) {}
+    });
+    const req = []; const toInvite = [];
+    g.players.forEach(p => {
+      const pn = normalizeNameSegment((p && p.name) || '');
+      if (!pn || pn === meN) return;
+      const pr = byNorm[pn];
+      if (pr && req.indexOf(pn) < 0) { req.push(pn); toInvite.push(pr); }
+    });
+    if (!req.length) return;
+    g.consentReq = req;
+    try { await saveGame(g); } catch (e) {}
+    for (const pr of toInvite) {
+      try {
+        try { await supa.from('game_invites').delete().eq('to_user', pr.id).eq('game_code', g.code); } catch (e) {}
+        await supa.from('game_invites').insert({ from_user: _authUser.id, to_user: pr.id, game_code: g.code, course: g.course || '', status: 'pending' });
+      } catch (e) {}
+      try { sendPush(pr.id, 'Bad Golf', (me || 'A friend') + ' added you to a round at ' + (g.course || 'a course') + ' — accept it so it counts on your stats', { type: 'round_start', round_code: g.code }, 'cr:' + g.code); } catch (e) {}
+    }
+  } catch (e) { console.warn('notifyAddedRegisteredUsers', e); }
+}
+
 async function sendWagerProposal(toId, code) {
   if (!supa || !_authUser || !code) return;
   try {
@@ -47330,6 +47383,9 @@ async function init() {
       }
     } catch (e) {}
     const ok = await saveGame(game, { deferRecent: true });
+    // v624 CONSENT: auto-invite registered users the creator added by name — the
+    // round doesn't count for them until they accept/join (fire-and-forget).
+    if (ok) { try { notifyAddedRegisteredUsers(game); } catch (e) {} }
     if (!ok) { hideRoundLoading(_rl, true); showToast('Save failed'); return; }
     try { clearSetupDraft(); } catch (e) {} // round started — drop the setup draft
 
@@ -47598,6 +47654,20 @@ async function init() {
     state.currentHole = findNextUnscoredHole(g);
     await safeSet(KEY_LAST, code, false);
     try { await addToRecent(g); } catch (e) { console.warn('addToRecent on join failed:', e); }
+    // v624 CONSENT: joining by code IS acceptance — record it so the round
+    // counts for me (clears any pending flag / earlier decline).
+    try {
+      clearPendingJoin(code);
+      const _me = await getMeName();
+      if (_me) {
+        let _dirty = false;
+        const _meN = normalizeNameSegment(_me);
+        if (Array.isArray(g.declinedBy) && g.declinedBy.some(n => normalizeNameSegment(n) === _meN)) { g.declinedBy = g.declinedBy.filter(n => normalizeNameSegment(n) !== _meN); _dirty = true; }
+        if (!Array.isArray(g.acceptedBy)) g.acceptedBy = [];
+        if (!g.acceptedBy.some(n => normalizeNameSegment(n) === _meN)) { g.acceptedBy.push(_me); _dirty = true; }
+        if (_dirty) await saveGame(g);
+      }
+    } catch (e) {}
     enableGameTabs(true);
     if (state.viewOnlyMode) {
       switchTab('board');
