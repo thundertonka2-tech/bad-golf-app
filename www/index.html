@@ -6949,7 +6949,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.624';
+const BG_BUILD = 'v2026.11.625';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -22506,12 +22506,16 @@ function renderScoreEntry() {
       const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[h - 1], g.pars[h - 1], g.hcpRules) : 0;
       const row = document.createElement('div');
       row.className = 'score-entry';
+      // v625 CONSENT: show waiting/declined state and dim the stepper (writes
+      // are hard-blocked in handleScoreChange either way).
+      const _cs = consentBlockState(g, p.name);
+      const _csBadge = _cs ? ` <span style="font-size:9.5px;font-weight:800;letter-spacing:.3px;color:#8a6d1a;background:rgba(212,175,55,.18);border-radius:999px;padding:2px 8px;vertical-align:2px">${_cs === 'declined' ? 'DECLINED' : '⏳ WAITING TO ACCEPT'}</span>` : '';
       row.innerHTML = `
         <div>
-          <div class="name">${displayFirst(p)}</div>
+          <div class="name">${displayFirst(p)}${_csBadge}</div>
           <div class="meta">${p.playsGross ? 'Plays gross' : `HCP ${p.hcp}${strokes > 0 ? ` · gets ${strokes} stroke${strokes > 1 ? 's' : ''}` : ''}`}</div>
         </div>
-        <div class="score-stepper" style="position:relative">
+        <div class="score-stepper" style="position:relative${_cs ? ';opacity:.45' : ''}">
           ${strokes > 0 ? `<span class="pop-dot${strokes > 1 ? ' pop-multi' : ''}" title="${strokes} stroke${strokes > 1 ? 's' : ''} on this hole"></span>` : ''}
           <button data-action="dec" data-pid="${p.id}">−</button>
           <div class="val ${score === null ? 'empty' : ''}" id="val-${p.id}">${score === null ? '—' : score}</div>
@@ -24749,6 +24753,7 @@ async function handlePenaltyToggle(pid) {
 async function clearScoreFor(pid) {
   const g = state.game;
   if (!g || state.viewOnlyMode) return;
+  if (consentBlockToast(g, pid)) return;   // v625 consent lock
   const h = state.currentHole;
   if (!g.scores[pid] || g.scores[pid][h - 1] == null) return;
   g.scores[pid][h - 1] = null;
@@ -24770,6 +24775,8 @@ async function handleScoreChange(pid, action) {
     return;
   }
   const h = state.currentHole;
+  // v625 CONSENT: nobody can enter scores for a player who hasn't accepted.
+  if (consentBlockToast(g, pid)) return;
   if (!g.scores[pid]) g.scores[pid] = new Array(18).fill(null);
   let cur = g.scores[pid][h - 1];
   const prev = cur; // value before this tap — used to fire the celebration only on an improvement
@@ -29918,7 +29925,8 @@ function renderBoard() {
     // Defensive name display — fall back through firstName, name, then a
     // visible placeholder if the player record is somehow empty (saved game
     // missing names, restore bug, etc). Better to show "Player N" than blank.
-    const nameStr = displayFull(p) || displayFirst(p) || p.name || `Player ${i + 1}`;
+    let nameStr = displayFull(p) || displayFirst(p) || p.name || `Player ${i + 1}`;
+    try { const _csb = consentBlockState(g, p.name); if (_csb) nameStr += _csb === 'declined' ? ' ✕' : ' ⏳'; } catch (e) {}
     row.innerHTML = `
       <div class="pos">${i + 1}</div>
       <div class="name">${nameStr}${p.hcp > 0 && !p.playsGross ? ` <span style="color:var(--text-muted);font-weight:400;font-size:11px">(${p.hcp})</span>` : ''}</div>
@@ -30835,6 +30843,12 @@ async function onScoreCellEdit(inp) {
   const pid = inp.dataset.pid;
   const h = parseInt(inp.dataset.h, 10);
   if (pid == null || isNaN(h)) return;
+  // v625 CONSENT: revert any typed value for a player who hasn't accepted.
+  if (consentBlockStatePid(g, pid)) {
+    inp.value = (g.scores[pid] && g.scores[pid][h] != null) ? g.scores[pid][h] : '';
+    consentBlockToast(g, pid);
+    return;
+  }
   let n = String(inp.value).trim() === '' ? null : parseInt(inp.value, 10);
   if (n != null && (isNaN(n) || n < 1)) n = null;
   if (n != null) n = Math.min(15, Math.max(1, n));
@@ -36283,6 +36297,36 @@ async function notifyAddedRegisteredUsers(g) {
       try { sendPush(pr.id, 'Bad Golf', (me || 'A friend') + ' added you to a round at ' + (g.course || 'a course') + ' — accept it so it counts on your stats', { type: 'round_start', round_code: g.code }, 'cr:' + g.code); } catch (e) {}
     }
   } catch (e) { console.warn('notifyAddedRegisteredUsers', e); }
+}
+
+// v625 CONSENT: block state for a player in a round. 'pending' = registered
+// user someone else added who hasn't accepted/joined yet; 'declined' = they
+// said no. null = free to score (guests, creator, accepted users, old rounds,
+// admin-created rounds — none of those carry consentReq entries).
+function consentBlockState(g, name) {
+  try {
+    if (!g || !Array.isArray(g.consentReq) || !g.consentReq.length) return null;
+    const pn = normalizeNameSegment(String(name || ''));
+    if (!pn || g.consentReq.indexOf(pn) < 0) return null;
+    if (Array.isArray(g.acceptedBy) && g.acceptedBy.some(n => normalizeNameSegment(n) === pn)) return null;
+    if (Array.isArray(g.declinedBy) && g.declinedBy.some(n => normalizeNameSegment(n) === pn)) return 'declined';
+    return 'pending';
+  } catch (e) { return null; }
+}
+function consentBlockStatePid(g, pid) {
+  try { const p = ((g && g.players) || []).find(x => x && x.id === pid); return p ? consentBlockState(g, p.name) : null; } catch (e) { return null; }
+}
+function consentBlockToast(g, pid) {
+  const cs = consentBlockStatePid(g, pid);
+  if (!cs) return false;
+  try {
+    const p = ((g && g.players) || []).find(x => x && x.id === pid);
+    const nm = p ? displayFirst(p) : 'They';
+    showToast(cs === 'declined'
+      ? (nm + " declined this round — their scores can't be entered")
+      : ('⏳ ' + nm + " hasn't accepted this round yet — scoring unlocks the moment they join"), 4000);
+  } catch (e) {}
+  return true;
 }
 
 async function sendWagerProposal(toId, code) {
