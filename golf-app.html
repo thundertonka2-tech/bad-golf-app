@@ -5930,6 +5930,11 @@
     <h2>Bad Golf Users</h2>
     <p class="help-text" style="margin-bottom:8px">Tap to add. Names are saved automatically when you start a round — or use ➕ Add a player to store a guest (non-user) now so they're here next time.</p>
     <input type="text" id="roster-search" placeholder="Search names…" style="width:100%;margin-bottom:10px">
+    <!-- v618: Friends / All users filter -->
+    <div style="display:flex;gap:6px;margin-bottom:10px">
+      <button type="button" class="small" id="roster-filter-friends" style="flex:1;min-height:38px">⭐ Friends</button>
+      <button type="button" class="small" id="roster-filter-all" style="flex:1;min-height:38px">All users</button>
+    </div>
     <button class="full" id="roster-add-new" style="margin-bottom:10px;background:rgba(43,108,184,0.10);color:var(--accent);border:1px solid var(--accent);font-weight:600">➕ Add a player (guest / non-user)</button>
     <div id="roster-add-form" style="display:none;background:var(--surface-2);border-radius:8px;padding:10px;margin-bottom:10px">
       <div class="row" style="gap:6px">
@@ -6941,7 +6946,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.617';
+const BG_BUILD = 'v2026.11.618';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -19937,6 +19942,45 @@ async function renderRosterList() {
   const search = ($('roster-search').value || '').toLowerCase().trim();
   const roster = await getPlayerRoster();
 
+  // v618: Friends / All filter. Chips are static HTML — wire once; remember the
+  // last choice. Friend-linked names are cached 60s; if the lookup fails
+  // (guest / offline) the Friends filter falls back to showing everyone.
+  try {
+    const fb = $('roster-filter-friends'), ab = $('roster-filter-all');
+    if (fb && ab && !fb._wired) {
+      fb._wired = true;
+      fb.onclick = () => { window._rosterPickFilter = 'friends'; try { localStorage.setItem('golf:roster-pick-filter', 'friends'); } catch (e) {} renderRosterList(); };
+      ab.onclick = () => { window._rosterPickFilter = 'all'; try { localStorage.setItem('golf:roster-pick-filter', 'all'); } catch (e) {} renderRosterList(); };
+    }
+    if (window._rosterPickFilter == null) { try { window._rosterPickFilter = localStorage.getItem('golf:roster-pick-filter') || 'all'; } catch (e) { window._rosterPickFilter = 'all'; } }
+    if (fb) fb.classList.toggle('primary', window._rosterPickFilter === 'friends');
+    if (ab) ab.classList.toggle('primary', window._rosterPickFilter !== 'friends');
+  } catch (e) {}
+  let friendSet = null;
+  if (window._rosterPickFilter === 'friends') {
+    try {
+      const now = Date.now();
+      if (!window._rosterFriendSet || (now - (window._rosterFriendSetAt || 0)) > 60000) {
+        const meId = _authUser && _authUser.id;
+        const [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]);
+        const byId = {}; (profiles || []).forEach(pr => { if (pr) byId[pr.id] = pr; });
+        const set = new Set();
+        (edges || []).filter(e => e && e.status === 'accepted' && meId && (e.requester === meId || e.addressee === meId))
+          .map(e => byId[e.requester === meId ? e.addressee : e.requester]).filter(Boolean)
+          .forEach(pr => {
+            try {
+              if (pr.my_player) set.add(normalizeNameSegment(pr.my_player));
+              const dn = String(pr.display_name || '');
+              if (dn && dn.indexOf('@') < 0 && !/\d/.test(dn)) set.add(normalizeNameSegment(dn));
+            } catch (e) {}
+          });
+        try { const me = await getMeName(); if (me) set.add(normalizeNameSegment(me)); } catch (e) {}
+        window._rosterFriendSet = set; window._rosterFriendSetAt = now;
+      }
+      friendSet = window._rosterFriendSet;
+    } catch (e) { friendSet = null; }
+  }
+
   // Match by full first+last name to identify "already in setup"
   const inSetup = new Set(
     getCurrentSetupPlayers().map(p =>
@@ -19946,14 +19990,25 @@ async function renderRosterList() {
 
   // Search matches against either first name OR last name OR combined name.
   const filtered = roster.filter(p => {
+    // v618: Friends filter — only roster entries linked to an accepted friend
+    // (or me). No-op when the friend set couldn't be built.
+    if (friendSet && friendSet.size) {
+      try {
+        const nn = normalizeNameSegment(p.name || (((p.firstName || '') + ' ' + (p.lastName || '')).trim()));
+        if (!friendSet.has(nn)) return false;
+      } catch (e) {}
+    }
     if (!search) return true;
     const f = (p.firstName || '').toLowerCase();
     const l = (p.lastName || '').toLowerCase();
     const n = (p.name || '').toLowerCase();
     return f.includes(search) || l.includes(search) || n.includes(search);
   });
-  // Alphabetical order (by full name) so the list is easy to scan.
+  // v618: most RECENTLY PLAYED-WITH first (lastUsed desc — set every time a
+  // player is in a started round), then alphabetical for the rest.
   filtered.sort((a, b) => {
+    const lu = (b.lastUsed || 0) - (a.lastUsed || 0);
+    if (lu) return lu;
     const an = (((a.firstName || '') + ' ' + (a.lastName || '')).trim() || a.name || '').toLowerCase();
     const bn = (((b.firstName || '') + ' ' + (b.lastName || '')).trim() || b.name || '').toLowerCase();
     return an.localeCompare(bn);
@@ -19965,7 +20020,9 @@ async function renderRosterList() {
     return;
   }
   if (filtered.length === 0) {
-    container.innerHTML = `<div class="help-text" style="text-align:center;padding:12px">No matches.</div>`;
+    container.innerHTML = (friendSet && friendSet.size && !search)
+      ? `<div class="help-text" style="text-align:center;padding:12px">No friends in your saved players yet — tap <b>All users</b> to see everyone.</div>`
+      : `<div class="help-text" style="text-align:center;padding:12px">No matches.</div>`;
     return;
   }
 
