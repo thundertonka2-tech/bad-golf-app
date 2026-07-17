@@ -6949,7 +6949,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.627';
+const BG_BUILD = 'v2026.11.628';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -34879,7 +34879,41 @@ async function renderCrewLeaderboard() {
       allowed.forEach(nm => { if (nm && !_have.has(nm)) pool.push({ name: nm }); });
     } catch (e) { console.warn('leaderboard friends filter failed', e); pool = roster; }
   }
-  const rows = pool.map(p => ({ p, s: crewPlayerStats(p) }));
+  // v628: leaderboard money/rounds now use the SAME data a player's PROFILE
+  // shows — local roster history UNIONED with their cloud backup (player_stats).
+  // ONE fetch for the whole board (the profile does this per player), union by
+  // round key, shared round-tombstones respected. Fixes friends showing +$0 on
+  // the Winnings board while their profile shows real lifetime bets.
+  let _cloudStats = null;
+  try {
+    if (supa) {
+      const { data: _ps } = await supa.from('player_stats').select('stats,player_name');
+      if (Array.isArray(_ps)) { _cloudStats = {}; _ps.forEach(r => { try { if (r && r.player_name) _cloudStats[normalizeNameSegment(r.player_name)] = Array.isArray(r.stats) ? r.stats : []; } catch (e) {} }); }
+    }
+  } catch (e) { _cloudStats = null; }
+  let _tombRounds = null;
+  try { const _t = await getSharedTombstones(); _tombRounds = (_t && _t.rounds) || null; } catch (e) {}
+  const _enrich = (p) => {
+    try {
+      if (!_cloudStats || !p || !p.name) return p;
+      const cloud = _cloudStats[normalizeNameSegment(p.name)];
+      if (!cloud || !cloud.length) return p;
+      const hist = Array.isArray(p.scoreHistory) ? p.scoreHistory.slice() : [];
+      const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+      const have = new Set(hist.map(keyOf));
+      cloud.forEach(s => {
+        try {
+          if (!s) return;
+          const k = keyOf(s);
+          if (!k || have.has(k)) return;
+          if (_tombRounds && (_tombRounds.has(statsRoundKey(s)) || _tombRounds.has(rosterRoundKey(s)))) return;
+          hist.push(s); have.add(k);
+        } catch (e) {}
+      });
+      return Object.assign({}, p, { scoreHistory: hist });
+    } catch (e) { return p; }
+  };
+  const rows = pool.map(p => { const ep = _enrich(p); return { p: ep, s: crewPlayerStats(ep) }; });
   const played = rows.filter(r => r.s.rounds > 0);
   // Friends view shows EVERY accepted friend (even 0 rounds / +$0); Everyone view
   // still hides the zero-round long tail. (Tyler: Frank was a friend but missing.)
@@ -34945,7 +34979,7 @@ function resolveRosterPlayerByName(roster, name) {
   return hit || null;
 }
 
-async function openCrewProfile(name) {
+async function openCrewProfile(name, _skipHeal) {
   let roster = await getPlayerRoster();
   let base = resolveRosterPlayerByName(roster, name);
   // v614: friend not on this device's roster at all (never played together on
@@ -34967,6 +35001,11 @@ async function openCrewProfile(name) {
   // writes EVERY player's money to the shared roster (idempotent), so the profile
   // matches the round's Money standings even if it hadn't been archived into their
   // history on this device yet. (Tyler: friend bet money didn't match the board.)
+  // v628: the heal used to be AWAITED here — up to 18 cloud round loads + re-
+  // archives BEFORE the profile appeared (Tyler: "takes over a minute"). It now
+  // runs in the BACKGROUND: the profile renders instantly from current data, and
+  // when the heal finds changes it re-renders the still-open modal once.
+  const _healInBackground = async () => {
   try {
     if (typeof loadGame === 'function' && typeof archiveScoresFromRound === 'function') {
       window._crewHealedCodes = window._crewHealedCodes || new Set();
@@ -34992,9 +35031,19 @@ async function openCrewProfile(name) {
           if (g && g.finishedAt && Array.isArray(g.players) && g.players.length) { await archiveScoresFromRound(g); window._crewHealedCodes.add(_code); _did = true; }
         } catch (e) {}
       }
-      if (_did) { roster = await getPlayerRoster(); base = roster.find(x => x.name === name) || base; }
+      if (_did) return true;
     }
   } catch (e) {}
+    return false;
+  };
+  if (!_skipHeal) {
+    _healInBackground().then(did => {
+      try {
+        const m = document.getElementById('crew-profile-modal');
+        if (did && m && m.classList.contains('show')) openCrewProfile(name, true);
+      } catch (e) {}
+    }).catch(() => {});
+  }
   // Pull the player's real rounds from their per-user cloud backup — fixes a friend
   // who played on their own device showing 0 because the shared roster blob is stale.
   const p = Object.assign({}, base, { scoreHistory: await mergedPlayerHistory(base) });
