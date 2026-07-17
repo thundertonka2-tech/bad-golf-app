@@ -37,5 +37,8 @@ public class WatchBridgePlugin: CAPPlugin {
 class MainViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(WatchBridgePlugin())
+        // Live Activity (Lock Screen / Dynamic Island round card) — same explicit
+        // registration path, for the same Release-build stripping reason.
+        bridge?.registerPluginInstance(LiveActivityPlugin())
     }
 }
