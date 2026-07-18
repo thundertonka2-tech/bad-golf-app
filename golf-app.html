@@ -6953,7 +6953,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.637';
+const BG_BUILD = 'v2026.11.638';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -25568,12 +25568,52 @@ async function resolvePayHandles(payeePlayer){
   try {
     const roster = await getPlayerRoster();
     const key = rosterPlayerKey(payeePlayer);
-    const rp = Array.isArray(roster) ? roster.find(x => rosterPlayerKey(x) === key) : null;
+    let rp = Array.isArray(roster) ? roster.find(x => rosterPlayerKey(x) === key) : null;
+    // v638: normalized-name fallback — a casing/spelling difference between the
+    // round's player and the roster entry ("Frank LoNigro" vs "Frank Lonigro")
+    // used to silently drop the handles from the texted settle-up.
+    if (!(rp && _payHasAny(rp.pay)) && Array.isArray(roster)) {
+      try {
+        const nn = normalizeNameSegment(displayFull(payeePlayer) || payeePlayer.name || '');
+        if (nn) { const alt = roster.find(x => x && _payHasAny(x.pay) && normalizeNameSegment(x.name || '') === nn); if (alt) rp = alt; }
+      } catch(e){}
+    }
     if (rp && _payHasAny(rp.pay)) return rp.pay;
     const me = await getMeName();
     if (me && rosterPlayerKey({ name: me }) === key){ const mine = getMyPay(); if (_payHasAny(mine)) return mine; }
+    // v638: CLOUD fallback — the legacy shared roster row. Rosters are per-user
+    // now (v603), but every handle save still dual-writes (merged) into the
+    // shared row, so a player who set his Venmo on HIS OWN phone is found here
+    // even though he never appears in the sender's per-user roster with pay info.
+    const shared = await _sharedRosterForPay();
+    if (Array.isArray(shared)) {
+      let sp = shared.find(x => x && _payHasAny(x.pay) && rosterPlayerKey(x) === key);
+      if (!sp) {
+        try {
+          const nn2 = normalizeNameSegment(displayFull(payeePlayer) || payeePlayer.name || '');
+          if (nn2) sp = shared.find(x => x && _payHasAny(x.pay) && normalizeNameSegment(x.name || '') === nn2);
+        } catch(e){}
+      }
+      if (sp && _payHasAny(sp.pay)) return sp.pay;
+    }
   } catch(e){}
   return {};
+}
+
+// v638: read (and cache 60s) the legacy shared roster PURELY for payment-handle
+// lookups. Read-only from here — never written. Best-effort: any failure just
+// returns the last cached copy (or null → no links, same as before).
+let _paySharedCache = null, _paySharedAt = 0;
+async function _sharedRosterForPay(){
+  try {
+    if (_paySharedCache && (Date.now() - _paySharedAt) < 60000) return _paySharedCache;
+    if (!(typeof isSignedIn === 'function' && isSignedIn())) return _paySharedCache;
+    if (!supaReady) await initSupabase();
+    if (!(supa && supaOnline)) return _paySharedCache;
+    const { data, error } = await supa.from('games').select('data').eq('code', LEGACY_ROSTER_ROW).maybeSingle();
+    if (!error && data && Array.isArray(data.data)) { _paySharedCache = data.data; _paySharedAt = Date.now(); }
+    return _paySharedCache;
+  } catch(e){ return _paySharedCache; }
 }
 
 // Persist handles for any roster player (by key). Mirrors to local if it's me,
@@ -25600,6 +25640,17 @@ async function saveMyPay(handles){
     const me = await getMeName();
     if (me){ const roster = await getPlayerRoster(); const p = findMyRosterPlayer(roster, me); if (p){ p.pay = Object.assign({}, p.pay, handles); await savePlayerRoster(roster); } }
   } catch(e){ console.warn('saveMyPay', e); }
+  // v638: also stamp MY handles onto my player in the ACTIVE round and sync the
+  // game, so every phone in the group (incl. the scorekeeper texting the
+  // results) carries them immediately — not just my own roster row.
+  try {
+    const me2 = await getMeName();
+    if (me2 && state && state.game && Array.isArray(state.game.players)){
+      const myKey = rosterPlayerKey({ name: me2 });
+      const gp = state.game.players.find(p => p && rosterPlayerKey(p) === myKey);
+      if (gp){ gp.pay = Object.assign({}, gp.pay, handles); try { await saveGame(state.game); } catch(e){} }
+    }
+  } catch(e){}
 }
 
 // Dynamic editor modal. opts: { player, onboarding }. No static HTML needed.
