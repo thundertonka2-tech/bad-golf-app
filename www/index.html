@@ -6949,7 +6949,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.632';
+const BG_BUILD = 'v2026.11.633';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -29421,7 +29421,24 @@ function _t2MyCrossGroupStatuses(g, myId) {
 
 // Build a plain-text settle-up summary for the active round so it can be
 // texted to the group ("who pays who") and everyone can pay out easily.
-function buildSettleUpText() {
+// v633: build the tappable pay links (amount pre-filled) for the CREDITOR of a
+// settle-up line, so a texted settle-up offers Venmo / Cash App / PayPal — not
+// just Apple Cash (which iOS auto-detects on the raw "$31.00" and is all it
+// could show before). Returns indented link lines; empty if the payee set no
+// handles. (Tyler, Jul 2026: "clicking the money owed only shows Apple Cash.")
+async function _settlePayLines(creditorPlayer, amount) {
+  try {
+    const h = await resolvePayHandles(creditorPlayer);
+    if (!_payHasAny(h)) return [];
+    const label = { venmo: 'Venmo', cashapp: 'Cash App', paypal: 'PayPal' };
+    const order = h.preferred ? [h.preferred].concat(['venmo','cashapp','paypal'].filter(m => m !== h.preferred)) : ['venmo','cashapp','paypal'];
+    const out = [];
+    order.forEach(m => { if (!h[m]) return; const link = buildPayLink(m, h[m], amount, 'Bad Golf'); if (link) out.push('   ' + label[m] + ': ' + link); });
+    return out;
+  } catch (e) { return []; }
+}
+
+async function buildSettleUpText() {
   const g = state.game;
   if (!g || !Array.isArray(g.players)) return '';
   let money;
@@ -29433,7 +29450,10 @@ function buildSettleUpText() {
   if (!settlements.length) {
     lines.push('All square — nobody owes anybody. 🍻');
   } else {
-    settlements.forEach(s => lines.push(nm(s.fromId) + ' → ' + nm(s.toId) + '  $' + s.amount.toFixed(2)));
+    for (const s of settlements) {
+      lines.push(nm(s.fromId) + ' → ' + nm(s.toId) + '  $' + s.amount.toFixed(2));
+      try { const _cred = g.players.find(pp => pp.id === s.toId); (await _settlePayLines(_cred, s.amount)).forEach(l => lines.push(l)); } catch (e) {}
+    }
     const total = settlements.reduce((a, s) => a + s.amount, 0);
     lines.push('');
     lines.push(settlements.length + ' payment' + (settlements.length > 1 ? 's' : '') + ' · $' + total.toFixed(2) + ' total');
@@ -29444,7 +29464,7 @@ function buildSettleUpText() {
 // Share the settle-up via text. Native share sheet first (best on phones —
 // pick Messages + recipients), then an sms: link, then clipboard as a backstop.
 async function shareSettleUpSms() {
-  const text = buildSettleUpText();
+  const text = await buildSettleUpText();
   if (!text) { showToast('No round loaded'); return; }
   try {
     if (navigator.share) { await navigator.share({ text }); return; }
@@ -29456,7 +29476,7 @@ async function shareSettleUpSms() {
 
 // Full round-results text for the finish summary: final standings (gross/net +
 // money) and the who-pays-who settle-up.
-function buildRoundShareText() {
+async function buildRoundShareText() {
   const g = state.game;
   if (!g || !Array.isArray(g.players)) return '';
   let money = {}; try { money = computeAllGameMoney(g).combined || {}; } catch (e) {}
@@ -29475,7 +29495,10 @@ function buildRoundShareText() {
   if (settlements.length) {
     const nm = id => { const p = g.players.find(pp => pp.id === id); return p ? displayFull(p) : '?'; };
     lines.push('', 'Settle up:');
-    settlements.forEach(s => lines.push(nm(s.fromId) + ' → ' + nm(s.toId) + '  $' + s.amount.toFixed(2)));
+    for (const s of settlements) {
+      lines.push(nm(s.fromId) + ' → ' + nm(s.toId) + '  $' + s.amount.toFixed(2));
+      try { const _cred = g.players.find(pp => pp.id === s.toId); (await _settlePayLines(_cred, s.amount)).forEach(l => lines.push(l)); } catch (e) {}
+    }
   }
   // (The hole-by-hole scorecard is attached as an IMAGE in shareRoundSummary —
   // a text grid never lines up in a messaging app's proportional font.)
@@ -29689,7 +29712,7 @@ function buildScorecardBlob(g) {
 }
 
 async function shareRoundSummary() {
-  const text = buildRoundShareText();
+  const text = await buildRoundShareText();
   if (!text) { showToast('No round loaded'); return; }
   // Build the scorecard image and share it alongside the text where supported
   // (iOS/Android Web Share with files). The columns line up because it's a real
@@ -47774,8 +47797,17 @@ async function init() {
   window.joinRoundByCode = async function (rawCode) {
     const code = String(rawCode || '').trim().toUpperCase();
     if (!code) return;
+    // v633: coming off the lock screen, the Live Activity card deep-links back
+    // into the round you're ALREADY playing — don't try to "join" it again or
+    // flash the "not live yet" toast. If it's the active live round, no-op.
+    if (state.game && state.game.code === code && !state.viewOnlyMode) return;
     const g = await loadGame(code);
-    if (!g) { showToast('That round isn’t live yet — the host may not have started it (or it ended). Try again once they tee off.'); return; }
+    if (!g) {
+      // A momentary cloud-read miss (LTE / resuming from lock) for the round
+      // we're already in must not false-alarm — stay put silently.
+      if (state.game && state.game.code === code) return;
+      showToast('That round isn’t live yet — the host may not have started it (or it ended). Try again once they tee off.'); return;
+    }
     state.game = g;
     state.viewOnlyMode = !!g.finishedAt;
     state.currentHole = findNextUnscoredHole(g);
@@ -50787,20 +50819,24 @@ const gpsView = (() => {
         // the back tee), so it reads ~0 when parked at the tee and counts up as they
         // drive. (Tyler, Jul 2026: "reset to zero once the carts are at the tee box and
         // parked — that is our starting distance always.")
-        const _nearTee = !hd || !Array.isArray(hd.tee) || ydsBetween(hd.tee, p) <= 70;
+        const _nearTee = !hd || !Array.isArray(hd.tee) || ydsBetween(hd.tee, p) <= 90;
+        const _step = _driveLastPos ? ydsBetween(_driveLastPos, p) : 0;   // movement since the last GPS fix
         if (!_holeStartPos) {
-          if (_nearTee) { _holeStartPos = p.slice(); _driveLastPos = p.slice(); _driveStableSince = _now; }
+          if (_nearTee) { _holeStartPos = p.slice(); _driveLastPos = p.slice(); }
         } else {
           const _fromAnchor = ydsBetween(_holeStartPos, p);
-          if (_fromAnchor <= 30) {
-            // within the tee area — keep the planted anchor; let the dwell clock run.
-          } else if ((_now - _driveStableSince) > 1200 || _fromAnchor > 70) {
-            // Dwelled at the tee then drove off — that move IS the drive. Lock it.
+          // v633: pin the ZERO point to where the player ACTUALLY is while parked /
+          // milling at the tee (fromAnchor <= 25y). Re-seating every stationary fix
+          // makes the bubble read ~0 no matter how they rolled up — fixes the phantom
+          // "44y while parked at the tee" (Tyler, Jul 2026). A lone GPS spike
+          // (_step >= 40y in one fix) is ignored; only a real, gradual departure
+          // past 60y locks the parked origin as the drive's start point.
+          if (_step >= 40) {
+            // single-fix GPS jump — neither re-seat nor lock; wait for the next fix.
+          } else if (_fromAnchor > 60) {
             _driveLocked = true;
-          } else if (_nearTee) {
-            _holeStartPos = p.slice(); _driveStableSince = _now;   // still rolling up to the tee → re-anchor
-          } else {
-            _driveLocked = true;   // moved away from the tee before settling → that's the drive; lock the parked origin
+          } else if (_fromAnchor <= 25) {
+            _holeStartPos = p.slice();
           }
           _driveLastPos = p.slice();
         }
