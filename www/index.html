@@ -6959,7 +6959,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.638';
+const BG_BUILD = 'v2026.11.639';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -39301,6 +39301,7 @@ async function renderT2SettingsHub(t) {
   h += b('carts|' + day, '&#128678;', 'Cart Configuration' + dtag, isTeam ? 'Groups & team assignments' : 'Groups');
   h += b('games|' + day, '&#127919;', 'Games' + dtag, 'Tournament games &mdash; whole field');
   h += b('sidebets|' + day, '&#128176;', 'Side Bets' + dtag, 'Tournament side bets &mdash; whole field');
+  h += b('eventpots', '&#128181;', 'Event Pots', 'Skins &middot; Low Net &middot; GIRs &middot; Putts &middot; Long Putt &mdash; field-wide money');
   h += b('admins', '&#128737;&#65039;', 'Assign Admins', 'Co-managers with full control');
   h += b('scorer|' + day, '&#128081;', 'Assign Scorekeepers' + dtag, 'Who keeps score per group');
   h += '</div>';
@@ -39351,6 +39352,7 @@ async function renderT2SettingsHub(t) {
       if (act === 'carts') { if (!_dayId) { showToast('Set the date first so the day is saved'); return; } close(); return openT2Carts(d, _dayId); }
       if (act === 'games') { close(); return openT2DayConfig(d, { fromHub: true }); }
       if (act === 'sidebets') { close(); return openT2DayConfig(d, { focus: 'sidebets', fromHub: true }); }
+      if (act === 'eventpots') { return openEventPotsMenu(t); }
     } catch (e) { console.error('settings hub', act, e); showToast('Could not open that'); }
   });
 }
@@ -41468,6 +41470,10 @@ async function t2LaunchDayRounds(courseId) {
     // Side games are PER-GROUP now: each group's scorekeeper adds their own money
     // games on the group's round (💰 Side games) — no tournament-wide forcing.
     const code = generateCode();
+    // v639: carry the day's tracking prefs onto the group round (they were never
+    // stamped, so tournament rounds had no putt/GIR steppers — which also feeds
+    // the new field-wide GIR / Fewest-Putt side pots).
+    const _dTrk = (t.settings && t.settings.dayTracking && t.settings.dayTracking[ctx.dayNumber]) || {};
     const game = {
       code: code,
       course: courseName,
@@ -41477,6 +41483,7 @@ async function t2LaunchDayRounds(courseId) {
       games: games,
       groupGames: (groupGamesObj && Object.keys(groupGamesObj).length) ? groupGamesObj : undefined,
       hcpRules: (t.settings && t.settings.dayHcpRules && t.settings.dayHcpRules[ctx.dayNumber]) || { basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false },
+      trackPutts: _dTrk.putts !== false, trackGirs: _dTrk.girs !== false, trackFairways: _dTrk.fairways !== false,
       unranked: false,
       scores: {},
       bankerData: { holes: {}, picks: {} },
@@ -44750,6 +44757,11 @@ function t2ComputeFieldNassau(rows, cfg) {
 function t2ComputeFieldSkins(rows, cfg) {
   if (!cfg || !cfg.on || !Array.isArray(rows) || !rows.length) return null;
   const nmk = s => normalizeNameSegment(String(s || ''));
+  // v639: per-pot handicap % (Tyler's Saturday skins run at 80% while the side
+  // pots stay at 100%). Based on rawHcp (the un-adjusted tournament handicap)
+  // so a day-level % can never double-reduce.
+  const _skPct = (cfg.hcpPct != null && cfg.hcpPct !== '' && !isNaN(Number(cfg.hcpPct))) ? Number(cfg.hcpPct) : 100;
+  const _skHcp = p => { const b = (p.rawHcp != null ? p.rawHcp : (p.hcp != null ? p.hcp : 0)); return Math.round(b * _skPct / 100); };
   const byDay = {};
   rows.forEach(row => {
     const g = row && row.data ? row.data : row;
@@ -44767,11 +44779,11 @@ function t2ComputeFieldSkins(rows, cfg) {
       for (let h = 0; h < 18; h++) {
         const s = sc[h]; if (s == null) continue;
         const par = pars ? pars[h] : 4;
-        net[h] = netHoleScore(s, (p.hcp != null ? p.hcp : 0), sis[h], par, rules); thru++;
+        net[h] = netHoleScore(s, _skHcp(p), sis[h], par, rules); thru++;
       }
       if (!thru) return;
       const k = nmk(p.name); const cur = byDay[day].parts[k];
-      if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), hcp: (p.hcp != null ? p.hcp : 0), net: net, thru: thru };
+      if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), hcp: _skHcp(p), net: net, thru: thru };
     });
   });
   const perDay = []; const totalsByName = {};
@@ -44785,6 +44797,7 @@ function t2ComputeFieldSkins(rows, cfg) {
       if (c.length < 2) continue;
       let best = Infinity; c.forEach(p => { if (p.net[h] < best) best = p.net[h]; });
       let tied = c.filter(p => p.net[h] === best); let winner = tied[0];
+      if (tied.length > 1 && cfg.ties === 'void') continue;   // v639: tied hole = NO skin; pot divides among skins actually won
       if (tied.length > 1) {
         let resolved = null;
         for (const hb of holesBySi) {
@@ -44809,7 +44822,7 @@ function t2ComputeFieldSkins(rows, cfg) {
     perDay.push({ day: Number(day), N: N, totalSkins: totalSkins, skinValue: skinValue, pot: pot, rows: out });
   });
   if (!perDay.length) return null;
-  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), mode: cfg.mode, value: Number(cfg.value) || 0 };
+  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), mode: cfg.mode, value: Number(cfg.value) || 0, ties: (cfg.ties === 'void' ? 'void' : 'countback'), hcpPct: _skPct };
 }
 // FIELD-WIDE TOURNAMENT LONG PUTT — one pot per day, WINNER-TAKE-ALL: the single
 // longest made putt across ALL groups that day wins the pot. Reads each round's logged
@@ -44909,6 +44922,85 @@ function t2ComputeFieldCtp(rows) {
   });
   if (!perDay.length) return null;
   return { perDay: perDay, totals: Object.values(totalsByName).filter(t => t.net !== 0).sort((a, b) => b.net - a.net) };
+}
+
+// v639 — TOURNAMENT SIDE POTS (Tyler's Saturday game): field-wide $ pots computed
+// from every group's scores + tracked data. cfg = t.settings.tourneySidePots =
+// { lowNet:{on,value}, girs:{on,value}, putts:{on,value} }. Every field player
+// antes the pot's $ value; winner takes the pot; TIES SPLIT EVENLY. Low Net runs
+// at FULL (100%) handicap regardless of the skins pot's %. GIRs come from
+// tracked putts (score − putts ≤ par − 2) or the manual GIR chip; Fewest Putts
+// requires putts logged on every scored hole so missing data can never "win".
+// Money moves only once every player in the day's field has finished 18.
+function t2ComputeFieldSidePots(rows, cfg) {
+  try {
+    if (!cfg || !Array.isArray(rows) || !rows.length) return null;
+    const pots = ['lowNet', 'girs', 'putts'].filter(k => cfg[k] && cfg[k].on && Number(cfg[k].value) > 0);
+    if (!pots.length) return null;
+    const nmk = s => normalizeNameSegment(String(s || ''));
+    const byDay = {};
+    rows.forEach(row => {
+      const g = row && row.data ? row.data : row;
+      if (!g || !Array.isArray(g.players)) return;
+      const day = (g.t2 && g.t2.day) || 1;
+      const pars = Array.isArray(g.pars) ? g.pars : null;
+      const sis = Array.isArray(g.sis) ? g.sis : null;
+      byDay[day] = byDay[day] || { parts: {} };
+      g.players.forEach(p => {
+        if (!p || !p.name) return;
+        const sc = (g.scores && g.scores[p.id]) || [];
+        const fullHcp = (p.rawHcp != null ? p.rawHcp : (p.hcp != null ? p.hcp : 0));
+        let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
+        for (let h = 0; h < 18; h++) {
+          const s = sc[h]; if (s == null) continue;
+          scored++;
+          const par = pars ? pars[h] : 4;
+          net += (sis ? netHoleScore(s, fullHcp, sis[h], par, g.hcpRules || null) : s);
+          const pu = (g.puttsData && g.puttsData[p.id]) ? g.puttsData[p.id][h] : null;
+          if (pu != null) {
+            putts += Number(pu) || 0; puttHoles++;
+            if ((s - (Number(pu) || 0)) <= (par - 2)) girs++;
+          } else if (g.girData && Array.isArray(g.girData[p.id]) && g.girData[p.id][h] === true) girs++;
+        }
+        if (!scored) return;
+        const k = nmk(p.name); const cur = byDay[day].parts[k];
+        if (!cur || scored > cur.scored) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), scored: scored, net: net, girs: girs, putts: putts, puttHoles: puttHoles };
+      });
+    });
+    const POT_LABELS = { lowNet: '🏅 Low Net', girs: '🎯 Most GIRs', putts: '🥄 Fewest Putts' };
+    const perDay = [], totalsByName = {};
+    Object.keys(byDay).sort((a, b) => a - b).forEach(day => {
+      const players = Object.values(byDay[day].parts), N = players.length;
+      if (N < 2) return;
+      const done = players.every(p => p.scored >= 18);
+      const dayOut = { day: Number(day), pots: [] };
+      pots.forEach(k => {
+        const val = Number(cfg[k].value) || 0, pot = val * N;
+        const statOf = p => (k === 'lowNet') ? p.net : (k === 'girs' ? p.girs : p.putts);
+        let elig;
+        if (k === 'lowNet') elig = players.filter(p => p.scored >= 18);
+        else if (k === 'girs') elig = players.filter(p => p.girs > 0);
+        else elig = players.filter(p => p.scored >= 18 && p.puttHoles >= p.scored);
+        let winners = [], bestVal = null;
+        if (elig.length) {
+          const sorted = elig.slice().sort((a, b) => (k === 'girs') ? (statOf(b) - statOf(a)) : (statOf(a) - statOf(b)));
+          bestVal = statOf(sorted[0]);
+          winners = sorted.filter(p => statOf(p) === bestVal);
+        }
+        const paying = done && winners.length > 0;   // no qualifier → pot void, no money moves
+        const rowsOut = players.map(p => {
+          const isW = winners.some(w => nmk(w.name) === nmk(p.name));
+          const money = paying ? ((isW ? pot / winners.length : 0) - val) : 0;
+          if (paying && money !== 0) { const tk = nmk(p.name); totalsByName[tk] = totalsByName[tk] || { first: p.first, net: 0 }; totalsByName[tk].net += money; }
+          return { name: p.name, first: p.first, money: money, winner: isW, stat: statOf(p) };
+        }).sort((a, b) => (b.money - a.money) || String(a.first || '').localeCompare(String(b.first || '')));
+        dayOut.pots.push({ key: k, label: POT_LABELS[k], value: val, pot: pot, done: done, paying: paying, winners: winners.map(w => w.first || w.name), best: bestVal, rows: rowsOut });
+      });
+      if (dayOut.pots.length) perDay.push(dayOut);
+    });
+    if (!perDay.length) return null;
+    return { perDay: perDay, totals: Object.values(totalsByName).filter(x => x.net !== 0).sort((a, b) => b.net - a.net) };
+  } catch (e) { return null; }
 }
 
 // Phase 4 — 4-man TEAM standings "vs the field": each group plays as one team
@@ -45289,6 +45381,16 @@ async function openEventLeaderboard(t) {
       });
       html += '<div class="small-text" style="color:var(--text-muted)">The winner takes the per-player ante from everyone else in the field.</div></div>';
     }
+    // v639: commissioner "Event pots" row — the Skins/Nassau/LongPutt config modals
+    // existed but their buttons were never emitted anywhere (dead wiring). This row
+    // is the always-visible entry point, plus the new Side Pots config.
+    if (_amCommish) {
+      html += '<div style="margin:14px 0 2px;display:flex;flex-wrap:wrap;gap:6px;align-items:center"><span style="font-weight:700;flex:0 0 auto">💵 Event pots:</span>' +
+        '<button type="button" class="small evlb-skins-cfg" style="flex:0 0 auto">🎯 Skins</button>' +
+        '<button type="button" class="small evlb-sp-cfg" style="flex:0 0 auto">🏅 Side Pots</button>' +
+        '<button type="button" class="small evlb-lp-cfg" style="flex:0 0 auto">📏 Long Putt</button>' +
+        '<button type="button" class="small evlb-nassau-cfg" style="flex:0 0 auto">🏆 Nassau</button></div>';
+    }
     // Tournament Skins — FIELD-WIDE pot (net, hardest-hole countback), a SEPARATE
     // pool from any group's own skins. Commissioner sets the pot; results compute live.
     {
@@ -45306,7 +45408,7 @@ async function openEventLeaderboard(t) {
                 html += '<div>' + escapeHtml(r.first || r.name) + ': ' + r.skins + ' skin' + (r.skins === 1 ? '' : 's') + ' — <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>';
               });
             });
-            html += '<div class="small-text" style="color:var(--text-muted)">Net low per hole; ties broken by hardest-hole countback. Pot ÷ skins won.</div></div>';
+            html += '<div class="small-text" style="color:var(--text-muted)">Net low per hole' + (_sk.hcpPct !== 100 ? ' at ' + _sk.hcpPct + '% handicap' : '') + '; ' + (_sk.ties === 'void' ? 'tied holes carry no skin' : 'ties broken by hardest-hole countback') + '. Pot ÷ skins won.</div></div>';
           } else {
             html += '<div class="small-text" style="color:var(--text-muted)">' + (_ts.mode === 'total' ? 'Total pot $' + _ts.value : '$' + _ts.value + '/player') + ' — results show once scores are in.</div>';
           }
@@ -45377,6 +45479,34 @@ async function openEventLeaderboard(t) {
         }
       }
     }
+    // v639: Tournament Side Pots — Low Net / Most GIRs / Fewest Putts (whole field).
+    {
+      const _tsp = (t.settings && t.settings.tourneySidePots) || null;
+      const _spAny = _tsp && ['lowNet', 'girs', 'putts'].some(k => _tsp[k] && _tsp[k].on);
+      if (_spAny) {
+        html += '<h3 style="margin:14px 0 4px">🏅 Tournament Side Pots <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field · ties split)</span></h3>';
+        let _spRows = []; try { _spRows = await loadTourneyRawRounds(t); } catch (e) {}
+        const _sp = t2ComputeFieldSidePots(_spRows, _tsp);
+        if (_sp && _sp.perDay.length) {
+          html += '<div style="font-size:13px">';
+          _sp.perDay.forEach(dd => {
+            dd.pots.forEach(pp => {
+              const statTxt = (pp.best != null) ? (pp.key === 'lowNet' ? ('net ' + pp.best) : (pp.key === 'girs' ? (pp.best + ' GIRs') : (pp.best + ' putts'))) : '';
+              const dayTag = _sp.perDay.length > 1 ? ('Day ' + dd.day + ' · ') : '';
+              let line;
+              if (pp.paying) line = ' · 🏆 ' + escapeHtml(pp.winners.join(' & ')) + (statTxt ? ' (' + statTxt + ')' : '');
+              else if (pp.done) line = ' · <span style="color:var(--text-muted)">no qualifier — pot void</span>';
+              else line = pp.winners.length ? ' · <span style="color:var(--text-muted)">leading: ' + escapeHtml(pp.winners.join(' & ')) + (statTxt ? ' (' + statTxt + ')' : '') + '</span>' : ' · <span style="color:var(--text-muted)">waiting on data</span>';
+              html += '<div style="font-weight:600;margin-top:4px">' + dayTag + pp.label + ' · pot $' + pp.pot.toFixed(0) + line + '</div>';
+              if (pp.paying) pp.rows.filter(r => r.money !== 0).forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.money >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.money) + '</strong></div>'; });
+            });
+          });
+          html += '<div class="small-text" style="color:var(--text-muted)">Low Net = full handicap. GIRs auto from tracked putts, or the GIR chip. Fewest Putts needs putts on all 18. Ties split the pot; pots pay once every group finishes.</div></div>';
+        } else {
+          html += '<div class="small-text" style="color:var(--text-muted)">Standings appear as scores come in; pots pay once every group finishes.</div>';
+        }
+      }
+    }
     // Tournament Closest to the Pin — FIELD-WIDE pot: the closest ball on each CTP
     // hole across ALL groups wins that hole's pot. Shown when any group ran a
     // tournament-level (field) CTP. Separate from any group's own CTP.
@@ -45425,6 +45555,7 @@ async function openEventLeaderboard(t) {
     body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-nassau-cfg').forEach(b => b.onclick = () => openTourneyNassauConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-lp-cfg').forEach(b => b.onclick = () => openTourneyLongPuttConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    body.querySelectorAll('.evlb-sp-cfg').forEach(b => b.onclick = () => openTourneySidePotsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
    } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
   };
   await _renderEvlbBody();
@@ -45468,11 +45599,15 @@ function openTourneySkinsConfig(t, onDone) {
   const ov = document.createElement('div');
   ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100065';
   ov.innerHTML = '<div class="modal" style="max-width:420px"><h2 style="margin-bottom:6px">🎯 Tournament Skins</h2>' +
-    '<p class="help-text" style="margin-bottom:10px">One field-wide skins pot — NET scoring, split by skins won, tied holes broken by hardest-hole countback. This is separate from any group’s own skins game.</p>' +
+    '<p class="help-text" style="margin-bottom:10px">One field-wide skins pot — NET scoring, split by skins won. This is separate from any group’s own skins game.</p>' +
     '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="tsk-on" class="bg-sw"' + (cur.on ? ' checked' : '') + ' style="width:auto;transform:scale(1.3)"> <span style="font-weight:600">Run Tournament Skins this event</span></label>' +
     '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Pot</label>' +
     '<select id="tsk-mode" style="width:100%;margin-bottom:8px"><option value="buyin"' + (cur.mode !== 'total' ? ' selected' : '') + '>Buy-in per player</option><option value="total"' + (cur.mode === 'total' ? ' selected' : '') + '>Total pot (whole field)</option></select>' +
     '<div class="row" style="align-items:center;gap:8px;margin-bottom:12px"><span class="small-text">$</span><input type="number" id="tsk-val" inputmode="decimal" min="0" value="' + (cur.value != null ? cur.value : '') + '" style="flex:1" placeholder="0"></div>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Handicap for skins</label>' +
+    '<select id="tsk-hcp" style="width:100%;margin-bottom:8px">' + [100, 90, 80, 75, 66, 50].map(function (pc) { return '<option value="' + pc + '"' + ((cur.hcpPct != null ? Number(cur.hcpPct) : 100) === pc ? ' selected' : '') + '>' + pc + '%' + (pc === 100 ? ' (full)' : '') + '</option>'; }).join('') + '</select>' +
+    '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Tied holes</label>' +
+    '<select id="tsk-ties" style="width:100%;margin-bottom:12px"><option value="void"' + (cur.ties === 'void' ? ' selected' : '') + '>No skin — pot splits among skins won</option><option value="countback"' + (cur.ties !== 'void' ? ' selected' : '') + '>Countback picks a winner (every hole pays)</option></select>' +
     '<div class="actions"><button id="tsk-cancel" style="flex:1">Cancel</button><button class="primary" id="tsk-save" style="flex:1">Save</button></div></div>';
   document.body.appendChild(ov);
   const close = () => { try { ov.remove(); } catch (e) {} };
@@ -45482,7 +45617,9 @@ function openTourneySkinsConfig(t, onDone) {
     const on = ov.querySelector('#tsk-on').checked;
     const mode = ov.querySelector('#tsk-mode').value;
     const value = parseFloat(ov.querySelector('#tsk-val').value) || 0;
-    const ok = await t2MergeSettings(t.id, s => { s.tourneySkins = { on: on, mode: mode, value: value }; });
+    const hcpPct = parseInt(ov.querySelector('#tsk-hcp').value, 10) || 100;
+    const ties = ov.querySelector('#tsk-ties').value === 'void' ? 'void' : 'countback';
+    const ok = await t2MergeSettings(t.id, s => { s.tourneySkins = { on: on, mode: mode, value: value, hcpPct: hcpPct, ties: ties }; });
     showToast(ok ? 'Tournament Skins saved ✓' : 'Couldn’t save — try again');
     close(); if (typeof onDone === 'function') onDone();
   };
@@ -45517,6 +45654,69 @@ function openTourneyNassauConfig(t, onDone) {
     showToast(ok ? 'Tournament Nassau saved ✓' : 'Couldn’t save — try again');
     close(); if (typeof onDone === 'function') onDone();
   };
+}
+
+// v639: commissioner sets up the field-wide SIDE POTS (Low Net / Most GIRs /
+// Fewest Putts). Stored in t.settings.tourneySidePots; computed by
+// t2ComputeFieldSidePots on the Event Leaderboard. Ties split evenly.
+function openTourneySidePotsConfig(t, onDone) {
+  const cur = (t.settings && t.settings.tourneySidePots) || {};
+  const rowH = (id, label, desc, c) => '<div style="border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px">' +
+    '<label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="tsp-' + id + '-on" class="bg-sw"' + ((c && c.on) ? ' checked' : '') + ' style="width:auto;transform:scale(1.2)"> <span style="font-weight:600;flex:1">' + label + '</span>' +
+    '<span class="small-text">$</span><input type="number" id="tsp-' + id + '-val" inputmode="decimal" min="0" value="' + ((c && c.value != null) ? c.value : 1) + '" style="width:64px;flex:0 0 auto"></label>' +
+    '<div class="small-text" style="color:var(--text-muted);margin-top:4px">' + desc + '</div></div>';
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100065';
+  ov.innerHTML = '<div class="modal" style="max-width:440px;max-height:84vh;overflow-y:auto"><h2 style="margin-bottom:6px">🏅 Tournament Side Pots</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">Field-wide $ pots across every group — each player antes the $ per pot, winner takes the pot, TIES SPLIT. All at FULL handicap (skins has its own % setting). Pots pay once every group finishes.</p>' +
+    rowH('lownet', '🏅 Low Net (overall 18)', 'Lowest net total across the whole field — full handicap.', cur.lowNet) +
+    rowH('girs', '🎯 Most GIRs', 'Most greens in regulation across the field. Auto from tracked putts, or the GIR chip on the score row.', cur.girs) +
+    rowH('putts', '🥄 Fewest Putts', 'Fewest total putts across the field. Needs putts logged on all 18 — a player missing putt data can’t win it.', cur.putts) +
+    '<div class="actions" style="margin-top:4px"><button id="tsp-cancel" style="flex:1">Cancel</button><button class="primary" id="tsp-save" style="flex:1">Save</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#tsp-cancel').onclick = close;
+  ov.querySelector('#tsp-save').onclick = async () => {
+    const pick = id => ({ on: ov.querySelector('#tsp-' + id + '-on').checked, value: parseFloat(ov.querySelector('#tsp-' + id + '-val').value) || 0 });
+    const cfgOut = { lowNet: pick('lownet'), girs: pick('girs'), putts: pick('putts') };
+    const ok = await t2MergeSettings(t.id, s => { s.tourneySidePots = cfgOut; });
+    showToast(ok ? 'Side pots saved ✓' : 'Couldn’t save — try again');
+    close(); if (typeof onDone === 'function') onDone();
+  };
+}
+
+// v639: ONE menu for all the field-wide event pots (opened from the settings
+// hub). Each line opens its existing config modal; status chips show what's on.
+async function openEventPotsMenu(t) {
+  try { const f = await t2Get(t.id); if (f) { t = f; if (_t2Current && _t2Current.id === f.id) _t2Current = f; } } catch (e) {}
+  const s = (t && t.settings) || {};
+  const st = on => on ? '<span class="small-text" style="color:var(--money-pos);font-weight:700;flex:0 0 auto">ON</span>' : '<span class="small-text" style="color:var(--text-muted);flex:0 0 auto">off</span>';
+  const spOn = s.tourneySidePots && ['lowNet', 'girs', 'putts'].some(k => s.tourneySidePots[k] && s.tourneySidePots[k].on);
+  const old = document.getElementById('event-pots-menu'); if (old) { try { old.remove(); } catch (e) {} }
+  const ov = document.createElement('div');
+  ov.id = 'event-pots-menu'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100064';
+  const btn = (k, label, on) => '<button type="button" class="full epm-b" data-k="' + k + '" style="display:flex;align-items:center;gap:8px;margin-bottom:6px;text-align:left"><span style="flex:1;min-width:0">' + label + '</span>' + st(on) + '<span style="flex:0 0 auto;color:var(--text-muted)">›</span></button>';
+  ov.innerHTML = '<div class="modal" style="max-width:440px"><h2 style="margin-bottom:4px">💵 Event Pots</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">Field-wide money pots that settle across EVERY group on the Event Leaderboard. Separate from each group’s own games.</p>' +
+    btn('skins', '🎯 Tournament Skins', s.tourneySkins && s.tourneySkins.on) +
+    btn('sp', '🏅 Side Pots — Low Net · GIRs · Putts', spOn) +
+    btn('lp', '📏 Long Putt', s.tourneyLongPutt && s.tourneyLongPutt.on) +
+    btn('nassau', '🏆 Nassau (F9/B9/18 places)', s.tourneyNassau && s.tourneyNassau.on) +
+    '<div class="help-text" style="margin:8px 0 10px">Closest to the Pin: turn on CTP in <b>Games</b> for the day and pick the hole (e.g. #17) — it settles field-wide automatically. Long Drive: set it in Games too; the commissioner picks the winner on the Event Leaderboard.</div>' +
+    '<div class="actions"><button id="epm-close" class="primary full">Done</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#epm-close').onclick = close;
+  const reopen = () => { openEventPotsMenu(t); };
+  ov.querySelectorAll('.epm-b').forEach(b => b.onclick = () => {
+    const k = b.dataset.k; close();
+    if (k === 'skins') return openTourneySkinsConfig(t, reopen);
+    if (k === 'sp') return openTourneySidePotsConfig(t, reopen);
+    if (k === 'lp') return openTourneyLongPuttConfig(t, reopen);
+    if (k === 'nassau') return openTourneyNassauConfig(t, reopen);
+  });
 }
 
 // Commissioner picks the ONE field-wide Long Drive winner for a tournament day.
