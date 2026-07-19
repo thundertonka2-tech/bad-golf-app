@@ -7092,7 +7092,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.689';
+const BG_BUILD = 'v2026.11.690';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -37550,7 +37550,7 @@ async function showIncomingInvite(inv) {
   const txt = document.getElementById('incoming-invite-text');
   if (txt) {
     if (isT2) {
-      txt.innerHTML = '<b>' + fromName + '</b> invited you to the tournament <b>' + (inv.course || '') + '</b> 🏆. Open it?';
+      txt.innerHTML = '<b>' + fromName + '</b> invited you to the tournament <b>' + (inv.course || '') + '</b> 🏆. Accept to add it to your rounds?';
     } else if (isW) {
       txt.innerHTML = '<b>' + fromName + '</b> put a bet on' +
         (inv.course ? ' <b>' + inv.course + '</b>' : ' a round') + ' 🎲. Watch it in your Wager tab — live updates + the final result. You won\'t be joining their round.';
@@ -37577,7 +37577,7 @@ async function showIncomingInvite(inv) {
   { const titleEl = document.getElementById('incoming-invite-title');
     if (titleEl) titleEl.textContent = isWB ? '🎲 Bet sent to you' : isW ? '🎲 Bet proposal' : (isOR ? '📣 Open round' : (isT2 ? '🏆 Tournament invite' : '⛳ Game invite')); }
   { const joinBtn = document.getElementById('incoming-invite-join');
-    if (joinBtn) joinBtn.textContent = isWB ? 'View in Wager tab' : isW ? 'Watch in Wager tab' : (isOR ? 'Accept' : (isT2 ? 'Open tournament' : 'Join now')); }
+    if (joinBtn) joinBtn.textContent = isWB ? 'View in Wager tab' : isW ? 'Watch in Wager tab' : (isOR ? 'Accept' : (isT2 ? 'Accept' : 'Join now')); }
   document.getElementById('incoming-invite-modal').classList.add('show');
   return true;
 }
@@ -37589,10 +37589,13 @@ async function acceptIncomingInvite() {
   if (!inv) return;
   try { await supa.from('game_invites').update({ status: 'accepted' }).eq('id', inv.id); } catch (e) {}
   if (String(inv.game_code || '').indexOf('T2:') === 0) {
-    // Tournament invite — the event is already in their Events tab (they were
-    // added as a linked player). Take them straight to it.
-    switchTab('tourneys');
-    try { await openT2Home(inv.game_code.slice(3)); } catch (e) { showToast('Open the Events tab to see your tournament'); }
+    // v690: accepting an invite ADDS the event to my rounds — land on the Events tab
+    // as a PLAYER (the event's already there as a linked player), NOT the admin setup
+    // screen. Invitees were being dumped onto Configure games / Start Event / Delete
+    // tournament — they must never see that. (Tyler, Jul 2026.)
+    try { switchTab('tourneys'); } catch (e) {}
+    try { if (typeof renderT2List === 'function') await renderT2List(); } catch (e) {}
+    showToast('Added to your rounds ✓');
     return;
   }
   if (String(inv.game_code || '').indexOf('WB:') === 0) {
@@ -37662,21 +37665,36 @@ async function declineIncomingInvite() {
   // A wager proposal decline is just "no thanks to the bet" — nothing else to do.
   if (String(inv.game_code || '').indexOf('WB:') === 0) { try { renderIncomingWagers(); } catch (e) {} return; }
   if (String(inv.game_code || '').indexOf('W:') === 0) { return; }
+  const _isT2decl = String(inv.game_code || '').indexOf('T2:') === 0;
+  // v690: tell the person who invited me that I declined. Push (best-effort) to the
+  // inviter — the tournament director for a T2 invite, the round creator for a round
+  // invite. The 'declined' status written above is ALSO read by the director's event
+  // screen to show a "✕ Declined" tag by my name, so it lands even if push is off.
+  try {
+    let _meNm = ''; try { _meNm = (await getMeName()) || ''; } catch (e) {}
+    if (inv.from_user && typeof sendPush === 'function') {
+      sendPush(inv.from_user, 'Invite declined',
+        (_meNm || 'A player') + ' declined your ' + (_isT2decl ? 'tournament' : 'round') + ' invite' + (inv.course ? (' for ' + inv.course) : '') + '.',
+        { kind: 'invite_declined', code: inv.game_code || '' });
+    }
+  } catch (e) {}
+  if (_isT2decl) {
+    showToast('Declined — the tournament director was notified.', 4000);
+    return;
+  }
   // Declined a ROUND invite: even if scores get entered for them anyway,
   // this round must never count toward their handicap.
-  if (String(inv.game_code || '').indexOf('T2:') !== 0) {
-    try {
-      const g = await loadGame(inv.game_code);
-      const me = await getMeName();
-      if (g && me) {
-        if (!Array.isArray(g.declinedBy)) g.declinedBy = [];
-        if (!g.declinedBy.includes(me)) { g.declinedBy.push(me); await saveGame(g); }
-      }
-      clearPendingJoin(inv.game_code);
-    } catch (e) {}
-    showToast("Ignored — this round won't count toward your stats.", 4500);
-    try { switchTab('home'); } catch (e) {}
-  }
+  try {
+    const g = await loadGame(inv.game_code);
+    const me = await getMeName();
+    if (g && me) {
+      if (!Array.isArray(g.declinedBy)) g.declinedBy = [];
+      if (!g.declinedBy.includes(me)) { g.declinedBy.push(me); await saveGame(g); }
+    }
+    clearPendingJoin(inv.game_code);
+  } catch (e) {}
+  showToast("Declined — the round creator was notified. This round won't count toward your stats.", 4500);
+  try { switchTab('home'); } catch (e) {}
 }
 
 function wireFriendsModals() {
@@ -39578,6 +39596,7 @@ async function t2PersistStandings(t, players, standings) {
 // ============================================================
 let _t2Wired = false;
 let _t2Current = null;
+let _t2DeclinedIds = new Set();  // v690: user_ids who DECLINED their invite to _t2Current (director-visible "✕ Declined" tag)
 let _pendingTjoin = null;
 function t2esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 const T2_FORMATS = [['singles','Singles (1v1)'],['bestball','Best Ball (2v2)'],['scramble','Scramble (2v2)'],['altshot','Alt Shot (2v2)'],['rydercup','Ryder Cup (2v2, 3 formats)'],['quota','Quota (points)'],['teamquota','Team Quota'],['stroke','Stroke (leaderboard)']];
@@ -40615,7 +40634,8 @@ function t2PlayerRow(p, amCommish, od, teeLabel) {
     t2esc(p.display_name) + (wd ? ' <span class="small-text" style="color:var(--danger)">WD</span>' : '') +
     (!amCommish && p.handicap != null ? ' <span class="small-text" style="color:var(--text-muted)">(' + fmtHcp(p.handicap) + ')</span>' : '') +
     (teeLabel ? ' <span class="small-text" style="color:var(--accent)">⛳ ' + t2esc(teeLabel) + '</span>' : '') +
-    claimed + _guestTag + '</div>';
+    claimed + _guestTag +
+    ((p.user_id && typeof _t2DeclinedIds !== 'undefined' && _t2DeclinedIds.has(p.user_id)) ? ' <span class="small-text" style="color:var(--danger);font-weight:700">✕ Declined</span>' : '') + '</div>';
   if (amCommish) {
     // Editable handicap — adjust any player's HCP after the fact. Saves on change.
     let _hv = (p.handicap != null ? String(p.handicap) : '');
@@ -42902,6 +42922,14 @@ async function renderT2Home() {
   _t2WizActive = false;
   const body = document.getElementById('t2-home-body');
   const amCommish = t2CanManage(t);
+  // v690: which invited players DECLINED — the director sees a "✕ Declined" tag by
+  // their name (paired with the push the decliner sends). Only the inviter/commish
+  // can read these invite rows, so this stays empty for a regular player's view.
+  _t2DeclinedIds = new Set();
+  if (amCommish && supa) { try {
+    const { data: _dcl } = await supa.from('game_invites').select('to_user').eq('game_code', 'T2:' + t.id).eq('status', 'declined');
+    (_dcl || []).forEach(r => { if (r && r.to_user) _t2DeclinedIds.add(r.to_user); });
+  } catch (e) {} }
   const [players, days] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id)]);
   // Groups + members per saved day (small scale — a handful of queries).
   const groupsByDay = {}; const membersByGroup = {};
