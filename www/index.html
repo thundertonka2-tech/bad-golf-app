@@ -7128,7 +7128,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.705';
+const BG_BUILD = 'v2026.11.706';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -10328,6 +10328,63 @@ const _singletonDirty = {};     // key -> true when local edits AREN'T yet confi
 // background refresh would clobber them with the stale cloud row.
 try { (JSON.parse(localStorage.getItem('golf:dirty-singletons') || '[]') || []).forEach(k => { if (k) _singletonDirty[k] = true; }); } catch (e) {}
 function _persistDirty() { try { localStorage.setItem('golf:dirty-singletons', JSON.stringify(Object.keys(_singletonDirty).filter(k => _singletonDirty[k]))); } catch (e) {} }
+// v706 — localStorage is capped ~5 MB per origin. Bad Golf caches big cloud blobs
+// in localStorage for instant reads: golf:courses (~2 MB), golf:course-library-
+// additions (~1.8 MB), plus dozens of golf:course-gps-cache:* (~33 KB each). Once
+// that fills, EVERY localStorage.setItem throws QuotaExceededError — silently
+// swallowed everywhere — so round-delete TOMBSTONES, the hidden-rounds list and
+// roster edits stopped persisting. Net effect the crew kept hitting: "I delete a
+// round and nothing happens / it keeps coming back." bgLsSet makes writes quota-
+// resilient: on a quota error it evicts the largest cheaply-re-fetchable caches
+// (GPS caches first, then the course-library blobs — all re-pulled from the cloud)
+// and retries, so correctness writes always land.
+function bgIsQuotaError(e) {
+  return !!e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e.code === 1014 || (/quota/i.test(String(e && e.message || ''))));
+}
+// Keys that carry LOCAL truth not yet guaranteed in the cloud — NEVER evict these
+// to free space (evicting them is exactly the data loss we're preventing).
+var BG_LS_PROTECTED = ['golf:player-roster', 'golf:roster-tombstones', 'golf:hidden-rounds',
+  'golf:deleted-rounds', 'golf:recent-games', 'golf:tourneys', 'golf:round-templates',
+  'golf:dirty-singletons'];
+function bgLsEvict(keepKey) {
+  var freed = 0;
+  // 1) GPS hole caches — always safe (re-fetched from course_gps on demand).
+  var drop = [];
+  for (var i = 0; i < localStorage.length; i++) {
+    var k = localStorage.key(i);
+    if (k && k !== keepKey && k.indexOf('golf:course-gps-cache:') === 0) drop.push(k);
+  }
+  drop.forEach(function (k) { try { var n = (localStorage.getItem(k) || '').length; localStorage.removeItem(k); freed += n; } catch (e) {} });
+  if (freed > 300000) return freed;   // ~300 KB+ freed is plenty for a tombstone/hidden/roster write
+  // 2) Still tight — drop the big re-fetchable cloud blobs, EXCEPT any with unsynced
+  //    local edits (dirty) or that carry local truth. Cache-first re-pulls them.
+  var big = ['golf:code-review-queue', 'golf:course-verified', 'golf:course-skipped',
+    'golf:course-deletes', 'golf:course-name-overrides', 'golf:course-detail-overrides',
+    'golf:course-library-additions', 'golf:courses'];
+  big.forEach(function (k) {
+    if (k === keepKey || BG_LS_PROTECTED.indexOf(k) >= 0) return;
+    try { if (typeof _singletonDirty !== 'undefined' && _singletonDirty[k]) return; } catch (e) {}
+    try { var n = (localStorage.getItem(k) || '').length; if (n) { localStorage.removeItem(k); freed += n; } } catch (e) {}
+  });
+  return freed;
+}
+function bgLsSet(key, value) {
+  try { localStorage.setItem(key, value); return true; }
+  catch (e) {
+    if (!bgIsQuotaError(e)) return false;
+    try { bgLsEvict(key); } catch (_e) {}
+    try { localStorage.setItem(key, value); return true; }
+    catch (e2) {
+      // Last resort: drop even the big course blobs so a delete/tombstone lands
+      // (correctness beats a warm cache). Skips the key we're writing.
+      try {
+        ['golf:courses', 'golf:course-library-additions'].forEach(function (k) { if (k !== key) { try { localStorage.removeItem(k); } catch (e3) {} } });
+        localStorage.setItem(key, value); return true;
+      } catch (e4) { return false; }
+    }
+  }
+}
+
 async function readSharedSingleton(key) {
   if (_singletonInFlight[key]) return _singletonInFlight[key];
   const p = _readSharedSingletonNow(key);
@@ -10375,7 +10432,7 @@ async function _readSharedSingletonNow(key) {
                     }
                     _next = _m;
                   }
-                  localStorage.setItem(key, JSON.stringify(_next));
+                  bgLsSet(key, JSON.stringify(_next));
                 } catch (e) {}
               }
             })
@@ -10396,7 +10453,7 @@ async function _readSharedSingletonNow(key) {
         .maybeSingle();
       if (!error && data && data.data) {
         const json = JSON.stringify(data.data);
-        try { localStorage.setItem(key, json); } catch (e) {}
+        try { bgLsSet(key, json); } catch (e) {}
         return json;
       }
     }
@@ -10487,7 +10544,7 @@ async function _mergeSharedSingletonValue(key, local) {
   return undefined;
 }
 async function writeSharedSingleton(key, value) {
-  try { localStorage.setItem(key, value); } catch (e) {}  // cache locally so cache-first reads are correct right after a write
+  try { bgLsSet(key, value); } catch (e) {}  // cache locally so cache-first reads are correct right after a write
   _singletonWroteAt[key] = Date.now();                    // shield this fresh write from a stale background refresh (see readSharedSingleton)
   _singletonDirty[key] = true; _persistDirty();           // unsaved until the cloud confirms — protects the local copy from being clobbered
   let committed = false;
@@ -10654,7 +10711,7 @@ async function safeGet(key, shared) {
           .maybeSingle();
         if (!error && data && data.data) {
           const json = JSON.stringify(data.data);
-          try { localStorage.setItem(key, json); } catch (e) {}
+          try { bgLsSet(key, json); } catch (e) {}
           return json;
         }
       }
@@ -10675,7 +10732,7 @@ async function safeGet(key, shared) {
 
 async function safeSet(key, value, shared, opts) {
   // Always cache locally first — works offline + provides instant local read
-  try { localStorage.setItem(key, value); } catch (e) {}
+  try { bgLsSet(key, value); } catch (e) {}
 
   // Phase 2 (Cloud): when signed in, the roster also writes up to the
   // friends-only cloud row so other devices/friends see the same players and
@@ -11822,7 +11879,7 @@ async function getSharedTombstones() {
 }
 async function _writeSharedTombstones(out) {
   _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds), playersLocked: new Set(out.playersLocked || []) };
-  try { localStorage.setItem(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
+  try { bgLsSet(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
   try { if (typeof isSignedIn === 'function' && isSignedIn() && typeof writeSharedSingleton === 'function') await writeSharedSingleton(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
 }
 async function addSharedTombstones(players, rounds, lockPlayers) {
@@ -34813,7 +34870,7 @@ function getHiddenRounds() {
   try { return JSON.parse(localStorage.getItem('golf:hidden-rounds') || '[]'); } catch (e) { return []; }
 }
 function setHiddenRounds(l) {
-  try { localStorage.setItem('golf:hidden-rounds', JSON.stringify(l.slice(-300))); } catch (e) {}
+  try { bgLsSet('golf:hidden-rounds', JSON.stringify(l.slice(-300))); } catch (e) {}
 }
 async function removeRoundForMe(code) {
   // Don't strand a scheduled round you started — bring it back to the schedule.
