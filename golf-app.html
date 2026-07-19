@@ -6539,6 +6539,9 @@
       © 2026 Bad Golf LLC
     </div>
     <div class="actions" style="margin-top:14px">
+      <button class="primary full" id="about-getstarted" style="background:var(--surface-2);color:var(--text)">▶ Replay the Get Started guide</button>
+    </div>
+    <div class="actions" style="margin-top:8px">
       <button class="primary full" id="about-close">Close</button>
     </div>
   </div>
@@ -6564,6 +6567,22 @@
     </div>
     <div class="actions" style="margin-top:16px">
       <button class="primary full" id="welcome-dismiss">Got it — let's play</button>
+    </div>
+  </div>
+</div>
+
+<!-- First-login GET STARTED walkthrough (v691) -->
+<div id="getstarted-overlay" style="display:none;position:fixed;inset:0;z-index:100095;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch">
+  <div style="min-height:100%;box-sizing:border-box;display:flex;flex-direction:column;max-width:520px;margin:0 auto;padding:calc(env(safe-area-inset-top, 0px) + 22px) 22px calc(env(safe-area-inset-bottom, 0px) + 22px)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="font-weight:800;font-size:15px;color:var(--accent);letter-spacing:.02em">GET STARTED</div>
+      <button id="gs-skip" style="background:none;border:none;color:var(--text-muted);font-size:14px;font-weight:600;cursor:pointer;padding:6px 4px">Skip</button>
+    </div>
+    <div id="gs-slides" style="flex:1;display:flex;flex-direction:column;justify-content:center;min-height:0"></div>
+    <div id="gs-dots" style="display:flex;gap:8px;justify-content:center;margin:20px 0"></div>
+    <div style="display:flex;gap:10px">
+      <button id="gs-back" style="flex:1;padding:15px;border:none;border-radius:14px;font-weight:700;font-size:15px;cursor:pointer;background:var(--surface-2);color:var(--text);visibility:hidden">Back</button>
+      <button id="gs-next" style="flex:2;padding:15px;border:none;border-radius:14px;font-weight:800;font-size:15px;cursor:pointer;background:var(--accent);color:#fff;box-shadow:0 4px 14px rgba(24,95,165,0.28)">Next</button>
     </div>
   </div>
 </div>
@@ -7086,7 +7105,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.690';
+const BG_BUILD = 'v2026.11.691';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -12445,7 +12464,20 @@ async function archiveScoresFromRound(g) {
   // A round I deleted from MY list must never re-enter MY stats, even if it's
   // re-archived later from a sync (the round can still be live for other players).
   let iDeletedThisRound = false;
-  try { iDeletedThisRound = !!(meName && getHiddenRounds().includes(g.code)); } catch (e) {}
+  // v691: a removed round must STAY removed after a reopen. The archive re-adder
+  // used to consult only the LOCAL golf:hidden-rounds list, so a delete made on
+  // another session/device (or after a cache clear) got resurrected. Now it also
+  // honors the durable local deleted-round keys AND the shared CLOUD tombstones.
+  try {
+    if (meName) {
+      var _rk = (typeof statsRoundKey === 'function') ? statsRoundKey({ gameCode: g.code }) : g.code;
+      if (getHiddenRounds().includes(g.code)) iDeletedThisRound = true;
+      else if (typeof getDeletedRoundKeys === 'function' && getDeletedRoundKeys().has(_rk)) iDeletedThisRound = true;
+      else if (typeof getSharedTombstones === 'function') {
+        try { var _st = await getSharedTombstones(); if (_st && _st.rounds && _st.rounds.has(_rk)) iDeletedThisRound = true; } catch (e) {}
+      }
+    }
+  } catch (e) {}
 
   // Resolve each player's gender from the roster so women get their tee's women's
   // rating/slope for the handicap differential. Default Male (unset) → unchanged.
@@ -19517,10 +19549,75 @@ function dismissWelcomeModal() {
   const modal = document.getElementById('welcome-modal');
   if (modal) modal.classList.remove('show');
   try { localStorage.setItem(KEY_WELCOME_SEEN, '1'); } catch (e) {}
-  // Now that the welcome is dismissed, show the sign-in prompt (deferred above).
+  // v691: on first run, show the Get Started walkthrough BEFORE the sign-in prompt.
+  // If it shows, finishGetStarted() runs the auth/pay prompts once it's dismissed;
+  // otherwise fall straight through to them (existing testers who skip the welcome).
+  var _gsShown = false;
+  try { _gsShown = maybeShowGetStarted(); } catch (e) {}
+  if (!_gsShown) {
+    try { maybeShowAuthPrompt(); } catch (e) {}
+    try { maybePromptPaySetup(); } catch (e) {}
+  }
+}
+
+// ============================================================
+// FIRST-LOGIN "GET STARTED" WALKTHROUGH (v691)
+// Three quick screens shown once, right after the welcome modal, for brand-new
+// users (setting up a round -> side games & bets -> stats & info). Gated by
+// KEY_GETSTARTED_SEEN (per-device first-run, same idea as the welcome flag) and
+// re-playable any time from About -> "Replay the Get Started guide" /
+// window.showGetStarted(). Fully additive + wrapped in try/catch so it can never
+// block boot.
+// ============================================================
+const KEY_GETSTARTED_SEEN = 'golf:getstarted-seen-v1';
+const GS_SLIDES = [
+  { emoji: '\u26F3', title: 'Set up a round', body: 'Tap the big <strong>BG</strong> button (Play) to start. Pick your course, add your players, and choose 9 or 18 holes. Then just tap in scores hole-by-hole \u2014 anyone you invite with the code follows along <strong>live</strong>.' },
+  { emoji: '\uD83D\uDCB8', title: 'Side games & bets', body: 'During setup, flip on the games you\'re playing \u2014 <strong>Skins, Nassau, Wolf, Vegas</strong> and 20+ more. Bad Golf tallies every bet <strong>to the penny</strong> and settles up automatically at the end. Tap the <strong>?</strong> by any game for its rules.' },
+  { emoji: '\uD83D\uDCCA', title: 'Stats & Info', body: 'The <strong>Stats</strong> tab tracks your handicap, scoring average, putts, GIR and fairways from every round. Stuck on something? The <strong>Info</strong> tab has the rules for every game, GPS tips and help any time.' }
+];
+let _gsIdx = 0;
+function _gsRender() {
+  try {
+    var s = GS_SLIDES[_gsIdx] || GS_SLIDES[0];
+    var wrap = document.getElementById('gs-slides');
+    if (wrap) wrap.innerHTML =
+      '<div style="text-align:center">' +
+        '<div style="font-size:66px;line-height:1;margin-bottom:20px">' + s.emoji + '</div>' +
+        '<div style="font-size:25px;font-weight:800;color:var(--text);margin-bottom:14px">' + s.title + '</div>' +
+        '<div style="font-size:15px;line-height:1.62;color:var(--text-muted);max-width:360px;margin:0 auto">' + s.body + '</div>' +
+      '</div>';
+    var dots = document.getElementById('gs-dots');
+    if (dots) dots.innerHTML = GS_SLIDES.map(function (_, i) {
+      return '<span style="width:' + (i === _gsIdx ? '24px' : '8px') + ';height:8px;border-radius:99px;background:' + (i === _gsIdx ? 'var(--accent)' : 'var(--surface-2)') + ';transition:all .2s"></span>';
+    }).join('');
+    var back = document.getElementById('gs-back'); if (back) back.style.visibility = _gsIdx === 0 ? 'hidden' : 'visible';
+    var next = document.getElementById('gs-next'); if (next) next.textContent = _gsIdx >= GS_SLIDES.length - 1 ? 'Start playing \u26F3' : 'Next';
+  } catch (e) {}
+}
+function showGetStarted() {
+  try {
+    var ov = document.getElementById('getstarted-overlay'); if (!ov) return;
+    _gsIdx = 0; _gsRender();
+    ov.style.display = 'block';
+  } catch (e) {}
+}
+window.showGetStarted = showGetStarted;
+function finishGetStarted() {
+  try { var ov = document.getElementById('getstarted-overlay'); if (ov) ov.style.display = 'none'; } catch (e) {}
+  try { localStorage.setItem(KEY_GETSTARTED_SEEN, '1'); } catch (e) {}
+  // Continue the first-run chain the welcome modal used to run directly.
   try { maybeShowAuthPrompt(); } catch (e) {}
-  // Optional one-time nudge to add payment handles (self-defers if sign-in modal is up).
   try { maybePromptPaySetup(); } catch (e) {}
+}
+// Returns true if the walkthrough was shown (so the caller can defer the sign-in
+// prompt until it closes), false if it was skipped/already-seen.
+function maybeShowGetStarted() {
+  try {
+    if (typeof isMaintenanceLink === 'function' && isMaintenanceLink()) return false;
+    if (localStorage.getItem(KEY_GETSTARTED_SEEN)) return false;
+    showGetStarted();
+    return true;
+  } catch (e) { return false; }
 }
 
 // ============================================================
@@ -44029,6 +44126,7 @@ async function resetAllData() {
   clearLocal(KEY_LAST);             // last opened game pointer
   clearLocal(KEY_ME);               // "me" pointer (which roster entry is you)
   clearLocal(KEY_WELCOME_SEEN);     // first-run welcome flag
+  clearLocal(KEY_GETSTARTED_SEEN);  // v691: first-run Get Started walkthrough flag
 
   // 2) Local-cached copies of SHARED indexes. We clear our LOCAL cache so
   //    the immediate view is empty, but the Supabase row underneath stays
@@ -50095,6 +50193,18 @@ async function init() {
   if (welcomeBtn) {
     welcomeBtn.onclick = dismissWelcomeModal;
   }
+
+  // v691: Get Started walkthrough controls + the About "replay" entry.
+  try {
+    const _gn = document.getElementById('gs-next');
+    if (_gn) _gn.onclick = function () { if (_gsIdx >= GS_SLIDES.length - 1) { finishGetStarted(); } else { _gsIdx++; _gsRender(); } };
+    const _gb = document.getElementById('gs-back');
+    if (_gb) _gb.onclick = function () { if (_gsIdx > 0) { _gsIdx--; _gsRender(); } };
+    const _gk = document.getElementById('gs-skip');
+    if (_gk) _gk.onclick = function () { finishGetStarted(); };
+    const _ags = document.getElementById('about-getstarted');
+    if (_ags) _ags.onclick = function () { try { var am = document.getElementById('about-modal'); if (am) am.classList.remove('show'); } catch (e) {} showGetStarted(); };
+  } catch (e) {}
 
   // Wire the About modal — opens from footer tap, closes via Close button
   // or by tapping the overlay backdrop.
