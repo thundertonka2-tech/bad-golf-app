@@ -4595,6 +4595,10 @@
         <div class="actions">
           <button class="danger full" id="btn-cancel-setup">Cancel</button>
         </div>
+        <label id="setup-save-template-row" style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+          <input type="checkbox" id="setup-save-template" class="bg-ck" style="width:auto;margin:0">
+          <span style="font-size:13px;font-weight:600">⭐ Save this setup as a reusable template</span>
+        </label>
         <div class="actions" style="margin-top:8px">
           <button id="btn-save-tourney">📅 Schedule for later</button>
           <button class="primary" id="btn-start-round">Start round now</button>
@@ -7114,7 +7118,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.698';
+const BG_BUILD = 'v2026.11.700';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -12049,8 +12053,15 @@ async function deletePlayerFromRoster(firstName, lastName) {
   // copy would otherwise re-add them on union).
   const rmKey = rosterPlayerKey({ firstName, lastName });
   await savePlayerRoster(filtered, { removals: { players: new Set([rmKey]) } });
-  // v630: an ADMIN's delete is LOCKED — no passive path can resurrect it.
-  try { if (typeof isAdmin === 'function' && isAdmin()) await addSharedTombstones([rmKey], null, true); } catch (e) {}
+  // v699: ALWAYS tombstone a delete so a passive re-add from one of this player's
+  // past rounds can't resurrect them (Tyler: "Tyler Test keeps coming back after we
+  // delete it"). Admins get a LOCKED tombstone (only an admin can ever clear it);
+  // everyone else gets a normal tombstone that still blocks passive re-adds but clears
+  // if they deliberately re-add the player later.
+  try {
+    const _adminLock = (typeof isAdmin === 'function' && isAdmin());
+    await addSharedTombstones([rmKey], null, _adminLock);
+  } catch (e) {}
 }
 
 // ============================================================
@@ -20610,7 +20621,7 @@ async function renderRosterList() {
     };
     row.querySelector('.roster-del-btn').onclick = async (ev) => {
       ev.stopPropagation();
-      if (!(await uiConfirm(`Remove ${displayFull(p)} from saved players? They'll be re-added next time you use them in a round.`, { title: 'Remove player?', okLabel: 'Remove', cancelLabel: 'Cancel', danger: true }))) return;
+      if (!(await uiConfirm(`Remove ${displayFull(p)} from saved players? This keeps them from re-appearing from past rounds. You can add them again anytime for a new round.`, { title: 'Remove player?', okLabel: 'Remove', cancelLabel: 'Cancel', danger: true }))) return;
       await deletePlayerFromRoster(p.firstName || p.name, p.lastName || '');
       await renderRosterList();
     };
@@ -49152,6 +49163,37 @@ async function init() {
     // instant while the save + GPS warm up behind it.
     const _rl = showRoundLoading();
     try { if (typeof playSwingSound === 'function') playSwingSound(); } catch (e) {}   // v696: club-swing sound on round start
+    // v700: if they ticked "Save this setup as a template", save it AS the round starts
+    // — the Start path used to ignore it, so the template was never written (Tyler:
+    // "started the game, no template saved"). Auto-named from the course; renamable on
+    // the Events tab. Fire-and-forget so it never holds up the round.
+    try {
+      if ($('setup-save-template') && $('setup-save-template').checked) {
+        const _tplSetup = setup;
+        Promise.resolve().then(async () => {
+          try {
+            const { savedConfig, cleanPlayers } = _buildTourneySavedConfig(_tplSetup);
+            const _list = await getTourneys();
+            const _tplName = ((_tplSetup && _tplSetup.course) ? String(_tplSetup.course) : 'My round') + ' template';
+            let _creator = null; try { _creator = await getMeName(); } catch (e) {}
+            const _existing = _list.find(x => x && x.isTemplate && x.name === _tplName);
+            const _rec = {
+              id: 'tn-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+              name: _tplName, isTemplate: true, date: '', time: '',
+              course: _tplSetup.course, players: cleanPlayers.map(p => p.name).join(', '),
+              notes: '', savedConfig, status: 'scheduled',
+              plannedCode: (typeof generateCode === 'function' ? generateCode() : null),
+              createdBy: _creator || null, createdAt: Date.now()
+            };
+            if (_existing) { Object.assign(_existing, { savedConfig, players: _rec.players, course: _tplSetup.course, updatedAt: Date.now() }); }
+            else { _list.push(_rec); }
+            await saveTourneys(_list);
+            try { if (typeof renderT2Templates === 'function') renderT2Templates(); } catch (e) {}
+            try { showToast('⭐ Setup saved as a template — find it on the Events tab'); } catch (e) {}
+          } catch (e) { console.warn('save template on start failed', e); }
+        });
+      }
+    } catch (e) {}
     const code = $('display-code').dataset.code || generateCode();
     const courseId = $('course-name').dataset.courseId || '';
     let creatorName = null;
@@ -49416,6 +49458,7 @@ async function init() {
     $('stm-time').value = '';
     $('stm-notes').value = '';
     if ($('stm-template')) $('stm-template').checked = false;
+    if ($('setup-save-template')) $('setup-save-template').checked = false;   // v700
     // Event image picker — reset + wire (fresh each open so onclick never stacks).
     state.pendingEventImg = '';
     (function () {
