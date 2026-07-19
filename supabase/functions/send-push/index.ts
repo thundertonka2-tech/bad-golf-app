@@ -76,8 +76,12 @@ export async function sendPushCore(opts: {
   const jwt = await apnsJwt();
   // Custom keys live alongside `aps` at the payload root so the native client reads
   // them as notification.data.* (matches push-bridge.js).
+  // Custom club-swing sound on round START / FINISH notifications (bundled in the
+  // iOS app as swing.caf). Everything else keeps the default system sound.
+  const _ntype = String((data as any).type || "");
+  const _sound = (_ntype === "round_start" || _ntype === "round_complete") ? "swing.caf" : "default";
   const payloadObj: Record<string, unknown> = {
-    aps: { alert: { title: opts.title || "Bad Golf", body: opts.body || "" }, sound: "default" },
+    aps: { alert: { title: opts.title || "Bad Golf", body: opts.body || "" }, sound: _sound },
     data: data,
   };
   // Also flatten the data keys to the root for clients that read them there.
