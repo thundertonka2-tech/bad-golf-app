@@ -11,19 +11,39 @@
     setTimeout(function () { ready(cb, tries + 1); }, 500);
   }
 
+  var _lastToken = null;
   async function upsertToken(token) {
     try {
+      if (token) _lastToken = token;
       var u = window._authUser;
-      if (!u || !u.id || !window.supa) return;
+      // The APNs `registration` event usually fires on launch, BEFORE sign-in
+      // finishes, so _authUser was null and the token never reached push_tokens —
+      // which is why iPhone pushes never arrived. Keep the token and let
+      // _flushToken() save it the moment the user is available. (v696)
+      if (!u || !u.id || !window.supa) return false;
       await window.supa.from('push_tokens').upsert({
-        user_id: u.id, token: token, platform: 'ios', updated_at: new Date().toISOString()
+        user_id: u.id, token: token || _lastToken, platform: 'ios', updated_at: new Date().toISOString()
       }, { onConflict: 'token' });
-    } catch (e) { console.warn('push upsertToken', e); }
+      return true;
+    } catch (e) { console.warn('push upsertToken', e); return false; }
+  }
+  // Retry until BOTH a device token and a signed-in user exist, then persist it.
+  function _flushToken(tries) {
+    tries = tries || 0;
+    try {
+      if (_lastToken && window._authUser && window._authUser.id && window.supa) { upsertToken(_lastToken); return; }
+    } catch (e) {}
+    if (tries > 240) return;                 // ~10 min then give up
+    setTimeout(function () { _flushToken(tries + 1); }, 2500);
   }
 
   ready(function (Push) {
     try {
       Push.addListener('registration', function (t) { if (t && t.value) upsertToken(t.value); });
+      // v696: re-save the token once auth completes / refreshes (covers the common
+      // case where the token arrives before the user is signed in).
+      _flushToken();
+      try { if (window.supa && window.supa.auth && window.supa.auth.onAuthStateChange) window.supa.auth.onAuthStateChange(function () { _flushToken(); }); } catch (e) {}
       Push.addListener('registrationError', function (e) { console.warn('push reg error', e); });
       // Tapped a notification -> deep link by notification type (legacy
       // wager_round_code still routes to the Wager tab).

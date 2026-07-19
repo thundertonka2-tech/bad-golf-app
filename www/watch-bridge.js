@@ -144,7 +144,15 @@
     try {
       supa.auth.onAuthStateChange(function () { _lastSent = ''; window.BadGolfWatchSync(); });
     } catch (e) {}
-    setInterval(function () { window.BadGolfWatchSync(); }, 15000);
+    var _wtick = 0;
+    setInterval(function () {
+      _wtick++;
+      // v696: every ~30s force a FULL resend (clear the de-dupe) so a watch that just
+      // woke / reconnected gets the session + round right away instead of waiting for
+      // the payload to change — cuts the "takes forever to connect" gap.
+      if (_wtick % 2 === 0) _lastSent = '';
+      window.BadGolfWatchSync();
+    }, 15000);
   }
   if (document.readyState === 'complete') setTimeout(arm, 1000);
   else window.addEventListener('load', function () { setTimeout(arm, 1000); });
