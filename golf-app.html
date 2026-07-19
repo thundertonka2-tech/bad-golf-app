@@ -5756,6 +5756,13 @@
     <h2 style="margin-top:0">Add a past round</h2>
     <p class="help-text" style="margin-bottom:12px">Logging for <strong id="past-round-player">—</strong>. Pick the course, tee and date, then enter the score. This feeds the handicap and all the Stats charts.</p>
 
+    <div id="past-admin-assign" style="display:none;margin-bottom:12px;padding:10px;border:1px solid var(--accent);border-radius:10px;background:var(--surface-2)">
+      <label style="display:block;margin-bottom:4px;font-weight:700;color:var(--accent)">🛠 Assign to account (admin)</label>
+      <input type="text" id="past-assign-search" placeholder="Search a user by name…" autocomplete="off" style="width:100%;margin-bottom:4px">
+      <select id="past-assign-select" size="6" style="width:100%;display:none"></select>
+      <div id="past-assign-current" class="small-text" style="margin-top:4px;color:var(--text-muted)">Logging for the player selected on the Stats tab. Pick an account here to log onto someone else's profile.</div>
+    </div>
+
     <label style="display:block;margin-bottom:4px">Course</label>
     <div class="course-picker-wrap">
       <input type="text" id="past-course-search" placeholder="Search by course name or state…" autocomplete="off" style="width:100%">
@@ -7079,7 +7086,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.684';
+const BG_BUILD = 'v2026.11.686';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -20438,6 +20445,18 @@ async function renderRosterList() {
     container.appendChild(row);
   });
   try { if (_keepTop) container.scrollTop = _keepTop; } catch (e) {}   // v664
+  // v686: GUEST pills need the accounts set (_bgUserNames), which loads async.
+  // If it wasn't ready when we drew the rows, re-render ONCE it arrives so the
+  // tags show here too — the scoring screen re-renders constantly, this picker
+  // draws only once, so without this the guest tags never appear in the list.
+  try {
+    if (typeof refreshBgUserNames === 'function' && (typeof _bgUserNames === 'undefined' || !_bgUserNames || !_bgUserNames.size) && !window._rosterGuestReRan) {
+      window._rosterGuestReRan = true;
+      refreshBgUserNames().then(function (s) { if (s && s.size) { try { renderRosterList(); } catch (e) {} } });
+    } else if (typeof _bgUserNames !== 'undefined' && _bgUserNames && _bgUserNames.size) {
+      window._rosterGuestReRan = false;
+    }
+  } catch (e) {}
 }
 
 // Get current player list from setup form (without committing).
@@ -31782,6 +31801,65 @@ async function renderHome() {
 
 // Home: list rounds the player can jump into — open invites to live rounds and
 // their own scheduled rounds — and let them join straight into the first-hole GPS.
+// Leave a round from the Home "Your rounds" list. Only offered on rounds you did
+// NOT create. Fully withdraws you (drops you from the round's player list AND from
+// your own list) and pushes the organizer a "<name> left your round" notification.
+async function leaveHomeRound(r) {
+  if (!r) return;
+  let meName = ''; try { meName = (await getMeName()) || ''; } catch (e) {}
+  const courseNm = r.course || 'the round';
+  const ok = await uiConfirm('Leave the round at ' + courseNm + '?\n\nYou\'ll be removed from this round and it drops off your list. The organizer gets notified you left.', { title: 'Leave round?', okLabel: 'Leave', cancelLabel: 'Stay', danger: true });
+  if (!ok) return;
+  const norm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
+  const meN = norm(meName);
+  let notifyId = null;
+  try {
+    if (r.kind === 'invite' && r.code) {
+      try {
+        const g = await loadGame(r.code);
+        if (g && Array.isArray(g.players)) {
+          g.players = g.players.filter(p => norm((p && p.name) || '') !== meN);
+          if (Array.isArray(g.consentReq)) g.consentReq = g.consentReq.filter(n => norm(n) !== meN);
+          if (Array.isArray(g.acceptedBy)) g.acceptedBy = g.acceptedBy.filter(n => norm(n) !== meN);
+          await saveGame(g);
+        }
+      } catch (e) {}
+      try { if (supa && _authUser) await supa.from('game_invites').update({ status: 'declined' }).eq('to_user', _authUser.id).eq('game_code', r.code); } catch (e) {}
+      try { await removeRoundForMe(r.code); } catch (e) {}
+      notifyId = r.fromUser || null;
+    } else if (r.kind === 'scheduled' && r.tourney) {
+      const t = r.tourney;
+      try {
+        const list = await getTourneys();
+        const row = (list || []).find(x => x && x.id === t.id);
+        if (row) {
+          row.players = String(row.players || '').split(',').map(s => s.trim()).filter(n => n && norm(n) !== meN).join(', ');
+          await saveTourneys(list);
+        }
+      } catch (e) {}
+      try {
+        if (t.createdBy) {
+          const profs = await fetchProfiles();
+          const cN = norm(t.createdBy);
+          const pr = (profs || []).find(p => p && (norm(p.my_player) === cN || norm(p.display_name) === cN));
+          if (pr) notifyId = pr.id;
+        }
+      } catch (e) {}
+    } else if (r.kind === 't2round') {
+      try { if (r.myTpId) await t2RemovePlayer(r.myTpId); } catch (e) {}
+      notifyId = r.ownerId || null;
+    }
+  } catch (e) { console.warn('leaveHomeRound core', e); }
+  try {
+    if (notifyId && !(_authUser && notifyId === _authUser.id)) {
+      const who = meName || 'A player';
+      sendPush(notifyId, 'Bad Golf', who + ' left your round at ' + courseNm, { type: 'round_left', course: courseNm }, 'left:' + (r.code || (r.tourney && r.tourney.id) || r.tournamentId || ''));
+    }
+  } catch (e) {}
+  try { showToast('You left the round'); } catch (e) {}
+  try { await renderHomeInvites(); } catch (e) {}
+}
+
 async function renderHomeInvites() {
   const card = document.getElementById('home-invites-card');
   const list = document.getElementById('home-invites-list');
@@ -31809,7 +31887,7 @@ async function renderHomeInvites() {
         let g0 = null; try { g0 = await loadGame(code); } catch (e) {}
         if (!g0 || g0.finishedAt) continue;
         rows.push({
-          kind: 'invite', code,
+          kind: 'invite', code, fromUser: inv.from_user,
           course: g0.course || 'Round',
           sub: (Array.isArray(g0.players) ? g0.players.map(p => displayFirst(p)).join(', ') : '') || 'Tap to join',
           action: 'Join'
@@ -31927,6 +32005,7 @@ async function renderHomeInvites() {
             let _cid2 = _g0.courseId || ''; if (!_cid2) { try { const _dc = ev.settings && ev.settings.dayCourses && ev.settings.dayCourses[d.day_number]; if (_dc && _dc.id) _cid2 = _dc.id; else { const _nm = (_g0.course || '').trim().toLowerCase(); if (_nm && typeof COURSE_LIBRARY !== 'undefined' && Array.isArray(COURSE_LIBRARY)) { const _m = COURSE_LIBRARY.find(c => c && (c.name || '').trim().toLowerCase() === _nm); if (_m) _cid2 = _m.id; } } } catch (e) {} }
             rows.push({
               kind: 't2round', code: g2.game_code, tournamentId: ev.id, courseId: _cid2, dayNumber: d.day_number,
+              ownerId: ev.commissioner_id || null, myTpId: (function(){ try { return Array.from(_meIds)[0]; } catch (e) { return null; } })(), isCreator: !!(ev.commissioner_id && _authUser && ev.commissioner_id === _authUser.id),
               course: _g0.course || ev.name || 'Tournament round',
               sub: '🏆 ' + (ev.name || 'Tournament') + (_days.length > 1 ? ' · Day ' + d.day_number : '') + ' · Group ' + g2.group_number + (_thru ? ' · thru ' + _thru : ''),
               action: 'Open'
@@ -31956,6 +32035,7 @@ async function renderHomeInvites() {
         (((r.kind === 'scheduled' || r.kind === 't2round') && r.courseId) ? '<button class="small home-card-btn" data-i="' + i + '" style="flex:1 1 auto;min-width:88px">🗂 Scorecard</button>' : '') +
         (((r.kind === 'scheduled' || r.kind === 't2round') && r.courseId) ? '<button class="small home-gps-btn" data-i="' + i + '" style="flex:1 1 100%">📍 GPS preview</button>' : '') +
         ((r.kind === 'scheduled' || r.kind === 't2round' || (r.kind === 'invite' && r.code)) ? '<button class="small home-share-btn" data-i="' + i + '" style="flex:1 1 100%">📤 Share game link</button>' : '') +
+        (((r.kind === 'invite' || r.kind === 'scheduled' || r.kind === 't2round') && !r.isCreator) ? '<button class="small home-leave-btn" data-i="' + i + '" style="flex:1 1 100%;color:var(--danger);border:1px solid var(--danger);background:var(--surface);font-weight:700">🚪 Leave round</button>' : '') +
       '</div>' +
     '</div>').join('');
   const go = (i) => {
@@ -31971,6 +32051,7 @@ async function renderHomeInvites() {
   list.querySelectorAll('.home-edit-settings-btn').forEach(b => b.onclick = (e) => { e.stopPropagation(); const r = rows[parseInt(b.dataset.i, 10)]; if (r && r.tourney) { try { if (r.isCreator) openTourneySettingsEditor(r.tourney); else openTourneyActions(r.tourney); } catch (err) {} } });
   list.querySelectorAll('.home-card-btn').forEach(b => b.onclick = (e) => { e.stopPropagation(); const r = rows[parseInt(b.dataset.i, 10)]; if (r && r.courseId) { try { window.renderPreviewScorecard(r.courseId); } catch (err) {} } });
   list.querySelectorAll('.home-gps-btn').forEach(b => b.onclick = (e) => { e.stopPropagation(); const r = rows[parseInt(b.dataset.i, 10)]; if (r && r.courseId) { try { window.previewCourseGps(r.courseId); } catch (err) {} } });
+  list.querySelectorAll('.home-leave-btn').forEach(b => b.onclick = async (e) => { e.stopPropagation(); const r = rows[parseInt(b.dataset.i, 10)]; if (r) { try { await leaveHomeRound(r); } catch (err) { console.warn('leave round', err); } } });
   // v621: 📤 Share game link — one tap to text the join link. Live rounds and
   // tournament rounds share ?join=CODE (taps straight into the round); a
   // scheduled round that isn't live yet shares the event details + app link
@@ -32436,7 +32517,7 @@ async function t2InjectTourneySummaryLink(g, container) {
   const tid = g && g.t2 && g.t2.tournamentId; if (!tid) return;
   const div = document.createElement('div');
   div.id = 't2-tourney-summary-link';
-  div.style.cssText = 'margin-top:14px;padding-top:10px;border-top:1px solid var(--border)';
+  div.style.cssText = 'margin-top:24px;padding-top:12px;border-top:1px solid var(--border)';
   div.innerHTML = '<div style="font-weight:700;margin-bottom:8px">🏆 Tournament</div>' +
     '<button class="full t2-summ-lb" style="font-weight:600;background:linear-gradient(135deg,#1d6fd6,var(--accent));color:#fff;border:none;border-radius:10px;padding:10px">🏆 Full standings &amp; payouts</button>';
   container.appendChild(div);
@@ -33362,12 +33443,14 @@ async function shareHandicap() {
 // Stats chart treat it identically.
 // ============================================================
 let _pastScorecard = null, _pastCourseId = null, _pastMode = 'total', _pastNearbyResults = [];
+let _pastAssignUser = null, _pastAssignAccounts = null;
 
 async function openPastRoundModal() {
   const sel = $('stats-player-select');
   const name = sel ? sel.value : '';
-  if (!name) { showToast('Pick a player first'); return; }
-  $('past-round-player').textContent = name;
+  const _isAdm = (typeof isAdmin === 'function' && isAdmin());
+  if (!name && !_isAdm) { showToast('Pick a player first'); return; }
+  $('past-round-player').textContent = name || '—';
   _pastScorecard = null; _pastCourseId = null; _pastNearbyResults = [];
   $('past-course-search').value = '';
   ['past-total', 'past-putts', 'past-fw', 'past-gir', 'past-rating', 'past-slope'].forEach(id => { if ($(id)) $(id).value = ''; });
@@ -33394,12 +33477,59 @@ async function openPastRoundModal() {
   $('past-mode-holes').onclick = () => pastSetMode('holes');
   $('past-save').onclick = () => savePastRound();
   $('past-cancel').onclick = () => { try { _clearPastRoundDraft(); } catch (e) {} $('past-round-modal').classList.remove('show'); };
+  try { await pastSetupAdminAssign(); } catch (e) {}
   $('past-round-modal').classList.add('show');
 }
 
 // Search-capable, grouped course list — same UI as the round-setup picker
 // (renderCourseList): 📍 Near you (GPS, by default) on top, then ⏱ Recent,
 // then state-grouped clickable rows.
+// ADMIN add-past-round: pick ANY real account to log the round onto. The round is
+// written into THAT account's own player_stats row (via the admin_add_player_round
+// RPC) so it shows on their profile and syncs to their phone. Hidden for non-admins.
+async function pastSetupAdminAssign() {
+  const box = $('past-admin-assign');
+  _pastAssignUser = null;
+  const isAdm = (typeof isAdmin === 'function' && isAdmin());
+  if (!box) return;
+  if (!isAdm) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  const searchEl = $('past-assign-search'); const selEl = $('past-assign-select'); const curEl = $('past-assign-current');
+  const resetMsg = "Logging for the player selected on the Stats tab. Pick an account here to log onto someone else's profile.";
+  if (searchEl) searchEl.value = '';
+  if (curEl) curEl.textContent = resetMsg;
+  if (!_pastAssignAccounts) {
+    try {
+      const profs = await fetchProfiles();
+      _pastAssignAccounts = (profs || []).map(p => ({ id: p.id, name: String(p.my_player || p.display_name || '').trim() }))
+        .filter(a => a.id && a.name).sort((a, b) => a.name.localeCompare(b.name));
+    } catch (e) { _pastAssignAccounts = []; }
+  }
+  const render = (term) => {
+    if (!selEl) return;
+    const t = String(term || '').trim().toLowerCase();
+    const list = (_pastAssignAccounts || []).filter(a => !t || a.name.toLowerCase().includes(t)).slice(0, 40);
+    selEl.innerHTML = list.map(a => '<option value="' + a.id + '">' + escapeHtml(a.name) + '</option>').join('');
+    selEl.style.display = list.length ? 'block' : 'none';
+  };
+  render('');
+  if (searchEl) searchEl.oninput = () => render(searchEl.value);
+  if (selEl) selEl.onchange = () => {
+    const acct = (_pastAssignAccounts || []).find(a => a.id === selEl.value);
+    if (!acct) return;
+    _pastAssignUser = acct;
+    const pl = $('past-round-player'); if (pl) pl.textContent = acct.name;
+    if (curEl) curEl.innerHTML = '✅ Logging onto <strong>' + escapeHtml(acct.name) + "</strong>'s account. <a href=\"#\" id=\"past-assign-clear\">clear</a>";
+    const clr = $('past-assign-clear');
+    if (clr) clr.onclick = (e) => {
+      e.preventDefault(); _pastAssignUser = null; if (selEl) selEl.value = '';
+      const sp = $('stats-player-select'); const pl2 = $('past-round-player');
+      if (pl2) pl2.textContent = (sp && sp.value) ? sp.value : '—';
+      if (curEl) curEl.textContent = resetMsg;
+    };
+  };
+}
+
 async function pastRenderCourseList(q) {
   const list = $('past-course-list');
   if (!list) return;
@@ -33623,7 +33753,8 @@ async function savePastRound() {
   const show = (m) => { err.textContent = m; err.style.display = 'block'; };
   err.style.display = 'none';
   const sel = $('stats-player-select');
-  const name = sel ? sel.value : '';
+  let name = sel ? sel.value : '';
+  if (_pastAssignUser && _pastAssignUser.name) name = _pastAssignUser.name;   // admin: assigning onto an account
   if (!name) return show('No player selected.');
   if (!_pastCourseId) return show('Pick a course from the list.');
   const dateStr = $('past-date').value;
@@ -33661,10 +33792,11 @@ async function savePastRound() {
   const puttsTotal = pInt('past-putts'), fwHit = pInt('past-fw'), girCount = pInt('past-gir');
   let par45 = 0; if (pars) pars.forEach(p => { if (p === 4 || p === 5) par45++; }); else par45 = 14;
 
-  const roster = await getPlayerRoster();
-  const player = roster.find(p => p.name === name);
-  if (!player) return show('Player not found in roster.');
-  if (!Array.isArray(player.scoreHistory)) player.scoreHistory = [];
+  const _assign = _pastAssignUser;   // admin: log onto another account's own profile
+  const roster = _assign ? null : await getPlayerRoster();
+  const player = _assign ? null : roster.find(p => p.name === name);
+  if (!_assign && !player) return show('Player not found in roster.');
+  if (player && !Array.isArray(player.scoreHistory)) player.scoreHistory = [];
   const courseObj = (typeof COURSE_LIBRARY !== 'undefined' ? COURSE_LIBRARY : []).find(c => c.id === _pastCourseId);
 
   const record = {
@@ -33698,6 +33830,20 @@ async function savePastRound() {
     manual: true,
     gameCode: 'manual-' + Date.now()
   };
+  if (_assign) {
+    // ADMIN: write the round straight into the TARGET account's cloud stats row via
+    // the admin RPC (client RLS can't touch another user's row). Merge-on-write.
+    try {
+      const { error } = await supa.rpc('admin_add_player_round', { p_user_id: _assign.id, p_player_name: _assign.name, p_record: record });
+      if (error) { return show(error.message || "Couldn't add to that account — is the admin_add_player_round function installed in Supabase?"); }
+    } catch (e) { return show("Couldn't add to that account — admin_add_player_round RPC missing?"); }
+    try { _clearPastRoundDraft(); } catch (e) {}
+    $('past-round-modal').classList.remove('show');
+    showToast('Round added to ' + _assign.name + "'s profile");
+    _pastAssignUser = null;
+    try { await renderStats(); } catch (e) {}
+    return;
+  }
   player.scoreHistory.push(record);
   player.lastUsed = Date.now();
   await savePlayerRoster(roster);
@@ -46314,10 +46460,10 @@ async function openEventLeaderboard(t) {
       let _ctpRows = []; try { _ctpRows = await loadTourneyRawRounds(t); } catch (e) {}
       const _fc = t2ComputeFieldCtp(_ctpRows);
       if (_fc && _fc.perDay.length) {
-        html += '<h3 style="margin:14px 0 4px">\U0001F4CD Tournament Closest to the Pin <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3><div style="font-size:13px">';
+        html += '<h3 style="margin:14px 0 4px">📍 Tournament Closest to the Pin <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3><div style="font-size:13px">';
         _fc.perDay.forEach(dd => {
           dd.holes.forEach(hr => {
-            html += '<div style="margin-top:2px">Day ' + dd.day + ' · Hole ' + hr.hole + ' · pot $' + hr.pot.toFixed(0) + ' · \U0001F3C6 ' + escapeHtml(hr.winnerFirst) + ' (' + hr.dist + ')</div>';
+            html += '<div style="margin-top:2px">Day ' + dd.day + ' · Hole ' + hr.hole + ' · pot $' + hr.pot.toFixed(0) + ' · 🏆 ' + escapeHtml(hr.winnerFirst) + ' (' + hr.dist + ')</div>';
           });
         });
         _fc.totals.forEach(r => {
