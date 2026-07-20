@@ -1,5 +1,8 @@
 import UIKit
 import Capacitor
+#if canImport(ActivityKit)
+import ActivityKit
+#endif
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -12,6 +15,20 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // carts/pockets while a score field still holds focus, which spuriously popped
         // the native "Undo Typing" alert — especially while two people were scoring.
         application.applicationSupportsShakeToEdit = false
+        // v728: clear any Live Activity left over from a previous session — e.g. a
+        // round that was deleted, or one iOS killed before the JS end() finished.
+        // The GPS view re-creates the card the moment the user reopens a live round,
+        // so nothing legitimate is lost, but a "stuck on the lock screen forever"
+        // card is gone on the next launch.
+        #if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            Task {
+                for activity in Activity<BadGolfRoundAttributes>.activities {
+                    await activity.end(dismissalPolicy: .immediate)
+                }
+            }
+        }
+        #endif
         return true
     }
 
