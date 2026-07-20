@@ -7118,7 +7118,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.732';
+const BG_BUILD = 'v2026.11.735';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8196,11 +8196,19 @@ async function getMappedCourseIdSet(ids) {
         }
       } else {
         const toFetch = ids.filter(id => id && !_adminMappedCache.has(id));
-        const CH = 50;  // .in() over course ids MUST be <=50 or the URL overflows and returns empty -> everything reads 0 holes
+        // .in() over course ids must stay small: too many long ids overflow the URL
+        // and PostgREST returns an EMPTY result (no error) -> every course reads 0
+        // holes. 40 keeps the URL well under any gateway limit even for states with
+        // long ids (avg id ~23 chars -> ~1.4 KB URL).
+        const CH = 40;
         for (let i = 0; i < toFetch.length; i += CH) {
           const chunk = toFetch.slice(i, i + CH);
           const { data, error } = await supa.from('course_gps').select('course_id,holes').in('course_id', chunk);
-          if (!error && data) data.forEach(_storeMappedRow);
+          // On a hard error, DON'T zero-fill this chunk — leave the ids uncached so the
+          // next admin load retries them. Zero-filling on a transient failure is what
+          // made a whole state show "0/18 · Not mapped" until the screen was reopened.
+          if (error) { console.warn('mapped hole-count chunk failed — leaving uncached for retry', error); continue; }
+          if (data) data.forEach(_storeMappedRow);
           chunk.forEach(id => { if (!_adminMappedCache.has(id)) _adminMappedCache.set(id, { holes: 0, fwc: 0, center: null }); });
         }
       }
@@ -14265,9 +14273,17 @@ async function deleteCourse(courseId) {
   } catch (e) {}
   // Remove from the in-memory library now.
   COURSE_LIBRARY = COURSE_LIBRARY.filter(x => x.id !== courseId);
-  // Best-effort cloud cleanup of GPS + scorecard rows.
-  try { if (supa && supaOnline) await supa.from('course_gps').delete().eq('course_id', courseId); } catch (e) {}
-  try { const saves = await getCourseSaves(); if (saves[courseId]) { delete saves[courseId]; await saveCourseSaves(saves); } } catch (e) {}
+  // Heavy cloud cleanup (GPS row + the ~4 MB scorecard blob) runs in the BACKGROUND.
+  // The delete OVERLAY written above already hides the course on every device, so we
+  // must NOT block the admin UI — and risk a timeout — rewriting the whole courses
+  // blob just to drop one now-orphaned scorecard. Awaiting it was what made deletes
+  // "take forever," and while that big write hogged the connection the small overlay
+  // write's merge-read could fail and skip (its data-loss guard), so the deletion
+  // silently didn't stick. Fire-and-forget, fully best-effort.
+  (async () => {
+    try { if (supa && supaOnline) await supa.from('course_gps').delete().eq('course_id', courseId); } catch (e) {}
+    try { const saves = await getCourseSaves(); if (saves[courseId]) { delete saves[courseId]; await saveCourseSaves(saves); } } catch (e) {}
+  })();
   try { audit('delete_course', courseId, nm); } catch (e) {}
   return true;
 }
@@ -17188,7 +17204,94 @@ const HOLLOWS_NINES = {
   }
 };
 
+// FL three-nines wired 2026-07-20 (final-review). Grand Palms: factored from 3
+// published GolfPass combos. Belle Glade (The Villages): each nine rated as a
+// doubled-18, per-nine 9-hole rating = published/2, combos via USGA two-nine method.
+const GRAND_PALMS_NINES = {
+  _label: "Grand Palms Golf & Country Club",
+  searchCombos: [['grand','royal'], ['sabal','grand'], ['royal','sabal']],
+  grand: { name:"Grand", pars:[4,3,4,4,4,3,4,4,5], hdcp:[5,8,6,4,1,9,7,3,2],
+    tees:[
+      { label:"Gold", rating:36.2, slope:142, yds:[385,245,380,382,440,225,351,405,545] },
+      { label:"Blue", rating:35.3, slope:139, yds:[365,202,370,367,415,209,337,389,508] },
+      { label:"White", rating:34.6, slope:137, yds:[332,170,355,355,390,185,320,368,487] },
+      { label:"White (W)", rating:37.5, slope:136, yds:[332,170,355,355,390,185,320,368,487] },
+      { label:"Silver", rating:32.8, slope:122, yds:[315,142,347,339,365,180,309,345,475] },
+      { label:"Silver (W)", rating:35.5, slope:127, yds:[315,142,347,339,365,180,309,345,475] },
+      { label:"Red (W)", rating:34.9, slope:126, yds:[305,130,286,294,290,172,294,325,400] },
+    ] },
+  royal: { name:"Royal", pars:[5,4,4,5,4,4,3,3,5], hdcp:[3,5,6,1,7,4,8,9,2],
+    tees:[
+      { label:"Gold", rating:37.1, slope:142, yds:[3358,512,370,375,525,408,411,188,197] },
+      { label:"Blue", rating:36.2, slope:137, yds:[3162,498,352,362,500,341,398,163,181] },
+      { label:"White", rating:35.5, slope:133, yds:[2962,482,339,347,475,335,378,150,165] },
+      { label:"White (W)", rating:39, slope:132, yds:[2962,482,339,347,475,335,378,150,165] },
+      { label:"Silver", rating:34.3, slope:130, yds:[2817,469,329,335,461,318,361,142,151] },
+      { label:"Silver (W)", rating:37.6, slope:127, yds:[2817,469,329,335,461,318,361,142,151] },
+      { label:"Red (W)", rating:36.2, slope:126, yds:[2496,410,250,317,405,309,345,136,140] },
+    ] },
+  sabal: { name:"Sabal", pars:[5,3,4,4,4,4,3,5,4], hdcp:[5,8,7,1,3,6,9,4,2],
+    tees:[
+      { label:"Gold", rating:35.5, slope:130, yds:[540,157,355,351,395,419,140,542,425] },
+      { label:"Blue", rating:34.6, slope:127, yds:[525,142,345,340,380,348,130,528,413] },
+      { label:"White", rating:34.1, slope:123, yds:[505,130,335,325,360,332,118,510,403] },
+      { label:"White (W)", rating:37.2, slope:126, yds:[505,130,335,325,360,332,118,510,403] },
+      { label:"Silver", rating:32.8, slope:120, yds:[485,115,325,319,340,320,109,495,365] },
+      { label:"Silver (W)", rating:35.8, slope:119, yds:[485,115,325,319,340,320,109,495,365] },
+      { label:"Red (W)", rating:34.9, slope:120, yds:[415,105,300,309,328,300,100,400,331] },
+    ] },
+  combos: {
+    "grand+royal": [ {label:"Gold",rating:73.3,slope:142}, {label:"Blue",rating:71.5,slope:138}, {label:"White",rating:70.1,slope:135}, {label:"White (W)",rating:76.5,slope:134}, {label:"Silver",rating:67.1,slope:126}, {label:"Silver (W)",rating:73.1,slope:127}, {label:"Red (W)",rating:71.1,slope:126} ],
+    "grand+sabal": [ {label:"Gold",rating:71.7,slope:136}, {label:"Blue",rating:69.9,slope:133}, {label:"White",rating:68.7,slope:130}, {label:"White (W)",rating:74.7,slope:131}, {label:"Silver",rating:65.6,slope:121}, {label:"Silver (W)",rating:71.3,slope:123}, {label:"Red (W)",rating:69.8,slope:123} ],
+    "royal+sabal": [ {label:"Gold",rating:72.6,slope:136}, {label:"Blue",rating:70.8,slope:132}, {label:"White",rating:69.6,slope:128}, {label:"White (W)",rating:76.2,slope:129}, {label:"Silver",rating:67.1,slope:125}, {label:"Silver (W)",rating:73.4,slope:123}, {label:"Red (W)",rating:71.1,slope:123} ],
+  },
+};
+const BELLE_GLADE_NINES = {
+  _label: "Belle Glade Country Club",
+  searchCombos: [['calusa','seminole'], ['seminole','tequesta'], ['calusa','tequesta']],
+  calusa: { name:"Calusa", pars:[5,4,3,4,4,3,4,5,4], hdcp:[2,7,8,3,6,9,5,1,4],
+    tees:[
+      { label:"Black", rating:36.7, slope:129, yds:[546,395,182,447,410,165,422,545,414] },
+      { label:"Gold", rating:35.8, slope:126, yds:[532,363,163,385,380,133,381,518,388] },
+      { label:"Blue", rating:34.9, slope:123, yds:[501,353,155,364,317,112,347,488,381] },
+      { label:"Blue (W)", rating:37.4, slope:131, yds:[501,353,155,364,317,112,347,488,381] },
+      { label:"White", rating:33.7, slope:117, yds:[441,328,132,338,297,104,318,418,357] },
+      { label:"White (W)", rating:35.9, slope:125, yds:[441,328,132,338,297,104,318,418,357] },
+      { label:"Green", rating:31.6, slope:107, yds:[388,276,102,269,193,93,298,362,288] },
+      { label:"Green (W)", rating:33.6, slope:111, yds:[388,276,102,269,193,93,298,362,288] },
+      { label:"Friendly", rating:29.5, slope:99, yds:[314,188,95,243,178,90,256,360,191] },
+      { label:"Friendly (W)", rating:30.4, slope:98, yds:[314,188,95,243,178,90,256,360,191] },
+    ] },
+  seminole: { name:"Seminole", pars:[4,4,4,4,5,4,3,5,3], hdcp:[4,6,5,3,2,7,9,1,8],
+    tees:[
+      { label:"Black", rating:36.3, slope:127, yds:[404,392,397,400,492,370,178,527,185] },
+      { label:"Gold", rating:35.3, slope:123, yds:[372,365,367,370,488,330,149,489,182] },
+      { label:"Blue", rating:34.3, slope:119, yds:[346,347,339,345,473,288,133,439,151] },
+      { label:"Blue (W)", rating:36.5, slope:131, yds:[346,347,339,345,473,288,133,439,151] },
+      { label:"White", rating:33.2, slope:114, yds:[338,326,329,286,441,252,127,432,125] },
+      { label:"White (W)", rating:35.3, slope:126, yds:[338,326,329,286,441,252,127,432,125] },
+      { label:"Green", rating:31.2, slope:105, yds:[281,264,274,277,381,227,100,389,102] },
+      { label:"Green (W)", rating:33.2, slope:109, yds:[281,264,274,277,381,227,100,389,102] },
+      { label:"Friendly", rating:29.5, slope:98, yds:[221,210,197,227,266,216,95,293,77] },
+      { label:"Friendly (W)", rating:30.3, slope:97, yds:[221,210,197,227,266,216,95,293,77] },
+    ] },
+  tequesta: { name:"Tequesta", pars:[5,4,4,4,5,3,4,3,4], hdcp:[2,6,7,4,3,5,9,8,1],
+    tees:[
+      { label:"Black", rating:36.5, slope:129, yds:[561,438,383,395,515,166,375,165,468] },
+      { label:"Gold", rating:35.5, slope:125, yds:[532,399,381,372,488,154,363,156,400] },
+      { label:"Blue", rating:34.4, slope:121, yds:[503,373,361,340,483,130,340,140,370] },
+      { label:"Blue (W)", rating:36.8, slope:129, yds:[503,373,361,340,483,130,340,140,370] },
+      { label:"White", rating:33.4, slope:116, yds:[428,344,336,305,452,121,317,120,341] },
+      { label:"White (W)", rating:35.6, slope:124, yds:[428,344,336,305,452,121,317,120,341] },
+      { label:"Green", rating:31.8, slope:109, yds:[423,312,267,272,390,100,243,95,268] },
+      { label:"Green (W)", rating:33.9, slope:114, yds:[423,312,267,272,390,100,243,95,268] },
+      { label:"Friendly", rating:29.5, slope:99, yds:[340,233,206,233,307,95,175,72,188] },
+      { label:"Friendly (W)", rating:29.9, slope:100, yds:[340,233,206,233,307,95,175,72,188] },
+    ] },
+};
 const THREE_NINE_COURSES = {
+  'grand-palms-golf-and-country-club': GRAND_PALMS_NINES,
+  'belle-glade-country-club-the-villages': BELLE_GLADE_NINES,
   'the-hollows-golf-club': HOLLOWS_NINES,
   'scepter-golf-club': SCEPTER_NINES,
   'the-legends-golf-club-2': LEGENDS_NINES,
@@ -27183,9 +27286,8 @@ async function openPaySetup(opts){
   ov.querySelector('#pay-save').onclick = ()=>{
     const h = { preferred: (prefSel && prefSel.value) || '' };
     PAY_METHODS.forEach(m=>{ const el = ov.querySelector('#pay-in-'+m.id); h[m.id] = _payClean(m.id, el ? el.value : ''); });
-    // Close INSTANTLY — the local cache is written synchronously at the top of the
-    // save fns, so nothing is lost; the cloud write finishes in the background and
-    // the screen never hangs on a slow connection (Tyler: "took forever to go away").
+    // Close INSTANTLY — local cache is written synchronously in the save fns; the
+    // cloud write finishes in the background so the screen never hangs (Tyler: "took forever to go away").
     markSeen();
     ov.classList.remove('show');
     try { showToast('Payment info saved ✓'); } catch(e){}
