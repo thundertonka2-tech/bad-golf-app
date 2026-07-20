@@ -7118,7 +7118,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.740';
+const BG_BUILD = 'v2026.11.741';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8212,12 +8212,26 @@ async function getMappedCourseIdSet(ids) {
         const CH = 40;
         for (let i = 0; i < toFetch.length; i += CH) {
           const chunk = toFetch.slice(i, i + CH);
-          const { data, error } = await supa.from('course_gps').select('course_id,holes').in('course_id', chunk);
-          // On a hard error, DON'T zero-fill this chunk — leave the ids uncached so the
-          // next admin load retries them. Zero-filling on a transient failure is what
-          // made a whole state show "0/18 · Not mapped" until the screen was reopened.
-          if (error) { console.warn('mapped hole-count chunk failed — leaving uncached for retry', error); continue; }
-          if (data) data.forEach(_storeMappedRow);
+          // v741: retry a chunk once, and NEVER poison the cache from a transient blip.
+          // The old code zero-filled every id whose row wasn't in the response — but a
+          // response that came back EMPTY (a network/rate hiccup, not a real "no rows")
+          // then cached holes:0 for the WHOLE chunk, and because cached ids are never
+          // refetched, an entire mapped state stuck at "0/18 · Not mapped" until reload
+          // (exactly what Tyler hit on IN right after a burst of DB writes). Now: on
+          // error OR an all-empty chunk we leave the ids UNCACHED so the next load
+          // retries them, and we only zero-fill ids genuinely missing from a chunk that
+          // DID return rows (those truly have no course_gps row).
+          let data = null, error = null;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const r = await supa.from('course_gps').select('course_id,holes').in('course_id', chunk);
+            data = r.data; error = r.error;
+            if (!error && data && data.length) break;
+            if (error) { console.warn('mapped hole-count chunk failed — retry', error); }
+            await new Promise(rs => setTimeout(rs, 350));
+          }
+          if (error) { continue; }                 // hard error — retry on the next load
+          if (!data || !data.length) { continue; } // empty response — treat as transient, don't poison
+          data.forEach(_storeMappedRow);
           chunk.forEach(id => { if (!_adminMappedCache.has(id)) _adminMappedCache.set(id, { holes: 0, fwc: 0, center: null }); });
         }
       }
