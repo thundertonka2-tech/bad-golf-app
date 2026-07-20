@@ -7124,7 +7124,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.745';
+const BG_BUILD = 'v2026.11.746';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -11676,14 +11676,41 @@ async function saveTourneys(list) {
 // saveCourseSaves() refreshes the cache, keeping read-after-write correct.
 let _courseSavesCache = null, _courseSavesAt = 0;
 function invalidateCourseSavesCache() { _courseSavesCache = null; _courseSavesAt = 0; }
+// v746: scorecards are SHARDED. The library outgrew a single ~4 MB shared:courses
+// blob — every card save rewrote the whole thing and started timing out (57014) as
+// more states imported. Now each card also lives in one of 64 small
+// `shared:courses:<hh>` shard rows (~1/64 of the library, ~100 KB), so a save
+// rewrites ONE shard, never the 4 MB blob. getCourseSaves reads the legacy blob as a
+// FROZEN base (it still holds every pre-shard card, so nothing can ever be lost) and
+// overlays the shard rows on top (authoritative for anything saved after this build).
+function _courseShard(id) { var s = String(id || ''), h = 0; for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; } return ('0' + (h % 64).toString(16)).slice(-2); }
 async function getCourseSaves() {
   if (_courseSavesCache != null && (Date.now() - _courseSavesAt < 20000)) {
     try { return JSON.parse(_courseSavesCache); } catch (e) { _courseSavesCache = null; }
   }
-  const v = await safeGet(KEY_COURSE_DATA, true);
-  if (!v) { _courseSavesCache = '{}'; _courseSavesAt = Date.now(); return {}; }
-  _courseSavesCache = v; _courseSavesAt = Date.now();
-  try { return JSON.parse(v); } catch (e) { return {}; }
+  // Base: the legacy blob (cache-first localStorage; keeps offline working). It is
+  // never written again, so it can only ever be missing NEW cards — which the shards
+  // supply below. This guarantees a card is never dropped.
+  var base = {};
+  try { const v = await safeGet(KEY_COURSE_DATA, true); if (v) base = JSON.parse(v) || {}; } catch (e) {}
+  // Overlay: sharded rows (shared:courses:00 .. :3f). Read via an indexed key range
+  // so it skips the blob itself and every other shared:* / scorecard:* singleton.
+  try {
+    if (!supaReady) await initSupabase();
+    if (supa && supaOnline) {
+      var from = 0; var page = 200;
+      while (true) {
+        var r = await supa.from('games').select('code,data').like('code', 'shared:courses:%').range(from, from + page - 1);
+        if (r.error || !r.data || !r.data.length) break;
+        r.data.forEach(function (row) { if (row && row.data && typeof row.data === 'object' && !Array.isArray(row.data)) { for (var k in row.data) base[k] = row.data[k]; } });
+        if (r.data.length < page) break;
+        from += page;
+      }
+    }
+  } catch (e) {}
+  var json = JSON.stringify(base);
+  _courseSavesCache = json; _courseSavesAt = Date.now();
+  return base;
 }
 
 // Player roster — names + handicaps remembered between rounds (personal/local)
@@ -12971,8 +12998,30 @@ async function backfillStatsFromSavedRounds() {
 
 async function saveCourseSaves(saves) {
   const json = JSON.stringify(saves);
+  var prev = {};
+  try { if (_courseSavesCache != null) prev = JSON.parse(_courseSavesCache) || {}; } catch (e) {}
   _courseSavesCache = json; _courseSavesAt = Date.now(); // keep cache in sync with the write
-  return await safeSet(KEY_COURSE_DATA, json, true);
+  // v746: rewrite only the SHARD rows whose cards changed (add/edit/remove) — a single
+  // card save touches one ~100 KB shard, not the 4 MB blob. The legacy blob is left
+  // frozen; getCourseSaves overlays these shards over it. Local edits are already in
+  // the cache above, so an offline/failed write just re-syncs on the next save.
+  try {
+    var changed = {}, id;
+    for (id in saves) { if (JSON.stringify(saves[id]) !== JSON.stringify(prev[id])) changed[_courseShard(id)] = 1; }
+    for (id in prev) { if (!(id in saves)) changed[_courseShard(id)] = 1; }
+    var shardKeys = Object.keys(changed);
+    if (!shardKeys.length) return true;
+    if (!supaReady) await initSupabase();
+    if (supa && supaOnline) {
+      var rows = shardKeys.map(function (sh) {
+        var obj = {};
+        for (var i2 in saves) { if (_courseShard(i2) === sh) obj[i2] = saves[i2]; }
+        return { code: 'shared:courses:' + sh, data: obj, updated_at: new Date().toISOString() };
+      });
+      for (var i = 0; i < rows.length; i += 20) { var e = (await supa.from('games').upsert(rows.slice(i, i + 20))).error; if (e) { console.warn('saveCourseSaves shard write error', e); return false; } }
+    }
+  } catch (e) { console.warn('saveCourseSaves failed', e); return false; }
+  return true;
 }
 
 async function getCourseScorecard(courseId) {
@@ -17682,39 +17731,7 @@ const WWGC_NINES = {
   searchCombos: [ ['cottonwood','silo'], ['silo','sleepingindian'], ['sleepingindian','cottonwood'] ]
 };
 
-const ELMRIDGE_NINES = {
-  _label: 'Elmridge Golf Club',
-  north: { name: 'North',
-    pars:[4,4,4,4,5,3,5,3,4], hdcp:[3,5,1,4,2,6,7,9,8],
-    tees:[
-      { label:'Front (W)', rating:35.3, slope:118, yds:[0,0,0,0,0,0,0,0,0] },
-      { label:'Back', rating:36.0, slope:123, yds:[366,377,403,376,527,201,525,148,384] },
-      { label:'Middle', rating:34.9, slope:119, yds:[344,350,334,343,504,192,492,128,343] },
-    ] },
-  south: { name: 'South',
-    pars:[4,4,4,5,3,4,3,4,4], hdcp:[3,8,2,4,5,6,7,1,9],
-    tees:[
-      { label:'Front (W)', rating:34.2, slope:102, yds:[0,0,0,0,0,0,0,0,0] },
-      { label:'Back', rating:34.5, slope:111, yds:[381,354,403,501,182,331,180,396,278] },
-      { label:'Middle', rating:33.7, slope:109, yds:[366,335,362,462,149,324,167,385,268] },
-    ] },
-  west: { name: 'West',
-    pars:[4,5,4,3,5,4,4,3,4], hdcp:[9,4,5,8,1,2,6,7,3],
-    tees:[
-      { label:'Front (W)', rating:34.8, slope:116, yds:[0,0,0,0,0,0,0,0,0] },
-      { label:'Back', rating:36.3, slope:119, yds:[372,493,366,165,591,380,371,222,391] },
-      { label:'Middle', rating:35.7, slope:115, yds:[365,433,344,149,576,354,365,206,370] },
-    ] },
-  combos: {
-    'north+south': [ {label:'Front (W)',rating:69.5,slope:110}, {label:'Back',rating:70.5,slope:117}, {label:'Middle',rating:68.5,slope:114} ],
-    'south+west': [ {label:'Front (W)',rating:69.0,slope:109}, {label:'Back',rating:70.8,slope:115}, {label:'Middle',rating:69.3,slope:112} ],
-    'north+west': [ {label:'Front (W)',rating:70.1,slope:117}, {label:'Back',rating:72.3,slope:121}, {label:'Middle',rating:70.5,slope:117} ],
-  },
-  searchCombos: [ ['north','south'], ['south','west'], ['west','north'] ]
-};
-
 const THREE_NINE_COURSES = {
-  'elmridge-golf-club': ELMRIDGE_NINES,
   'the-pinery-country-club': TPCC_NINES,
   'fox-hollow-2': FH_NINES,
   'west-woods-ranch-golf-club': WWGC_NINES,
