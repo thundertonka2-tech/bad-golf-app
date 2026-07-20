@@ -7124,7 +7124,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.728';
+const BG_BUILD = 'v2026.11.731';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8700,6 +8700,7 @@ async function renderAdmin() {
   html += '<h3 style="margin:4px 0 2px">🗺️ Course worklist</h3>';
   html += '<div class="help-text" style="margin-bottom:8px">Pick a <strong>state</strong> or <strong>search a course</strong> to load the list — every course can be re-mapped, re-rated, or edited. <span class="adm-flag gps" style="margin:0 2px">Needs GPS</span> · <span class="adm-flag both" style="margin:0 2px">both</span> · <span class="adm-flag rs" style="margin:0 2px">ratings</span> · ✓ Complete.</div>';
   html += '<button class="adm-act map" data-newcourse="1" style="width:100%;margin-bottom:10px;padding:11px">➕ Create new course</button>';
+  html += '<button class="adm-act map" data-newmultinine="1" style="width:100%;margin-bottom:10px;padding:11px">⛳ Build multi-nine facility</button>';
   // State list comes straight from the library (no network) so the dropdown is
   // instant; the per-course data loads only once a state is picked.
   const stCode = c => c.st || (typeof courseStateCode === 'function' ? courseStateCode(c) : '') || '';
@@ -8836,6 +8837,7 @@ async function renderAdmin() {
     if (t.dataset.unskip) { _adminSkipped.delete(t.dataset.unskip); renderAdminWorklist(); persistCourseSkipped(); return; }
     if (t.dataset.edit) { const ok = await editCourseDetails(t.dataset.edit); if (ok) { showToast('Course updated'); renderAdmin(); } return; }
     if (t.dataset.newcourse) { await adminCreateCourse(); return; }
+    if (t.dataset.newmultinine) { adminBuildMultiNine(); return; }
     if (t.dataset.map) { await adminMapCourse(t.dataset.map); return; }
     if (t.dataset.fwc) { await adminFwcCourse(t.dataset.fwc); return; }
     if (t.dataset.rate) { await adminEditTees(t.dataset.rate); return; }
@@ -10279,7 +10281,7 @@ function isSharedKey(key) {
 // Shared "singleton" keys — stored as one row each in the games table under a
 // reserved code prefix (shared:). The recent-rounds list lives here so all
 // devices see the same finished rounds. Same pattern for the course library.
-const SHARED_SINGLETONS = ['golf:courses', 'golf:recent-games', 'golf:tourneys', 'golf:round-templates', 'golf:course-gps',
+const SHARED_SINGLETONS = ['golf:multinine-configs', 'golf:courses', 'golf:recent-games', 'golf:tourneys', 'golf:round-templates', 'golf:course-gps',
   // Course library additions + the 48-state import queue MUST sync — without
   // these entries safeGet/safeSet silently fall back to localStorage and
   // user-added courses never reach anyone else's device.
@@ -17719,6 +17721,545 @@ const COURSE_HOLE_YARDS = {
     Red:   [346,292,473,129,352,344,326,128,495, 302,381,117,460,334,146,475,93,304]
   }
 };
+
+// === BEGIN multi-nine admin builder (v731) ===
+// ============================================================
+// ADMIN: BUILD A MULTI-COURSE / MULTI-NINE FACILITY BY HAND (v2026.11+)
+// ------------------------------------------------------------
+// Two layouts, one tool:
+//  (A) COMBINED NINES — a 27/36-hole club whose 3-5 nines combine into 18s.
+//      Stored as a THREE_NINE_COURSES config in Supabase (shared key
+//      'golf:multinine-configs'), merged into the live map at boot, no deploy.
+//      18-hole combo ratings are auto-factored by buildNineCombo.
+//  (B) SEPARATE COURSES — a facility with an 18 AND a 9 (or any mix of 18s/9s)
+//      that must NOT combine. Each course is created as its own normal library
+//      course with its own 9/18 scorecard and mapped on its own, so the 9's
+//      holes 1-9 never get mixed up with the 18. No THREE_NINE config for these.
+// After saving, each nine/course is handed to the existing hole-by-hole mapper
+// (tee / green front-back / fairway targets) — no new GPS code.
+// All screens are phone-first: 16px inputs (no iOS zoom), big tap targets,
+// scrollable modals, wrapping tee rows.
+// ============================================================
+const MULTININE_STORE_KEY = 'golf:multinine-configs';
+
+async function loadMultiNineConfigs() {
+  try {
+    const raw = await safeGet(MULTININE_STORE_KEY, true);
+    if (!raw) return;
+    let store = null;
+    try { store = JSON.parse(raw); } catch (e) { return; }
+    if (!store || typeof store !== 'object') return;
+    if (typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES) {
+      Object.keys(store).forEach(id => {
+        const cfg = store[id];
+        if (cfg && typeof cfg === 'object' && Array.isArray(cfg.searchCombos)) THREE_NINE_COURSES[id] = cfg;
+      });
+    }
+  } catch (e) { console.warn('loadMultiNineConfigs failed:', e); }
+}
+
+async function _mnGetStore() {
+  try {
+    const raw = await safeGet(MULTININE_STORE_KEY, true);
+    if (!raw) return {};
+    const s = JSON.parse(raw);
+    return (s && typeof s === 'object') ? s : {};
+  } catch (e) { return {}; }
+}
+
+async function saveMultiNineConfig(libraryId, cfg) {
+  if (!libraryId || !cfg) return false;
+  const store = await _mnGetStore();
+  store[libraryId] = cfg;
+  const ok = await safeSet(MULTININE_STORE_KEY, JSON.stringify(store), true);
+  try { if (typeof THREE_NINE_COURSES === 'object') THREE_NINE_COURSES[libraryId] = cfg; } catch (e) {}
+  try { audit('build_multinine', libraryId, (cfg._label || '') + ' — ' + (cfg.searchCombos ? cfg.searchCombos.length : 0) + ' combos'); } catch (e) {}
+  return ok !== false;
+}
+
+function _mnPairings(keys) {
+  const out = [];
+  for (let i = 0; i < keys.length; i++)
+    for (let j = i + 1; j < keys.length; j++) out.push([keys[i], keys[j]]);
+  return out;
+}
+
+function _mnKeyFor(name, used) {
+  let base = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 20);
+  if (!base) base = 'nine';
+  let k = base, n = 1;
+  while (used[k]) { n++; k = base + n; }
+  used[k] = 1;
+  return k;
+}
+
+// ---- Draft state ----
+let _mnDraft = null;
+let _mnStep = 0;   // 0 = setup, 1..N = per-item, then build
+
+function _mnBlankItem(holes) { return { name: '', holes: holes || 9, pars: new Array(holes || 9).fill(4), hdcp: new Array(holes || 9).fill(null), tees: {}, existingId: null }; }
+
+// The list of items being edited (nines OR separate courses), and how many holes each has.
+function _mnItems() { return (_mnDraft.layout === 'separate') ? _mnDraft.courses : _mnDraft.nines; }
+function _mnItemHoles(idx) { const it = _mnItems()[idx]; return (_mnDraft.layout === 'separate') ? (it.holes || 18) : 9; }
+function _mnItemCount() { return (_mnDraft.layout === 'separate') ? _mnDraft.courses.length : _mnDraft.nineCount; }
+
+function _mnEnsureItems() {
+  if (_mnDraft.layout === 'separate') {
+    if (!_mnDraft.courses) _mnDraft.courses = [];
+    if (!_mnDraft.courses.length) _mnDraft.courses.push(_mnBlankItem(18));
+  } else {
+    if (!_mnDraft.nines) _mnDraft.nines = [];
+    while (_mnDraft.nines.length < _mnDraft.nineCount) _mnDraft.nines.push(_mnBlankItem(9));
+    _mnDraft.nines.length = _mnDraft.nineCount;
+  }
+  // ensure every item has a slot for every current tee, sized to its hole count
+  _mnItems().forEach((it, idx) => {
+    const holes = (_mnDraft.layout === 'separate') ? (it.holes || 18) : 9;
+    if (!Array.isArray(it.pars) || it.pars.length !== holes) it.pars = new Array(holes).fill(4);
+    if (!Array.isArray(it.hdcp) || it.hdcp.length !== holes) it.hdcp = new Array(holes).fill(null);
+    if (!it.tees || typeof it.tees !== 'object') it.tees = {};
+    _mnDraft.teeLabels.forEach(lb => {
+      if (!it.tees[lb]) it.tees[lb] = { rating: null, slope: null, yds: new Array(holes).fill(null), wRating: null, wSlope: null };
+      else if (!Array.isArray(it.tees[lb].yds) || it.tees[lb].yds.length !== holes) it.tees[lb].yds = new Array(holes).fill(null);
+    });
+  });
+}
+
+// ============================================================
+// Entry point — chooser: brand-new, or convert an existing course.
+// ============================================================
+function adminBuildMultiNine(presetId) {
+  if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Admins only'); return; }
+  if (presetId) { _mnStartFacility(presetId); return; }
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.zIndex = 100093;
+  ov.innerHTML = '<div class="modal" style="max-width:440px">'
+    + '<h2>⛳ Build a facility</h2>'
+    + '<p class="help-text" style="margin-bottom:14px">Hand-map a facility that has no clean data — either a 27/36-hole club (nines that combine) or a facility with an 18 plus a separate 9.</p>'
+    + '<button class="primary full" id="mn-new" style="margin-bottom:8px">➕ Brand-new facility</button>'
+    + '<button class="primary full" id="mn-existing" style="margin-bottom:8px">🔀 Convert an existing course</button>'
+    + '<button class="full" id="mn-cancel">Cancel</button>'
+    + '</div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = e => { if (e.target === ov) close(); };
+  ov.querySelector('#mn-cancel').onclick = close;
+  ov.querySelector('#mn-new').onclick = () => { close(); _mnStartFacility(null); };
+  ov.querySelector('#mn-existing').onclick = () => { close(); _mnPickExisting(); };
+}
+
+async function _mnPickExisting() {
+  const q = window.prompt('Convert existing course\n\nType part of the course name:', '');
+  if (q === null) return;
+  const needle = (q || '').trim().toLowerCase();
+  if (!needle) { showToast('Enter a course name'); return; }
+  const matches = (COURSE_LIBRARY || []).filter(c => c && c.name && c.name.toLowerCase().includes(needle)).slice(0, 12);
+  if (!matches.length) { showToast('No course matches "' + q + '"'); return; }
+  if (matches.length === 1) { _mnStartFacility(matches[0].id); return; }
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.zIndex = 100093;
+  ov.innerHTML = '<div class="modal" style="max-width:440px"><h2>Which course?</h2>'
+    + matches.map(c => '<button class="primary full" data-id="' + escapeHtml(c.id) + '" style="margin-bottom:8px">' + escapeHtml(c.name) + (c.city ? ' — ' + escapeHtml(c.city) : '') + '</button>').join('')
+    + '<button class="full" id="mn-pc">Cancel</button></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = e => { if (e.target === ov) close(); };
+  ov.querySelector('#mn-pc').onclick = close;
+  ov.querySelectorAll('button[data-id]').forEach(b => b.onclick = () => { close(); _mnStartFacility(b.dataset.id); });
+}
+
+function _mnStartFacility(existingId) {
+  const lib = existingId ? (COURSE_LIBRARY || []).find(c => c.id === existingId) : null;
+  _mnDraft = {
+    layout: 'nines',
+    facility: lib ? lib.name : '',
+    city: lib ? (lib.city || '') : '',
+    baseId: existingId || null,
+    existing: !!existingId,
+    nineCount: 3,
+    teeLabels: ['Blue', 'White', 'Red'],
+    teeHasW: { Blue: false, White: true, Red: true },
+    nines: [],
+    courses: []
+  };
+  _mnStep = 0;
+  _mnRender();
+}
+
+// ============================================================
+// Persistent wizard overlay — re-rendered per step.
+// ============================================================
+function _mnRender() {
+  let ov = document.getElementById('mn-ov');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'mn-ov';
+    ov.className = 'modal-overlay show';
+    ov.style.zIndex = 100094;
+    document.body.appendChild(ov);
+  }
+  if (_mnStep === 0) ov.innerHTML = _mnSetupHtml();
+  else ov.innerHTML = _mnItemHtml(_mnStep - 1);
+  _mnWire(ov);
+  try { const m = ov.querySelector('.modal'); if (m) m.scrollTop = 0; } catch (e) {}
+}
+function _mnClose() { const ov = document.getElementById('mn-ov'); if (ov) { try { ov.remove(); } catch (e) {} } _mnDraft = null; }
+
+function _mnSetupHtml() {
+  const d = _mnDraft;
+  const sep = (d.layout === 'separate');
+  // layout toggle
+  const seg = '<div class="mn-seg">'
+    + '<button class="mn-segb' + (!sep ? ' on' : '') + '" data-lay="nines">Combined nines<br><span>27 / 36-hole</span></button>'
+    + '<button class="mn-segb' + (sep ? ' on' : '') + '" data-lay="separate">Separate courses<br><span>18 + 9, any mix</span></button>'
+    + '</div>';
+  let body = '';
+  if (!sep) {
+    const nineOpts = [2, 3, 4, 5].map(n => '<option value="' + n + '"' + (n === d.nineCount ? ' selected' : '') + '>' + n + ' nines</option>').join('');
+    let nineNames = '';
+    for (let i = 0; i < d.nineCount; i++) {
+      const nm = (d.nines[i] && d.nines[i].name) || '';
+      nineNames += '<input class="mn-in mn-itemname" data-i="' + i + '" placeholder="Nine ' + (i + 1) + ' name (e.g. Lakes)" value="' + escapeHtml(nm) + '">';
+    }
+    body = '<label class="mn-lab">How many nines?</label><select class="mn-in" id="mn-count">' + nineOpts + '</select>'
+      + '<label class="mn-lab">Nine names</label>' + nineNames;
+  } else {
+    let rows = '';
+    (d.courses || []).forEach((c, i) => {
+      rows += '<div class="mn-crow">'
+        + '<input class="mn-in mn-itemname" data-i="' + i + '" placeholder="Course ' + (i + 1) + ' name" value="' + escapeHtml(c.name || '') + '">'
+        + '<div class="mn-holeseg">'
+        + '<button class="mn-holeb' + (c.holes === 18 ? ' on' : '') + '" data-i="' + i + '" data-h="18">18</button>'
+        + '<button class="mn-holeb' + (c.holes === 9 ? ' on' : '') + '" data-i="' + i + '" data-h="9">9</button>'
+        + '</div>'
+        + (d.courses.length > 1 ? '<button class="mn-itemdel" data-i="' + i + '" title="remove">✕</button>' : '<span style="width:30px"></span>')
+        + '</div>';
+    });
+    body = '<label class="mn-lab">Courses at this facility</label>' + rows
+      + '<button class="mn-add" id="mn-addcourse">＋ Add another course</button>';
+  }
+  // shared tee list
+  let teeRows = '';
+  d.teeLabels.forEach((lb, i) => {
+    teeRows += '<div class="mn-teerow">'
+      + '<input class="mn-in mn-teelabel" data-i="' + i + '" value="' + escapeHtml(lb) + '" placeholder="Tee name">'
+      + '<label class="mn-wtog"><input type="checkbox" class="mn-teew" data-i="' + i + '"' + (d.teeHasW[lb] ? ' checked' : '') + '>&#9792;</label>'
+      + '<button class="mn-teedel" data-i="' + i + '" title="remove">✕</button>'
+      + '</div>';
+  });
+  return '<div class="modal mn-modal">'
+    + _mnStyleTag()
+    + '<h2>' + (d.existing ? 'Convert to facility' : 'New facility — setup') + '</h2>'
+    + seg
+    + '<label class="mn-lab">Facility name</label>'
+    + '<input class="mn-in" id="mn-fac" placeholder="e.g. Bayou Barriere Golf Club" value="' + escapeHtml(d.facility) + '"' + (d.existing ? ' readonly style="opacity:.7"' : '') + '>'
+    + '<label class="mn-lab">City, State</label>'
+    + '<input class="mn-in" id="mn-city" placeholder="e.g. Belle Chasse, LA" value="' + escapeHtml(d.city) + '">'
+    + body
+    + '<label class="mn-lab">Tee boxes (shared by every ' + (sep ? 'course' : 'nine') + ')</label>' + teeRows
+    + '<button class="mn-add" id="mn-addtee">＋ Add tee box</button>'
+    + '<div class="mn-btnrow">'
+    + '<button class="full" id="mn-x">Cancel</button>'
+    + '<button class="primary full" id="mn-next">Enter scorecards →</button>'
+    + '</div></div>';
+}
+
+// group an array into chunks of 9 (for 18-hole par/SI rows)
+function _mnChunks(n) { const rows = []; for (let s = 0; s < n; s += 9) rows.push([s, Math.min(s + 9, n)]); return rows; }
+
+function _mnItemHtml(idx) {
+  const d = _mnDraft, sep = (d.layout === 'separate');
+  const it = _mnItems()[idx];
+  const holes = _mnItemHoles(idx);
+  const nm = it.name || ((sep ? 'Course ' : 'Nine ') + (idx + 1));
+  const siMax = holes;
+  // PAR rows (tap to cycle), chunked by 9
+  let parRows = '';
+  _mnChunks(holes).forEach(rg => {
+    parRows += '<div class="mn-grid">';
+    for (let i = rg[0]; i < rg[1]; i++) parRows += '<div class="mn-par" data-h="' + i + '"><span class="mn-h">' + (i + 1) + '</span><span class="mn-pv">' + (it.pars[i] != null ? it.pars[i] : 4) + '</span></div>';
+    parRows += '</div>';
+  });
+  const parTot = it.pars.reduce((a, b) => a + (b || 0), 0);
+  // SI rows, chunked by 9
+  let siRows = '';
+  _mnChunks(holes).forEach(rg => {
+    siRows += '<div class="mn-grid mn-gap">';
+    for (let i = rg[0]; i < rg[1]; i++) siRows += '<div class="mn-cell"><span class="mn-h">' + (i + 1) + '</span><input class="mn-siin" type="number" inputmode="numeric" min="1" max="' + siMax + '" data-h="' + i + '" value="' + (it.hdcp[i] != null ? it.hdcp[i] : '') + '"></div>';
+    siRows += '</div>';
+  });
+  // per-tee blocks
+  let teeBlocks = '';
+  d.teeLabels.forEach(lb => {
+    const t = it.tees[lb] || {};
+    let yGrid = '<div class="mn-ygrid">';
+    for (let i = 0; i < holes; i++) yGrid += '<div class="mn-cell"><span class="mn-h">' + (i + 1) + '</span><input class="mn-yin" type="number" inputmode="numeric" data-tee="' + escapeHtml(lb) + '" data-h="' + i + '" value="' + (t.yds && t.yds[i] != null ? t.yds[i] : '') + '"></div>';
+    yGrid += '</div>';
+    teeBlocks += '<div class="mn-teeblk">'
+      + '<div class="mn-teehdr">' + escapeHtml(lb) + ' tee</div>'
+      + '<div class="mn-rs">'
+      + '<label>Rating<input class="mn-in mn-rating" data-tee="' + escapeHtml(lb) + '" type="number" step="0.1" inputmode="decimal" value="' + (t.rating != null ? t.rating : '') + '"></label>'
+      + '<label>Slope<input class="mn-in mn-slope" data-tee="' + escapeHtml(lb) + '" type="number" inputmode="numeric" value="' + (t.slope != null ? t.slope : '') + '"></label>'
+      + '</div>';
+    if (d.teeHasW[lb]) {
+      teeBlocks += '<div class="mn-rs">'
+        + '<label>&#9792; Rating<input class="mn-in mn-wrating" data-tee="' + escapeHtml(lb) + '" type="number" step="0.1" inputmode="decimal" value="' + (t.wRating != null ? t.wRating : '') + '"></label>'
+        + '<label>&#9792; Slope<input class="mn-in mn-wslope" data-tee="' + escapeHtml(lb) + '" type="number" inputmode="numeric" value="' + (t.wSlope != null ? t.wSlope : '') + '"></label>'
+        + '</div>';
+    }
+    teeBlocks += '<div class="mn-lab" style="margin:10px 0 4px">Yardages (holes 1&ndash;' + holes + ')</div>' + yGrid + '</div>';
+  });
+  const last = (idx === _mnItemCount() - 1);
+  const siHint = 'STROKE INDEX — 1 (hardest) to ' + siMax + ', each once';
+  return '<div class="modal mn-modal">'
+    + _mnStyleTag()
+    + '<h2 style="margin-bottom:2px">' + escapeHtml(d.facility || 'Facility') + '</h2>'
+    + '<div class="help-text" style="margin-bottom:10px">' + (sep ? 'Course ' : 'Nine ') + (idx + 1) + ' of ' + _mnItemCount() + ' — <strong>' + escapeHtml(nm) + '</strong> (' + holes + ' holes)</div>'
+    + '<div class="mn-lab">PAR — tap a hole to change (3&rarr;4&rarr;5&rarr;6)</div>' + parRows
+    + '<div class="mn-sub">Total par ' + parTot + '</div>'
+    + '<div class="mn-lab" id="mn-si-lab" style="margin-top:12px">' + siHint + '</div>' + siRows
+    + teeBlocks
+    + '<div class="mn-btnrow">'
+    + '<button class="full" id="mn-back">' + (idx === 0 ? '← Setup' : (sep ? '← Prev course' : '← Prev nine')) + '</button>'
+    + (last
+        ? '<button class="primary full" id="mn-build">✅ Build facility</button>'
+        : '<button class="primary full" id="mn-nextnine">' + (sep ? 'Next course →' : 'Next nine →') + '</button>')
+    + '</div>'
+    + '<button class="full mn-cancelbtn" id="mn-x">Cancel</button>'
+    + '</div>';
+}
+
+function _mnStyleTag() {
+  if (document.getElementById('mn-style')) return '';
+  return '<style id="mn-style">'
+    + '.mn-modal{max-width:560px;width:100%;max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch;box-sizing:border-box}'
+    + '.mn-lab{display:block;font-size:12px;font-weight:700;color:var(--text-muted);margin:12px 0 5px;text-transform:uppercase;letter-spacing:.03em}'
+    + '.mn-in{width:100%;padding:12px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:9px;box-sizing:border-box;margin-bottom:6px}'
+    + '.mn-seg{display:flex;gap:8px;margin:6px 0 4px}'
+    + '.mn-segb{flex:1;min-height:52px;padding:8px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);color:var(--text);font-weight:800;font-size:14px;cursor:pointer;line-height:1.25}'
+    + '.mn-segb span{font-weight:600;font-size:11px;color:var(--text-muted)}'
+    + '.mn-segb.on{border-color:var(--accent,#2f6fed);box-shadow:inset 0 0 0 2px var(--accent,#2f6fed);color:var(--text)}'
+    + '.mn-crow{display:flex;gap:8px;align-items:center;margin-bottom:8px}'
+    + '.mn-crow .mn-in{margin-bottom:0}'
+    + '.mn-holeseg{display:flex;flex:0 0 auto}'
+    + '.mn-holeb{min-width:44px;min-height:44px;padding:0 10px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-weight:800;font-size:15px;cursor:pointer}'
+    + '.mn-holeb:first-child{border-radius:9px 0 0 9px}.mn-holeb:last-child{border-radius:0 9px 9px 0;border-left:none}'
+    + '.mn-holeb.on{background:var(--accent,#2f6fed);color:#fff;border-color:var(--accent,#2f6fed)}'
+    + '.mn-itemdel,.mn-teedel{flex:0 0 auto;width:30px;min-height:44px;background:none;border:none;color:var(--danger,#d33);font-size:19px;cursor:pointer}'
+    + '.mn-teerow{display:flex;gap:8px;align-items:center;margin-bottom:6px}'
+    + '.mn-teerow .mn-in{margin-bottom:0}'
+    + '.mn-wtog{display:flex;align-items:center;gap:4px;font-size:16px;white-space:nowrap;min-height:44px}'
+    + '.mn-wtog input{width:20px;height:20px}'
+    + '.mn-add{width:100%;background:none;border:1px dashed var(--border);border-radius:9px;padding:11px;color:var(--text-muted);cursor:pointer;margin:2px 0 6px;font-size:14px;min-height:44px}'
+    + '.mn-grid{display:grid;grid-template-columns:repeat(9,1fr);gap:4px;margin-bottom:4px}'
+    + '.mn-ygrid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}'
+    + '.mn-gap{margin-top:2px}'
+    + '.mn-par{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:46px;padding:4px 0;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);cursor:pointer;user-select:none}'
+    + '.mn-h{font-size:9px;color:var(--text-muted);line-height:1}'
+    + '.mn-pv{font-size:18px;font-weight:800;line-height:1.2}'
+    + '.mn-cell{display:flex;flex-direction:column;align-items:center;gap:2px}'
+    + '.mn-siin,.mn-yin{width:100%;text-align:center;padding:11px 2px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;box-sizing:border-box;-moz-appearance:textfield;min-height:44px}'
+    + '.mn-siin::-webkit-outer-spin-button,.mn-siin::-webkit-inner-spin-button,.mn-yin::-webkit-outer-spin-button,.mn-yin::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}'
+    + '.mn-sub{text-align:center;font-size:12px;color:var(--text-muted);margin:6px 0 2px;font-weight:600}'
+    + '.mn-teeblk{border:1px solid var(--border);border-radius:11px;padding:12px;margin-top:14px;background:var(--surface)}'
+    + '.mn-teehdr{font-weight:800;margin-bottom:8px;font-size:15px}'
+    + '.mn-rs{display:flex;gap:10px;margin-bottom:4px}'
+    + '.mn-rs label{flex:1;font-size:12px;color:var(--text-muted);display:flex;flex-direction:column;gap:3px;font-weight:700}'
+    + '.mn-rs .mn-in{margin-bottom:0}'
+    + '.mn-btnrow{display:flex;gap:10px;margin-top:16px}'
+    + '.mn-btnrow .full{flex:1;min-height:48px}.mn-btnrow .primary{flex:1.6}'
+    + '.mn-cancelbtn{margin-top:8px;min-height:44px}'
+    + '.mn-modal.asi-editing{padding-bottom:44vh}'
+    + '</style>';
+}
+
+// ---- read values on screen into the draft ----
+function _mnReadSetup(ov) {
+  const d = _mnDraft;
+  const fac = ov.querySelector('#mn-fac'); if (fac && !d.existing) d.facility = fac.value.trim();
+  const city = ov.querySelector('#mn-city'); if (city) d.city = city.value.trim();
+  const labels = [], hasW = {};
+  ov.querySelectorAll('.mn-teelabel').forEach(inp => { const v = (inp.value || '').trim(); if (v) labels.push(v); });
+  ov.querySelectorAll('.mn-teew').forEach(cb => { const i = +cb.dataset.i; const lbInp = ov.querySelector('.mn-teelabel[data-i="' + i + '"]'); const v = lbInp ? (lbInp.value || '').trim() : ''; if (v) hasW[v] = cb.checked; });
+  if (labels.length) { d.teeLabels = labels; d.teeHasW = hasW; }
+  ov.querySelectorAll('.mn-itemname').forEach(inp => { const i = +inp.dataset.i; const arr = _mnItems(); if (arr[i]) arr[i].name = (inp.value || '').trim(); });
+}
+function _mnReadItem(ov, idx) {
+  const it = _mnItems()[idx]; if (!it) return;
+  ov.querySelectorAll('.mn-siin').forEach(inp => { const h = +inp.dataset.h; const v = parseInt(inp.value, 10); it.hdcp[h] = isNaN(v) ? null : Math.max(1, Math.min(it.hdcp.length, v)); });
+  ov.querySelectorAll('.mn-yin').forEach(inp => { const lb = inp.dataset.tee, h = +inp.dataset.h; if (!it.tees[lb]) return; const v = parseInt(inp.value, 10); it.tees[lb].yds[h] = isNaN(v) ? null : v; });
+  ov.querySelectorAll('.mn-rating').forEach(inp => { const lb = inp.dataset.tee; if (it.tees[lb]) { const v = parseFloat(inp.value); it.tees[lb].rating = isNaN(v) ? null : v; } });
+  ov.querySelectorAll('.mn-slope').forEach(inp => { const lb = inp.dataset.tee; if (it.tees[lb]) { const v = parseInt(inp.value, 10); it.tees[lb].slope = isNaN(v) ? null : v; } });
+  ov.querySelectorAll('.mn-wrating').forEach(inp => { const lb = inp.dataset.tee; if (it.tees[lb]) { const v = parseFloat(inp.value); it.tees[lb].wRating = isNaN(v) ? null : v; } });
+  ov.querySelectorAll('.mn-wslope').forEach(inp => { const lb = inp.dataset.tee; if (it.tees[lb]) { const v = parseInt(inp.value, 10); it.tees[lb].wSlope = isNaN(v) ? null : v; } });
+}
+
+function _mnWire(ov) {
+  const closeX = ov.querySelector('#mn-x'); if (closeX) closeX.onclick = () => { if (window.confirm('Discard this facility? Nothing is saved yet.')) _mnClose(); };
+  if (_mnStep === 0) {
+    ov.querySelectorAll('.mn-segb').forEach(b => b.onclick = () => {
+      _mnReadSetup(ov); _mnDraft.layout = b.dataset.lay; _mnEnsureItems(); _mnRender();
+    });
+    const cnt = ov.querySelector('#mn-count');
+    if (cnt) cnt.onchange = () => { _mnReadSetup(ov); _mnDraft.nineCount = parseInt(cnt.value, 10) || 3; _mnEnsureItems(); _mnRender(); };
+    ov.querySelectorAll('.mn-holeb').forEach(b => b.onclick = () => { _mnReadSetup(ov); const i = +b.dataset.i; _mnDraft.courses[i].holes = parseInt(b.dataset.h, 10); _mnEnsureItems(); _mnRender(); });
+    const addc = ov.querySelector('#mn-addcourse'); if (addc) addc.onclick = () => { _mnReadSetup(ov); _mnDraft.courses.push(_mnBlankItem(9)); _mnEnsureItems(); _mnRender(); };
+    ov.querySelectorAll('.mn-itemdel').forEach(b => b.onclick = () => { _mnReadSetup(ov); const i = +b.dataset.i; if (_mnDraft.courses.length <= 1) return; _mnDraft.courses.splice(i, 1); _mnRender(); });
+    const addtee = ov.querySelector('#mn-addtee');
+    if (addtee) addtee.onclick = () => { _mnReadSetup(ov); _mnDraft.teeLabels.push('Tee ' + (_mnDraft.teeLabels.length + 1)); _mnEnsureItems(); _mnRender(); };
+    ov.querySelectorAll('.mn-teedel').forEach(b => b.onclick = () => { _mnReadSetup(ov); const i = +b.dataset.i; if (_mnDraft.teeLabels.length <= 1) { showToast('Need at least one tee'); return; } _mnDraft.teeLabels.splice(i, 1); _mnEnsureItems(); _mnRender(); });
+    const nextB = ov.querySelector('#mn-next');
+    if (nextB) nextB.onclick = () => {
+      _mnReadSetup(ov);
+      if (!_mnDraft.facility) { showToast('Enter a facility name'); return; }
+      if (!_mnDraft.teeLabels.length) { showToast('Add at least one tee box'); return; }
+      const items = _mnItems();
+      for (let i = 0; i < items.length; i++) { if (!items[i] || !items[i].name) { showToast('Name ' + (_mnDraft.layout === 'separate' ? 'course ' : 'nine ') + (i + 1)); return; } }
+      _mnEnsureItems();
+      _mnStep = 1; _mnRender();
+    };
+    return;
+  }
+  // per-item step
+  const idx = _mnStep - 1;
+  const it = _mnItems()[idx];
+  ov.querySelectorAll('.mn-par').forEach(cell => cell.onclick = () => {
+    const h = +cell.dataset.h;
+    let nv = (it.pars[h] != null ? it.pars[h] : 4) + 1; if (nv > 6) nv = 3; it.pars[h] = nv;
+    cell.querySelector('.mn-pv').textContent = nv;
+    const sub = ov.querySelector('.mn-sub'); if (sub) sub.textContent = 'Total par ' + it.pars.reduce((a, b) => a + (b || 0), 0);
+  });
+  ov.querySelectorAll('.mn-siin').forEach(inp => {
+    inp.oninput = () => {
+      const h = +inp.dataset.h; const v = parseInt(inp.value, 10);
+      it.hdcp[h] = isNaN(v) ? null : Math.max(1, Math.min(it.hdcp.length, v));
+      const seen = {}; let dup = false; it.hdcp.forEach(x => { if (x != null) { if (seen[x]) dup = true; seen[x] = 1; } });
+      const lab = ov.querySelector('#mn-si-lab'); if (lab) lab.innerHTML = 'STROKE INDEX — 1 (hardest) to ' + it.hdcp.length + ', each once' + (dup ? ' <span style="color:var(--danger)">· duplicate!</span>' : '');
+    };
+    // keep focused box above the iOS keypad
+    inp.addEventListener('focus', () => { try { const m = ov.querySelector('.mn-modal'); if (m) m.classList.add('asi-editing'); } catch (e) {} setTimeout(() => { try { inp.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) {} }, 260); });
+    inp.addEventListener('blur', () => { setTimeout(() => { try { const a = document.activeElement; if (!a || !a.classList || !(a.classList.contains('mn-siin') || a.classList.contains('mn-yin'))) { const m = ov.querySelector('.mn-modal'); if (m) m.classList.remove('asi-editing'); } } catch (e) {} }, 150); });
+  });
+  ov.querySelectorAll('.mn-yin').forEach(inp => {
+    inp.addEventListener('focus', () => { try { const m = ov.querySelector('.mn-modal'); if (m) m.classList.add('asi-editing'); } catch (e) {} setTimeout(() => { try { inp.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) {} }, 260); });
+    inp.addEventListener('blur', () => { setTimeout(() => { try { const a = document.activeElement; if (!a || !a.classList || !(a.classList.contains('mn-siin') || a.classList.contains('mn-yin'))) { const m = ov.querySelector('.mn-modal'); if (m) m.classList.remove('asi-editing'); } } catch (e) {} }, 150); });
+  });
+  const backB = ov.querySelector('#mn-back');
+  if (backB) backB.onclick = () => { _mnReadItem(ov, idx); _mnStep = _mnStep - 1; _mnRender(); };
+  const nextNine = ov.querySelector('#mn-nextnine');
+  if (nextNine) nextNine.onclick = () => { _mnReadItem(ov, idx); _mnStep = _mnStep + 1; _mnRender(); };
+  const buildB = ov.querySelector('#mn-build');
+  if (buildB) buildB.onclick = () => { _mnReadItem(ov, idx); _mnFinish(); };
+}
+
+// ============================================================
+// Assemble + validate + save.
+// ============================================================
+function _mnTeesFor(it, d) {
+  const tees = [];
+  d.teeLabels.forEach(lb => {
+    const t = it.tees[lb] || {};
+    const yds = (t.yds || []).map(v => (v == null ? 0 : v));
+    const total = yds.reduce((a, b) => a + b, 0);
+    tees.push({ label: lb, rating: (t.rating != null ? t.rating : null), slope: (t.slope != null ? t.slope : null), yds: yds, yardage: total });
+    if (d.teeHasW[lb] && t.wRating != null) tees.push({ label: lb + ' (W)', rating: t.wRating, slope: (t.wSlope != null ? t.wSlope : null), yds: yds, yardage: total });
+  });
+  return tees;
+}
+
+function _mnAssembleNines() {
+  const d = _mnDraft, used = {}, keys = [];
+  const cfg = { _label: d.facility, searchCombos: [], combos: {} };
+  d.nines.forEach(nn => {
+    const key = _mnKeyFor(nn.name, used); keys.push(key);
+    cfg[key] = { name: nn.name, pars: nn.pars.map(p => p || 4), hdcp: nn.hdcp.map(h => h || 0), tees: _mnTeesFor(nn, d) };
+  });
+  cfg.searchCombos = _mnPairings(keys);
+  return cfg;
+}
+
+function _mnValidate() {
+  const d = _mnDraft; const problems = [];
+  _mnItems().forEach((it, i) => {
+    const tag = (d.layout === 'separate' ? 'Course ' : 'Nine ') + (i + 1) + ' (' + (it.name || '?') + ')';
+    const holes = it.hdcp.length;
+    const si = it.hdcp.filter(x => x != null);
+    const uniq = new Set(si);
+    if (si.length !== holes || uniq.size !== holes || Math.min.apply(null, si) !== 1 || Math.max.apply(null, si) !== holes)
+      problems.push(tag + ': stroke index must be 1–' + holes + ', each once');
+    d.teeLabels.forEach(lb => {
+      const t = it.tees[lb] || {};
+      if (t.rating == null || t.slope == null) problems.push(tag + ' · ' + lb + ': missing rating/slope');
+      const yv = (t.yds || []).filter(x => x != null && x > 0);
+      if (yv.length !== holes) problems.push(tag + ' · ' + lb + ': needs all ' + holes + ' yardages');
+    });
+  });
+  return problems;
+}
+
+async function _mnFinish() {
+  const problems = _mnValidate();
+  if (problems.length) {
+    const show = problems.slice(0, 8).join('\n• ');
+    if (!window.confirm('Some data is incomplete:\n\n• ' + show + (problems.length > 8 ? '\n…and more' : '') + '\n\nSave anyway? (You can reopen and finish later.)')) return;
+  }
+  const d = _mnDraft;
+  if (d.layout === 'separate') { await _mnFinishSeparate(); return; }
+  // ---- combined nines ----
+  let baseId = d.baseId;
+  try {
+    if (!baseId) { const added = await addCourseToLibrary(d.facility, d.city, '', { multiNine: true }); if (!added) { showToast('Could not create the facility'); return; } baseId = added.id; }
+  } catch (e) { showToast('Library error — try again'); return; }
+  const cfg = _mnAssembleNines();
+  const ok = await saveMultiNineConfig(baseId, cfg);
+  if (!ok) showToast('Saved locally — will sync when online');
+  try { await loadMultiNineConfigs(); } catch (e) {}
+  try { invalidateCourseLibraryCache(); } catch (e) {}
+  _mnClose();
+  _mnSavedModal(cfg._label, [{ label: 'the nines', map: () => { try { adminPickLoop(baseId, cid => adminMapCourse(cid)); } catch (e) { try { adminMapCourse(baseId); } catch (e2) {} } } }],
+    cfg.searchCombos.length + ' playable combo' + (cfg.searchCombos.length === 1 ? '' : 's'));
+}
+
+async function _mnFinishSeparate() {
+  const d = _mnDraft;
+  const made = [];
+  for (let i = 0; i < d.courses.length; i++) {
+    const c = d.courses[i];
+    let cid = c.existingId;
+    try {
+      if (!cid) { const added = await addCourseToLibrary(c.name, d.city, ''); if (!added) { showToast('Could not create ' + c.name); continue; } cid = added.id; }
+    } catch (e) { showToast('Library error on ' + c.name); continue; }
+    const pars = c.pars.map(p => p || 4);
+    const sis = c.hdcp.map(h => h || 0);
+    const tees = _mnTeesFor(c, d);
+    try { await persistCourseScorecard(cid, c.name, pars, sis, tees); } catch (e) {}
+    try { audit('build_separate_course', cid, c.name + ' (' + c.holes + ')'); } catch (e) {}
+    made.push({ id: cid, name: c.name, holes: c.holes });
+  }
+  try { invalidateCourseLibraryCache(); } catch (e) {}
+  _mnClose();
+  if (!made.length) { showToast('Nothing saved'); return; }
+  _mnSavedModal(d.facility, made.map(m => ({ label: m.name + ' (' + m.holes + ')', map: () => { try { adminMapCourse(m.id); } catch (e) {} } })),
+    made.length + ' course' + (made.length === 1 ? '' : 's') + ' — mapped separately');
+}
+
+// Shared "saved!" modal with one map button per nine-set / course.
+function _mnSavedModal(title, mapTargets, subtitle) {
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.zIndex = 100095;
+  ov.innerHTML = '<div class="modal" style="max-width:460px">' + _mnStyleTag()
+    + '<h2>✅ Saved &amp; live</h2>'
+    + '<p class="help-text" style="margin-bottom:12px"><strong>' + escapeHtml(title) + '</strong> is now in the library (' + escapeHtml(subtitle) + '). Every phone will see it. Map now to add greens, tees &amp; targets?</p>'
+    + mapTargets.map((t, i) => '<button class="primary full" data-mi="' + i + '" style="margin-bottom:8px">🗺️ Map ' + escapeHtml(t.label) + '</button>').join('')
+    + '<button class="full" id="mn-later">Done for now</button></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.querySelector('#mn-later').onclick = () => { close(); try { renderAdmin(); } catch (e) {} };
+  ov.querySelectorAll('button[data-mi]').forEach(b => b.onclick = () => { const t = mapTargets[+b.dataset.mi]; close(); if (t && t.map) t.map(); });
+}
+
+// === END multi-nine admin builder ===
 
 function buildNineCombo(nineSet, frontKey, backKey) {
   const F = nineSet[frontKey], B = nineSet[backKey];
@@ -48674,6 +49215,7 @@ async function init() {
   // Run it in the BACKGROUND so it doesn't block first paint (boot-time win).
   // The picker re-reads COURSE_LIBRARY each time it opens, so late additions show.
   loadCourseLibrary().catch(e => console.warn('Course library load failed:', e));
+  try { loadMultiNineConfigs().catch(function(){}); } catch (e) {}
 
   // Tabs
   document.querySelectorAll('.tab').forEach(t => {
