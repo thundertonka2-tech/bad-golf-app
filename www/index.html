@@ -7124,7 +7124,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.731';
+const BG_BUILD = 'v2026.11.732';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8191,11 +8191,19 @@ async function getMappedCourseIdSet(ids) {
         }
       } else {
         const toFetch = ids.filter(id => id && !_adminMappedCache.has(id));
-        const CH = 50;  // .in() over course ids MUST be <=50 or the URL overflows and returns empty -> everything reads 0 holes
+        // .in() over course ids must stay small: too many long ids overflow the URL
+        // and PostgREST returns an EMPTY result (no error) -> every course reads 0
+        // holes. 40 keeps the URL well under any gateway limit even for states with
+        // long ids (avg id ~23 chars -> ~1.4 KB URL).
+        const CH = 40;
         for (let i = 0; i < toFetch.length; i += CH) {
           const chunk = toFetch.slice(i, i + CH);
           const { data, error } = await supa.from('course_gps').select('course_id,holes').in('course_id', chunk);
-          if (!error && data) data.forEach(_storeMappedRow);
+          // On a hard error, DON'T zero-fill this chunk — leave the ids uncached so the
+          // next admin load retries them. Zero-filling on a transient failure is what
+          // made a whole state show "0/18 · Not mapped" until the screen was reopened.
+          if (error) { console.warn('mapped hole-count chunk failed — leaving uncached for retry', error); continue; }
+          if (data) data.forEach(_storeMappedRow);
           chunk.forEach(id => { if (!_adminMappedCache.has(id)) _adminMappedCache.set(id, { holes: 0, fwc: 0, center: null }); });
         }
       }
@@ -14257,9 +14265,17 @@ async function deleteCourse(courseId) {
   } catch (e) {}
   // Remove from the in-memory library now.
   COURSE_LIBRARY = COURSE_LIBRARY.filter(x => x.id !== courseId);
-  // Best-effort cloud cleanup of GPS + scorecard rows.
-  try { if (supa && supaOnline) await supa.from('course_gps').delete().eq('course_id', courseId); } catch (e) {}
-  try { const saves = await getCourseSaves(); if (saves[courseId]) { delete saves[courseId]; await saveCourseSaves(saves); } } catch (e) {}
+  // Heavy cloud cleanup (GPS row + the ~4 MB scorecard blob) runs in the BACKGROUND.
+  // The delete OVERLAY written above already hides the course on every device, so we
+  // must NOT block the admin UI — and risk a timeout — rewriting the whole courses
+  // blob just to drop one now-orphaned scorecard. Awaiting it was what made deletes
+  // "take forever," and while that big write hogged the connection the small overlay
+  // write's merge-read could fail and skip (its data-loss guard), so the deletion
+  // silently didn't stick. Fire-and-forget, fully best-effort.
+  (async () => {
+    try { if (supa && supaOnline) await supa.from('course_gps').delete().eq('course_id', courseId); } catch (e) {}
+    try { const saves = await getCourseSaves(); if (saves[courseId]) { delete saves[courseId]; await saveCourseSaves(saves); } } catch (e) {}
+  })();
   try { audit('delete_course', courseId, nm); } catch (e) {}
   return true;
 }
