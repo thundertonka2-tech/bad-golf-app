@@ -6,7 +6,11 @@
   function ready(cb, tries) {
     tries = tries || 0;
     var Push = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.PushNotifications;
-    if (Push && window.supa && window.supa.from) return cb(Push);
+    // v757: wait for the Push PLUGIN only — NOT Supabase — before asking for permission.
+    // Coupling the permission prompt to supa meant that when supa was slow/unavailable the
+    // iOS prompt never fired, so the app never registered and never appeared in iOS
+    // Settings > Notifications. The token upsert still waits for supa via _flushToken().
+    if (Push) return cb(Push);
     if (tries > 60) return;                 // ~30s then give up quietly
     setTimeout(function () { ready(cb, tries + 1); }, 500);
   }
