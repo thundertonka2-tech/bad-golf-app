@@ -7141,7 +7141,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.759';
+const BG_BUILD = 'v2026.11.760';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -34994,8 +34994,19 @@ async function fetchPlayerCloudStats(name) {
     const nm = normalizeNameSegment(name);
     const { data, error } = await supa.from('player_stats').select('stats,player_name');
     if (error || !Array.isArray(data)) return null;
-    const row = data.find(r => r && r.player_name && normalizeNameSegment(r.player_name) === nm);
-    return (row && Array.isArray(row.stats)) ? row.stats : null;
+    // A person can have MORE THAN ONE player_stats row whose player_name normalizes the
+    // same (a second/old account, or a guest row that later linked). Taking only the
+    // FIRST row made the board and card pick DIFFERENT rows for the same person — one
+    // full, one empty — so Frank read +$125 on his card but -$22 on the board. Union
+    // EVERY matching row by round key: the whole backup, deterministic regardless of
+    // row order, and a superset that can only make a stale single-row read more correct.
+    const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+    const out = []; const have = new Set();
+    data.forEach(r => {
+      if (!r || !r.player_name || normalizeNameSegment(r.player_name) !== nm) return;
+      (Array.isArray(r.stats) ? r.stats : []).forEach(s => { const k = keyOf(s); if (s && k && !have.has(k)) { out.push(s); have.add(k); } });
+    });
+    return out.length ? out : null;
   } catch (e) { return null; }
 }
 // Merge a roster player's local scoreHistory with their cloud backup (union by
@@ -37536,62 +37547,56 @@ async function renderCrewLeaderboard() {
       allowed.forEach(nm => { if (nm && !_have.has(nm)) pool.push({ name: nm }); });
     } catch (e) { console.warn('leaderboard friends filter failed', e); pool = roster; }
   }
-  // v629: collapse duplicate roster entries that are the same person under
-  // different capitalization/spelling ("Frank LoNigro" vs "Frank Lonigro").
-  // Roster keys are exact-cased on purpose (until an admin merge), but the
-  // leaderboard must show ONE row per person — histories union by round key so
-  // shared rounds never double-count. (Tyler: Frank showed twice.)
-  try {
-    const _byN = {};
-    const _keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
-    pool.forEach(p => {
-      const _nm = p ? (p.name || displayFull(p)) : '';   // v668: entries with only first/last name must not vanish
-      if (!p || !_nm) return;
-      const k = normalizeNameSegment(_nm);
-      if (!_byN[k]) { _byN[k] = Object.assign({}, p, { scoreHistory: Array.isArray(p.scoreHistory) ? p.scoreHistory.slice() : [] }); return; }
-      const tgt = _byN[k];
-      const have = new Set((tgt.scoreHistory || []).map(_keyOf));
-      (Array.isArray(p.scoreHistory) ? p.scoreHistory : []).forEach(s => { const kk = _keyOf(s); if (s && kk && !have.has(kk)) { tgt.scoreHistory.push(s); have.add(kk); } });
-      if (!tgt.avatar && p.avatar) tgt.avatar = p.avatar;
-      if ((!tgt.firstName || !tgt.lastName) && p.firstName && p.lastName) { tgt.firstName = p.firstName; tgt.lastName = p.lastName; tgt.name = p.name; }
-    });
-    const _collapsed = Object.values(_byN);
-    if (_collapsed.length && _collapsed.length < pool.length) pool = _collapsed;
-  } catch (e) {}
-  // v628: leaderboard money/rounds now use the SAME data a player's PROFILE
-  // shows — local roster history UNIONED with their cloud backup (player_stats).
-  // ONE fetch for the whole board (the profile does this per player), union by
-  // round key, shared round-tombstones respected. Fixes friends showing +$0 on
-  // the Winnings board while their profile shows real lifetime bets.
+  // v760: ONE row per person, each computed with the EXACT path the profile card
+  // uses (resolveRosterPlayerByName → merge with the cloud backup), so the Winnings
+  // board total can NEVER disagree with the card. The old board diverged two ways:
+  // (1) it collapse-UNIONED every duplicate roster entry's history, folding a stale
+  //     duplicate's money into the row — the card resolves ONE canonical entry; and
+  // (2) it read only the FIRST player_stats row per name while the card could read a
+  //     different one, so a person with a second/empty backup row split the two.
+  // Net effect: Frank read -$22 on the board but +$125 on his card. Now the board
+  // resolves the same base the tap-through opens and merges the same cloud union, so
+  // the row and the card it opens are computed identically. (Tyler confirmed the card
+  // is right, so matching the card = correct for everyone.)
+  //
+  // Cloud backup, batched ONCE for the whole board. UNION every player_stats row that
+  // normalizes to the same name (old/second account, linked guest) so nobody's backup
+  // is split — mirrors fetchPlayerCloudStats, the card's per-player fetch.
   let _cloudStats = null;
   try {
     if (supa) {
       const { data: _ps } = await supa.from('player_stats').select('stats,player_name');
-      if (Array.isArray(_ps)) { _cloudStats = {}; _ps.forEach(r => { try { if (r && r.player_name) _cloudStats[normalizeNameSegment(r.player_name)] = Array.isArray(r.stats) ? r.stats : []; } catch (e) {} }); }
+      if (Array.isArray(_ps)) {
+        _cloudStats = {};
+        const _k = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+        _ps.forEach(r => {
+          try {
+            if (!r || !r.player_name) return;
+            const nm = normalizeNameSegment(r.player_name);
+            const bag = _cloudStats[nm] || (_cloudStats[nm] = { list: [], have: new Set() });
+            (Array.isArray(r.stats) ? r.stats : []).forEach(s => { const k = _k(s); if (s && k && !bag.have.has(k)) { bag.list.push(s); bag.have.add(k); } });
+          } catch (e) {}
+        });
+        Object.keys(_cloudStats).forEach(nm => { _cloudStats[nm] = _cloudStats[nm].list; });
+      }
     }
   } catch (e) { _cloudStats = null; }
   let _tombRounds = null;
   try { const _t = await getSharedTombstones(); _tombRounds = (_t && _t.rounds) || null; } catch (e) {}
-  // Who's viewing + their own deleted-round tombstones — applied ONLY to the "me"
-  // row, exactly like mergedPlayerHistory does, so a round I deleted can't reappear
-  // on my own board line from the cloud backup (never touches anyone else's rounds).
+  // Viewer + their own deleted-round keys — applied ONLY to the "me" row, exactly like
+  // mergedPlayerHistory, so a round I deleted can't reappear on my line from the cloud.
   let _meNorm = '';
   try { const _mn = await getMeName(); _meNorm = _mn ? normalizeNameSegment(_mn) : ''; } catch (e) {}
   let _myDel = null;
   try { _myDel = getDeletedRoundKeys(); } catch (e) {}
-  const _enrich = (p) => {
+  // Synchronous mirror of mergedPlayerHistory (the card awaits it per player): a
+  // canonical base entry's local rounds UNIONED with the batch cloud union, same
+  // tombstone rules, same union-by-round-key. Board history === card history.
+  const _lbHistory = (base, name) => {
     try {
-      if (!p) return p;
-      // v759: the board now UNIONS each player's local rounds with their cloud backup
-      // (player_stats), deduped by round key with tombstones applied — the SAME merge
-      // the profile card uses (mergedPlayerHistory), so the Winnings board total ALWAYS
-      // equals the card. Picking one source broke half the crew: v757's local-only
-      // showed Frank a -$22 local SUBSET while his 7 real rounds (+$125.25) live in the
-      // cloud; the pre-v757 cloud-override showed Kylan a stale -$1 cloud subset instead
-      // of his -$16 local rounds. A union takes the SUPERSET, so neither a stale local
-      // nor a stale cloud copy can shrink the total — both Frank and Kylan now match.
+      const norm = normalizeNameSegment(name || (base && base.name) || '');
+      const isMe = !!(_meNorm && norm === _meNorm);
       const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
-      const isMe = !!(_meNorm && p.name && normalizeNameSegment(p.name) === _meNorm);
       const _tombed = (s) => {
         try {
           if (_tombRounds && (_tombRounds.has(statsRoundKey(s)) || _tombRounds.has(rosterRoundKey(s)))) return true;
@@ -37599,23 +37604,36 @@ async function renderCrewLeaderboard() {
         } catch (e) {}
         return false;
       };
-      const hist = (Array.isArray(p.scoreHistory) ? p.scoreHistory : []).filter(s => s && !_tombed(s));
-      const cloud = (_cloudStats && p.name) ? _cloudStats[normalizeNameSegment(p.name)] : null;
+      const hist = (base && Array.isArray(base.scoreHistory) ? base.scoreHistory : []).filter(s => s && !_tombed(s));
+      const cloud = _cloudStats ? _cloudStats[norm] : null;
       if (cloud && cloud.length) {
         const have = new Set(hist.map(keyOf));
-        cloud.forEach(s => {
-          try {
-            if (!s) return;
-            const k = keyOf(s);
-            if (!k || have.has(k) || _tombed(s)) return;
-            hist.push(s); have.add(k);
-          } catch (e) {}
-        });
+        cloud.forEach(s => { try { if (!s) return; const k = keyOf(s); if (!k || have.has(k) || _tombed(s)) return; hist.push(s); have.add(k); } catch (e) {} });
       }
-      return Object.assign({}, p, { scoreHistory: hist });
-    } catch (e) { return p; }
+      return hist;
+    } catch (e) { return (base && Array.isArray(base.scoreHistory)) ? base.scoreHistory : []; }
   };
-  const rows = pool.map(p => { const ep = _enrich(p); return { p: ep, s: crewPlayerStats(ep) }; });
+  // Dedupe the pool to ONE representative per person (first entry's name wins the row
+  // identity — the same string used to display, to resolve the base, and to open the
+  // profile on tap, so the row and its card agree). No history is unioned here; each
+  // row's numbers come from _lbHistory below, exactly like the card.
+  const _seen = {};
+  const _uniq = [];
+  pool.forEach(p => {
+    const nm = p ? (p.name || displayFull(p)) : '';
+    if (!p || !nm) return;
+    const k = normalizeNameSegment(nm);
+    if (_seen[k]) { const u = _seen[k]; if (u.poolEntry && !u.poolEntry.avatar && p.avatar) u.poolEntry.avatar = p.avatar; return; }
+    _seen[k] = { name: nm, poolEntry: p };
+    _uniq.push(_seen[k]);
+  });
+  const rows = _uniq.map(u => {
+    let base = resolveRosterPlayerByName(roster, u.name) || u.poolEntry;
+    const ep = Object.assign({}, u.poolEntry, base, { scoreHistory: _lbHistory(base, u.name) });
+    if (!ep.avatar && u.poolEntry && u.poolEntry.avatar) ep.avatar = u.poolEntry.avatar;
+    if (!ep.name) ep.name = u.name;
+    return { p: ep, s: crewPlayerStats(ep) };
+  });
   const played = rows.filter(r => r.s.rounds > 0);
   // Friends view shows EVERY accepted friend (even 0 rounds / +$0); Everyone view
   // still hides the zero-round long tail. (Tyler: Frank was a friend but missing.)
