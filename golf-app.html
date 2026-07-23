@@ -7142,7 +7142,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.776';
+const BG_BUILD = 'v2026.11.777';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -18710,6 +18710,11 @@ function _mnStartFacility(existingId, opts) {
     combos: {}
   };
   _mnStep = 0;
+  // Pre-create the blank nine/course items BEFORE the first render+read. Without
+  // this, _mnDraft.nines was still [] the first time _mnReadSetup ran, so the
+  // typed nine NAMES were read into nothing and silently dropped ("names not
+  // saving at all"). Ensuring items first means the name inputs map to real items.
+  try { _mnEnsureItems(); } catch (e) {}
   _mnRender();
 }
 
@@ -20185,6 +20190,69 @@ function setWatchPlaysAsEnabled(on){
   if (typeof showToast === 'function') showToast(on ? 'Watch: plays-as distance' : 'Watch: actual yardage');
   try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
 }
+
+// ===== Apple Watch hand-off =================================================
+// Push the active round + its greens + session token to the paired Apple Watch
+// so the watch shows real yardages and can score. This was previously REFERENCED
+// (setWatchPlaysAsEnabled above) but never DEFINED, so the watch never received a
+// round and reported "no active round". Defining it here + calling it on round
+// start, hole change and score save keeps the watch current.
+// Greens are cached per course so we don't re-hit Supabase on every hole change.
+window._bgWatchGreens = window._bgWatchGreens || { id: null, holes: null };
+window.BadGolfWatchSync = async function () {
+  try {
+    if (typeof isNativeApp !== 'function' || !isNativeApp()) return;
+    if (!(window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.WatchBridge)) return;
+    const g = (typeof state !== 'undefined' && state) ? state.game : null;
+    if (!g || !g.code) return;
+    // session token + account id
+    let token = null, playerId = null;
+    try { const s = await supa.auth.getSession(); token = (s && s.data && s.data.session) ? s.data.session.access_token : null; } catch (e) {}
+    try { playerId = (typeof _authUser !== 'undefined' && _authUser) ? _authUser.id : null; } catch (e) {}
+    // greens for this course (course_gps.holes), cached by courseId
+    let holes = {};
+    try {
+      if (window._bgWatchGreens.id === g.courseId && window._bgWatchGreens.holes) {
+        holes = window._bgWatchGreens.holes;
+      } else if (g.courseId) {
+        const { data } = await supa.from('course_gps').select('holes').eq('course_id', g.courseId).maybeSingle();
+        holes = (data && data.holes) || {};
+        window._bgWatchGreens = { id: g.courseId, holes };
+      }
+    } catch (e) {}
+    // the wearer's own per-hole strokes → { "1": {strokes}, ... }
+    let myPid = null;
+    try { myPid = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null; } catch (e) {}
+    const arr = (g.scores && myPid && g.scores[myPid]) || [];
+    const scores = {};
+    try { arr.forEach((v, i) => { if (v != null) scores[String(i + 1)] = { strokes: v }; }); } catch (e) {}
+    const handoff = {
+      token: token,
+      playerId: playerId,
+      round: {
+        id: g.code,
+        course_id: g.courseId || '',
+        course_name: g.course || '',
+        user_id: playerId || '',
+        current_hole: (typeof state !== 'undefined' && state && state.currentHole) ? state.currentHole : (g.startHole || 1),
+        scores: scores
+      },
+      course: {
+        course_id: g.courseId || '',
+        name: g.course || '',
+        city: '',
+        holes: holes
+      },
+      clubs: Array.isArray(window._myClubs) ? window._myClubs : [],
+      playsAs: (typeof watchPlaysAsEnabled === 'function') ? watchPlaysAsEnabled() : true
+    };
+    await Capacitor.Plugins.WatchBridge.syncSession({
+      token: token || '', playerId: playerId || '', handoff: JSON.stringify(handoff)
+    });
+  } catch (e) { /* watch sync is best-effort */ }
+};
+// Fire-and-forget helper used at hole/score/start hooks.
+function _bgWatchSyncSoon() { try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {} }
 
 // ============================================================
 // SETUP UI
@@ -23712,6 +23780,10 @@ function applySavedConfig(config) {
       detail.style.pointerEvents = noHcp ? 'none' : 'auto';
     }
   }
+  // Back-nine-first (nineMode) is independent of handicap rules — restore it
+  // UNCONDITIONALLY so a template / open round saved without hcpRules still
+  // brings the "Start on the Back 9" choice back into the dropdown.
+  if ($('nine-mode')) $('nine-mode').value = config.nineMode || 'all18';
 
   // Game toggles + their option panels
   const games = config.games || {};
@@ -24851,6 +24923,7 @@ function isHoleComplete(g, h) {
 function renderScoreEntry() {
   const g = state.game;
   if (!g) return;
+  _bgWatchSyncSoon();   // keep the paired Apple Watch on this hole/score
   const h = state.currentHole;
   $('cur-hole').textContent = h;
   $('cur-par').textContent = g.pars[h - 1];
@@ -26499,6 +26572,7 @@ function renderJunkEntry() {
   // the top of the hole — sync BEFORE drawing so a GIR flipped by a SCORE entry (not
   // just a putt) auto-populates here. No-ops unless GIR tracking + the GIR junk are on.
   try { syncGirJunk(g, h); } catch (e) {}
+  try { syncArnieJunk(g, h); } catch (e) {}
   try { syncSandyJunk(g, h); } catch (e) {}
 
   // Migrate any legacy single-player entries to arrays so we can multi-select.
@@ -27194,6 +27268,32 @@ function syncGirJunk(g, h) {
   g.junkData[h]['gir'] = list;
 }
 
+// Auto-fill the "Arnie" junk (Arnold Palmer): made PAR on a hole while hitting
+// NEITHER the fairway NOR the green in regulation. Needs fairways AND GIR/putts
+// tracked so a fairway-miss and a GIR-miss are both DEFINITELY known (a null =
+// "unmarked" never counts). Leaves any hand-set Arnie chips alone. Mirrors
+// syncGirJunk. Runs only when Arnie is a live side bet.
+function syncArnieJunk(g, h) {
+  if (!g || !g.trackFairways || !g.trackGirs) return;
+  if (!g.games || !g.games.junk || g.games.junk.arnie == null) return;
+  if (!g.junkData) g.junkData = {};
+  if (!g.junkData[h]) g.junkData[h] = {};
+  if (g.junkData[h]._arnieManual) return;   // user manually set this hole's Arnie — don't overwrite
+  const par = g.pars && g.pars[h - 1];
+  const list = [];
+  (g.players || []).forEach(p => {
+    try {
+      const s = (g.scores && g.scores[p.id]) ? g.scores[p.id][h - 1] : null;
+      const fw = (g.fairwaysData && g.fairwaysData[p.id]) ? g.fairwaysData[p.id][h - 1] : null;
+      const gir = (typeof girStatusFor === 'function') ? girStatusFor(g, p.id, h) : null;
+      // Exactly par, DEFINITELY missed the fairway (=== false, not null/unmarked),
+      // and DEFINITELY missed GIR (=== false — requires putts tracked to be known).
+      if (s != null && par != null && s === par && fw === false && gir === false) list.push(p.id);
+    } catch (e) {}
+  });
+  g.junkData[h]['arnie'] = list;
+}
+
 // Auto-fill the existing "Sandy" junk (par after being in a bunker) from the tracked
 // sand-save chip — mirrors syncGirJunk. Only runs when sand tracking is on AND the
 // Sandy side bet is live; otherwise the manual Sandy chip is left untouched.
@@ -27222,7 +27322,7 @@ async function handleGirToggle(pid) {
   if (!Array.isArray(g.girData[pid])) g.girData[pid] = new Array(18).fill(null);
   g.girData[pid][h - 1] = g.girData[pid][h - 1] === true ? null : true;
   _markScoreTouched('girData', pid, h - 1);
-  syncGirJunk(g, h); try { syncSandyJunk(g, h); } catch (e) {}
+  syncGirJunk(g, h); try { syncSandyJunk(g, h); } catch (e) {} try { syncArnieJunk(g, h); } catch (e) {}
   await saveGame(g);
   renderScoreEntry();
 }
@@ -27239,6 +27339,7 @@ async function handleFairwayToggle(pid) {
   const cur = g.fairwaysData[pid][h - 1];
   g.fairwaysData[pid][h - 1] = cur == null ? true : (cur === true ? false : null);
   _markScoreTouched('fairwaysData', pid, h - 1);
+  try { syncArnieJunk(g, h); } catch (e) {}   // fairway is an Arnie input — recompute
   await saveGame(g);
   renderScoreEntry();
 }
@@ -27286,7 +27387,7 @@ async function clearScoreFor(pid) {
   if (!g.scores[pid] || g.scores[pid][h - 1] == null) return;
   g.scores[pid][h - 1] = null;
   _markScoreTouched('scores', pid, h - 1); // a deliberate clear must STICK — never let a stale write resurrect it
-  syncGirJunk(g, h); try { syncSandyJunk(g, h); } catch (e) {}
+  syncGirJunk(g, h); try { syncSandyJunk(g, h); } catch (e) {} try { syncArnieJunk(g, h); } catch (e) {}
   await saveGame(g);
   renderScoreEntry();
   showToast('Score cleared — tap + or − to re-enter');
@@ -27322,7 +27423,7 @@ async function handleScoreChange(pid, action) {
   _markScoreTouched('scores', pid, h - 1); // this cell is mine — wins any concurrent merge
   // Round timer starts at the FIRST score logged (not at round creation).
   if (cur !== null && !g.firstScoreAt) g.firstScoreAt = Date.now();
-  syncGirJunk(g, h); try { syncSandyJunk(g, h); } catch (e) {}
+  syncGirJunk(g, h); try { syncSandyJunk(g, h); } catch (e) {} try { syncArnieJunk(g, h); } catch (e) {}
 
   // Celebrations (birdie / blow-up) no longer fire here — they're deferred to
   // hole-advance via announceHoleCelebrations() so they never interrupt the
@@ -39393,11 +39494,11 @@ async function openProposeWager(code) {
 async function notifyAddedRegisteredUsers(g) {
   try {
     if (!g || !g.code || !Array.isArray(g.players) || !supa || !_authUser) return;
-    // ADMIN EXEMPTION (Tyler): rounds STARTED BY AN ADMIN skip the consent gate
-    // entirely — no consentReq stamp, no auto-invites, no pushes — so testing
-    // with dummy accounts works without each one having to accept. Normal
-    // users' rounds always gate.
-    try { if (typeof isAdmin === 'function' && isAdmin()) return; } catch (e) {}
+    // Admin-started rounds notify the added players just like anyone else's. (An
+    // old exemption returned here for admins so dummy-account testing wouldn't
+    // fire invites — but that meant Kevin, an admin, could never invite his crew,
+    // so no one got his round invitations. Solo/test rounds still send nothing,
+    // because there are no OTHER players to notify.)
     let me = null; try { me = await getMeName(); } catch (e) {}
     const meN = me ? normalizeNameSegment(me) : '';
     const profiles = await fetchProfiles();
@@ -49507,7 +49608,11 @@ function _buildTourneySavedConfig(setup) {
     tees: Array.isArray(setup.tees) ? setup.tees : [],
     players: cleanPlayers,
     games: cleanGames,
-    hcpRules: setup.hcpRules
+    hcpRules: setup.hcpRules,
+    // Persist the back-nine-first choice so templates / scheduled / open rounds
+    // remember "Start on the Back 9" (was previously dropped here, so the toggle
+    // "did nothing" after a round was saved that way and reopened).
+    nineMode: setup.nineMode || 'all18'
   };
   return { savedConfig, cleanPlayers };
 }
@@ -49861,6 +49966,17 @@ window.switchTab = function(name, opts) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   try { renderBottomNav(); } catch (e) {}   // mirror the active tab onto the bottom nav
+  // Always land at the TOP of a newly-shown screen. Switching tabs or joining a
+  // game used to leave the page scrolled wherever the previous screen was (often
+  // the bottom). Reset the window AND the active panel's own scroll to the top.
+  try {
+    window.scrollTo(0, 0);
+    if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+    if (document.documentElement) document.documentElement.scrollTop = 0;
+    if (document.body) document.body.scrollTop = 0;
+    const _activePanel = document.getElementById('panel-' + name);
+    if (_activePanel) _activePanel.scrollTop = 0;
+  } catch (e) {}
   try { if (name === 'times') renderTimes(); } catch (e) {}   // Times tab: (re)draw the tee-time calendar
   if (name === 'score') {
     // If you're only VIEWING a finished or spectated round (read-only), tapping
@@ -51420,6 +51536,7 @@ async function init() {
     // hard-coded to 1, which silently dropped players on hole 1 no matter what they
     // picked (the "back nine first wouldn't let us" bug).
     state.currentHole = game.startHole || 1;
+    _bgWatchSyncSoon();   // prime the paired Apple Watch with this new round immediately
     state.viewOnlyMode = false; // brand-new round you created — never spectator/read-only
     // Crew heads-up: if the "alert friends" toggle is on, stamp the round so each
     // crew member's app can surface a one-time "XX is playing <course> in <city>" toast.
@@ -53407,6 +53524,7 @@ const gpsView = (() => {
     cancelTrack();
     closePlaysPanel();
     farWarned = false;
+    _bgWatchSyncSoon();   // keep the paired Apple Watch on this hole
     el('gps-shot-panel').style.display = 'none';
     hole = Math.min(18, Math.max(1, h));
     el('gps-hole-num').textContent = hole;
