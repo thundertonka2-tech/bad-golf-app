@@ -24,10 +24,22 @@ final class RoundStore: ObservableObject {
     }()
     private var pendingHoles: Set<Int> = []   // holes with unsynced score writes
 
-    init() { loadCache() }
+    init() { loadCache(); ensureCourseMatchesRound() }
 
     // MARK: Hole helpers
-    var hole: Hole? { course?.holes[currentHole] }
+    // The cached greens ONLY when they belong to the ACTIVE round's course.
+    // The round and the course are cached separately, so without this guard a
+    // course mapped earlier (e.g. the Michigan courses Kevin was mapping) would
+    // keep feeding greens into a brand-new round on a different course — making
+    // the watch range to a green a thousand miles away (the 1.7M-yard bug). When
+    // both ids are known and DON'T match, we refuse the stale greens (show
+    // "Loading…") until ensureCourseMatchesRound() pulls the right course.
+    var activeCourse: Course? {
+        guard let c = course else { return nil }
+        guard let r = round, !r.courseId.isEmpty, !c.id.isEmpty else { return course }
+        return c.id == r.courseId ? c : nil
+    }
+    var hole: Hole? { activeCourse?.holes[currentHole] }
     var par: Int? { hole?.par }
     var holeCount: Int { round?.holeCount ?? 18 }
 
@@ -38,7 +50,7 @@ final class RoundStore: ObservableObject {
         var playedPar = 0, played = 0
         for (h, s) in r.scores {
             played += s.strokes
-            playedPar += course?.holes[h]?.par ?? 0
+            playedPar += activeCourse?.holes[h]?.par ?? 0
         }
         let diff = played - playedPar
         let thru = r.scores.count
@@ -82,6 +94,7 @@ final class RoundStore: ObservableObject {
         SessionStore.shared.playerId = handoff.round.playerId
         signedIn = SessionStore.shared.isSignedIn
         saveCache()
+        ensureCourseMatchesRound()
     }
 
     // MARK: Tolerant hand-off from the phone (token + optional round + course)
@@ -113,6 +126,7 @@ final class RoundStore: ObservableObject {
         if let pa = payload["playsAs"] as? Bool { self.watchPlaysAs = pa }
         signedIn = SessionStore.shared.isSignedIn
         saveCache()
+        ensureCourseMatchesRound()
     }
 
     /// Best club for a yardage: the one whose range contains it, else nearest by mid.
@@ -132,6 +146,30 @@ final class RoundStore: ObservableObject {
                 self.course = c
             }
             saveCache()
+        }
+    }
+
+    // MARK: Keep the cached greens in sync with the active round's course
+    /// If the cached course doesn't belong to the active round (a new round on a
+    /// different course, before its greens were handed over), drop the stale
+    /// greens IMMEDIATELY so we never range to the wrong course, then pull the
+    /// correct course — from Supabase (course_gps) if we have network, otherwise
+    /// ask the phone to re-send the round handoff (which carries the greens).
+    func ensureCourseMatchesRound() {
+        guard let r = round, !r.courseId.isEmpty else { return }
+        if course?.id == r.courseId { return }            // already correct
+        if course != nil { course = nil; saveCache() }    // drop stale greens NOW
+        let wantedId = r.courseId
+        Task { @MainActor in
+            if let c = await SupabaseService.shared.fetchCourse(courseId: wantedId) {
+                // Guard against a race: only apply if the round still wants it.
+                if self.round?.courseId == wantedId {
+                    self.course = c
+                    self.saveCache()
+                }
+            } else {
+                WatchConnectivityManager.shared.requestRound()
+            }
         }
     }
 
