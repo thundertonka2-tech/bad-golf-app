@@ -105,13 +105,27 @@ export async function sendPushCore(opts: {
   return { sent: results };
 }
 
+// CORS so the in-app WebView (Capacitor) / browser preflight succeeds. supabase-js
+// functions.invoke sends application/json + auth headers, which triggers a CORS
+// preflight OPTIONS request. Without answering it (and without CORS headers on the
+// real responses), the WebView blocks the actual POST and NO push ever sends.
+// 2026-07-23: this preflight 500 was the true blocker behind "notifications never
+// arrive" — the earlier contract fix only helped direct (curl) POSTs.
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
 Deno.serve(async (req) => {
+  // Answer the CORS preflight before touching the body (OPTIONS has no JSON body).
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS_HEADERS });
   try {
     const body = await req.json();
     const user_ids: string[] = Array.isArray(body.user_ids)
       ? body.user_ids
       : (body.user_id ? [body.user_id] : (body.to_user ? [body.to_user] : []));
-    if (!user_ids.length) return new Response("missing user_ids", { status: 400 });
+    if (!user_ids.length) return new Response("missing user_ids", { status: 400, headers: CORS_HEADERS });
     const out = await sendPushCore({
       user_ids,
       title: body.title,
@@ -119,8 +133,8 @@ Deno.serve(async (req) => {
       data: body.data || {},
       collapse_id: body.collapse_id ?? null,
     });
-    return new Response(JSON.stringify(out), { headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(out), { headers: { ...CORS_HEADERS, "content-type": "application/json" } });
   } catch (e) {
-    return new Response(`error: ${e}`, { status: 500 });
+    return new Response(`error: ${e}`, { status: 500, headers: CORS_HEADERS });
   }
 });
