@@ -5075,7 +5075,7 @@
         <details class="bet-explainer">
           <summary>🔨 Hammer</summary>
           <div class="bet-body">
-            <div style="margin:2px 0 12px"><a href="#" role="button" onclick="try{bgOpenHowItWorks()}catch(e){}return false;" style="display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:15px;color:#185fa5;text-decoration:underline;cursor:pointer"><svg viewBox="0 0 24 24" aria-hidden="true" style="width:18px;height:18px;fill:#185fa5"><path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4z"/></svg>Watch how it works — click here</a></div>
+            <div style="margin:2px 0 12px"><button type="button" onclick="try{bgOpenHowItWorks()}catch(e){}" style="display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px;border:none;border-radius:12px;font-weight:800;font-size:15px;cursor:pointer;background:linear-gradient(135deg,#185fa5,#0c447c);color:#fff"><svg viewBox="0 0 24 24" aria-hidden="true" style="width:18px;height:18px;fill:#fff"><path d="M8 5v14l11-7z"/></svg> Watch how it works</button></div>
             <p><strong>How it works:</strong> A match-play game (1v1 or 2v2) built around a doubling "hammer." You play each hole for a base bet, but at any point a player can <strong>throw the hammer</strong> to double the stake.</p>
             <p><strong>Accept or fold:</strong> when the hammer is thrown, the other side either <em>accepts</em> — the bet doubles and they hold the hammer next — or <em>declines</em> and concedes the hole right there at the current bet. The hammer can be thrown back and forth, doubling each time it's accepted.</p>
             <p><strong>Winning the hole:</strong> low score wins the hole and its pot. Turn on <em>halved holes carry</em> and a tied hole rolls its pot forward onto the next hole.</p>
@@ -7291,7 +7291,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.798';
+const BG_BUILD = 'v2026.11.796';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -11401,6 +11401,25 @@ async function _mergeGameForWrite(local, opts) {
       if (r && !r.error && r.data) cloud = r.data.data;
     } catch (e) { return local; } // read failed/timed out → write local as-is (prior behavior)
     if (!cloud || typeof cloud !== 'object') return local;
+    // v796: CODE-COLLISION guard. A brand-new round can land on a code an OLD,
+    // unrelated round already used (small code space). That old row is NOT a
+    // concurrent scorer on THIS round — folding it in imported its players (the
+    // "phantom" duplicate/extra players that couldn't be deleted). A genuine
+    // co-scorer shares this round's createdAt; a collision has a different one, so
+    // when they differ our round is authoritative and we skip the cross-round union.
+    try { if (local.createdAt && cloud.createdAt && local.createdAt !== cloud.createdAt) return local; } catch (e) {}
+    // v796: honor round-level player removals so a removed player can't be
+    // resurrected by a stale cloud copy (or another phone) through the union below.
+    let _rmPids = null;
+    try {
+      const _s = new Set([].concat(Array.isArray(local.removedPlayerIds) ? local.removedPlayerIds : [],
+                                   Array.isArray(cloud.removedPlayerIds) ? cloud.removedPlayerIds : []));
+      if (_s.size) {
+        _rmPids = _s;
+        local.removedPlayerIds = Array.from(_s);
+        if (Array.isArray(local.players)) local.players = local.players.filter(p => p && !_s.has(p.id));
+      }
+    } catch (e) { _rmPids = null; }
     _mergeGameArrays(local, cloud, opts);
     _unionHoleMap(local, 'bankerData', 'holes', cloud);
     _unionHoleMap(local, 'bankerData', 'picks', cloud);
@@ -11415,7 +11434,7 @@ async function _mergeGameForWrite(local, opts) {
     if (!cfgFresh) {
       if (Array.isArray(cloud.players) && Array.isArray(local.players)) {
         local.players = local.players.map(lp => (cloud.players.find(p => p && p.id === lp.id) || lp));
-        cloud.players.forEach(cp => { if (cp && !local.players.some(p => p && p.id === cp.id)) local.players.push(cp); });
+        cloud.players.forEach(cp => { if (cp && !(_rmPids && _rmPids.has(cp.id)) && !local.players.some(p => p && p.id === cp.id)) local.players.push(cp); });
       }
       ['games', 'hcpRules', 'pars', 'sis', 'tees', 'teeYards', 'unranked', 'nineMode', 'trackPutts', 'trackGirs', 'trackFairways', 'trackPenalties', 'trackSands', 'naturalBoost', 'hydration'].forEach(k => {
         if (cloud[k] === undefined) return;
@@ -19749,6 +19768,30 @@ function generateCode() {
   return w + n;
 }
 
+// v796: guarantee a COLLISION-FREE round code before a round is saved. The code
+// space (word + 2 digits) is small, so a brand-new round could land on a code an
+// OLD, unrelated round already used — and the merge-on-write then imported that
+// old round's players (the "phantom" duplicate/extra players that wouldn't
+// delete). Check the cloud and regenerate until the code is unused. Never blocks
+// the round: any read failure just returns the candidate code.
+async function ensureUniqueGameCode(code) {
+  try {
+    let c = code || generateCode();
+    if (typeof isSignedIn === 'function' && !isSignedIn()) return c;
+    if (!supaReady) { try { await initSupabase(); } catch (e) { return c; } }
+    if (!(supa && supaOnline)) return c;
+    for (let i = 0; i < 12; i++) {
+      let r;
+      try { r = await supa.from('games').select('code').eq('code', c).maybeSingle(); }
+      catch (e) { return c; }                 // read failed — don't block the round
+      if (r && r.error) return c;
+      if (!r || !r.data) return c;             // code is free
+      c = generateCode();                      // taken — try another
+    }
+    return c + (Math.floor(Math.random() * 900) + 100);   // unlucky streak — force uniqueness
+  } catch (e) { return code || generateCode(); }
+}
+
 function showToast(msg) {
   if (window._suppressToasts) return;   // silent mode (used by live-edit auto-save's dry-run gatherSetup)
   const t = $('toast');
@@ -21602,10 +21645,7 @@ function bgCloseInfoModal() {
 // sized 9:16. Built as a dismissable overlay so closing it removes the iframe
 // and fully stops playback. Fully additive + wrapped in try/catch so it can
 // never affect boot.
-// Self-hosted MP4 (in repo root, served by GitHub Pages). Plays embedded on BOTH web and
-// the native iOS/Android app via a plain <video> tag — no YouTube, so no Error 153 (the
-// old youtube-nocookie embed was rejected by the Capacitor WebView's capacitor:// origin).
-const BG_HIW_VIDEO_URL = 'https://thundertonka2-tech.github.io/bad-golf-app/hammer-howto.mp4';
+const BG_HIW_VIDEO_ID = '0JBj_pMcOQ0'; // youtube.com/shorts/0JBj_pMcOQ0
 function bgOpenHowItWorks() {
   try {
     let ov = document.getElementById('bg-hiw-overlay');
@@ -21615,7 +21655,7 @@ function bgOpenHowItWorks() {
       '<div style="width:100%;max-width:420px;margin:0 auto">' +
         '<button onclick="try{bgCloseHowItWorks()}catch(e){}" class="small" style="margin-bottom:10px">‹ Close</button>' +
         '<div style="position:relative;width:100%;aspect-ratio:9/16;max-height:78vh;background:#000;border-radius:14px;overflow:hidden;box-shadow:0 8px 50px rgba(0,0,0,0.5)">' +
-          '<video src="' + BG_HIW_VIDEO_URL + '" autoplay playsinline controls preload="auto" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000"></video>' +
+          '<iframe src="https://www.youtube-nocookie.com/embed/' + BG_HIW_VIDEO_ID + '?autoplay=1&playsinline=1&rel=0&modestbranding=1" title="How it works" style="position:absolute;inset:0;width:100%;height:100%;border:0" allow="autoplay;encrypted-media;fullscreen;picture-in-picture" allowfullscreen></iframe>' +
         '</div>' +
       '</div>';
     // Tap the dark backdrop (outside the player) to dismiss.
@@ -51000,6 +51040,30 @@ function applyLiveEditMerge(g, setup) {
       g.scores[pid] = new Array(18).fill(null);
     }
   });
+  // v796: PRUNE players removed from the edit form. Editing a live round used to
+  // only ADD/update players — a row you deleted stayed in the round (and the merge
+  // re-imported it), so a phantom/extra player was impossible to remove. Now any
+  // player whose name is no longer ANYWHERE in the just-saved setup is dropped from
+  // the round, their scores/tracking cleared, their game participation removed, and
+  // their id tombstoned so a stale cloud copy or another phone can't bring them
+  // back. Names still present are left alone, so this can't mis-target one of two
+  // identically-named players.
+  try {
+    const _keep = new Set((setup.players || []).map(p => (p && p.name ? p.name.trim().toLowerCase() : '')).filter(Boolean));
+    if (_keep.size && Array.isArray(g.players)) {
+      const _rm = g.players.filter(p => p && !_keep.has((p.name || '').trim().toLowerCase()));
+      if (_rm.length) {
+        const _ids = new Set(_rm.map(p => p.id).filter(Boolean));
+        g.players = g.players.filter(p => p && !_ids.has(p.id));
+        g.removedPlayerIds = Array.from(new Set([].concat(Array.isArray(g.removedPlayerIds) ? g.removedPlayerIds : [], Array.from(_ids))));
+        ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData', 'sipManual'].forEach(k => {
+          if (g[k]) _ids.forEach(id => { try { delete g[k][id]; } catch (e) {} });
+        });
+        try { Object.keys(g.games || {}).forEach(gk => { const gv = g.games[gk]; if (gv && Array.isArray(gv.participants)) gv.participants = gv.participants.filter(id => !_ids.has(id)); }); } catch (e) {}
+        try { if (g.bankerData && Array.isArray(g.bankerData.bankerOrder)) g.bankerData.bankerOrder = g.bankerData.bankerOrder.filter(id => !_ids.has(id)); } catch (e) {}
+      }
+    }
+  } catch (e) {}
   if (!g.games.banker && g.bankerData) g.bankerData = { holes: {}, picks: {} };
   if (!g.games.wolf && g.wolfData) g.wolfData = { picks: {} };
   if (!g.games.nassau && g.huckleData) g.huckleData = { huckles: [] };
@@ -52143,7 +52207,10 @@ async function init() {
         });
       }
     } catch (e) {}
-    const code = $('display-code').dataset.code || generateCode();
+    let code = $('display-code').dataset.code || generateCode();
+    // v796: make sure this round's code isn't already used by another round in the
+    // cloud (small code space → collisions imported an old round's phantom players).
+    try { code = await ensureUniqueGameCode(code); const _dc = $('display-code'); if (_dc) { _dc.dataset.code = code; try { _dc.textContent = code; } catch (e) {} } } catch (e) {}
     const courseId = $('course-name').dataset.courseId || '';
     let creatorName = null;
     try { creatorName = await getMeName(); } catch (e) {}
@@ -54447,7 +54514,23 @@ const gpsView = (() => {
     } catch (e) {}
     targetMk.on('dragstart', () => { targetManual = true; targetDragging = true; });
     targetMk.on('drag', () => { targetManual = true; const p = targetMk.getLngLat(); target = [p.lng, p.lat]; refresh(); });
-    targetMk.on('dragend', () => { targetDragging = false; fetchElev(); });
+    targetMk.on('dragend', () => {
+      targetDragging = false; fetchElev();
+      // v796 (Tyler): when the player MOVES the target, re-frame the map so the
+      // player dot AND the moved target both stay on screen — instead of leaving
+      // it zoomed in too far with the target sliding off. Same idea as the walk-up
+      // auto-follow, capped at a comfortable zoom so it never snaps in too tight.
+      try {
+        if (map && Array.isArray(ball) && ball.length === 2 && Array.isArray(target) && target.length === 2) {
+          const _b = new maplibregl.LngLatBounds(ball, ball);
+          _b.extend(target);
+          const _brg = brgBetween(ball, target);
+          map.fitBounds(_b, { bearing: _brg, padding: { top: 120, bottom: 150, left: 50, right: 50 }, maxZoom: 17.4, duration: 500 });
+          lastUserMoveAt = Date.now();   // hold this framing before auto-follow re-engages
+          try { _frameZoom = map.getZoom ? map.getZoom() : _frameZoom; } catch (e) {}
+        }
+      } catch (e) {}
+    });
     frameWholeHole();
     refresh();
     elev = null; fetchElev(); fetchWind();
