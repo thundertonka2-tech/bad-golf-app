@@ -1292,6 +1292,11 @@
   /* Skins: the score that WON a skin on a hole — bold blue circle, on every scorecard. */
   .skin-win { color: var(--accent); border: 2.5px solid var(--accent); border-radius: 50%; font-weight: 900; }
   .mini-sc .skin-win { border-width: 2px; }
+  /* v851: TOURNAMENT-WIDE field skin (separate pot from the group's own —
+     gold instead of blue so the two are never confused when both run at once). */
+  .skin-win-field { color: var(--gold); border: 2.5px solid var(--gold); border-radius: 50%; font-weight: 900; }
+  .mini-sc .skin-win-field { border-width: 2px; }
+  .skin-win.skin-win-field { box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 3.5px var(--gold); margin: 2px; }
 
   .toast {
     position: fixed;
@@ -7346,7 +7351,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.850';
+const BG_BUILD = 'v2026.11.851';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -33895,6 +33900,14 @@ function renderBoard() {
 
   // Scorecard
   renderScorecard(g, totals);
+  // v851 (Tyler): "show when someone won the skin on tournament and group bet
+  // if skins were being played... add that to the score card." Local group
+  // skins already mark the scorecard synchronously above (skinWinnersByHole).
+  // Tournament-wide field skins need every other group's scores too, so they
+  // can only be known async — this repaints the scorecard a second time, gold
+  // circles only, once that cross-group fetch lands. No-op for non-tournament
+  // rounds and for tournaments not running the whole-field Skins pot.
+  try { if (g && g.t2 && g.t2.tournamentId) _t2PaintFieldSkinsOnScorecard(g); } catch (e) {}
 
   // Game results
   const gr = $('game-results-list');
@@ -34634,9 +34647,34 @@ function skinWinnersByHole(g) {
   return map;
 }
 // Like scoreMark, but a skin-winning score gets the bold blue circle instead.
-function skinMark(s, par, won) {
-  if (won && s != null) return '<span class="sc-mark skin-win" title="Won a skin here">' + s + '</span>';
+// v851 (Tyler): 4th param `wonField` marks a TOURNAMENT-WIDE field skin (a
+// different pot from this group's own local skins.value) with a gold circle,
+// so the two are visually distinguishable when both are running at once.
+function skinMark(s, par, won, wonField) {
+  if (s == null) return scoreMark(s, par);
+  if (won && wonField) return '<span class="sc-mark skin-win skin-win-field" title="Won the group skin AND the tournament skin here">' + s + '</span>';
+  if (wonField) return '<span class="sc-mark skin-win-field" title="Won the tournament skin here">' + s + '</span>';
+  if (won) return '<span class="sc-mark skin-win" title="Won a skin here">' + s + '</span>';
   return scoreMark(s, par);
+}
+// Tournament-wide field skins: per-hole map of who won THAT day's field skin,
+// keyed to THIS round's own player ids (matched by normalized name, same
+// scheme loadTourneyMoney/t2ComputeFieldSkins already use). Built from
+// t2ComputeFieldSkins's holeResults (v851) once the async fetch lands —
+// see _t2PaintFieldSkinsOnScorecard below. Local skinWinnersByHole (above)
+// is unchanged and still covers this group's OWN g.games.skins, synchronously.
+function fieldSkinWinnersByHole(g, holeResults) {
+  const map = {};
+  try {
+    if (!g || !Array.isArray(g.players) || !Array.isArray(holeResults)) return map;
+    const nmk = s => normalizeNameSegment(String(s || ''));
+    holeResults.forEach(hr => {
+      if (!hr || !hr.winnerKey || hr.hole == null) return;
+      const p = g.players.find(pp => pp && nmk(pp.name) === hr.winnerKey);
+      if (p) (map[hr.hole - 1] = map[hr.hole - 1] || {})[p.id] = true;
+    });
+  } catch (e) {}
+  return map;
 }
 
 // Phone-friendly stacked scorecard: front nine table on top, back nine below,
@@ -34799,7 +34837,7 @@ async function onScoreCellEdit(inp) {
   try { if (typeof updateGpsMoneyMatch === 'function') updateGpsMoneyMatch(); } catch (e) {}
 }
 
-function renderScorecard(g, totals) {
+function renderScorecard(g, totals, fieldSkinMap) {
   const t = $('scorecard');
   // #1 Round timer: starts at the FIRST score logged (firstScoreAt), runs live,
   // and stops at finishedAt (set when the round is finished OR ended early).
@@ -34815,6 +34853,10 @@ function renderScorecard(g, totals) {
   const scrambleActive  = !!(g.games && g.games.scramble);
   const ryderCupActive  = !!(g.games && g.games.ryderCup);
   const skinMap = skinWinnersByHole(g);
+  // v851: tournament-wide field skins map, passed in by _t2PaintFieldSkinsOnScorecard
+  // once its async cross-group fetch lands (this round's own data alone can't know
+  // it — see that function). Optional/undefined on every synchronous render.
+  const fSkinMap = fieldSkinMap || {};
 
   // ── Header + Par row (same for all formats) ──────────────────────────────
   let html = '<thead><tr><th>' + (scrambleActive || ryderCupActive ? 'Team' : 'Player') + '</th>';
@@ -34899,7 +34941,7 @@ function renderScorecard(g, totals) {
         const s = arr[i];
         const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0;
         const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
-        if (s != null) { out += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]))}</td>`; }
+        if (s != null) { out += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id]))}</td>`; }
         else html += `<td style="position:relative">${dot}—</td>`;
       }
       html += `<td class="total">${out || '—'}</td>`;
@@ -34907,7 +34949,7 @@ function renderScorecard(g, totals) {
         const s = arr[i];
         const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0;
         const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
-        if (s != null) { inT += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]))}</td>`; }
+        if (s != null) { inT += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id]))}</td>`; }
         else html += `<td style="position:relative">${dot}—</td>`;
       }
       html += `<td class="total">${inT || '—'}</td><td class="total">${(out + inT) || '—'}</td></tr>`;
@@ -49568,19 +49610,31 @@ function t2ComputeFieldSkins(rows, cfg) {
     // configured) defaults to carry-over, matching the in-round game's default.
     const _skCarryOn = cfg.ties !== 'void' && cfg.ties !== 'none';
     const skins = {}; players.forEach(p => skins[nmk(p.name)] = 0);
+    // v851 (Tyler): "show when someone won the skin on tournament... add that
+    // to the score card." Per-hole record of who won THAT hole's field skin
+    // (or that it tied/carried) — a group's own scorecard has no idea what
+    // other groups shot, so this is what _t2PaintFieldSkinsOnScorecard reads
+    // to mark the winning score gold on every group's board, once fetched.
+    // Purely additive (new array) — doesn't touch the existing skins/totalSkins
+    // tally this loop already did.
+    const holeResults = [];
     let _skCarry = 0;
     for (let h = 0; h < 18; h++) {
       const c = players.filter(p => p.net[h] != null);
-      if (c.length < 2) continue;
+      if (c.length < 2) { holeResults.push({ hole: h + 1, winnerKey: null, tied: false, incomplete: true }); continue; }
       let best = Infinity; c.forEach(p => { if (p.net[h] < best) best = p.net[h]; });
       const tied = c.filter(p => p.net[h] === best);
       if (tied.length === 1) {
         skins[nmk(tied[0].name)] += 1 + _skCarry;
+        holeResults.push({ hole: h + 1, winnerKey: nmk(tied[0].name), winnerFirst: tied[0].first, tied: false, carried: _skCarry });
         _skCarry = 0;
       } else if (_skCarryOn) {
         _skCarry++;   // this hole's skin rolls onto the next hole with an outright winner
+        holeResults.push({ hole: h + 1, winnerKey: null, tied: true, carries: true });
+      } else {
+        // else: no-carry mode — a tied hole simply pays no skin.
+        holeResults.push({ hole: h + 1, winnerKey: null, tied: true, carries: false });
       }
-      // else: no-carry mode — a tied hole simply pays no skin.
     }
     const totalSkins = Object.values(skins).reduce((s, x) => s + x, 0);
     const pot = (cfg.mode === 'total') ? (Number(cfg.value) || 0) : ((Number(cfg.value) || 0) * N);
@@ -49593,7 +49647,7 @@ function t2ComputeFieldSkins(rows, cfg) {
     }).sort((a, b) => (b.skins - a.skins) || (b.net - a.net));
     const _dInfo = byDay[day];
     const _dComplete = _dInfo.rounds > 0 && _dInfo.finished === _dInfo.rounds;   // v676: all groups this day done
-    perDay.push({ day: Number(day), N: N, totalSkins: totalSkins, skinValue: skinValue, pot: pot, rows: out, complete: _dComplete, finished: _dInfo.finished, total: _dInfo.rounds });
+    perDay.push({ day: Number(day), N: N, totalSkins: totalSkins, skinValue: skinValue, pot: pot, rows: out, complete: _dComplete, finished: _dInfo.finished, total: _dInfo.rounds, holeResults: holeResults });
   });
   if (!perDay.length) return null;
   return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), totalsByKey: totalsByName, mode: cfg.mode, value: Number(cfg.value) || 0, ties: (cfg.ties === 'void' ? 'void' : 'countback'), hcpPct: _skPct, complete: perDay.every(d => d.complete) };
@@ -50150,6 +50204,12 @@ async function t2ComputeCombinedPayouts(t) {
     // Total-filter breakdown table as separate columns (no new money math).
     const gameTotals = {};
     const bumpGame = (label, key, amt) => { if (!key || !amt) return; if (!gameTotals[label]) gameTotals[label] = {}; gameTotals[label][key] = (gameTotals[label][key] || 0) + amt; };
+    // v851 (Tyler): "on skins won, put the amount of skins won in ()" — a
+    // parallel COUNT map (skins won, not $) alongside gameTotals' $ map, keyed
+    // the same way, so the breakdown table can show "+$13.33 (2)" for the
+    // "Skins won" column specifically. No effect on any $ math.
+    const gameCounts = {};
+    const bumpCount = (label, key, n) => { if (!key || !n) return; if (!gameCounts[label]) gameCounts[label] = {}; gameCounts[label][key] = (gameCounts[label][key] || 0) + n; };
     const bump = (key, amt, dispName, dispFirst) => {
       if (!key) return;
       if (!display[key] && (dispName || dispFirst)) display[key] = { name: dispName || dispFirst, first: dispFirst || dispName };
@@ -50206,10 +50266,15 @@ async function t2ComputeCombinedPayouts(t) {
         (d.rows || []).forEach(r => {
           const k = nm(r.name);
           if (!display[k] && (r.name || r.first)) display[k] = { name: r.name || r.first, first: r.first || r.name };
-          const buyIn = (r.payout || 0) - (r.net || 0);   // = pot/N, the contribution already baked into r.net
+          // v851 (Tyler): "remove the skins buy in column that is not needed" —
+          // dropped the separate "Skins buy-in" column (was -buyIn = -(pot/N),
+          // the flat per-player contribution already netted into r.net/r.payout
+          // below). "Skins won" alone, now with a (count) alongside the $, is
+          // the only skins breakdown column. combined/`bump` total is unchanged
+          // either way — this only removes a display column, no money math.
           bump(k, r.net || 0, r.name, r.first);
-          bumpGame('Skins buy-in', k, -buyIn);
           bumpGame('Skins won', k, r.payout || 0);
+          bumpCount('Skins won', k, r.skins || 0);
         });
       });
     }
@@ -50220,10 +50285,14 @@ async function t2ComputeCombinedPayouts(t) {
     // per day (perDay[].pots[].rows[].money) — just not flattened into
     // totalsByKey first, so no new math here either.
     if (sidePots && Array.isArray(sidePots.perDay)) {
-      const _spLabel = { lowNet: 'Side pot: Low Net', girs: 'Side pot: Most GIRs', putts: 'Side pot: Fewest Putts' };
+      // v851 (Tyler): "remove 'side pot' just say Most GIRs or whatever" —
+      // dropped the "Side pot: " prefix from these column labels. Still keyed
+      // the same internally (lowNet/girs/putts) — this only shortens the
+      // column header text, no data/math change.
+      const _spLabel = { lowNet: 'Low Net', girs: 'Most GIRs', putts: 'Fewest Putts' };
       sidePots.perDay.forEach(d => {
         (d.pots || []).forEach(p => {
-          const label = _spLabel[p.key] || ('Side pot: ' + p.key);
+          const label = _spLabel[p.key] || String(p.key);
           (p.rows || []).forEach(r => {
             const k = nm(r.name);
             if (!display[k] && (r.name || r.first)) display[k] = { name: r.name || r.first, first: r.first || r.name };
@@ -50246,7 +50315,7 @@ async function t2ComputeCombinedPayouts(t) {
       .map(k => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: Math.round(combined[k] * 100) / 100 }))
       .sort((a, b) => b.net - a.net);
     const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
-    const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label] })).filter(gm => Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
+    const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label] })).filter(gm => Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
 
     return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame };
   } catch (e) { return null; }
@@ -50298,6 +50367,12 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     // already folds into the combined total.
     const gameTotals = {};
     const bumpGame = (label, key, amt) => { if (!key || !amt) return; if (!gameTotals[label]) gameTotals[label] = {}; gameTotals[label][key] = (gameTotals[label][key] || 0) + amt; };
+    // v851 (Tyler): "on skins won, put the amount of skins won in ()" — a
+    // parallel COUNT map (skins won, not $) alongside gameTotals' $ map, keyed
+    // the same way, so the breakdown table can show "+$13.33 (2)" for the
+    // "Skins won" column specifically. No effect on any $ math.
+    const gameCounts = {};
+    const bumpCount = (label, key, n) => { if (!key || !n) return; if (!gameCounts[label]) gameCounts[label] = {}; gameCounts[label][key] = (gameCounts[label][key] || 0) + n; };
     const bump = (key, amt, dispName, dispFirst) => {
       if (!key) return;
       if (!display[key] && (dispName || dispFirst)) display[key] = { name: dispName || dispFirst, first: dispFirst || dispName };
@@ -50351,10 +50426,15 @@ async function t2ComputeTournamentOnlyPayouts(t) {
         (d.rows || []).forEach(r => {
           const k = nm(r.name);
           if (!display[k] && (r.name || r.first)) display[k] = { name: r.name || r.first, first: r.first || r.name };
-          const buyIn = (r.payout || 0) - (r.net || 0);   // = pot/N, the contribution already baked into r.net
+          // v851 (Tyler): "remove the skins buy in column that is not needed" —
+          // dropped the separate "Skins buy-in" column (was -buyIn = -(pot/N),
+          // the flat per-player contribution already netted into r.net/r.payout
+          // below). "Skins won" alone, now with a (count) alongside the $, is
+          // the only skins breakdown column. combined/`bump` total is unchanged
+          // either way — this only removes a display column, no money math.
           bump(k, r.net || 0, r.name, r.first);
-          bumpGame('Skins buy-in', k, -buyIn);
           bumpGame('Skins won', k, r.payout || 0);
+          bumpCount('Skins won', k, r.skins || 0);
         });
       });
     }
@@ -50365,10 +50445,14 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     // per day (perDay[].pots[].rows[].money) — just not flattened into
     // totalsByKey first, so no new math here either.
     if (sidePots && Array.isArray(sidePots.perDay)) {
-      const _spLabel = { lowNet: 'Side pot: Low Net', girs: 'Side pot: Most GIRs', putts: 'Side pot: Fewest Putts' };
+      // v851 (Tyler): "remove 'side pot' just say Most GIRs or whatever" —
+      // dropped the "Side pot: " prefix from these column labels. Still keyed
+      // the same internally (lowNet/girs/putts) — this only shortens the
+      // column header text, no data/math change.
+      const _spLabel = { lowNet: 'Low Net', girs: 'Most GIRs', putts: 'Fewest Putts' };
       sidePots.perDay.forEach(d => {
         (d.pots || []).forEach(p => {
-          const label = _spLabel[p.key] || ('Side pot: ' + p.key);
+          const label = _spLabel[p.key] || String(p.key);
           (p.rows || []).forEach(r => {
             const k = nm(r.name);
             if (!display[k] && (r.name || r.first)) display[k] = { name: r.name || r.first, first: r.first || r.name };
@@ -50391,7 +50475,7 @@ async function t2ComputeTournamentOnlyPayouts(t) {
       .map(k => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: Math.round(combined[k] * 100) / 100 }))
       .sort((a, b) => b.net - a.net);
     const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
-    const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label] })).filter(gm => Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
+    const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label] })).filter(gm => Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
 
     return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame };
   } catch (e) { return null; }
@@ -50432,7 +50516,12 @@ function _t2BreakdownTableHtml(byGame, rows) {
     byGame.forEach(gm => {
       const v = (gm.money && gm.money[r.id]) || 0;
       const cls = v > 0.005 ? 'pos' : (v < -0.005 ? 'neg' : 'zero');
-      html += '<td class="money ' + cls + '" style="padding:8px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap">' + (Math.abs(v) < 0.005 ? '—' : signed(v)) + '</td>';
+      // v851 (Tyler): "Skins won" column also shows the skin COUNT in
+      // parentheses (e.g. "+$13.33 (2)") — gm.counts is only populated for
+      // that one column (see bumpCount), so every other column is unaffected.
+      const cnt = gm.counts && gm.counts[r.id];
+      const cntStr = cnt ? ' <span style="opacity:0.65;font-weight:400">(' + (Number.isInteger(cnt) ? cnt : cnt.toFixed(1)) + ')</span>' : '';
+      html += '<td class="money ' + cls + '" style="padding:8px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap">' + (Math.abs(v) < 0.005 ? '—' : signed(v) + cntStr) + '</td>';
     });
     const tot = r.net || 0;
     const tcls = tot > 0.005 ? 'pos' : (tot < -0.005 ? 'neg' : 'zero');
@@ -50504,6 +50593,46 @@ function renderT2PayoutFilterBar(g) {
 // t2ComputeCombinedPayouts / _t2PayoutBoardRowsHtml) — no new money math.
 // 'group' scope is a no-op: the synchronous group board painted earlier in
 // renderBoard() is already correct and is left completely alone.
+// v851 (Tyler): "show when someone won the skin on tournament and group bet
+// if skins were being played... add that to the score card." Local group
+// skins (g.games.skins) already mark the scorecard synchronously via
+// skinWinnersByHole/skinMark. Tournament-WIDE field skins (t.settings.
+// tourneySkins) compare every group's score on a hole against every OTHER
+// group — this round's own `g` has no idea what anyone else shot, so it has
+// to be fetched (same t2Get + loadTourneyRawRounds round-trip the Tournament/
+// Total payout filter already does) and painted in after the fact. Token-
+// guarded like _t2RepaintMoneyBoardForScope so a fast tab-switch/re-render
+// can't let a stale fetch paint over a newer one. Marks gold (.skin-win-field)
+// — a different color from the local skin's blue — so the two are never
+// confused when both are running on the same round.
+let _t2FieldSkinToken = 0;
+async function _t2PaintFieldSkinsOnScorecard(g) {
+  try {
+    const tid = g && g.t2 && g.t2.tournamentId;
+    if (!tid) return;
+    const myToken = ++_t2FieldSkinToken;
+    const t = await t2Get(tid);
+    if (myToken !== _t2FieldSkinToken || !t) return;
+    const skinsCfg = t.settings && t.settings.tourneySkins;
+    if (!skinsCfg || !skinsCfg.on) return;
+    const raw = await loadTourneyRawRounds(t).catch(() => []);
+    if (myToken !== _t2FieldSkinToken || !raw || !raw.length) return;
+    let result = null; try { result = t2ComputeFieldSkins(raw, skinsCfg); } catch (e) {}
+    if (!result || !Array.isArray(result.perDay)) return;
+    const day = (g.t2 && g.t2.day) || 1;
+    const dayData = result.perDay.find(d => d.day === day);
+    if (!dayData || !Array.isArray(dayData.holeResults)) return;
+    const fieldSkinMap = fieldSkinWinnersByHole(g, dayData.holeResults);
+    if (!Object.keys(fieldSkinMap).length) return;
+    // Only repaint if this is still the round actually on screen — a fast tap
+    // to another round while this fetch was in flight must not paint over it.
+    if (!(state && state.game && state.game.code === g.code)) return;
+    if (myToken !== _t2FieldSkinToken) return;
+    const totals = calcTotals(g);
+    renderScorecard(g, totals, fieldSkinMap);
+  } catch (e) {}
+}
+
 let _t2RepaintToken = 0;
 async function _t2RepaintMoneyBoardForScope(g, scope) {
   if (scope === 'group') return;
