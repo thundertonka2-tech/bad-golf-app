@@ -7351,7 +7351,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.852';
+const BG_BUILD = 'v2026.11.853';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -50618,23 +50618,55 @@ function renderT2PayoutFilterBar(g) {
 // that knows how to get this data means one place to fix if it's ever wrong).
 // Returns the fieldSkinMap (hole-index -> {playerId: true}) or null if this
 // isn't a tournament round, field skins aren't on, or nothing's decided yet.
+// v852-fix (Tyler: "gold skins show up on web but not on mobile"): this is a
+// real two-hop network round-trip (t2Get, then loadTourneyRawRounds), and the
+// callers below are invoked from EVERY renderBoard() — which fires on every
+// realtime score update from any player in the group, plus the 12s backstop
+// poll (_gamePollTimer) while a round is live. During an actual live round
+// with players actively entering scores, renderBoard() fires far more often
+// than this fetch can complete, so a newer call's token keeps winning before
+// the previous fetch resolves — it never gets a chance to paint. Testing on
+// web (quieter, less render churn) let the single fetch land in time, which
+// is why it looked fine there and broken on mobile. Fixed with a short cache
+// + in-flight de-dupe keyed by tournament+day: repeated renderBoard() calls
+// during a live round now reuse the same pending/cached result instead of
+// racing a brand-new fetch every time, so it reliably resolves and paints
+// regardless of how often the board re-renders.
+const _t2FieldSkinCache = {};      // key (tid|day) -> { map, expiresAt }
+const _t2FieldSkinInFlight = {};   // key (tid|day) -> in-progress Promise
 async function _t2FetchFieldSkinMap(g) {
   try {
     const tid = g && g.t2 && g.t2.tournamentId;
     if (!tid) return null;
-    const t = await t2Get(tid);
-    if (!t) return null;
-    const skinsCfg = t.settings && t.settings.tourneySkins;
-    if (!skinsCfg || !skinsCfg.on) return null;
-    const raw = await loadTourneyRawRounds(t).catch(() => []);
-    if (!raw || !raw.length) return null;
-    let result = null; try { result = t2ComputeFieldSkins(raw, skinsCfg); } catch (e) {}
-    if (!result || !Array.isArray(result.perDay)) return null;
     const day = (g.t2 && g.t2.day) || 1;
-    const dayData = result.perDay.find(d => d.day === day);
-    if (!dayData || !Array.isArray(dayData.holeResults)) return null;
-    const fieldSkinMap = fieldSkinWinnersByHole(g, dayData.holeResults);
-    return Object.keys(fieldSkinMap).length ? fieldSkinMap : null;
+    const key = tid + '|' + day;
+    const cached = _t2FieldSkinCache[key];
+    if (cached && cached.expiresAt > Date.now()) return cached.map;
+    if (_t2FieldSkinInFlight[key]) return _t2FieldSkinInFlight[key];
+    const p = (async () => {
+      try {
+        const t = await t2Get(tid);
+        if (!t) return null;
+        const skinsCfg = t.settings && t.settings.tourneySkins;
+        if (!skinsCfg || !skinsCfg.on) return null;
+        const raw = await loadTourneyRawRounds(t).catch(() => []);
+        if (!raw || !raw.length) return null;
+        let result = null; try { result = t2ComputeFieldSkins(raw, skinsCfg); } catch (e) {}
+        if (!result || !Array.isArray(result.perDay)) return null;
+        const dayData = result.perDay.find(d => d.day === day);
+        if (!dayData || !Array.isArray(dayData.holeResults)) return null;
+        const fieldSkinMap = fieldSkinWinnersByHole(g, dayData.holeResults);
+        return Object.keys(fieldSkinMap).length ? fieldSkinMap : null;
+      } catch (e) { return null; }
+    })();
+    _t2FieldSkinInFlight[key] = p;
+    try {
+      const map = await p;
+      _t2FieldSkinCache[key] = { map: map, expiresAt: Date.now() + 20000 };
+      return map;
+    } finally {
+      delete _t2FieldSkinInFlight[key];
+    }
   } catch (e) { return null; }
 }
 let _t2FieldSkinToken = 0;
