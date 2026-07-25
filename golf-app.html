@@ -7344,7 +7344,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.833';
+const BG_BUILD = 'v2026.11.834';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -33129,26 +33129,74 @@ async function _settlePayLines(creditorPlayer, amount) {
   } catch (e) { return []; }
 }
 
+// v833 (Tyler): the shared text-formatting core for a settle-up — a list of
+// {fromId,toId,amount} settlements against a {id->displayFull} name resolver
+// and a Venmo/CashApp/PayPal-link-per-payment lookup. Used by BOTH the
+// per-round settle-up (buildSettleUpText) and the tournament-wide combined
+// settle-up (buildCombinedSettleUpText) so their output format stays in sync.
+async function _settleUpLinesFor(settlements, nameOf, findPlayerById) {
+  const lines = [];
+  if (!settlements.length) {
+    lines.push('All square — nobody owes anybody. 🍻');
+    return lines;
+  }
+  for (const s of settlements) {
+    lines.push(nameOf(s.fromId) + ' → ' + nameOf(s.toId) + '  $' + s.amount.toFixed(2));
+    try { const _cred = findPlayerById(s.toId); (await _settlePayLines(_cred, s.amount)).forEach(l => lines.push(l)); } catch (e) {}
+  }
+  const total = settlements.reduce((a, s) => a + s.amount, 0);
+  lines.push('');
+  lines.push(settlements.length + ' payment' + (settlements.length > 1 ? 's' : '') + ' · $' + total.toFixed(2) + ' total');
+  return lines;
+}
+
 async function buildSettleUpText() {
   const g = state.game;
   if (!g || !Array.isArray(g.players)) return '';
+  // v833 (Tyler): "when we send the text to everyone to pay it needs to
+  // combine them both and give each user one total." Once this round's WHOLE
+  // tournament has finished (every group, every pot), text the merged
+  // tournament-wide total instead of just this one round's group bets — same
+  // button, same place, upgrades automatically. Before that point (or for a
+  // non-tournament round) this falls straight through to the round-only text,
+  // completely unchanged, so nothing mid-event ever comes up empty.
+  if (g.t2 && g.t2.tournamentId) {
+    try {
+      const t = await t2Get(g.t2.tournamentId);
+      if (t) {
+        const combinedPay = await t2ComputeCombinedPayouts(t);
+        if (combinedPay && combinedPay.allFinished) {
+          const combinedText = await buildCombinedSettleUpText(t, combinedPay);
+          if (combinedText) return combinedText;
+        }
+      }
+    } catch (e) {}
+  }
   let money;
   try { money = computeAllGameMoney(g).combined; } catch (e) { return ''; }
   const settlements = calculateSettlements(money, g.players);
   const nm = id => { const p = g.players.find(pp => pp.id === id); return p ? displayFull(p) : '?'; };
   const where = g.course ? (' — ' + g.course) : '';
   const lines = ['⛳ Bad Golf settle-up' + where];
-  if (!settlements.length) {
-    lines.push('All square — nobody owes anybody. 🍻');
-  } else {
-    for (const s of settlements) {
-      lines.push(nm(s.fromId) + ' → ' + nm(s.toId) + '  $' + s.amount.toFixed(2));
-      try { const _cred = g.players.find(pp => pp.id === s.toId); (await _settlePayLines(_cred, s.amount)).forEach(l => lines.push(l)); } catch (e) {}
-    }
-    const total = settlements.reduce((a, s) => a + s.amount, 0);
-    lines.push('');
-    lines.push(settlements.length + ' payment' + (settlements.length > 1 ? 's' : '') + ' · $' + total.toFixed(2) + ' total');
-  }
+  (await _settleUpLinesFor(settlements, nm, id => g.players.find(pp => pp.id === id))).forEach(l => lines.push(l));
+  return lines.join('\n');
+}
+
+// v833 (Tyler): the tournament-wide version of buildSettleUpText — merges
+// EVERY pot in the event (group side bets, cross-group team bets, cross-group
+// 1v1s, and every field-wide event pot) into one net $ per player via
+// t2ComputeCombinedPayouts, then runs the SAME minimal-payment-count algorithm
+// (calculateSettlements) across the whole field. Only produces text once
+// combinedPay.allFinished is true — callers are expected to check that first.
+async function buildCombinedSettleUpText(t, combinedPay) {
+  if (!combinedPay || !combinedPay.allFinished) return '';
+  const moneyDict = {}; (combinedPay.rows || []).forEach(r => moneyDict[r.id] = r.net);
+  const settlements = calculateSettlements(moneyDict, combinedPay.players || []);
+  const findPlayer = id => (combinedPay.players || []).find(pp => pp.id === id);
+  const nm = id => { const p = findPlayer(id); return p ? displayFull(p) : '?'; };
+  const where = t && t.name ? (' — ' + t.name) : '';
+  const lines = ['🏆 Bad Golf — combined tournament payout' + where];
+  (await _settleUpLinesFor(settlements, nm, findPlayer)).forEach(l => lines.push(l));
   return lines.join('\n');
 }
 
@@ -33162,6 +33210,19 @@ async function shareSettleUpSms() {
   } catch (e) { if (e && e.name === 'AbortError') return; }
   try { window.location.href = 'sms:?&body=' + encodeURIComponent(text); return; } catch (e) {}
   try { await navigator.clipboard.writeText(text); showToast('Settle-up copied — paste it into a text'); }
+  catch (e) { showToast('Could not open Messages'); }
+}
+
+// Share the tournament-wide COMBINED settle-up (see buildCombinedSettleUpText).
+// Same share fallback chain as shareSettleUpSms, reused for consistency.
+async function shareCombinedSettleUp(t, combinedPay) {
+  const text = await buildCombinedSettleUpText(t, combinedPay);
+  if (!text) { showToast('Not ready yet'); return; }
+  try {
+    if (navigator.share) { await navigator.share({ text }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { window.location.href = 'sms:?&body=' + encodeURIComponent(text); return; } catch (e) {}
+  try { await navigator.clipboard.writeText(text); showToast('Combined settle-up copied — paste it into a text'); }
   catch (e) { showToast('Could not open Messages'); }
 }
 
@@ -49218,7 +49279,7 @@ function t2ComputeFieldNassau(rows, cfg) {
     perDay.push({ day: Number(day), N: Nall, segments: segOut });
   });
   if (!perDay.length) return null;
-  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), value: value, split: split, segments: segs };
+  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), totalsByKey: totalsByName, value: value, split: split, segments: segs };
 }
 function t2ComputeFieldSkins(rows, cfg) {
   if (!cfg || !cfg.on || !Array.isArray(rows) || !rows.length) return null;
@@ -49297,7 +49358,7 @@ function t2ComputeFieldSkins(rows, cfg) {
     perDay.push({ day: Number(day), N: N, totalSkins: totalSkins, skinValue: skinValue, pot: pot, rows: out, complete: _dComplete, finished: _dInfo.finished, total: _dInfo.rounds });
   });
   if (!perDay.length) return null;
-  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), mode: cfg.mode, value: Number(cfg.value) || 0, ties: (cfg.ties === 'void' ? 'void' : 'countback'), hcpPct: _skPct, complete: perDay.every(d => d.complete) };
+  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), totalsByKey: totalsByName, mode: cfg.mode, value: Number(cfg.value) || 0, ties: (cfg.ties === 'void' ? 'void' : 'countback'), hcpPct: _skPct, complete: perDay.every(d => d.complete) };
 }
 // FIELD-WIDE TOURNAMENT LONG PUTT — one pot per day, WINNER-TAKE-ALL: the single
 // longest made putt across ALL groups that day wins the pot. Reads each round's logged
@@ -49341,7 +49402,7 @@ function t2ComputeFieldLongPutt(rows, cfg) {
     perDay.push({ day: Number(day), pot: pot, winnerFirst: best.first, dist: best.ft + "' " + best.in + '"', rows: out });
   });
   if (!perDay.length) return null;
-  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net) };
+  return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), totalsByKey: totalsByName };
 }
 
 // Tournament Closest to the Pin — FIELD-WIDE pool. On each CTP hole, the closest
@@ -49396,7 +49457,7 @@ function t2ComputeFieldCtp(rows) {
     if (holeRows.length) perDay.push({ day: Number(day), holes: holeRows });
   });
   if (!perDay.length) return null;
-  return { perDay: perDay, totals: Object.values(totalsByName).filter(t => t.net !== 0).sort((a, b) => b.net - a.net) };
+  return { perDay: perDay, totals: Object.values(totalsByName).filter(t => t.net !== 0).sort((a, b) => b.net - a.net), totalsByKey: totalsByName };
 }
 
 // v639 — TOURNAMENT SIDE POTS (Tyler's Saturday game): field-wide $ pots computed
@@ -49474,7 +49535,7 @@ function t2ComputeFieldSidePots(rows, cfg) {
       if (dayOut.pots.length) perDay.push(dayOut);
     });
     if (!perDay.length) return null;
-    return { perDay: perDay, totals: Object.values(totalsByName).filter(x => x.net !== 0).sort((a, b) => b.net - a.net) };
+    return { perDay: perDay, totals: Object.values(totalsByName).filter(x => x.net !== 0).sort((a, b) => b.net - a.net), totalsByKey: totalsByName };
   } catch (e) { return null; }
 }
 
@@ -49770,6 +49831,120 @@ function _roundDetailsHtml(t){
   return h;
 }
 
+// v833 (Tyler): "combine tournament bets and group bets into ONE total to pay
+// or receive, like any other normal game." Every pot in a tournament settles
+// separately today — each group's own side bets, cross-group team bets,
+// cross-group 1v1 Nassau/Match, and every field-wide event pot (Skins, Nassau,
+// Long Putt, CTP, Side Pots, Stableford, Quota) all compute their OWN money
+// independently, in their own shape, keyed different ways. This merges every
+// one of them into a single net $ per player across the WHOLE event, using
+// each player's full normalized name as the join key (matches the canonical-id
+// scheme loadTourneyMoney already uses) so same-first-name players in a big
+// field can't get merged together.
+//
+// Gate: per Tyler, this is only "ready" once EVERY group's round in the event
+// has actually finished (g.finishedAt on every raw round) — every pot's own
+// completion logic ("day pays once every group finishes") bottoms out on that
+// same signal, so it's a single reliable proxy for "every pot has paid out"
+// rather than trying to parse each pot's own differently-shaped complete flag.
+// Returns null on any failure, or { rows, allFinished, players, roundsFinished,
+// roundsTotal } — rows/players are only meaningful once allFinished is true;
+// callers should still surface roundsFinished/roundsTotal so an in-progress
+// event can show "3 of 4 groups finished" instead of nothing.
+//
+// KNOWN LIMITATION: cross-group 1v1 Nassau/Match (t2ComputeCrossGroupMatches'
+// `matches`/`nassaus` arrays) only carry each player's FIRST name, not their
+// full name — a pre-existing limitation shared with t2InjectTourneySummaryLink
+// elsewhere in the app. This resolves first name back to a full player via a
+// best-effort reverse lookup; it's only ambiguous if two DIFFERENT players in
+// the same field share a first name AND both have a cross-group 1v1 bet.
+async function t2ComputeCombinedPayouts(t) {
+  try {
+    if (!t || !t.id) return null;
+    const raw = await loadTourneyRawRounds(t).catch(() => []);
+    if (!raw || !raw.length) return null;
+    const validRounds = raw.filter(row => { const g = row && row.data ? row.data : row; return g && Array.isArray(g.players) && g.players.length; });
+    if (!validRounds.length) return null;
+    const roundsTotal = validRounds.length;
+    const roundsFinished = validRounds.filter(row => !!((row.data || row).finishedAt)).length;
+    const allFinished = roundsTotal > 0 && roundsFinished === roundsTotal;
+
+    const evPlayers = await t2GetPlayers(t.id).catch(() => []);
+    const money = await loadTourneyMoney(t).catch(() => null);
+    let cross = null; try { cross = t2ComputeCrossGroupMatches(t, raw); } catch (e) {}
+    const skinsCfg = t.settings && t.settings.tourneySkins;
+    const nassauCfg = t.settings && t.settings.tourneyNassau;
+    const longPuttCfg = t.settings && t.settings.tourneyLongPutt;
+    const sidePotsCfg = t.settings && t.settings.tourneySidePots;
+    let skins = null; try { skins = (skinsCfg && skinsCfg.on) ? t2ComputeFieldSkins(raw, skinsCfg) : null; } catch (e) {}
+    let fNassau = null; try { fNassau = (nassauCfg && nassauCfg.on) ? t2ComputeFieldNassau(raw, nassauCfg) : null; } catch (e) {}
+    let longPutt = null; try { longPutt = (longPuttCfg && longPuttCfg.on) ? t2ComputeFieldLongPutt(raw, longPuttCfg) : null; } catch (e) {}
+    let ctp = null; try { ctp = t2ComputeFieldCtp(raw); } catch (e) {}
+    let sidePots = null; try { sidePots = sidePotsCfg ? t2ComputeFieldSidePots(raw, sidePotsCfg) : null; } catch (e) {}
+    let fieldStbl = null; try { fieldStbl = t2ComputeFieldStableford(raw, t, evPlayers); } catch (e) {}
+    let fieldQuota = null; try { fieldQuota = t2ComputeFieldQuota(raw, t, evPlayers); } catch (e) {}
+
+    const nm = s => normalizeNameSegment(String(s || ''));
+    const combined = {};   // full-name key -> net $
+    const display = {};    // full-name key -> { name, first }
+    const bump = (key, amt, dispName, dispFirst) => {
+      if (!key) return;
+      if (!display[key] && (dispName || dispFirst)) display[key] = { name: dispName || dispFirst, first: dispFirst || dispName };
+      if (amt) combined[key] = (combined[key] || 0) + amt;
+    };
+
+    if (money) {
+      (money.groupRows || []).forEach(r => bump(nm(r.name), r.net, r.name, r.first));
+      (money.tourneyRows || []).forEach(r => bump(nm(r.name), r.net, r.name, r.first));
+    }
+
+    // Best-effort first-name -> full-key reverse lookup, built from whatever
+    // we've already resolved above (see KNOWN LIMITATION note).
+    const firstToKey = {};
+    const rebuildFirstToKey = () => { Object.keys(display).forEach(k => { const f = display[k] && display[k].first; if (f) { const fk = nm(f); if (!firstToKey[fk]) firstToKey[fk] = k; } }); };
+    rebuildFirstToKey();
+    const keyForFirst = (first) => { const fk = nm(first); return firstToKey[fk] || fk; };
+
+    if (cross) {
+      (cross.matches || []).forEach(m => {
+        if (!m || m.push || !m.winnerFirst) return;
+        bump(keyForFirst(m.winnerFirst), m.value || 0, null, m.winnerFirst);
+        if (m.loserFirst) bump(keyForFirst(m.loserFirst), -(m.value || 0), null, m.loserFirst);
+      });
+      (cross.nassaus || []).forEach(n => {
+        if (!n) return;
+        bump(keyForFirst(n.aFirst), n.aNet || 0, null, n.aFirst);
+        bump(keyForFirst(n.bFirst), n.bNet || 0, null, n.bFirst);
+      });
+      (cross.nassauGroups || []).forEach(ng => {
+        if (!ng || !ng.money) return;
+        Object.keys(ng.money).forEach(k => { const p = (ng.players || []).find(pp => pp.key === k); bump(k, ng.money[k], p && p.name, p && p.first); });
+      });
+      rebuildFirstToKey();
+    }
+
+    [skins, fNassau, longPutt, ctp, sidePots].forEach(pot => {
+      if (!pot || !pot.totalsByKey) return;
+      Object.keys(pot.totalsByKey).forEach(k => { const row = pot.totalsByKey[k]; bump(k, row.net || 0, row.name, row.first); });
+    });
+    rebuildFirstToKey();
+    if (fieldStbl && fieldStbl.money) {
+      Object.keys(fieldStbl.money).forEach(k => { const s = (fieldStbl.standings || []).find(x => nm(x.name) === k); bump(k, fieldStbl.money[k], s && s.name, s && s.first); });
+    }
+    if (fieldQuota && fieldQuota.money) {
+      Object.keys(fieldQuota.money).forEach(k => { const s = (fieldQuota.standings || []).find(x => nm(x.name) === k); bump(k, fieldQuota.money[k], s && s.name, s && s.first); });
+    }
+
+    const rows = Object.keys(combined)
+      .filter(k => Math.abs(combined[k] || 0) >= 0.005)
+      .map(k => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: Math.round(combined[k] * 100) / 100 }))
+      .sort((a, b) => b.net - a.net);
+    const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
+
+    return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players };
+  } catch (e) { return null; }
+}
+
 async function openEventLeaderboard(t) {
   if (!t || !t.id) { showToast('Open an event first'); return; }
   const ov = document.createElement('div');
@@ -49796,7 +49971,7 @@ async function openEventLeaderboard(t) {
     // Long Putt shows immediately — the passed-in t can be a stale snapshot, which made
     // a configured pot still say "Not set up yet". (v452)
     try { const _freshT = await t2Get(t.id); if (_freshT) { if (_freshT.settings) t.settings = _freshT.settings; if (_freshT.status) t.status = _freshT.status; } } catch (e) {}
-    const [list, money, teamStand, evPlayers, _rawRounds] = await Promise.all([loadTourneyScores(t), loadTourneyMoney(t), loadTourneyTeamStandings(t), t2GetPlayers(t.id).catch(() => []), loadTourneyRawRounds(t).catch(() => [])]);
+    const [list, money, teamStand, evPlayers, _rawRounds, _combinedPay] = await Promise.all([loadTourneyScores(t), loadTourneyMoney(t), loadTourneyTeamStandings(t), t2GetPlayers(t.id).catch(() => []), loadTourneyRawRounds(t).catch(() => []), t2ComputeCombinedPayouts(t).catch(() => null)]);
     let _fieldStbl = null; try { _fieldStbl = t2ComputeFieldStableford(_rawRounds, t, evPlayers); } catch (e) {}
     let _fieldQuota = null; try { _fieldQuota = t2ComputeFieldQuota(_rawRounds, t, evPlayers); } catch (e) {}
     let html = '';
@@ -49876,6 +50051,25 @@ async function openEventLeaderboard(t) {
       html += '<h3 style="margin:14px 0 4px">🏆 Tournament team bets <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3><div style="font-size:13px">';
       money.tourneyRows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
       if (money.tourneyGames && money.tourneyGames.length) html += '<div class="small-text" style="color:var(--text-muted)">Games: ' + escapeHtml(money.tourneyGames.join(', ')) + '</div>';
+      html += '</div>';
+    }
+    // v833 (Tyler): "combine tournament bets and group bets into ONE total to
+    // pay or receive, like any other normal game." Everything above (group
+    // side bets, team bets, and every pot further down — Skins, Nassau, Long
+    // Putt, Side Pots, Stableford, Quota) settles separately; this is the
+    // merged answer. Only shown once every group in the field has actually
+    // finished (see t2ComputeCombinedPayouts) so the number texted out can
+    // never be a partial one that changes later.
+    if (_combinedPay) {
+      html += '<h3 style="margin:14px 0 4px">🤝 Combined settle-up <span class="small-text" style="font-weight:400;color:var(--text-muted)">(everything above, merged into one total per player)</span></h3><div style="font-size:13px" id="evlb-combined-body">';
+      if (!_combinedPay.allFinished) {
+        html += '<div class="small-text" style="color:var(--text-muted)">Available once every group has finished — ' + _combinedPay.roundsFinished + ' of ' + _combinedPay.roundsTotal + ' finished so far.</div>';
+      } else if (!_combinedPay.rows.length) {
+        html += '<div class="small-text" style="color:var(--text-muted)">Every group is finished, but there\'s no money to settle — all square. 🍻</div>';
+      } else {
+        _combinedPay.rows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
+        html += '<button type="button" class="small primary evlb-text-combined" style="margin-top:8px;font-weight:600">📲 Text everyone — combined payouts</button>';
+      }
       html += '</div>';
     }
     if (_fieldStbl && Array.isArray(_fieldStbl.standings) && _fieldStbl.standings.length) {
@@ -50116,6 +50310,7 @@ async function openEventLeaderboard(t) {
       _evlbClose();
       if (canEdit) { openT2GroupSideBets(b.dataset.code); } else { openT2Round(b.dataset.code); }
     });
+    body.querySelectorAll('.evlb-text-combined').forEach(b => b.onclick = () => shareCombinedSettleUp(t, _combinedPay));
    } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
   };
   await _renderEvlbBody();
