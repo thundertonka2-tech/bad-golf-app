@@ -18,7 +18,31 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
         }
     }
 
-    func session(_ session: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: Error?) {}
+    func session(_ session: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: Error?) {
+        // v829 (Tyler/Kevin): "it takes forever to sync but once it does, it's
+        // correct." Before this, requestRound() only ever fired once, from
+        // BadGolfWatchApp's .onAppear, and only if the reachability check
+        // happened to already be true at that exact instant. If the phone
+        // wasn't reachable yet (Bluetooth/WiFi still reconnecting after the
+        // watch woke up — the normal case), that one shot silently no-op'd
+        // and NOTHING retried it. The watch was then just waiting on the
+        // phone's best-effort transferUserInfo, which the OS can delay by a
+        // long time. Activation completing is one more moment worth trying.
+        if state == .activated { requestRound() }
+    }
+
+    // v829: THE fix for the slow-resync complaint. WCSessionDelegate calls this
+    // whenever reachability flips (e.g. the watch wakes and re-pairs with the
+    // phone over Bluetooth) — previously unimplemented, so that moment was
+    // wasted. Now the watch immediately re-asks for the current round the
+    // instant it *can* reach the phone, instead of waiting for the next
+    // passive transferUserInfo delivery. This is the same idea as 18Birdies
+    // "keeping the app open" — we can't force watchOS to keep our process
+    // resident, but we CAN make sure the very first moment we're reachable
+    // again, we actively ask, rather than sitting there hoping.
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        if session.isReachable { requestRound() }
+    }
 
     // Phone sends the round via transferUserInfo / updateApplicationContext.
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
