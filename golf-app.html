@@ -7344,7 +7344,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.835';
+const BG_BUILD = 'v2026.11.838';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -11481,6 +11481,23 @@ async function _mergeGameForWrite(local, opts) {
     // co-scorer shares this round's createdAt; a collision has a different one, so
     // when they differ our round is authoritative and we skip the cross-round union.
     try { if (local.createdAt && cloud.createdAt && local.createdAt !== cloud.createdAt) return local; } catch (e) {}
+    // v835 (Tyler): "no matter how many times we finish it, it still shows
+    // Join now in my saved rounds." Root cause: this whole-blob upsert never
+    // carried finishedAt over from the cloud, so once ONE player finished the
+    // round, any OTHER player's device that still had it open (unaware it was
+    // finished — their own local copy's finishedAt was still null) would push
+    // its next routine autosave and silently blank the finish right back out.
+    // Once any copy of a round is finished, only the explicit "Reopen round"
+    // action (which clears finishedAt AND stamps reopenedAt) should ever bring
+    // it back to live — a stray unaware save must not un-finish someone else's
+    // finish. If this device genuinely reopened it AFTER that finish, honor
+    // that (reopenedAt newer than the cloud's finishedAt).
+    try {
+      if (cloud.finishedAt && !local.finishedAt) {
+        const reopenedAfter = local.reopenedAt && local.reopenedAt > cloud.finishedAt;
+        if (!reopenedAfter) local.finishedAt = cloud.finishedAt;
+      }
+    } catch (e) {}
     // v796: honor round-level player removals so a removed player can't be
     // resurrected by a stale cloud copy (or another phone) through the union below.
     let _rmPids = null;
@@ -40672,6 +40689,35 @@ async function checkPendingInvites() {
 // One prompt per round code per app session; Dismiss just closes it (it re-checks
 // the next time you open the app).
 let _rejoinPrompted = new Set();
+// v837 (Tyler): "when this round started I did not get a notification to join.
+// When I clicked the play button it wanted me to start a new game instead" of
+// resuming the tournament round Kevin had already started. Root cause: a
+// Tournament 2.0 (multi-day) event never sets t.activeCode — each GROUP's
+// round code lives on tournament_groups.game_code instead — so neither this
+// rejoin-prompt finder nor the center Play button's finder (findMyLiveRound,
+// which mirrors this one) ever looked there. A player who hadn't manually
+// opened their group's round yet (exactly the situation when the join
+// notification is also missing) was invisible to both. Shared here so the
+// fix applies identically to both finders.
+async function _t2MyLiveRoundCodes(t, meN, norm) {
+  const out = [];
+  try {
+    if (!t || !t.id || typeof t2GetPlayers !== 'function' || typeof t2GetDays !== 'function' || typeof t2GetGroups !== 'function' || typeof t2GetGroupMembers !== 'function') return out;
+    const tPlayers = await t2GetPlayers(t.id);
+    const myTpIds = new Set((tPlayers || []).filter(p => p && norm(p.display_name || '') === meN).map(p => p.id));
+    if (!myTpIds.size) return out;
+    const days = await t2GetDays(t.id);
+    for (const d of (days || [])) {
+      const groups = await t2GetGroups(d.id);
+      for (const grp of (groups || [])) {
+        if (!grp || !grp.game_code) continue;
+        const members = await t2GetGroupMembers(grp.id);
+        if ((members || []).some(m => m && myTpIds.has(m.tournament_player_id))) out.push(grp.game_code);
+      }
+    }
+  } catch (e) {}
+  return out;
+}
 async function checkLiveRoundRejoin() {
   try {
     if (typeof uiConfirm !== 'function' || typeof state === 'undefined') return;
@@ -40695,16 +40741,16 @@ async function checkLiveRoundRejoin() {
     try { const last = await safeGet(KEY_LAST, false); if (last) codes.push(String(last)); } catch (e) {}
     try {
       const tourneys = await getTourneys();
-      (tourneys || []).forEach(t => {
-        if (!t || t.isTemplate) return;
-        if (t.status === 'complete' || t.status === 'open' || t.openRound) return;
+      for (const t of (tourneys || [])) {
+        if (!t || t.isTemplate) continue;
+        if (t.status === 'complete' || t.status === 'open' || t.openRound) continue;
         // Am I in this round? Check the live-tourney player string AND a scheduled
         // round's savedConfig roster + creator (covers every player in the group).
         let inP = !meN;
         if (!inP && t.players) inP = String(t.players).split(',').some(n => norm(n) === meN);
         if (!inP && t.savedConfig && Array.isArray(t.savedConfig.players)) inP = t.savedConfig.players.some(p => norm(nameOf(p)) === meN || norm(p && p.name) === meN);
         if (!inP && norm(t.createdBy) === meN) inP = true;
-        if (!inP) return;
+        if (!inP) continue;
         // Probe BOTH the flipped activeCode and the pre-allocated plannedCode the
         // game inherits at start. The plannedCode path finds the round even when
         // the shared tourney record never flipped to status:'live' (a last-write-wins
@@ -40712,7 +40758,10 @@ async function checkLiveRoundRejoin() {
         // the cloud, and loadGame() returns null until the round is actually started.
         if (t.activeCode) codes.push(t.activeCode);
         if (t.plannedCode && t.plannedCode !== t.activeCode) codes.push(t.plannedCode);
-      });
+        // v837: Tournament 2.0 (multi-day) events — walk this event's groups for
+        // MY already-launched round code (see _t2MyLiveRoundCodes above).
+        try { (await _t2MyLiveRoundCodes(t, meN, norm)).forEach(c => codes.push(c)); } catch (e) {}
+      }
     } catch (e) {}
 
     const seen = new Set();
@@ -45937,7 +45986,16 @@ async function t2LaunchDayRounds(courseId) {
     };
     game.players.forEach(p => game.scores[p.id] = new Array(18).fill(null));
     const ok = await saveGame(game);
-    if (ok) { await t2SetGroupCode(grp.id, code); made++; }
+    if (ok) {
+      await t2SetGroupCode(grp.id, code); made++;
+      // v837 (Tyler): "when this round started I did not get a notification to
+      // join." A regular round (setup form → Save game) has ALWAYS called
+      // notifyAddedRegisteredUsers here to push each registered player "X added
+      // you to a round…" — but launching a tournament day's group rounds never
+      // called it at all, so nobody in the group ever got pinged when their game
+      // actually started. Same fire-and-forget call regular rounds already use.
+      try { notifyAddedRegisteredUsers(game); } catch (e) {}
+    }
   }
   await t2SetDayStatus(ctx.dayId, 'active');
   showToast(made + ' round' + (made === 1 ? '' : 's') + ' created — each group taps ▶ Open to score');
@@ -50136,10 +50194,24 @@ async function openEventLeaderboard(t) {
     // existed but their buttons were never emitted anywhere (dead wiring). This row
     // is the always-visible entry point, plus the new Side Pots config.
     if (_amCommish) {
-      html += '<div style="margin:14px 0 2px;display:flex;flex-wrap:wrap;gap:6px;align-items:center"><span style="font-weight:700;flex:0 0 auto">💵 Event pots:</span>' +
-        '<button type="button" class="small evlb-skins-cfg" style="flex:0 0 auto">🏆 Skins</button>' +
-        '<button type="button" class="small evlb-sp-cfg" style="flex:0 0 auto">🏅 Side Pots · Long Putt</button>' +
-        '<button type="button" class="small evlb-nassau-cfg" style="flex:0 0 auto">🏆 Nassau</button></div>';
+      // v836 (Tyler): "it says the Nassau game was an event game but it is not
+      // it is a group game/cross groups." These buttons are just SETUP shortcuts
+      // for the whole-field pots (separate from any group's own Nassau/Skins/etc)
+      // — always shown so a commissioner can find them, regardless of whether a
+      // field pot is actually configured. Sitting under a plain "Event pots:"
+      // label with no on/off indicator, they read as "here are the tournament's
+      // active pots" instead of "tap to configure." Relabeled the row as setup,
+      // and each button now shows ON/off so it's obvious at a glance whether
+      // that whole-field pot is actually turned on for this event.
+      const _epSkOn = !!(t.settings && t.settings.tourneySkins && t.settings.tourneySkins.on);
+      const _epNaOn = !!(t.settings && t.settings.tourneyNassau && t.settings.tourneyNassau.on);
+      const _epSpOn = !!(t.settings && ((['lowNet', 'girs', 'putts'].some(k => t.settings.tourneySidePots && t.settings.tourneySidePots[k] && t.settings.tourneySidePots[k].on)) || (t.settings.tourneyLongPutt && t.settings.tourneyLongPutt.on)));
+      const _epTag = on => on ? ' <span style="color:var(--money-pos);font-weight:800">ON</span>' : ' <span style="color:var(--text-muted)">off</span>';
+      html += '<div style="margin:14px 0 2px"><div style="font-weight:700">💵 Set up event-wide pots</div><div class="small-text" style="color:var(--text-muted);margin-bottom:6px">Whole-field pools — separate from any group’s own bets</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
+        '<button type="button" class="small evlb-skins-cfg" style="flex:0 0 auto">🏆 Skins' + _epTag(_epSkOn) + '</button>' +
+        '<button type="button" class="small evlb-sp-cfg" style="flex:0 0 auto">🏅 Side Pots · Long Putt' + _epTag(_epSpOn) + '</button>' +
+        '<button type="button" class="small evlb-nassau-cfg" style="flex:0 0 auto">🏆 Nassau' + _epTag(_epNaOn) + '</button></div></div>';
     }
     // Tournament Skins — FIELD-WIDE pot (net, hardest-hole countback), a SEPARATE
     // pool from any group's own skins. Commissioner sets the pot; results compute live.
@@ -51149,17 +51221,20 @@ async function findMyLiveRound() {
     try { const last = await safeGet(KEY_LAST, false); if (last) codes.push(String(last)); } catch (e) {}
     try {
       const tourneys = await getTourneys();
-      (tourneys || []).forEach(t => {
-        if (!t || t.isTemplate) return;
-        if (t.status === 'complete' || t.status === 'open' || t.openRound) return;
+      for (const t of (tourneys || [])) {
+        if (!t || t.isTemplate) continue;
+        if (t.status === 'complete' || t.status === 'open' || t.openRound) continue;
         let inP = !meN;
         if (!inP && t.players) inP = String(t.players).split(',').some(n => norm(n) === meN);
         if (!inP && t.savedConfig && Array.isArray(t.savedConfig.players)) inP = t.savedConfig.players.some(p => norm(nameOf(p)) === meN || norm(p && p.name) === meN);
         if (!inP && norm(t.createdBy) === meN) inP = true;
-        if (!inP) return;
+        if (!inP) continue;
         if (t.activeCode) codes.push(t.activeCode);
         if (t.plannedCode && t.plannedCode !== t.activeCode) codes.push(t.plannedCode);
-      });
+        // v837: Tournament 2.0 (multi-day) events — walk this event's groups for
+        // MY already-launched round code (see _t2MyLiveRoundCodes near checkLiveRoundRejoin).
+        try { (await _t2MyLiveRoundCodes(t, meN, norm)).forEach(c => codes.push(c)); } catch (e) {}
+      }
     } catch (e) {}
     const seen = new Set();
     for (const code of codes) {
