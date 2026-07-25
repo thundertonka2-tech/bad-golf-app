@@ -7352,7 +7352,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.851';
+const BG_BUILD = 'v2026.11.852';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -34680,10 +34680,15 @@ function fieldSkinWinnersByHole(g, holeResults) {
 
 // Phone-friendly stacked scorecard: front nine table on top, back nine below,
 // so it reads without horizontal scrolling. Used by the GPS mini-scorecard.
-function buildStackedScorecardHtml(g) {
+function buildStackedScorecardHtml(g, fieldSkinMap) {
   if (!g || !Array.isArray(g.pars)) return '<div style="padding:16px;text-align:center;color:var(--text-muted)">No scorecard yet.</div>';
   const players = Array.isArray(g.players) ? g.players : [];
   const skinMap = skinWinnersByHole(g);
+  // v851 follow-up: tournament-wide field skins on the GPS mini-scorecard too —
+  // passed in by _t2PaintFieldSkinsOnMiniScorecard once its async cross-group
+  // fetch lands. Optional/undefined on the initial synchronous open (local
+  // group skins still show immediately either way).
+  const fSkinMap = fieldSkinMap || {};
   const seg = (from, to, label) => {
     const cols = []; for (let i = from; i < to; i++) cols.push(i);
     let h = '<table class="mini-sc"><thead><tr><th class="pn">Hole</th>';
@@ -34698,7 +34703,7 @@ function buildStackedScorecardHtml(g) {
       const penArr = (g.trackPenalties && g.penaltiesData && g.penaltiesData[p.id]) || [];
       let tot = 0, any = false;
       let row = '<tr><td class="pn">' + (typeof displayFirst === 'function' ? displayFirst(p) : (p.name || '?')) + '</td>';
-      cols.forEach(i => { const s = arr[i]; if (s != null) { tot += s; any = true; } const _pen = penArr[i]; const _ps = _pen ? '<sup style="color:var(--money-neg);font-size:8px">+' + _pen + '</sup>' : ''; const _strk = (g.sis && typeof strokesOnHole === 'function') ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0; const _dot = _strk > 0 ? '<span class="sc-stroke-dot"></span>' : ''; row += '<td style="position:relative">' + _dot + (s != null ? skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id])) + _ps : '–') + '</td>'; });
+      cols.forEach(i => { const s = arr[i]; if (s != null) { tot += s; any = true; } const _pen = penArr[i]; const _ps = _pen ? '<sup style="color:var(--money-neg);font-size:8px">+' + _pen + '</sup>' : ''; const _strk = (g.sis && typeof strokesOnHole === 'function') ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0; const _dot = _strk > 0 ? '<span class="sc-stroke-dot"></span>' : ''; row += '<td style="position:relative">' + _dot + (s != null ? skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id])) + _ps : '–') + '</td>'; });
       row += '<td class="tot">' + (any ? tot : '–') + '</td></tr>';
       h += row;
     });
@@ -50606,31 +50611,68 @@ function renderT2PayoutFilterBar(g) {
 // can't let a stale fetch paint over a newer one. Marks gold (.skin-win-field)
 // — a different color from the local skin's blue — so the two are never
 // confused when both are running on the same round.
+// v851 follow-up (Tyler): "build this as well — it's also not wired into the
+// small GPS mini-scorecard yet." Pulled the actual fetch-and-compute logic out
+// of _t2PaintFieldSkinsOnScorecard into its own function so the Board-tab
+// scorecard AND the GPS mini-scorecard can both use it without duplicating
+// the t2Get/loadTourneyRawRounds/t2ComputeFieldSkins round-trip (one place
+// that knows how to get this data means one place to fix if it's ever wrong).
+// Returns the fieldSkinMap (hole-index -> {playerId: true}) or null if this
+// isn't a tournament round, field skins aren't on, or nothing's decided yet.
+async function _t2FetchFieldSkinMap(g) {
+  try {
+    const tid = g && g.t2 && g.t2.tournamentId;
+    if (!tid) return null;
+    const t = await t2Get(tid);
+    if (!t) return null;
+    const skinsCfg = t.settings && t.settings.tourneySkins;
+    if (!skinsCfg || !skinsCfg.on) return null;
+    const raw = await loadTourneyRawRounds(t).catch(() => []);
+    if (!raw || !raw.length) return null;
+    let result = null; try { result = t2ComputeFieldSkins(raw, skinsCfg); } catch (e) {}
+    if (!result || !Array.isArray(result.perDay)) return null;
+    const day = (g.t2 && g.t2.day) || 1;
+    const dayData = result.perDay.find(d => d.day === day);
+    if (!dayData || !Array.isArray(dayData.holeResults)) return null;
+    const fieldSkinMap = fieldSkinWinnersByHole(g, dayData.holeResults);
+    return Object.keys(fieldSkinMap).length ? fieldSkinMap : null;
+  } catch (e) { return null; }
+}
 let _t2FieldSkinToken = 0;
 async function _t2PaintFieldSkinsOnScorecard(g) {
   try {
     const tid = g && g.t2 && g.t2.tournamentId;
     if (!tid) return;
     const myToken = ++_t2FieldSkinToken;
-    const t = await t2Get(tid);
-    if (myToken !== _t2FieldSkinToken || !t) return;
-    const skinsCfg = t.settings && t.settings.tourneySkins;
-    if (!skinsCfg || !skinsCfg.on) return;
-    const raw = await loadTourneyRawRounds(t).catch(() => []);
-    if (myToken !== _t2FieldSkinToken || !raw || !raw.length) return;
-    let result = null; try { result = t2ComputeFieldSkins(raw, skinsCfg); } catch (e) {}
-    if (!result || !Array.isArray(result.perDay)) return;
-    const day = (g.t2 && g.t2.day) || 1;
-    const dayData = result.perDay.find(d => d.day === day);
-    if (!dayData || !Array.isArray(dayData.holeResults)) return;
-    const fieldSkinMap = fieldSkinWinnersByHole(g, dayData.holeResults);
-    if (!Object.keys(fieldSkinMap).length) return;
+    const fieldSkinMap = await _t2FetchFieldSkinMap(g);
+    if (myToken !== _t2FieldSkinToken || !fieldSkinMap) return;
     // Only repaint if this is still the round actually on screen — a fast tap
     // to another round while this fetch was in flight must not paint over it.
     if (!(state && state.game && state.game.code === g.code)) return;
     if (myToken !== _t2FieldSkinToken) return;
     const totals = calcTotals(g);
     renderScorecard(g, totals, fieldSkinMap);
+  } catch (e) {}
+}
+// v851 follow-up: same idea for the GPS mini-scorecard (the stacked front/back
+// popup opened from the map view's "Scorecard" button) — it only ever showed
+// local group skins (blue), since buildStackedScorecardHtml had no field-skins
+// param at all. Guards on the panel still being OPEN (not just the round still
+// being current) since this popup can be closed while the fetch is in flight.
+let _t2MiniFieldSkinToken = 0;
+async function _t2PaintFieldSkinsOnMiniScorecard(g) {
+  try {
+    const tid = g && g.t2 && g.t2.tournamentId;
+    if (!tid) return;
+    const myToken = ++_t2MiniFieldSkinToken;
+    const fieldSkinMap = await _t2FetchFieldSkinMap(g);
+    if (myToken !== _t2MiniFieldSkinToken || !fieldSkinMap) return;
+    if (!(state && state.game && state.game.code === g.code)) return;
+    const panel = document.getElementById('gps-scorecard-panel');
+    const body = document.getElementById('gps-scorecard-body');
+    if (!panel || panel.style.display !== 'block' || !body) return;
+    if (myToken !== _t2MiniFieldSkinToken) return;
+    body.innerHTML = buildStackedScorecardHtml(g, fieldSkinMap);
   } catch (e) {}
 }
 
@@ -58232,6 +58274,11 @@ const gpsView = (() => {
         if (body) body.innerHTML = buildStackedScorecardHtml(state.game);
         _scZoom = 1; _applyScZoom();
         el('gps-scorecard-panel').style.display = 'block';
+        // v851 follow-up (Tyler): "build this as well" — tournament-wide field
+        // skins on the mini-scorecard too. Local group skins already show in
+        // the synchronous build above; this repaints gold markers in once the
+        // cross-group fetch lands (same pattern as the Board tab's scorecard).
+        try { const _g = state.game; if (_g && _g.t2 && _g.t2.tournamentId) _t2PaintFieldSkinsOnMiniScorecard(_g); } catch (e) {}
         // If an admin saved a photo of the real scorecard, offer to view it.
         try { const _cid = resolveCourseId(); if (_cid && typeof getScorecardImg === 'function') getScorecardImg(_cid).then(u => { if (u && body && !body.querySelector('#gps-real-sc')) { const rb = document.createElement('button'); rb.id = 'gps-real-sc'; rb.textContent = '🖼 View real scorecard'; rb.style.cssText = 'width:100%;padding:10px;margin-bottom:8px;border-radius:8px;border:none;background:var(--accent,var(--accent));color:#fff;font-weight:700'; rb.onclick = () => showScorecardImageFor(_cid, (state.game && state.game.course) || 'Scorecard'); body.insertBefore(rb, body.firstChild); } }).catch(() => {}); } catch (e) {}
       } catch (e) {}
