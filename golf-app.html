@@ -7344,7 +7344,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.839';
+const BG_BUILD = 'v2026.11.840';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -50048,6 +50048,164 @@ async function t2ComputeCombinedPayouts(t) {
   } catch (e) { return null; }
 }
 
+// v839 (Tyler): "have a tournament board and a groups board... have three
+// buttons, tournament payout, group payout and total payout." This is the
+// middle one: TOURNAMENT-WIDE money only (team bets, cross-group 1v1s, every
+// field-wide event pot, Stableford, Quota) — deliberately EXCLUDING each
+// group's own private side bets, so a player can see where they stand on the
+// tournament-only games while their own group is still mid-round, without
+// waiting on the whole field like Total payout does. Mirrors
+// t2ComputeCombinedPayouts's logic exactly, minus the groupRows bump — kept as
+// its own function rather than refactoring the shared internals of the
+// already-shipped, tested combined-payout calculator, so this new screen
+// can't accidentally change what Total payout / "Text everyone" computes.
+async function t2ComputeTournamentOnlyPayouts(t) {
+  try {
+    if (!t || !t.id) return null;
+    const raw = await loadTourneyRawRounds(t).catch(() => []);
+    if (!raw || !raw.length) return null;
+    const validRounds = raw.filter(row => { const g = row && row.data ? row.data : row; return g && Array.isArray(g.players) && g.players.length; });
+    if (!validRounds.length) return null;
+    const roundsTotal = validRounds.length;
+    const roundsFinished = validRounds.filter(row => !!((row.data || row).finishedAt)).length;
+    const allFinished = roundsTotal > 0 && roundsFinished === roundsTotal;
+
+    const evPlayers = await t2GetPlayers(t.id).catch(() => []);
+    const money = await loadTourneyMoney(t).catch(() => null);   // only .tourneyRows used — group side bets deliberately excluded
+    let cross = null; try { cross = t2ComputeCrossGroupMatches(t, raw); } catch (e) {}
+    const skinsCfg = t.settings && t.settings.tourneySkins;
+    const nassauCfg = t.settings && t.settings.tourneyNassau;
+    const longPuttCfg = t.settings && t.settings.tourneyLongPutt;
+    const sidePotsCfg = t.settings && t.settings.tourneySidePots;
+    let skins = null; try { skins = (skinsCfg && skinsCfg.on) ? t2ComputeFieldSkins(raw, skinsCfg) : null; } catch (e) {}
+    let fNassau = null; try { fNassau = (nassauCfg && nassauCfg.on) ? t2ComputeFieldNassau(raw, nassauCfg) : null; } catch (e) {}
+    let longPutt = null; try { longPutt = (longPuttCfg && longPuttCfg.on) ? t2ComputeFieldLongPutt(raw, longPuttCfg) : null; } catch (e) {}
+    let ctp = null; try { ctp = t2ComputeFieldCtp(raw); } catch (e) {}
+    let sidePots = null; try { sidePots = sidePotsCfg ? t2ComputeFieldSidePots(raw, sidePotsCfg) : null; } catch (e) {}
+    let fieldStbl = null; try { fieldStbl = t2ComputeFieldStableford(raw, t, evPlayers); } catch (e) {}
+    let fieldQuota = null; try { fieldQuota = t2ComputeFieldQuota(raw, t, evPlayers); } catch (e) {}
+
+    const nm = s => normalizeNameSegment(String(s || ''));
+    const combined = {};
+    const display = {};
+    const bump = (key, amt, dispName, dispFirst) => {
+      if (!key) return;
+      if (!display[key] && (dispName || dispFirst)) display[key] = { name: dispName || dispFirst, first: dispFirst || dispName };
+      if (amt) combined[key] = (combined[key] || 0) + amt;
+    };
+
+    if (money) {
+      (money.tourneyRows || []).forEach(r => bump(nm(r.name), r.net, r.name, r.first));
+    }
+
+    const firstToKey = {};
+    const rebuildFirstToKey = () => { Object.keys(display).forEach(k => { const f = display[k] && display[k].first; if (f) { const fk = nm(f); if (!firstToKey[fk]) firstToKey[fk] = k; } }); };
+    rebuildFirstToKey();
+    const keyForFirst = (first) => { const fk = nm(first); return firstToKey[fk] || fk; };
+
+    if (cross) {
+      (cross.matches || []).forEach(m => {
+        if (!m || m.push || !m.winnerFirst) return;
+        bump(keyForFirst(m.winnerFirst), m.value || 0, null, m.winnerFirst);
+        if (m.loserFirst) bump(keyForFirst(m.loserFirst), -(m.value || 0), null, m.loserFirst);
+      });
+      (cross.nassaus || []).forEach(n => {
+        if (!n) return;
+        bump(keyForFirst(n.aFirst), n.aNet || 0, null, n.aFirst);
+        bump(keyForFirst(n.bFirst), n.bNet || 0, null, n.bFirst);
+      });
+      (cross.nassauGroups || []).forEach(ng => {
+        if (!ng || !ng.money) return;
+        Object.keys(ng.money).forEach(k => { const p = (ng.players || []).find(pp => pp.key === k); bump(k, ng.money[k], p && p.name, p && p.first); });
+      });
+      rebuildFirstToKey();
+    }
+
+    [skins, fNassau, longPutt, ctp, sidePots].forEach(pot => {
+      if (!pot || !pot.totalsByKey) return;
+      Object.keys(pot.totalsByKey).forEach(k => { const row = pot.totalsByKey[k]; bump(k, row.net || 0, row.name, row.first); });
+    });
+    rebuildFirstToKey();
+    if (fieldStbl && fieldStbl.money) {
+      Object.keys(fieldStbl.money).forEach(k => { const s = (fieldStbl.standings || []).find(x => nm(x.name) === k); bump(k, fieldStbl.money[k], s && s.name, s && s.first); });
+    }
+    if (fieldQuota && fieldQuota.money) {
+      Object.keys(fieldQuota.money).forEach(k => { const s = (fieldQuota.standings || []).find(x => nm(x.name) === k); bump(k, fieldQuota.money[k], s && s.name, s && s.first); });
+    }
+
+    const rows = Object.keys(combined)
+      .filter(k => Math.abs(combined[k] || 0) >= 0.005)
+      .map(k => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: Math.round(combined[k] * 100) / 100 }))
+      .sort((a, b) => b.net - a.net);
+    const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
+
+    return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players };
+  } catch (e) { return null; }
+}
+
+// v839 (Tyler): shared row renderer so Tournament payout / Total payout
+// visually match the group board's .lb-row list exactly (same CSS classes,
+// same layout) — "all three screens should look and feel the same."
+function _t2PayoutBoardRowsHtml(rows) {
+  if (!rows || !rows.length) return '<div class="help-text" style="padding:16px;text-align:center">No money to settle — all square. 🍻</div>';
+  const sorted = rows.slice().sort((a, b) => (b.net || 0) - (a.net || 0));
+  return sorted.map((r, i) => {
+    const m = r.net || 0;
+    const cls = m > 0.005 ? 'pos' : (m < -0.005 ? 'neg' : 'zero');
+    return '<div class="lb-row">' +
+      '<div class="pos">' + (i + 1) + '</div>' +
+      '<div class="name">' + escapeHtml(r.first || r.name || '?') + '</div>' +
+      '<div class="score">—</div>' +
+      '<div class="money ' + cls + '">' + signed(m) + '</div></div>';
+  }).join('');
+}
+
+// v839: Tournament payout / Total payout screens. Same modal chrome as the
+// other T2 config overlays (so it layers cleanly on top of the Event
+// Leaderboard), but the body reuses #money-board's exact .lb-row markup so it
+// looks and feels identical to the group board, per Tyler's request. Group
+// payout doesn't need a wrapper like this — it opens the real group Board tab
+// directly via openT2GroupBoardReadOnly.
+async function openT2PayoutBoard(t, scope) {
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show';
+  ov.style.cssText = 'z-index:100060;align-items:flex-start;overflow-y:auto';
+  const title = scope === 'total' ? '🤝 Total payout' : '🏆 Tournament payout';
+  const sub = scope === 'total'
+    ? 'Everything combined — group bets + tournament bets, into one number per player.'
+    : 'Tournament-wide bets only (team bets, cross-group 1v1s, event pots, Stableford, Quota) — not each group’s own side bets.';
+  ov.innerHTML = '<div class="modal" style="max-width:480px;width:94%;margin:12px auto">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px"><h2 style="margin:0;font-size:18px">' + title + '</h2>' +
+    '<button id="t2pb-x" aria-label="Close" style="background:transparent;border:none;font-size:22px;line-height:1;cursor:pointer">✕</button></div>' +
+    '<div class="small-text" style="color:var(--text-muted);margin-bottom:10px">' + sub + '</div>' +
+    '<div id="t2pb-body"><div class="help-text" style="padding:16px;text-align:center">Loading…</div></div>' +
+    '<div class="actions" style="margin-top:16px"><button id="t2pb-close" class="primary full" style="width:100%">Close</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.querySelector('#t2pb-x').onclick = close;
+  ov.querySelector('#t2pb-close').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  const body = ov.querySelector('#t2pb-body');
+  try {
+    const pay = scope === 'total' ? await t2ComputeCombinedPayouts(t) : await t2ComputeTournamentOnlyPayouts(t);
+    if (!body.isConnected) return;
+    if (!pay) { body.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">No scores in this event yet.</div>'; return; }
+    // Total payout stays gated on every group finishing (Tyler's own earlier
+    // call: "Only when everything's final") so the number texted out can
+    // never be a partial one that changes later. Tournament payout is live —
+    // each pot it pulls from already labels itself "pays at the end" /
+    // "in progress" internally where that matters, same as it always has.
+    if (scope === 'total' && !pay.allFinished) {
+      body.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">Available once every group has finished — ' + pay.roundsFinished + ' of ' + pay.roundsTotal + ' finished so far.</div>';
+      return;
+    }
+    body.innerHTML = '<div id="t2pb-board">' + _t2PayoutBoardRowsHtml(pay.rows) + '</div>' +
+      ((scope === 'total' && pay.rows.length) ? '<button type="button" id="t2pb-text" class="small primary full" style="margin-top:12px;font-weight:600">📲 Text everyone — combined payouts</button>' : '');
+    const tb = body.querySelector('#t2pb-text');
+    if (tb) tb.onclick = () => shareCombinedSettleUp(t, pay);
+  } catch (e) { body.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">Could not load payouts.</div>'; }
+}
+
 async function openEventLeaderboard(t) {
   if (!t || !t.id) { showToast('Open an event first'); return; }
   const ov = document.createElement('div');
@@ -50133,66 +50291,36 @@ async function openEventLeaderboard(t) {
     if (field && field.players && field.players.length && Array.isArray(field.pars)) {
       html += '<h3 style="margin:14px 0 4px">Full scorecard</h3>' + buildEventScorecardHtml(field);
     }
-    // TWO SEPARATE POOLS — never merged. (1) each group's own side games, and
-    // (2) the cross-group tournament team bets. Listed as distinct sections.
-    if (money && money.groupRows && money.groupRows.length) {
-      html += '<h3 style="margin:14px 0 4px">💰 Group side bets <span class="small-text" style="font-weight:400;color:var(--text-muted)">(each group’s own games)</span></h3><div style="font-size:13px">';
-      money.groupRows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
-      if (money.groupGames && money.groupGames.length) html += '<div class="small-text" style="color:var(--text-muted)">Games: ' + escapeHtml(money.groupGames.join(', ')) + '</div>';
-      // v829 (Tyler): this section combines EVERY group's side bets into one flat
-      // list — with more than one group playing, a player can't tell which line is
-      // theirs. Add a straight-to-my-own-group's-board button (detailed scorecard +
-      // bets), reusing the same read-only-vs-editable routing "Your group's bets"
-      // uses elsewhere (openT2Round lands read-only for a finished round).
+    // v839 (Tyler): "have a tournament board and a groups board like you have
+    // today... get rid of the way you display the payouts today and do this
+    // instead. Have three buttons, tournament payout, group payout and total
+    // payout. All three screens should look and feel the same." Replaces the
+    // long scroll of separately-formatted sections below (Group side bets,
+    // Tournament team bets, Combined settle-up, Stableford/Quota money,
+    // Tournament Skins/Nassau/Long Putt/Side Pots/CTP detail, Cross-group
+    // bets) — the same money showing up in three different places in three
+    // different formats was exactly what made this "very confusing" (Tyler,
+    // earlier this session). Group payout reuses the existing group board
+    // unchanged (openT2GroupBoardReadOnly). Tournament payout and Total
+    // payout are new board-styled screens (openT2PayoutBoard) that reuse the
+    // SAME .lb-row list markup the group board already uses, so all three
+    // look and feel identical. Per-game breakdowns (which hole a skin was won
+    // on, Nassau segment detail, etc.) are no longer shown here — the net $
+    // from every one of those pots still flows into Tournament/Total payout,
+    // just without the blow-by-blow, matching what was asked for.
+    {
       let _myGI = null; try { _myGI = await _t2MyGroupInfo(t); } catch (e) {}
+      html += '<h3 style="margin:14px 0 8px">💰 Payouts</h3>';
+      html += '<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:6px">';
+      html += '<button type="button" class="full evlb-pay-tournament" style="text-align:left;padding:12px 14px"><div style="font-weight:700">🏆 Tournament payout</div><div class="small-text" style="color:var(--text-muted);margin-top:2px">Team bets, cross-group 1v1s &amp; every event-wide pot</div></button>';
       if (_myGI && _myGI.gameCode) {
-        html += '<button type="button" class="small evlb-my-group-board" data-code="' + escapeHtml(_myGI.gameCode) + '" style="margin-top:8px">📋 View my group’s board</button>';
+        html += '<button type="button" class="full evlb-pay-group" data-code="' + escapeHtml(_myGI.gameCode) + '" style="text-align:left;padding:12px 14px"><div style="font-weight:700">👥 Group payout</div><div class="small-text" style="color:var(--text-muted);margin-top:2px">Just your own group’s side bets</div></button>';
       }
+      const _totSub = _combinedPay
+        ? (_combinedPay.allFinished ? 'Everything combined into one number per player' : (_combinedPay.roundsFinished + ' of ' + _combinedPay.roundsTotal + ' groups finished so far'))
+        : 'Everything combined into one number per player';
+      html += '<button type="button" class="full primary evlb-pay-total" style="text-align:left;padding:12px 14px"><div style="font-weight:700">🤝 Total payout</div><div style="margin-top:2px;font-size:12px;opacity:.9">' + escapeHtml(_totSub) + '</div></button>';
       html += '</div>';
-    }
-    if (money && money.tourneyRows && money.tourneyRows.length) {
-      html += '<h3 style="margin:14px 0 4px">🏆 Tournament team bets <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3><div style="font-size:13px">';
-      money.tourneyRows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
-      if (money.tourneyGames && money.tourneyGames.length) html += '<div class="small-text" style="color:var(--text-muted)">Games: ' + escapeHtml(money.tourneyGames.join(', ')) + '</div>';
-      html += '</div>';
-    }
-    // v833 (Tyler): "combine tournament bets and group bets into ONE total to
-    // pay or receive, like any other normal game." Everything above (group
-    // side bets, team bets, and every pot further down — Skins, Nassau, Long
-    // Putt, Side Pots, Stableford, Quota) settles separately; this is the
-    // merged answer. Only shown once every group in the field has actually
-    // finished (see t2ComputeCombinedPayouts) so the number texted out can
-    // never be a partial one that changes later.
-    if (_combinedPay) {
-      html += '<h3 style="margin:14px 0 4px">🤝 Combined settle-up <span class="small-text" style="font-weight:400;color:var(--text-muted)">(everything above, merged into one total per player)</span></h3><div style="font-size:13px" id="evlb-combined-body">';
-      if (!_combinedPay.allFinished) {
-        html += '<div class="small-text" style="color:var(--text-muted)">Available once every group has finished — ' + _combinedPay.roundsFinished + ' of ' + _combinedPay.roundsTotal + ' finished so far.</div>';
-      } else if (!_combinedPay.rows.length) {
-        html += '<div class="small-text" style="color:var(--text-muted)">Every group is finished, but there\'s no money to settle — all square. 🍻</div>';
-      } else {
-        _combinedPay.rows.forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>'; });
-        html += '<button type="button" class="small primary evlb-text-combined" style="margin-top:8px;font-weight:600">📲 Text everyone — combined payouts</button>';
-      }
-      html += '</div>';
-    }
-    if (_fieldStbl && Array.isArray(_fieldStbl.standings) && _fieldStbl.standings.length) {
-      html += '<h3 style="margin:14px 0 4px">\uD83C\uDFAF Stableford <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field \u00b7 Pool $' + _fieldStbl.pool + ' \u00b7 $' + _fieldStbl.buyin + ' buy-in)</span></h3><div style="font-size:13px">';
-      _fieldStbl.standings.forEach((r, i) => {
-        const m = _fieldStbl.money ? (_fieldStbl.money[normalizeNameSegment(String(r.name || ''))] || 0) : 0;
-        const moneyStr = (_fieldStbl.complete && m) ? ' \u00b7 <strong style="color:' + (m >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(m) + '</strong>' : '';
-        html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:60px;text-align:right;font-weight:700">' + r.points + ' pts</span>' + (moneyStr ? '<span>' + moneyStr + '</span>' : '') + '</div>';
-      });
-      html += '</div>' + (_fieldStbl.complete ? '' : '<div class="small-text" style="color:var(--text-muted)">Pool pays out once every group finishes.</div>');
-    }
-    if (_fieldQuota && Array.isArray(_fieldQuota.standings) && _fieldQuota.standings.length) {
-      html += '<h3 style="margin:14px 0 4px">\uD83C\uDFAF Quota <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field \u00b7 Pool $' + _fieldQuota.pool + ' \u00b7 $' + _fieldQuota.buyin + ' buy-in)</span></h3><div style="font-size:13px">';
-      _fieldQuota.standings.forEach((r, i) => {
-        const m = _fieldQuota.money ? (_fieldQuota.money[normalizeNameSegment(String(r.name || ''))] || 0) : 0;
-        const moneyStr = (_fieldQuota.complete && m) ? ' \u00b7 <strong style="color:' + (m >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(m) + '</strong>' : '';
-        const _rstr = (r.result >= 0 ? '+' + r.result : r.result);
-        html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:96px;text-align:right;font-weight:700">' + _rstr + ' vs quota</span>' + (moneyStr ? '<span>' + moneyStr + '</span>' : '') + '</div>';
-      });
-      html += '</div>' + (_fieldQuota.complete ? '' : '<div class="small-text" style="color:var(--text-muted)">Pool pays out once every group finishes.</div>');
     }
     // Long Drive — ONE field-wide individual winner per day, set by the commissioner.
     const _amCommish = t2CanManage(t);
@@ -50237,197 +50365,23 @@ async function openEventLeaderboard(t) {
         '<button type="button" class="small evlb-sp-cfg" style="flex:0 0 auto">🏅 Side Pots · Long Putt' + _epTag(_epSpOn) + '</button>' +
         '<button type="button" class="small evlb-nassau-cfg" style="flex:0 0 auto">🏆 Nassau' + _epTag(_epNaOn) + '</button></div></div>';
     }
-    // Tournament Skins — FIELD-WIDE pot (net, hardest-hole countback), a SEPARATE
-    // pool from any group's own skins. Commissioner sets the pot; results compute live.
-    {
-      const _ts = (t.settings && t.settings.tourneySkins) || null;
-      if (_ts && _ts.on) {
-        html += '<h3 style="margin:14px 0 4px">🏆 Tournament Skins <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3>';
-        if (_ts && _ts.on) {
-          let _rawRounds = []; try { _rawRounds = await loadTourneyRawRounds(t); } catch (e) {}
-          const _sk = t2ComputeFieldSkins(_rawRounds, _ts);
-          if (_sk && _sk.perDay.length) {
-            html += '<div style="font-size:13px">';
-            _sk.perDay.forEach(dd => {
-              if (dd.complete) {
-                html += '<div style="font-weight:600;margin-top:4px">Day ' + dd.day + ' · pot $' + dd.pot.toFixed(0) + ' · ' + dd.totalSkins + ' skins @ $' + dd.skinValue.toFixed(2) + '</div>';
-                dd.rows.filter(r => r.skins > 0 || r.net !== 0).forEach(r => {
-                  html += '<div>' + escapeHtml(r.first || r.name) + ': ' + r.skins + ' skin' + (r.skins === 1 ? '' : 's') + ' — <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>';
-                });
-              } else {
-                // v676: skins aren't determined until the day's groups finish — show the
-                // count so far, NEVER the money (Tyler: "we should not show any skins
-                // money in or out since they are not determined yet"). Pot ÷ skins-won
-                // shifts every hole, so a mid-round payout would be wrong.
-                html += '<div style="font-weight:600;margin-top:4px">Day ' + dd.day + ' · pot $' + dd.pot.toFixed(0) + ' <span class="small-text" style="font-weight:400;color:var(--text-muted)">— in progress (' + dd.finished + '/' + dd.total + ' group' + (dd.total === 1 ? '' : 's') + ' done) · pays at the end</span></div>';
-                dd.rows.filter(r => r.skins > 0).forEach(r => {
-                  html += '<div>' + escapeHtml(r.first || r.name) + ': ' + r.skins + ' skin' + (r.skins === 1 ? '' : 's') + ' so far</div>';
-                });
-              }
-            });
-            html += '<div class="small-text" style="color:var(--text-muted)">Net low per hole' + (_sk.hcpPct !== 100 ? ' at ' + _sk.hcpPct + '% handicap' : '') + '; ' + (_sk.ties === 'void' ? 'tied holes carry no skin' : 'ties broken by hardest-hole countback') + '. Pot ÷ skins won.</div></div>';
-          } else {
-            html += '<div class="small-text" style="color:var(--text-muted)">' + (_ts.mode === 'total' ? 'Total pot $' + _ts.value : '$' + _ts.value + '/player') + ' — results show once scores are in.</div>';
-          }
-        } else if (_amCommish) {
-          html += '<div class="small-text" style="color:var(--text-muted)">Not set up yet.</div>';
-        }
-      }
-    }
-    // Tournament Nassau — FIELD-WIDE NET pool: best net Front/Back/Overall with
-    // multi-place payouts that scale with field size. SEPARATE from any group Nassau.
-    {
-      const _tn = (t.settings && t.settings.tourneyNassau) || null;
-      if (_tn && _tn.on) {
-        html += '<h3 style="margin:14px 0 4px">🏆 Tournament Nassau <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field · net)</span></h3>';
-        if (_tn && _tn.on) {
-          let _nRows = []; try { _nRows = await loadTourneyRawRounds(t); } catch (e) {}
-          const _nz = t2ComputeFieldNassau(_nRows, _tn);
-          if (_nz && _nz.perDay.length) {
-            const _segName = { front: 'Front 9', back: 'Back 9', overall: 'Overall 18' };
-            html += '<div style="font-size:13px">';
-            _nz.perDay.forEach(dd => {
-              if ((dd.segments || []).length) html += '<div style="font-weight:700;margin-top:6px">Day ' + dd.day + '</div>';
-              dd.segments.forEach(sg => {
-                const hdr = (_segName[sg.seg] || sg.seg) + ' · $' + sg.value + '/player';
-                if (sg.complete) {
-                  html += '<div style="font-weight:600;margin-top:3px">' + hdr + ' · pot $' + sg.pot.toFixed(0) + ' · pays ' + sg.places + ' place' + (sg.places === 1 ? '' : 's') + '</div>';
-                  sg.rows.filter(r => r.pay !== 0).forEach(r => {
-                    html += '<div>' + escapeHtml(r.first || r.name) + ' — net ' + r.net + ' <strong style="color:' + (r.pay >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.pay) + '</strong></div>';
-                  });
-                } else {
-                  const lead = sg.rows[0];
-                  html += '<div style="margin-top:3px">' + hdr + ' — <span style="color:var(--text-muted)">in progress (' + sg.finished + '/' + sg.total + ' done)' + (lead ? ' · leader ' + escapeHtml(lead.first || lead.name) + ' net ' + lead.net : '') + '</span></div>';
-                }
-              });
-            });
-            html += '<div class="small-text" style="color:var(--text-muted)">Best NET per segment. Places scale with field size (≈1 per 10, max 3); ties split. ' + (_nz.split === '8020' ? 'Top-heavy 80/20 split.' : 'Standard split.') + '</div></div>';
-          } else {
-            html += '<div class="small-text" style="color:var(--text-muted)">$' + _tn.value + '/player per segment — results show once the field finishes a nine.</div>';
-          }
-        } else if (_amCommish) {
-          html += '<div class="small-text" style="color:var(--text-muted)">Not set up yet.</div>';
-        }
-      }
-    }
-    // Tournament Long Putt — FIELD-WIDE pot: the longest made putt across ALL groups
-    // wins. SEPARATE pool from each group's own long putt (which still pays in-group).
-    {
-      const _tlp = (t.settings && t.settings.tourneyLongPutt) || null;
-      if (_tlp && _tlp.on) {
-        html += '<h3 style="margin:14px 0 4px">📏 Tournament Long Putt <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3>';
-        if (_tlp && _tlp.on) {
-          let _lpRows = []; try { _lpRows = await loadTourneyRawRounds(t); } catch (e) {}
-          const _lp = t2ComputeFieldLongPutt(_lpRows, _tlp);
-          if (_lp && _lp.perDay.length) {
-            html += '<div style="font-size:13px">';
-            _lp.perDay.forEach(dd => {
-              html += '<div style="font-weight:600;margin-top:4px">Day ' + dd.day + ' · pot $' + dd.pot.toFixed(0) + ' · 🏆 ' + escapeHtml(dd.winnerFirst) + ' (' + dd.dist + ')</div>';
-              dd.rows.filter(r => r.net !== 0).forEach(r => {
-                html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>';
-              });
-            });
-            html += '<div class="small-text" style="color:var(--text-muted)">Longest made putt across all groups wins the pot. Runs alongside each group’s own long putt.</div></div>';
-          } else {
-            html += '<div class="small-text" style="color:var(--text-muted)">' + (_tlp.mode === 'total' ? 'Total pot $' + _tlp.value : '$' + _tlp.value + '/player') + ' — winner shows once a putt is logged.</div>';
-          }
-        } else if (_amCommish) {
-          html += '<div class="small-text" style="color:var(--text-muted)">Not set up yet.</div>';
-        }
-      }
-    }
-    // v639: Tournament Side Pots — Low Net / Most GIRs / Fewest Putts (whole field).
-    {
-      const _tsp = (t.settings && t.settings.tourneySidePots) || null;
-      const _spAny = _tsp && ['lowNet', 'girs', 'putts'].some(k => _tsp[k] && _tsp[k].on);
-      if (_spAny) {
-        html += '<h3 style="margin:14px 0 4px">🏅 Tournament Side Pots <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field · ties split)</span></h3>';
-        let _spRows = []; try { _spRows = await loadTourneyRawRounds(t); } catch (e) {}
-        const _sp = t2ComputeFieldSidePots(_spRows, _tsp);
-        if (_sp && _sp.perDay.length) {
-          html += '<div style="font-size:13px">';
-          _sp.perDay.forEach(dd => {
-            dd.pots.forEach(pp => {
-              const statTxt = (pp.best != null) ? (pp.key === 'lowNet' ? ('net ' + pp.best) : (pp.key === 'girs' ? (pp.best + ' GIRs') : (pp.best + ' putts'))) : '';
-              const dayTag = _sp.perDay.length > 1 ? ('Day ' + dd.day + ' · ') : '';
-              let line;
-              if (pp.paying) line = ' · 🏆 ' + escapeHtml(pp.winners.join(' & ')) + (statTxt ? ' (' + statTxt + ')' : '');
-              else if (pp.done) line = ' · <span style="color:var(--text-muted)">no qualifier — pot void</span>';
-              else line = pp.winners.length ? ' · <span style="color:var(--text-muted)">leading: ' + escapeHtml(pp.winners.join(' & ')) + (statTxt ? ' (' + statTxt + ')' : '') + '</span>' : ' · <span style="color:var(--text-muted)">waiting on data</span>';
-              html += '<div style="font-weight:600;margin-top:4px">' + dayTag + pp.label + ' · pot $' + pp.pot.toFixed(0) + line + '</div>';
-              if (pp.paying) pp.rows.filter(r => r.money !== 0).forEach(r => { html += '<div>' + escapeHtml(r.first || r.name) + ': <strong style="color:' + (r.money >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.money) + '</strong></div>'; });
-            });
-          });
-          html += '<div class="small-text" style="color:var(--text-muted)">Low Net = full handicap. GIRs auto from tracked putts, or the GIR chip. Fewest Putts needs putts on all 18. Ties split the pot; pots pay once every group finishes.</div></div>';
-        } else {
-          html += '<div class="small-text" style="color:var(--text-muted)">Standings appear as scores come in; pots pay once every group finishes.</div>';
-        }
-      }
-    }
-    // Tournament Closest to the Pin — FIELD-WIDE pot: the closest ball on each CTP
-    // hole across ALL groups wins that hole's pot. Shown when any group ran a
-    // tournament-level (field) CTP. Separate from any group's own CTP.
-    try {
-      let _ctpRows = []; try { _ctpRows = await loadTourneyRawRounds(t); } catch (e) {}
-      const _fc = t2ComputeFieldCtp(_ctpRows);
-      if (_fc && _fc.perDay.length) {
-        html += '<h3 style="margin:14px 0 4px">📍 Tournament Closest to the Pin <span class="small-text" style="font-weight:400;color:var(--text-muted)">(whole field)</span></h3><div style="font-size:13px">';
-        _fc.perDay.forEach(dd => {
-          dd.holes.forEach(hr => {
-            html += '<div style="margin-top:2px">Day ' + dd.day + ' · Hole ' + hr.hole + ' · pot $' + hr.pot.toFixed(0) + ' · 🏆 ' + escapeHtml(hr.winnerFirst) + ' (' + hr.dist + ')</div>';
-          });
-        });
-        _fc.totals.forEach(r => {
-          html += '<div>' + escapeHtml(r.first) + ': <strong style="color:' + (r.net >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + _evFmtMoney(r.net) + '</strong></div>';
-        });
-        html += '<div class="small-text" style="color:var(--text-muted)">Closest ball on each CTP hole across all groups wins that hole’s pot.</div></div>';
-      }
-    } catch (e) {}
-
-    // ⚔️ Cross-group 1v1 matches — players who set up a head-to-head against someone
-    // in a DIFFERENT cart group. Settled here from the field rounds (net per hole).
-    try {
-      let _cgRows = []; try { _cgRows = await loadTourneyRawRounds(t); } catch (e) {}
-      const _cg = t2ComputeCrossGroupMatches(t, _cgRows);
-      const _cgm = (_cg && _cg.matches) || [], _cgn = (_cg && _cg.nassaus) || [], _cgng = (_cg && _cg.nassauGroups) || [];
-      if (_cgm.length || _cgn.length || _cgng.length) {
-        html += '<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px"><div style="font-weight:700;margin-bottom:6px">⚔️ Cross-group bets</div>';
-        _cgm.forEach(m => {
-          const amt = m.value || 0;
-          const line = m.push
-            ? escapeHtml(m.aFirst) + ' vs ' + escapeHtml(m.bFirst) + ' — <span style="color:var(--text-muted)">' + escapeHtml(m.status) + ' · push</span>'
-            : escapeHtml(m.aFirst) + ' vs ' + escapeHtml(m.bFirst) + ' — <strong style="color:var(--money-pos)">' + escapeHtml(m.winnerFirst) + '</strong> ' + escapeHtml(m.status) + (amt > 0 ? ' · <strong>' + _evFmtMoney(amt) + '</strong>' : '');
-          html += '<div style="font-size:13px;margin:2px 0">' + line + '</div>';
-        });
-        _cgn.forEach(n => {
-          const segTxt = n.segments.map(s => s.name + ' ' + (s.winnerFirst ? escapeHtml(s.winnerFirst) : 'tie')).join(' · ');
-          const win = n.aNet > 0 ? n.aFirst : (n.aNet < 0 ? n.bFirst : null), amt = Math.abs(n.aNet);
-          html += '<div style="font-size:13px;margin:2px 0">' + escapeHtml(n.aFirst) + ' vs ' + escapeHtml(n.bFirst) + ' Nassau — ' + segTxt + (win && amt > 0 ? ' → <strong style="color:var(--money-pos)">' + escapeHtml(win) + ' ' + _evFmtMoney(amt) + '</strong>' : ' <span style="color:var(--text-muted)">· even</span>') + '</div>';
-        });
-        // v672: group-mode (3+) cross Nassaus
-        _cgng.forEach(n => {
-          const who = n.players.map(p => escapeHtml(p.first)).join(' · ');
-          const segTxt = n.segments.map(s => s.name + ' ' + (s.winnerFirst ? escapeHtml(s.winnerFirst) : 'tie')).join(' · ');
-          const nets = n.players.map(p => { const m2 = n.money[p.key] || 0; return m2 ? escapeHtml(p.first) + ' ' + (m2 > 0 ? '+$' + m2 : '−$' + Math.abs(m2)) : null; }).filter(Boolean).join(' · ');
-          html += '<div style="font-size:13px;margin:2px 0">' + who + ' — group Nassau: ' + segTxt + (nets ? ' → <strong>' + nets + '</strong>' : ' <span style="color:var(--text-muted)">· even</span>') + '</div>';
-        });
-        html += '<div class="small-text" style="color:var(--text-muted)">Bets between players in different cart groups · net per hole.</div></div>';
-      }
-    } catch (e) {}
     body.innerHTML = html || '<div class="help-text">No scores in this event yet.</div>';
     body.querySelectorAll('.evlb-ld-set').forEach(b => b.onclick = () => openLongDriveWinnerPicker(t, parseInt(b.dataset.day, 10), evPlayers || [], () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-nassau-cfg').forEach(b => b.onclick = () => openTourneyNassauConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-lp-cfg').forEach(b => b.onclick = () => openTourneyLongPuttConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-sp-cfg').forEach(b => b.onclick = () => openTourneySidePotsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
-    body.querySelectorAll('.evlb-my-group-board').forEach(b => b.onclick = async () => {
-      // v839 (Tyler): this button's job is to VIEW the board — it must never
-      // route to the bets-editing form (that's "Your group's bets", elsewhere)
-      // regardless of whether the tapper happens to have edit rights.
+    // v839 (Tyler): the three payout buttons. Group payout takes over the
+    // whole overlay and drops the user onto the real group Board tab, so
+    // close this modal first (same reasoning as the old "View my group's
+    // board" button it replaces). Tournament/Total payout stay as light
+    // overlays on TOP of this one — same pattern the other config modals use.
+    body.querySelectorAll('.evlb-pay-group').forEach(b => b.onclick = async () => {
       _evlbClose();
       try { await openT2GroupBoardReadOnly(b.dataset.code); } catch (e) {}
     });
-    body.querySelectorAll('.evlb-text-combined').forEach(b => b.onclick = () => shareCombinedSettleUp(t, _combinedPay));
+    body.querySelectorAll('.evlb-pay-tournament').forEach(b => b.onclick = () => openT2PayoutBoard(t, 'tournament'));
+    body.querySelectorAll('.evlb-pay-total').forEach(b => b.onclick = () => openT2PayoutBoard(t, 'total'));
    } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
   };
   await _renderEvlbBody();
