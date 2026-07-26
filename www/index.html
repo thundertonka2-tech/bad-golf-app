@@ -1302,6 +1302,14 @@
   /* Skins: the score that WON a skin on a hole — bold blue circle, on every scorecard. */
   .skin-win { color: var(--accent); border: 2.5px solid var(--accent); border-radius: 50%; font-weight: 900; }
   .mini-sc .skin-win { border-width: 2px; }
+  /* v851: TOURNAMENT-WIDE field skin (separate pot from the group's own —
+     gold instead of blue so the two are never confused when both run at once).
+     v863: this whole block was missing from www/index.html (iOS) — a real
+     web/iOS drift, found while auditing today's tournament. Grafted from
+     golf-app.html so the gold marker actually renders on mobile. */
+  .skin-win-field { color: var(--gold); border: 2.5px solid var(--gold); border-radius: 50%; font-weight: 900; }
+  .mini-sc .skin-win-field { border-width: 2px; }
+  .skin-win.skin-win-field { box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 3.5px var(--gold); margin: 2px; }
 
   .toast {
     position: fixed;
@@ -7362,7 +7370,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.862';
+const BG_BUILD = 'v2026.11.863';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -11154,6 +11162,22 @@ async function safeGet(key, shared) {
           .eq('code', code)
           .maybeSingle();
         if (!error && data && data.data) {
+          // v863 (Tyler): "clicked Save and return home... did not finish my round.
+          // Had to go back in and click Finish again." Root cause: this cloud read
+          // always overwrote the local cache with whatever the cloud currently has,
+          // with no check against a locally-known finish -- a lagging/failed cloud
+          // write (weak course signal) meant the NEXT open of the round re-read a
+          // stale cloud copy that still lacked finishedAt and stomped the correct
+          // local state right back to "not finished." Mirrors the existing v835
+          // write-side guard in _mergeGameForWrite, applied here on the read side.
+          try {
+            const _cachedRaw = localStorage.getItem(key);
+            const _cached = _cachedRaw ? JSON.parse(_cachedRaw) : null;
+            if (_cached && _cached.finishedAt && !data.data.finishedAt &&
+                !(_cached.reopenedAt && _cached.reopenedAt > _cached.finishedAt)) {
+              data.data.finishedAt = _cached.finishedAt;
+            }
+          } catch (e) {}
           const json = JSON.stringify(data.data);
           try { bgLsSet(key, json); } catch (e) {}
           return json;
@@ -31067,7 +31091,7 @@ function calcQuota(g) {
   // In a tournament, Quota is a WHOLE-FIELD game — it never settles within a group.
   // Report points/quotas/result only (money 0); a whole-field pool pays at the end
   // (follow-up: t2ComputeFieldQuota, modeled on Stableford's _isFieldSf). (Tyler, Jul 2026)
-  const _isFieldQ = !!cfg._t2field || !!(g && g.t2 && g.t2.tournamentId);
+  const _isFieldQ = !!cfg._t2field;
   if (_isFieldQ) {
     participants.forEach(p => money[p.id] = 0);
     return { points, quotas, result, holePoints, money, mode, field: true, pending: true };
@@ -40677,10 +40701,12 @@ async function notifyAddedRegisteredUsers(g) {
     let me = null; try { me = await getMeName(); } catch (e) {}
     const meN = me ? normalizeNameSegment(me) : '';
     const profiles = await fetchProfiles();
+    const byId = {};      // v863: durable match -- tournament_players.user_id -> profile row
     const byNorm = {};
     (profiles || []).forEach(pr => {
       try {
         if (!pr || pr.id === _authUser.id) return;   // never gate the creator himself
+        byId[pr.id] = pr;
         if (pr.my_player) byNorm[normalizeNameSegment(pr.my_player)] = pr;
         const dn = String(pr.display_name || '');
         if (dn && dn.indexOf('@') < 0 && !/\d/.test(dn)) { const k = normalizeNameSegment(dn); if (!byNorm[k]) byNorm[k] = pr; }
@@ -40690,7 +40716,15 @@ async function notifyAddedRegisteredUsers(g) {
     g.players.forEach(p => {
       const pn = normalizeNameSegment((p && p.name) || '');
       if (!pn || pn === meN) return;
-      const pr = byNorm[pn];
+      // v863 (Tyler): "push notifications still not working" -- tournament rosters
+      // are typed once by a commissioner/draw, so the name on the round often
+      // drifts from the account's own display name, which silently dropped an
+      // otherwise fully-claimed player from every tournament push. A tournament
+      // player's account link (tournament_players.user_id, carried onto
+      // g.players[].uid at launch) is durable and doesn't depend on name-matching --
+      // check it FIRST, falling back to the existing name match for guests/legacy
+      // rounds with no uid stamped.
+      const pr = (p && p.uid && byId[p.uid]) || byNorm[pn];
       if (pr && req.indexOf(pn) < 0) { req.push(pn); toInvite.push(pr); }
     });
     if (!req.length) return;
@@ -43268,6 +43302,49 @@ async function _t2MyGroupInfo(t) {
   } catch (e) { return null; }
 }
 
+// v863 (Tyler): "As an admin I want to be able to see both groups here, not just
+// my group." _t2MyGroupInfo above deliberately stops at the FIRST group the viewer
+// is a member of -- correct for a regular player, but a commissioner/admin running
+// the whole event only ever saw their own group's card. Same query shape as
+// _t2MyGroupInfo (batched players+days, one groups query, one members query) but
+// walks EVERY group on every day and returns an array instead of stopping at the
+// first match; each entry is tagged isMine so the card only offers "Your group's
+// bets" on the group the admin actually plays in.
+async function _t2AllGroupsInfo(t) {
+  if (!_authUser || !t) return [];
+  try {
+    let myName = ''; try { myName = (await getMeName()) || ''; } catch (e) {}
+    const myNameKey = normalizeNameSegment(myName);
+    const [players, days] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id)]);
+    const myP = players.find(p => (p.user_id && p.user_id === _authUser.id) || (myNameKey && normalizeNameSegment(p.display_name || '') === myNameKey));
+    const dayIds = (days || []).map(d => d.id).filter(Boolean);
+    let allGroups = [];
+    if (dayIds.length) { try { const { data } = await supa.from('tournament_groups').select('*').in('day_id', dayIds).order('group_number'); allGroups = data || []; } catch (e) {} }
+    const groupsByDay = {};
+    allGroups.forEach(g => { (groupsByDay[g.day_id] || (groupsByDay[g.day_id] = [])).push(g); });
+    const groupIds = allGroups.map(g => g.id).filter(Boolean);
+    let allMembers = [];
+    if (groupIds.length) { try { const { data } = await supa.from('tournament_group_members').select('*').in('group_id', groupIds); allMembers = data || []; } catch (e) {} }
+    const membersByGroup = {};
+    allMembers.forEach(m => { (membersByGroup[m.group_id] || (membersByGroup[m.group_id] = [])).push(m); });
+    const out = [];
+    for (const d of (days || [])) {
+      const groups = groupsByDay[d.id] || [];
+      for (const g of groups) {
+        const mem = membersByGroup[g.id] || [];
+        const isMine = !!(myP && mem.some(m => m.tournament_player_id === myP.id));
+        const isScorer = !!(g.captain && myP && normalizeNameSegment(g.captain) === normalizeNameSegment(myP.display_name || ''));
+        const _gg = (t.settings && t.settings.groupGames && t.settings.groupGames[g.id]) || null;
+        let gamesSummary = ''; try { gamesSummary = _gg ? (t2DayGamesSummary(_gg) || '') : ''; } catch (e) {}
+        let _finished = false;
+        if (g.game_code) { try { const { data: _rr } = await supa.from('games').select('data').eq('code', g.game_code).maybeSingle(); _finished = !!(_rr && _rr.data && _rr.data.finishedAt); } catch (e) {} }
+        out.push({ tid: t.id, gid: g.id, day: d.day_number, groupNumber: g.group_number, teeTime: g.tee_time || '', isScorer: isScorer, gameCode: g.game_code || '', started: !!g.game_code, finished: _finished, gamesSummary: gamesSummary, isMine: isMine });
+      }
+    }
+    return out;
+  } catch (e) { return []; }
+}
+
 let _t2ShowPast = false;
 // ============================================================
 // TOURNAMENT CHAT — per-event smack-talk + auto tourney updates.
@@ -43389,7 +43466,16 @@ async function renderT2List() {
   let _ei = {}; try { _ei = await getEventImgs(); } catch (e) {}
   // Enrich each event with THIS user's group + tee time so they see where they play
   // (and, if they're the scorer, a button to set up their group's side games).
-  const _infos = await Promise.all(list.map(t => _t2MyGroupInfo(t).catch(() => null)));
+  // v863 (Tyler): the tournament's commissioner/admin sees EVERY group on this
+  // card (not just whichever one they happen to play in); a regular player still
+  // sees only their own.
+  const _infos = await Promise.all(list.map(async t => {
+    try {
+      if (t2CanManage(t)) { const arr = await _t2AllGroupsInfo(t); return arr || []; }
+      const one = await _t2MyGroupInfo(t);
+      return one ? [one] : [];
+    } catch (e) { return []; }
+  }));
   // v859: only bother checking tournaments the pill would otherwise show as "live" —
   // scheduled/complete ones don't need the extra round trips.
   const _allFin = await Promise.all(list.map(t => (String(t.status || '').toLowerCase() === 'live') ? t2AllGroupsFinished(t).catch(() => false) : Promise.resolve(false)));
@@ -43417,23 +43503,24 @@ async function renderT2List() {
     const img = _ei[t.id] || '';
     const _thumbSrc = img || BG_DEFAULT_EVENT_IMG;
     const thumb = '<span style="display:inline-block;flex:0 0 auto;width:34px;height:34px;border-radius:8px;background:var(--text) center/cover no-repeat;background-image:url(\'' + _thumbSrc + '\');margin-right:9px"></span>';
-    const info = _infos[_idx];
+    const infoArr = _infos[_idx] || [];
     // First mapped day-course for this event → Course preview + Scorecard buttons (Tyler).
     let _cpCourseId = '';
     try { const _dcs = (t.settings && t.settings.dayCourses) || {}; const _ks = Object.keys(_dcs).sort((x, y) => (parseInt(x, 10) || 0) - (parseInt(y, 10) || 0)); for (const _k of _ks) { if (_dcs[_k] && _dcs[_k].id) { _cpCourseId = _dcs[_k].id; break; } } } catch (e) {}
-    let groupLine = '';
-    if (info) {
-      groupLine = '<div style="margin-top:6px;padding:7px 9px;background:var(--surface-2);border-radius:8px;font-size:13px">' +
+    // v863: infoArr now holds one entry per group for admins/commissioners (every
+    // group in the event), or the single group a regular player belongs to.
+    const groupLine = infoArr.map(info =>
+      '<div style="margin-top:6px;padding:7px 9px;background:var(--surface-2);border-radius:8px;font-size:13px">' +
         '📍 <strong>Group ' + info.groupNumber + '</strong>' + (info.day > 1 ? ' · Day ' + info.day : '') +
         (info.teeTime ? ' · ⏱ ' + t2esc(info.teeTime) : '') +
         ' · <span style="color:' + (info.finished ? 'var(--money-pos)' : (info.started ? 'var(--accent)' : 'var(--text-muted)')) + '">' + (info.finished ? 'finished' : (info.started ? 'live' : 'scheduled')) + '</span>' +
         (info.gamesSummary ? '<div class="small-text" style="margin-top:4px;color:var(--text-muted)">🎲 ' + t2esc(info.gamesSummary) + '</div>' : '') +
         (info.gameCode ? '<button class="full t2-open-round" data-code="' + t2esc(info.gameCode) + '" style="margin-top:6px;background:' + (info.finished ? 'var(--money-pos)' : 'var(--accent)') + ';color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">' + (info.finished ? '🏆 View results' : 'Join now') + '</button>' : '') +
-        (info.finished ? '' :
+        ((info.finished || !info.isMine) ? '' :
         ('<button class="full t2-grp-config" data-code="' + t2esc(info.gameCode) + '" data-tid="' + t2esc(info.tid) + '" data-gid="' + t2esc(info.gid) + '" data-day="' + info.day + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:600;padding:8px">Your group\'s bets</button>' +
           '<div class="small-text" style="color:var(--text-muted);margin-top:2px">' + (info.isScorer ? 'You\'re the scorer — set your group\'s own games here.' : 'Your foursome\'s own side games — separate from the tournament games.') + '</div>')) +
-        '</div>';
-    }
+        '</div>'
+    ).join('');
     // v493 Item 3 — card-detail: header + status pill, segmented icon strip
     // (replaces the stacked button grids), quiet footer. Classes + data-*
     // attributes preserved so every wired handler below still fires.
@@ -46146,6 +46233,7 @@ async function t2ResyncLaunchedGroupsForDay(t, dayId, dayNumber, kind, onlyGroup
           const remapped = t2RemapGamesToGroup(_dayGamesCfg, gp, Aids, Bids);
           if (remapped.stableford) { remapped.stableford._t2field = true; remapped.stableford._t2fieldCount = (players || []).length; }
           if (remapped.ctp) { remapped.ctp.fieldOnly = true; }
+          if (remapped.quota) { remapped.quota._t2field = true; remapped.quota._t2fieldCount = (players || []).length; }
           g.games = remapped;
           g.t2 = g.t2 || {}; g.t2.dayGameKeys = Object.keys(remapped || {});
           changed = true;
@@ -46170,10 +46258,19 @@ async function t2ResyncLaunchedGroupsForDay(t, dayId, dayNumber, kind, onlyGroup
   return result;
 }
 
+let _t2LaunchInFlight = false;   // v863: guard against a double-tap/duplicate-fire launch
 async function t2LaunchDayRounds(courseId) {
   document.getElementById('t2-course-modal').classList.remove('show');
   const ctx = _t2StartCtx; _t2StartCtx = null;
   const t = _t2Current; if (!t || !ctx) return;
+  // v863: found real duplicate-round data in production -- two separate `games`
+  // rows created for the SAME group, ~80ms apart. Almost certainly a double-tap or
+  // a duplicate click-handler binding firing this function twice before the first
+  // call's group_code claim landed. Hard-guard against a second concurrent launch;
+  // auto-clears after 15s as a safety net in case an error path skips past it.
+  if (_t2LaunchInFlight) { showToast('Already creating rounds — one moment…'); return; }
+  _t2LaunchInFlight = true;
+  setTimeout(() => { _t2LaunchInFlight = false; }, 15000);
   showToast('Creating rounds…');
   const saves = await getCourseSaves();
   let cs = courseId && saves[courseId] ? saves[courseId] : null;
@@ -46235,7 +46332,8 @@ async function t2LaunchDayRounds(courseId) {
         firstName: first, lastName: last, name: combineName(first, last),
         hcp: h, rawHcp: h, playsGross: false,
         teeLabel: dayTees[m.tournament_player_id] || (tees.length === 1 ? tees[0].label : null),
-        _team: m.team
+        _team: m.team,
+        uid: tp.user_id || null  // v863: durable account link, carried through for push-notification matching
       };
     });
     if (gp.length < 2) continue;
@@ -46255,6 +46353,12 @@ async function t2LaunchDayRounds(courseId) {
       // fieldOnly so the scorer can still LOG a winner per hole, but it never settles
       // per-group — t2ComputeFieldCtp settles it across the field. (Tyler, Jul 2026)
       if (games.ctp) { games.ctp.fieldOnly = true; }
+      // v863 (Tyler): Quota configured as the DAY's whole-field pool (via Configure
+      // Day) settles across every group at the end -- same _t2field convention as
+      // Stableford above. A group's OWN locally-configured Quota (added via "Your
+      // group's bets", stored separately in g.groupGames, never touched here) stays
+      // a normal per-group game that settles on THIS group's own finish.
+      if (games.quota) { games.quota._t2field = true; games.quota._t2fieldCount = (players || []).length; }
     } else {
       games = {};
       if (fmt === 'singles') {
@@ -50392,6 +50496,20 @@ async function t2ComputeCombinedPayouts(t) {
       if (amt) combined[key] = (combined[key] || 0) + amt;
     };
 
+    // v863 (Tyler): "tournament payout wasn't showing all users" / "Steve missing
+    // on one payout screen." Root cause: `display` (the roster this screen renders)
+    // was only ever populated by a money-generating event -- a player with zero net
+    // in every one of this screen's pots never got an entry at all, so they vanished
+    // instead of showing $0. Seed every real tournament player up front so everyone
+    // always has a row (matches Group payout, which always lists g.players
+    // unconditionally) -- doesn't change any dollar amount, only guarantees the
+    // roster is complete before the money loop below adds to it.
+    (evPlayers || []).forEach(p => {
+      if (!p || !p.display_name) return;
+      const k = nm(p.display_name);
+      if (!display[k]) { const parts = String(p.display_name).trim().split(/\s+/); display[k] = { name: p.display_name, first: parts[0] || p.display_name }; }
+      if (combined[k] === undefined) combined[k] = 0;
+    });
     if (money) {
       (money.groupRows || []).forEach(r => { const k = nm(r.name); bump(k, r.net, r.name, r.first); bumpGame('Group bets', k, r.net); });
       (money.tourneyRows || []).forEach(r => { const k = nm(r.name); bump(k, r.net, r.name, r.first); bumpGame('Team bets (A vs B)', k, r.net); });
@@ -50449,7 +50567,7 @@ async function t2ComputeCombinedPayouts(t) {
           // the only skins breakdown column. combined/`bump` total is unchanged
           // either way — this only removes a display column, no money math.
           bump(k, r.net || 0, r.name, r.first);
-          bumpGame('Skins won', k, r.payout || 0);
+          bumpGame('Skins won', k, r.net || 0);  // v863 (Tyler): net of buy-in, not raw amount won
           bumpCount('Skins won', k, r.skins || 0);
         });
       });
@@ -50487,7 +50605,8 @@ async function t2ComputeCombinedPayouts(t) {
     }
 
     const rows = Object.keys(combined)
-      .filter(k => Math.abs(combined[k] || 0) >= 0.005)
+      // v863: no longer filters out $0-net players -- everyone on the canonical
+      // roster (seeded above) gets a row, matching Group payout's behavior.
       .map(k => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: Math.round(combined[k] * 100) / 100 }))
       .sort((a, b) => b.net - a.net);
     const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
@@ -50555,6 +50674,15 @@ async function t2ComputeTournamentOnlyPayouts(t) {
       if (amt) combined[key] = (combined[key] || 0) + amt;
     };
 
+    // v863 (Tyler): see identical fix in t2ComputeCombinedPayouts -- seed every
+    // real tournament player up front so nobody vanishes from this screen just for
+    // having zero net in every tournament-only pot.
+    (evPlayers || []).forEach(p => {
+      if (!p || !p.display_name) return;
+      const k = nm(p.display_name);
+      if (!display[k]) { const parts = String(p.display_name).trim().split(/\s+/); display[k] = { name: p.display_name, first: parts[0] || p.display_name }; }
+      if (combined[k] === undefined) combined[k] = 0;
+    });
     if (money) {
       (money.tourneyRows || []).forEach(r => { const k = nm(r.name); bump(k, r.net, r.name, r.first); bumpGame('Team bets (A vs B)', k, r.net); });
     }
@@ -50609,7 +50737,7 @@ async function t2ComputeTournamentOnlyPayouts(t) {
           // the only skins breakdown column. combined/`bump` total is unchanged
           // either way — this only removes a display column, no money math.
           bump(k, r.net || 0, r.name, r.first);
-          bumpGame('Skins won', k, r.payout || 0);
+          bumpGame('Skins won', k, r.net || 0);  // v863 (Tyler): net of buy-in, not raw amount won
           bumpCount('Skins won', k, r.skins || 0);
         });
       });
@@ -50647,7 +50775,8 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     }
 
     const rows = Object.keys(combined)
-      .filter(k => Math.abs(combined[k] || 0) >= 0.005)
+      // v863: no longer filters out $0-net players -- everyone on the canonical
+      // roster (seeded above) gets a row, matching Group payout's behavior.
       .map(k => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: Math.round(combined[k] * 100) / 100 }))
       .sort((a, b) => b.net - a.net);
     const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
@@ -50727,7 +50856,7 @@ function renderT2PayoutFilterBar(g) {
   if (!bar) return;
   const tid = g && g.t2 && g.t2.tournamentId;
   if (!tid) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
-  const scope = _t2BoardFilterScope[g.code] || 'group';
+  const scope = _t2BoardFilterScope[g.code] || 'tournament';  // v863 (Tyler): default to whole-tournament, not just this group
   const opts = [
     { key: 'tournament', label: '🏆 Tournament' },
     { key: 'group', label: '👥 Group bets' },
@@ -52253,10 +52382,27 @@ async function enterEditLiveRoundMode() {
       }
     }
   } catch (e) {}
+  // v863 (Tyler/Kevin): "set up Nassau/Match/Greenies the night before, came back
+  // the next day and they showed unselected -- but they were still saved and
+  // running." Root cause: a group's PRE-LAUNCH bets live in a SEPARATE g.groupGames
+  // namespace (kept apart from g.games on purpose so a group can run the same game
+  // type as a tournament-wide pool with no key collision) -- but this live-round
+  // editor only ever read/wrote g.games, so it was blind to anything that only ever
+  // existed in g.groupGames. Fold any group-only game (no key collision with
+  // g.games) in here for DISPLAY, and remember which keys came from there so Save
+  // (applyLiveEditMerge) writes them back to g.groupGames instead of permanently
+  // merging them into g.games.
+  state._t2GroupOwnedGames = null;
+  try {
+    if (g.t2 && g.t2.tournamentId && g.groupGames && Object.keys(g.groupGames).length) {
+      const gok = new Set(Object.keys(g.groupGames).filter(k => !(g.games && g.games[k])));
+      if (gok.size) state._t2GroupOwnedGames = gok;
+    }
+  } catch (e) {}
   const _editGames = (() => {
-    if (!state._t2PreservedGames) return g.games;
     const out = {};
-    Object.keys(g.games || {}).forEach(k => { if (!_tOwnedGames.has(k)) out[k] = g.games[k]; });
+    Object.keys(g.games || {}).forEach(k => { if (!_tOwnedGames || !_tOwnedGames.has(k)) out[k] = g.games[k]; });
+    if (state._t2GroupOwnedGames) state._t2GroupOwnedGames.forEach(k => { out[k] = g.groupGames[k]; });
     return out;
   })();
   // v675: any live edit of a tournament round must load the cross-group field
@@ -52384,6 +52530,7 @@ function exitEditLiveRoundMode() {
   state.editingLiveRound = false;
   state._t2GroupConfig = null;
   state._t2PreservedGames = null;   // v670
+  state._t2GroupOwnedGames = null;  // v863
   state._t2DayGameKeys = null;      // v670
   state._t2FieldRoster = null;      // v675: don't leak the cross-group roster into a later non-tournament edit
   try { document.body.classList.remove('t2-group-config'); } catch (e) {}   // v670
@@ -52418,6 +52565,20 @@ function applyLiveEditMerge(g, setup) {
   // v670: tournament-owned games (stripped from the group-config form) come back
   // untouched — a group save can never edit or drop the event's games.
   try { if (state._t2PreservedGames) Object.keys(state._t2PreservedGames).forEach(k => { g.games[k] = state._t2PreservedGames[k]; }); } catch (e) {}
+  // v863: route any game that was displayed here FROM g.groupGames (see
+  // enterEditLiveRoundMode) back into g.groupGames on save instead of leaving it in
+  // g.games -- keeps one source of truth per game instead of quietly creating a
+  // second, duplicate copy of the same bet (the exact "double Nassau" class of bug).
+  try {
+    if (state._t2GroupOwnedGames && state._t2GroupOwnedGames.size) {
+      g.groupGames = g.groupGames || {};
+      state._t2GroupOwnedGames.forEach(k => {
+        if (g.games[k] !== undefined) { g.groupGames[k] = g.games[k]; delete g.games[k]; }
+        else { delete g.groupGames[k]; }
+      });
+      if (!Object.keys(g.groupGames).length) g.groupGames = undefined;
+    }
+  } catch (e) {}
   g.hcpRules = setup.hcpRules;
   g.unranked = setup.unranked || false;
   g.trackPutts = setup.trackPutts || false;
