@@ -7361,7 +7361,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.872';
+const BG_BUILD = 'v2026.11.873';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -14553,11 +14553,15 @@ async function adminCardDelete(id){
   try{ go=await uiConfirm('Delete "'+nm+'" from the library for everyone?\n\nRemoves its scorecard + GPS. This can’t be undone.', { title:'Delete course', okLabel:'Delete', cancelLabel:'Cancel', danger:true }); }
   catch(e){ go=window.confirm('Delete "'+nm+'" from the library for everyone? Removes its scorecard + GPS. Cannot be undone.'); }
   if(!go) return;
-  let ok=false; try{ ok=await deleteCourse(id); }catch(e){}
-  if(ok){
+  let res=null; try{ res=await deleteCourse(id); }catch(e){}
+  if(res){
     try{ _adminWork=(_adminWork||[]).filter(function(x){return x.id!==id;}); }catch(e){}
     try{ _adminOrder=(_adminOrder||[]).filter(function(x){return x!==id;}); }catch(e){}
-    showToast('Course deleted ✓');
+    // v873: tell the truth about whether this actually confirmed in the cloud yet —
+    // see deleteCourse()'s synced flag. A false "deleted ✓" here (when it silently
+    // didn't sync) is exactly what let a course keep resurrecting after a refresh.
+    var _synced = !(res && res.synced === false);
+    showToast(_synced ? 'Course deleted ✓' : 'Removed here — still finishing sync, give it a minute before refreshing');
     try{ renderAdminWorklist(); }catch(e){}
   } else { showToast('Could not delete — try again'); }
 }
@@ -14978,23 +14982,53 @@ async function deleteCourse(courseId) {
       return false; } } catch(e){}
   const c = COURSE_LIBRARY.find(x => x.id === courseId);
   const nm = c ? c.name : courseId;
-  // Record the deletion (synced overlay).
+  // Record the deletion (synced overlay). v873 (Tyler): "I've deleted these courses
+  // three times now and they keep coming back on refreshes." Root cause: this
+  // function always returned true — and every caller always showed "Course
+  // deleted ✓" — the instant the in-memory list was updated, WITHOUT checking
+  // whether the shared-singleton cloud write (safeSet → writeSharedSingleton)
+  // actually committed. That write can legitimately fail (a flaky connection, or
+  // its own merge-read failing — see the data-loss guard note below) and simply
+  // queues itself as "dirty" for a background retry — so on a genuine, persistent
+  // failure (or if the retry queue never got a turn before the next refresh), the
+  // course was NEVER actually recorded as deleted in the cloud even though the
+  // admin was told it was. Confirmed directly against two of Tyler's courses: he'd
+  // deleted them repeatedly, yet neither id was ever present in the cloud's
+  // course-deletes / course-deletes-locked lists. Fixed those two directly in
+  // Supabase, and fixed the bug here: now actually confirm each write landed
+  // (retrying a couple more times if not) before reporting success, so the caller
+  // can tell the truth instead of a false "deleted."
   const dels = await getCourseDeletes();
   try { invalidateCourseLibraryCache(); } catch (e) {}
-  if (!dels.includes(courseId)) { dels.push(courseId); await safeSet(KEY_COURSE_DELETES, JSON.stringify(dels), true); }
+  let delsSynced = true;
+  if (!dels.includes(courseId)) {
+    delsSynced = await safeSet(KEY_COURSE_DELETES, JSON.stringify(dels), true);
+    for (let i = 0; i < 2 && !delsSynced; i++) {
+      await new Promise(r => setTimeout(r, 800));
+      delsSynced = await safeSet(KEY_COURSE_DELETES, JSON.stringify(dels), true);
+    }
+  }
   // LOCK the delete so the v402 sweep can't resurrect it if the course still has
   // ratings. This is what makes an admin delete permanent (Kevin's MS/TX fix).
+  let lockedSynced = true;
   try {
     const locked = await getCourseDeletesLocked();
-    if (!locked.includes(courseId)) { locked.push(courseId); await safeSet(KEY_COURSE_DELETES_LOCKED, JSON.stringify(locked), true); }
-  } catch (e) {}
+    if (!locked.includes(courseId)) {
+      lockedSynced = await safeSet(KEY_COURSE_DELETES_LOCKED, JSON.stringify(locked), true);
+      for (let i = 0; i < 2 && !lockedSynced; i++) {
+        await new Promise(r => setTimeout(r, 800));
+        lockedSynced = await safeSet(KEY_COURSE_DELETES_LOCKED, JSON.stringify(locked), true);
+      }
+    }
+  } catch (e) { lockedSynced = false; }
   // Pull from the user-added store if present.
   try {
     const additions = await getCourseLibraryAdditions();
     const filtered = additions.filter(x => x.id !== courseId);
     if (filtered.length !== additions.length) await saveCourseLibraryAdditions(filtered);
   } catch (e) {}
-  // Remove from the in-memory library now.
+  // Remove from the in-memory library now — always, regardless of sync state, so
+  // THIS device never shows it again even while a retry is still pending.
   COURSE_LIBRARY = COURSE_LIBRARY.filter(x => x.id !== courseId);
   // Heavy cloud cleanup (GPS row + the ~4 MB scorecard blob) runs in the BACKGROUND.
   // The delete OVERLAY written above already hides the course on every device, so we
@@ -15008,7 +15042,15 @@ async function deleteCourse(courseId) {
     try { const saves = await getCourseSaves(); if (saves[courseId]) { delete saves[courseId]; await saveCourseSaves(saves); } } catch (e) {}
   })();
   try { audit('delete_course', courseId, nm); } catch (e) {}
-  return true;
+  // v873: if a write still hasn't confirmed after retrying, it's now queued in the
+  // existing dirty-singleton retry loop (flushDirtySingletons — every 15s, on
+  // reconnect, and on next boot) so it WILL still finish on its own. Report that
+  // honestly (synced:false) instead of a blanket "deleted" so the caller can tell
+  // the admin it's still finishing rather than falsely declaring it permanent.
+  // Still truthy so every existing `if (await deleteCourse(...))` / `ok ? x : y`
+  // caller keeps treating this as a successful delete (it is — just maybe not
+  // fully synced everywhere yet).
+  return { ok: true, synced: !!(delsSynced && lockedSynced) };
 }
 
 // Clear a course's GPS mapping (every hole's tee/green/fairway-center data)
