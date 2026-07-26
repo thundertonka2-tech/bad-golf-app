@@ -7370,7 +7370,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.866';
+const BG_BUILD = 'v2026.11.867';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -50682,13 +50682,49 @@ async function t2ComputeCombinedPayouts(t) {
       Object.keys(fieldQuota.money).forEach(k => { const s = (fieldQuota.standings || []).find(x => nm(x.name) === k); bump(k, fieldQuota.money[k], s && s.name, s && s.first); bumpGame('Quota (field)', k, fieldQuota.money[k]); });
     }
 
+    // v866 (Tyler): "Long putt was one of the games, it is missing from the
+    // total... make this fix apply to all [games]." Root cause: a whole-field
+    // pot that's genuinely configured for this event but hasn't produced a
+    // single winner/dollar yet (nobody logged a made long putt/CTP shot all
+    // round, or a Stableford/Quota round hasn't reached a scoreable point)
+    // never got a `gameTotals` entry at all -- bumpGame only ever creates one
+    // when real money moves. The whole column then silently vanished from this
+    // breakdown instead of showing $0.00 for everyone, which reads as the game
+    // being dropped/broken rather than "configured, nothing to show yet."
+    // Stamp a placeholder $0 column for every field pot that's actually
+    // configured, and let the byGame filter below keep it even with no money
+    // in it -- doesn't change any dollar amount, only whether a
+    // configured-but-unused pot still shows up.
+    const _alwaysShowGameLabels = new Set();
+    if (nassauCfg && nassauCfg.on) { gameTotals['Tournament Nassau'] = gameTotals['Tournament Nassau'] || {}; _alwaysShowGameLabels.add('Tournament Nassau'); }
+    if (longPuttCfg && longPuttCfg.on) { gameTotals['Long Putt'] = gameTotals['Long Putt'] || {}; _alwaysShowGameLabels.add('Long Putt'); }
+    if (skinsCfg && skinsCfg.on) { gameTotals['Skins won'] = gameTotals['Skins won'] || {}; _alwaysShowGameLabels.add('Skins won'); }
+    if (sidePotsCfg) {
+      const _spAlwaysLabel = { lowNet: 'Low Net', girs: 'Most GIRs', putts: 'Fewest Putts' };
+      Object.keys(_spAlwaysLabel).forEach(k => { if (sidePotsCfg[k] && sidePotsCfg[k].on) { gameTotals[_spAlwaysLabel[k]] = gameTotals[_spAlwaysLabel[k]] || {}; _alwaysShowGameLabels.add(_spAlwaysLabel[k]); } });
+    }
+    // CTP / Stableford / Quota have no single top-level on/off flag -- they're
+    // configured per-day (Configure Day) or stamped onto a launched round, so
+    // check the same signals their own compute functions already use.
+    try {
+      const _ctpConfigured = (raw || []).some(row => { const rg = row && row.data ? row.data : row; return !!(rg && rg.games && rg.games.ctp && rg.games.ctp.fieldOnly); });
+      if (_ctpConfigured) { gameTotals['Closest to Pin'] = gameTotals['Closest to Pin'] || {}; _alwaysShowGameLabels.add('Closest to Pin'); }
+    } catch (e) {}
+    try {
+      const _dg = (t.settings && t.settings.dayGames) || {};
+      const _stblConfigured = Object.keys(_dg).some(d => { const dgd = _dg[d]; return !!(dgd && dgd.stableford && (dgd.stableford.mode || 'pool') !== 'perpoint'); });
+      if (_stblConfigured) { gameTotals['Stableford (field)'] = gameTotals['Stableford (field)'] || {}; _alwaysShowGameLabels.add('Stableford (field)'); }
+      const _quotaConfigured = Object.keys(_dg).some(d => { const dgd = _dg[d]; return !!(dgd && dgd.quota && (dgd.quota.mode || 'pool') !== 'perpoint'); });
+      if (_quotaConfigured) { gameTotals['Quota (field)'] = gameTotals['Quota (field)'] || {}; _alwaysShowGameLabels.add('Quota (field)'); }
+    } catch (e) {}
+
     const rows = Object.keys(combined)
       // v863: no longer filters out $0-net players -- everyone on the canonical
       // roster (seeded above) gets a row, matching Group payout's behavior.
       .map(k => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: Math.round(combined[k] * 100) / 100 }))
       .sort((a, b) => b.net - a.net);
     const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
-    const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label] })).filter(gm => Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
+    const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label] })).filter(gm => _alwaysShowGameLabels.has(gm.key) || Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
 
     return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame };
   } catch (e) { return null; }
@@ -50852,13 +50888,40 @@ async function t2ComputeTournamentOnlyPayouts(t) {
       Object.keys(fieldQuota.money).forEach(k => { const s = (fieldQuota.standings || []).find(x => nm(x.name) === k); bump(k, fieldQuota.money[k], s && s.name, s && s.first); bumpGame('Quota (field)', k, fieldQuota.money[k]); });
     }
 
+    // v866 (Tyler): "Long putt was one of the games, it is missing from the
+    // total... make this fix apply to all [games]." Same fix as
+    // t2ComputeCombinedPayouts above -- a whole-field pot that's genuinely
+    // configured but hasn't produced a single winner/dollar yet used to vanish
+    // from this breakdown instead of showing $0.00 for everyone. Stamp a
+    // placeholder $0 column for every configured field pot; no dollar math
+    // changes, only whether an unused-so-far pot still shows up.
+    const _alwaysShowGameLabels = new Set();
+    if (nassauCfg && nassauCfg.on) { gameTotals['Tournament Nassau'] = gameTotals['Tournament Nassau'] || {}; _alwaysShowGameLabels.add('Tournament Nassau'); }
+    if (longPuttCfg && longPuttCfg.on) { gameTotals['Long Putt'] = gameTotals['Long Putt'] || {}; _alwaysShowGameLabels.add('Long Putt'); }
+    if (skinsCfg && skinsCfg.on) { gameTotals['Skins won'] = gameTotals['Skins won'] || {}; _alwaysShowGameLabels.add('Skins won'); }
+    if (sidePotsCfg) {
+      const _spAlwaysLabel = { lowNet: 'Low Net', girs: 'Most GIRs', putts: 'Fewest Putts' };
+      Object.keys(_spAlwaysLabel).forEach(k => { if (sidePotsCfg[k] && sidePotsCfg[k].on) { gameTotals[_spAlwaysLabel[k]] = gameTotals[_spAlwaysLabel[k]] || {}; _alwaysShowGameLabels.add(_spAlwaysLabel[k]); } });
+    }
+    try {
+      const _ctpConfigured = (raw || []).some(row => { const rg = row && row.data ? row.data : row; return !!(rg && rg.games && rg.games.ctp && rg.games.ctp.fieldOnly); });
+      if (_ctpConfigured) { gameTotals['Closest to Pin'] = gameTotals['Closest to Pin'] || {}; _alwaysShowGameLabels.add('Closest to Pin'); }
+    } catch (e) {}
+    try {
+      const _dg = (t.settings && t.settings.dayGames) || {};
+      const _stblConfigured = Object.keys(_dg).some(d => { const dgd = _dg[d]; return !!(dgd && dgd.stableford && (dgd.stableford.mode || 'pool') !== 'perpoint'); });
+      if (_stblConfigured) { gameTotals['Stableford (field)'] = gameTotals['Stableford (field)'] || {}; _alwaysShowGameLabels.add('Stableford (field)'); }
+      const _quotaConfigured = Object.keys(_dg).some(d => { const dgd = _dg[d]; return !!(dgd && dgd.quota && (dgd.quota.mode || 'pool') !== 'perpoint'); });
+      if (_quotaConfigured) { gameTotals['Quota (field)'] = gameTotals['Quota (field)'] || {}; _alwaysShowGameLabels.add('Quota (field)'); }
+    } catch (e) {}
+
     const rows = Object.keys(combined)
       // v863: no longer filters out $0-net players -- everyone on the canonical
       // roster (seeded above) gets a row, matching Group payout's behavior.
       .map(k => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: Math.round(combined[k] * 100) / 100 }))
       .sort((a, b) => b.net - a.net);
     const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
-    const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label] })).filter(gm => Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
+    const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label] })).filter(gm => _alwaysShowGameLabels.has(gm.key) || Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
 
     return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame };
   } catch (e) { return null; }
