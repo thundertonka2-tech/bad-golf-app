@@ -7361,7 +7361,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.870';
+const BG_BUILD = 'v2026.11.872';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -34502,6 +34502,7 @@ function renderBoard() {
   if (p3greenie) {
     const div = document.createElement('div');
     div.className = 'game-result';
+    div.id = 'game-results-p3greenie';   // v870: repaint target for the field-wide Total/Tournament view
     const cfg = g.games.p3greenie;
     const bfNote = (cfg.bfEnabled !== false) ? ` · Hero Tax $${cfg.bfValue}` : '';
     div.innerHTML = `<div class="head"><span class="lbl">⛳ Par 3 Greenie ($${cfg.value}${bfNote})</span><span class="val">${p3greenie.events.length} event${p3greenie.events.length === 1 ? '' : 's'}</span></div>`;
@@ -51241,6 +51242,7 @@ function renderT2PayoutFilterBar(g) {
       _t2RepaintMoneyBoardForScope(g, b.dataset.scope);
       _t2RepaintPuttsGirForScope(g, b.dataset.scope);
       _t2RepaintScorecardForScope(g, b.dataset.scope);
+      _t2RepaintP3GreenieForScope(g, b.dataset.scope);
     };
   });
   // Group scope is already what renderBoard just painted synchronously above
@@ -51249,6 +51251,7 @@ function renderT2PayoutFilterBar(g) {
     _t2RepaintMoneyBoardForScope(g, scope);
     _t2RepaintPuttsGirForScope(g, scope);
     _t2RepaintScorecardForScope(g, scope);
+    _t2RepaintP3GreenieForScope(g, scope);
   }
 }
 
@@ -51439,6 +51442,80 @@ async function _t2RepaintPuttsGirForScope(g, scope) {
     if (!html) return;   // nobody in the field is tracking putts/GIR -- leave whatever renderBoard drew
     let el = document.getElementById('game-results-puttsgir');
     if (!el) { el = document.createElement('div'); el.className = 'game-result'; el.id = 'game-results-puttsgir'; gr.appendChild(el); }
+    el.innerHTML = html;
+  } catch (e) {}
+}
+
+// v870 (Tyler): "I clicked on the total filter, why don't I see Steve's
+// greenie on here? Look like it is only Kevin's group." Par 3 Greenie is
+// classified as a per-group game (T2_PER_GROUP_GAMES) since each cart can run
+// its own version independently -- but when a commissioner configures it
+// identically for every group (as here), the Total/Tournament filter should
+// merge every group's events, same as Putts & GIR / Scorecard above. This
+// "Game results" block was built straight from the local g's calcP3Greenie(g)
+// with zero awareness of the filter bar -- same class of gap as items #13/14,
+// just missed in that sweep because it isn't part of the $ breakdown table.
+// Merges every round in the field that has games.p3greenie configured (a
+// round with no Greenie contributes nothing) into one combined event list,
+// sorted by hole. If groups configured different dollar values, the header
+// just reflects the first round found -- the per-event lines are always exact.
+function _t2BuildFieldP3GreenieHtml(raw) {
+  // v872 fix: a per-group Greenie's config can live in EITHER g.games.p3greenie
+  // (day-level Configure-Day remap) OR g.groupGames.p3greenie (pre-launch
+  // "your group's bets" config, or the destination the live-edit editor routes
+  // saves to -- see item #5's data fix earlier this session, which is exactly
+  // why today's own Group 2 round has it in groupGames, not games). The v871
+  // version of this function only ever checked g.games, so it silently missed
+  // any group whose Greenie happens to live in groupGames -- fixed the same
+  // way computeAllGameMoney's other groupGames-aware call sites do it: fold
+  // groupGames.p3greenie onto a shallow copy's games bucket before calculating,
+  // never mutating the original fetched round.
+  const rounds = (raw || []).map(row => row && row.data ? row.data : row)
+    .filter(rg => rg && ((rg.games && rg.games.p3greenie) || (rg.groupGames && rg.groupGames.p3greenie)))
+    .map(rg => (!rg.games || !rg.games.p3greenie) && rg.groupGames && rg.groupGames.p3greenie
+      ? Object.assign({}, rg, { games: Object.assign({}, rg.games, { p3greenie: rg.groupGames.p3greenie }) })
+      : rg);
+  if (!rounds.length) return '';
+  const cfg = rounds[0].games.p3greenie;
+  const bfNote = (cfg.bfEnabled !== false) ? ' · Hero Tax $' + cfg.bfValue : '';
+  let allEvents = [];
+  rounds.forEach(rg => {
+    let res = null; try { res = calcP3Greenie(rg); } catch (e) {}
+    if (res && Array.isArray(res.events)) allEvents = allEvents.concat(res.events);
+  });
+  allEvents.sort((a, b) => (a.hole || 0) - (b.hole || 0));
+  let html = '<div class="head"><span class="lbl">⛳ Par 3 Greenie ($' + cfg.value + bfNote + ')</span><span class="val">' + allEvents.length + ' event' + (allEvents.length === 1 ? '' : 's') + '</span></div>';
+  allEvents.forEach(e => {
+    let lbl = '';
+    if (e.kind === 'greenie') lbl = '🟢 ' + e.name + ' won greenie';
+    else if (e.kind === 'greenie-forfeit') lbl = '⚠️ ' + e.name;
+    else if (e.kind === 'buddyfucker') lbl = '💩 ' + e.name;
+    else if (e.kind === 'greenie-no-par') lbl = '✗ ' + e.name;
+    else if (e.kind === 'greenie-override-lost') lbl = '🐦 ' + e.name;
+    const amtStr = e.amt > 0 ? ' +$' + e.amt.toFixed(2) : (e.amt < 0 ? ' -$' + Math.abs(e.amt).toFixed(2) : '');
+    html += '<div class="sub">H' + e.hole + ' ' + lbl + amtStr + '</div>';
+  });
+  return html;
+}
+let _t2P3GreenieRepaintToken = 0;
+async function _t2RepaintP3GreenieForScope(g, scope) {
+  const tid = g && g.t2 && g.t2.tournamentId;
+  if (!tid || scope === 'group') return;   // 'group' is whatever renderBoard() just painted locally -- leave it
+  const myToken = ++_t2P3GreenieRepaintToken;
+  try {
+    const t = await t2Get(tid);
+    if (myToken !== _t2P3GreenieRepaintToken) return;
+    if (!t) return;
+    const raw = await loadTourneyRawRounds(t).catch(() => []);
+    if (myToken !== _t2P3GreenieRepaintToken) return;
+    // A fast tap to another round while this fetch was in flight must not paint over it.
+    if (!(state && state.game && state.game.code === g.code)) return;
+    const gr = document.getElementById('game-results-list');
+    if (!gr) return;
+    const html = _t2BuildFieldP3GreenieHtml(raw);
+    if (!html) return;   // nobody in the field has Par 3 Greenie configured -- leave whatever renderBoard drew
+    let el = document.getElementById('game-results-p3greenie');
+    if (!el) { el = document.createElement('div'); el.className = 'game-result'; el.id = 'game-results-p3greenie'; gr.appendChild(el); }
     el.innerHTML = html;
   } catch (e) {}
 }
