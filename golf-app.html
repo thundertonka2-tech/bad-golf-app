@@ -7390,7 +7390,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.881';
+const BG_BUILD = 'v2026.11.882';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -8453,6 +8453,33 @@ function renderAdminUserList() {
 // Session cache of per-course mapped-hole info so the admin never refetches the
 // same course twice (course_id -> { holes, fwc, center }).
 let _adminMappedCache = new Map();
+// v882 (Kevin, via Tyler): "In admin it says 27. When I click I only get the choice
+// of a certain 18... I just opened again and the mapping is messed up. Might need to
+// figure a way I can go map all 3 separate."
+//
+// He was right, and the storage layer was ALREADY on his side. saveCourseRow()
+// decomposes a combo id ("base:champions-legends") into PER-NINE course_gps rows
+// ("base#champions", "base#legends"). So a nine mapped once is mapped for every
+// combination it appears in — no merging required, ever.
+//
+// The breakage was purely in ADMIN's counting: getMappedCourseIdSet() was only ever
+// asked about the BASE library id ("shangri-la-golf-club"), which by design has NO
+// course_gps row of its own. So the facility read "Not mapped · 0/18" no matter how
+// much Kevin mapped — his work was saving fine, admin just never looked where it
+// landed. That's the "mapping is messed up" he kept seeing on reopen.
+//
+// tnNines() is the one place that answers "what nines does this facility have?" so
+// the scope fetch, the progress rollup and the picker can't drift apart.
+function tnNines(id) {
+  try {
+    const set = (typeof THREE_NINE_COURSES === 'object') ? THREE_NINE_COURSES[id] : null;
+    if (!set) return null;
+    const out = Object.keys(set)
+      .filter(k => set[k] && Array.isArray(set[k].pars) && set[k].pars.length >= 9)
+      .map(k => ({ key: k, name: (set[k].name || k), pars: set[k].pars.slice(0, 9) }));
+    return out.length ? out : null;
+  } catch (e) { return null; }
+}
 function _storeMappedRow(r) {
   if (!r || !r.course_id) return;
   const hs = r.holes || {}; let greens = 0, fc = 0, nd = 0, cen = null;
@@ -8537,9 +8564,13 @@ async function getMappedCourseIdSet(ids) {
 // opening the course-detail landing screen first. GPS/targets reopen detail when
 // done (proven map-session return); rating opens the tee editor and refreshes the
 // list on save. Three-nine courses route greens through the nine picker.
-function adminJumpTo(kind, id) {
+function adminJumpTo(kind, id, nineKey) {
   try {
     const isTN = (typeof THREE_NINE_COURSES === 'object') && THREE_NINE_COURSES[id];
+    // v882: a per-nine chip maps THAT nine on its own (9 holes), nothing else.
+    // comboSpecFromId already understands the single-nine id "base:key" and
+    // saveCourseRow already writes it to "base#key" — so this needed no data change.
+    if (kind === 'nine' && nineKey) { state._thenReopenDetailId = id; adminMapCourse(id + ':' + nineKey); return; }
     if (kind === 'gps') { state._thenReopenDetailId = id; if (isTN) { adminPickLoop(id, cid => adminMapCourse(cid)); } else { adminMapCourse(id); } return; }
     if (kind === 'gpsmiss') { state._thenReopenDetailId = id; if (isTN) { adminPickLoop(id, cid => adminMapCourse(cid, { missingOnly: true })); } else { adminMapCourse(id, { missingOnly: true }); } return; }
     if (kind === 'targets') { state._thenReopenDetailId = id; adminFwcCourse(id); return; }
@@ -8562,16 +8593,37 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
       if (_tn) { dispName = name.replace(/\s*\([^)]*\)\s*$/, '').trim() || name;
         const _nk = Object.keys(_tn).filter(k => _tn[k] && Array.isArray(_tn[k].pars));
         holesLabel = (_nk.length * 9) + ' holes'; } }
-    const holes = (mappedSet && typeof mappedSet.get === 'function') ? (mappedSet.get(id) || 0) : 0;
-    const fwcCount = (mappedSet && mappedSet.fwc && typeof mappedSet.fwc.get === 'function') ? (mappedSet.fwc.get(id) || 0) : 0;
-    const _expH = (typeof libHoles==='function') ? libHoles(lib, sc, id) : 18;
+    let holes = (mappedSet && typeof mappedSet.get === 'function') ? (mappedSet.get(id) || 0) : 0;
+    let fwcCount = (mappedSet && mappedSet.fwc && typeof mappedSet.fwc.get === 'function') ? (mappedSet.fwc.get(id) || 0) : 0;
+    let _expH = (typeof libHoles==='function') ? libHoles(lib, sc, id) : 18;
+    // v882: three-nine facility — roll the PER-NINE rows up into a facility total, and
+    // keep the per-nine breakdown so the card can show Kevin exactly which nine is
+    // short. NOTE we deliberately do NOT touch libHoles(): a three-nine ROUND is still
+    // 18 holes and scoring depends on that. Only the admin's "how much is left to map"
+    // expectation becomes 27 (or 36).
+    let nineProg = null, _tnNeed = null;
+    try {
+      const _nines = tnNines(id);
+      if (_nines) {
+        let _g = 0, _f = 0, _n = 0;
+        nineProg = _nines.map(n => {
+          const rid = id + '#' + n.key;
+          const ng = (mappedSet && typeof mappedSet.get === 'function') ? (mappedSet.get(rid) || 0) : 0;
+          const nf = (mappedSet && mappedSet.fwc && typeof mappedSet.fwc.get === 'function') ? (mappedSet.fwc.get(rid) || 0) : 0;
+          const nn = n.pars.filter(p => Number(p) !== 3).length;
+          _g += ng; _f += nf; _n += nn;
+          return { key: n.key, name: n.name, greens: ng, fwc: nf, need: nn };
+        });
+        holes = _g; fwcCount = _f; _expH = _nines.length * 9; _tnNeed = _n;
+      }
+    } catch (e) {}
     const hasGPS = holes >= _expH;                 // every green mapped (9 or 18)
     const hasRS = !!(sc && Array.isArray(sc.tees) && sc.tees.some(t => t && t.rating != null && t.slope != null))
       || !!(sc && sc.rating != null && sc.slope != null)
       || !!(typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]);
     // Fairway targets are part of "done": every par 4/5 needs a fairway center.
     const _parArr = (sc && Array.isArray(sc.pars) && (sc.pars.length === 18 || sc.pars.length === 9)) ? sc.pars : null;
-    const targetsNeeded = _parArr ? _parArr.filter(p => Number(p) !== 3).length : ((mappedSet && mappedSet.need && typeof mappedSet.need.get === 'function' && mappedSet.need.get(id) != null) ? mappedSet.need.get(id) : 18);
+    const targetsNeeded = (_tnNeed != null) ? _tnNeed : (_parArr ? _parArr.filter(p => Number(p) !== 3).length : ((mappedSet && mappedSet.need && typeof mappedSet.need.get === 'function' && mappedSet.need.get(id) != null) ? mappedSet.need.get(id) : 18));
     const targetsComplete = targetsNeeded === 0 || fwcCount >= targetsNeeded;
     const hasCard = !!_parArr || !!(typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]); const complete = hasGPS && hasRS && targetsComplete && hasCard;   // greens + rating + every fairway target
     // Keep COMPLETE courses in the list too so an admin can search any course and
@@ -8580,7 +8632,7 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
     const flag = complete ? 'done' : (!hasGPS ? (hasRS ? 'gps' : 'both') : (!hasCard ? 'card' : (!hasRS ? 'rs' : 'targets')));
     const st = lib.st || (typeof courseStateCode === 'function' ? courseStateCode(lib) : '') || '';
     const _cen = (mappedSet && mappedSet.center && typeof mappedSet.center.get === 'function') ? mappedSet.center.get(id) : null;
-    items.push({ id, name, displayName: dispName, holesLabel: holesLabel, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, fwcCount, targetsNeeded, targetsComplete, needsTargets: hasGPS && !targetsComplete, expHoles: _expH, pop: playCount[name.toLowerCase()] || 0,
+    items.push({ id, name, displayName: dispName, holesLabel: holesLabel, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, fwcCount, targetsNeeded, targetsComplete, needsTargets: hasGPS && !targetsComplete, expHoles: _expH, nineProg: nineProg, pop: playCount[name.toLowerCase()] || 0,
       lat: (typeof lib.lat === 'number' ? lib.lat : (_cen ? _cen.lat : null)), lng: (typeof lib.lng === 'number' ? lib.lng : (_cen ? _cen.lng : null)) });
   });
   // Partially-mapped courses first (closest to done — quickest to finish), most
@@ -8853,7 +8905,7 @@ function renderAdminWorklist() {
     + (scoped ? '<div class="small-text" style="color:var(--text-muted);margin:-2px 0 8px;font-weight:600">☑️ ' + cVerified + ' verified · ✅ ' + cComplete + ' complete · ' + base.length + ' here</div>' : '')
     + '<div class="help-text" style="padding:4px 0 8px">Showing ' + cap + ' of ' + filt.length + (q ? ' matching course' + (filt.length === 1 ? '' : 's') + '.' : '.') + '</div>'
     + filt.slice(0, cap).map(it => {
-      const left = 18 - (it.holes || 0);
+      const left = (it.expHoles || 18) - (it.holes || 0);
       // GPS status pill: partial (some holes done — quick to finish) vs full.
       const gpsPill = !it.hasGPS
         ? (it.holes > 0
@@ -8873,6 +8925,17 @@ function renderAdminWorklist() {
       return '<div class="adm-card" data-open="' + ea(it.id) + '" style="cursor:pointer">'
       + '<div class="adm-name" title="' + ea(it.name) + '">' + esc(it.displayName || it.name) + (it.holesLabel ? ' <span class="adm-flag" style="background:var(--accent)">' + it.holesLabel + '</span>' : '') + (isSkip(it) ? ' <span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + ((nameCount[(it.name || '').trim().toLowerCase()] || 0) > 1 ? ' <span class="adm-flag" style="background:var(--money-neg)">⚠️ duplicate</span>' : '') + '</div>'
       + '<div class="adm-badges">' + gpsPill + badge + '</div>'
+      // v882: per-nine progress, each chip a direct tap-through to mapping THAT nine.
+      // Kevin works entirely on a phone — this is the whole point: he can see which
+      // nine is short and go straight at it, instead of guessing which 18-hole loop
+      // still contains unmapped holes.
+      + (it.nineProg ? '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:5px">'
+          + it.nineProg.map(function(n){
+              const col = (n.greens >= 9) ? 'var(--money-pos)' : (n.greens > 0 ? '#d98a2b' : 'var(--text-muted)');
+              return '<span class="adm-flag adm-jump" data-jump="nine" data-jid="' + ea(it.id) + '" data-nine="' + ea(n.key) + '" style="background:' + col + ';cursor:pointer">'
+                + esc(n.name) + ' ' + n.greens + '/9' + (n.greens >= 9 ? ' \u2713' : '') + ' \u203A</span>';
+            }).join('')
+          + '</div>' : '')
       + '<div class="loc">' + esc(loc(it)) + ' <span style="color:var(--accent);font-weight:600;white-space:nowrap">· tap to edit ›</span></div>'
       + '<div class="adm-contact" data-cc="' + ea(it.id) + '"></div>'
       + ((typeof _crRejectedNotes!=='undefined' && _crRejectedNotes && _crRejectedNotes[it.id]) ? '<div class="small-text" style="margin-top:4px;padding:6px 9px;background:rgba(192,57,43,0.10);border:1px solid rgba(192,57,43,0.30);border-radius:8px;line-height:1.35"><strong style="color:#c0392b">❌ Sent back:</strong> ' + esc(_crRejectedNotes[it.id]) + '</div>' : '')
@@ -8962,6 +9025,9 @@ function adminScopeLibIds() {
       if (!terms.every(t => hay.includes(t))) return;
     }
     out.push(c.id);
+    // v882: ALSO fetch each nine's own GPS row for a 27/36-hole facility — the base
+    // id has no row, so without this every three-nine reads 0 mapped holes forever.
+    try { const _tn = tnNines(c.id); if (_tn) _tn.forEach(n => out.push(c.id + '#' + n.key)); } catch (e) {}
   });
   return out;
 }
@@ -9269,7 +9335,7 @@ async function renderAdmin() {
     { const _scs=e.target.closest('[data-scsearch]'); if(_scs){ e.stopPropagation(); try{ var _sit=(_adminWork||[]).find(function(x){return x&&x.id===_scs.dataset.scsearch;})||{}; window.open('https://www.google.com/search?q='+encodeURIComponent(((_sit.name||'')+' '+(_sit.city||'')+' '+(_sit.st||'')+' golf scorecard').replace(/\s+/g,' ').trim()),'_blank'); }catch(e){} return; } }
     // The course rows are tappable DIVs (data-open), not buttons — match them
     // first, before the button-only guard below.
-    { const _jp = e.target.closest('[data-jump]'); if (_jp) { e.stopPropagation(); adminJumpTo(_jp.dataset.jump, _jp.dataset.jid); return; } }
+    { const _jp = e.target.closest('[data-jump]'); if (_jp) { e.stopPropagation(); adminJumpTo(_jp.dataset.jump, _jp.dataset.jid, _jp.dataset.nine); return; } }
     const openCard = e.target.closest('[data-open]');
     if (openCard) { openCourseDetail(openCard.dataset.open); return; }
     const avEl = e.target.closest('[data-avatar]');
@@ -9944,24 +10010,50 @@ function adminPrepCourse(courseId, name) {
 }
 // Admin: pick which loop of a three-nine course to map, then map it (each nine is
 // stored once; mapping the loops covers all of a facility's nines (3–5)).
+// v882 — NINE-FIRST picker (Kevin: "figure a way I can go map all 3 separate").
+// Each nine gets its own button showing its own progress, so a 27-hole facility is
+// three straightforward 9-hole jobs instead of a guessing game about which 18-hole
+// loop still has unmapped holes in it. The old loop buttons are kept below, folded
+// away, because mapping a full 18 in one sitting is still the faster path when a
+// facility is untouched. Mobile-first: full-width rows, 52px tall, single column.
 function adminPickLoop(baseId, then) {
   const set = (typeof THREE_NINE_COURSES === 'object') ? THREE_NINE_COURSES[baseId] : null;
-  if (!set || !Array.isArray(set.searchCombos) || !set.searchCombos.length) { then(baseId); return; }
-  const ov = document.createElement('div');
-  ov.className = 'modal-overlay show'; ov.style.zIndex = 100092;
-  const btns = set.searchCombos.map(p => {
+  const nines = (typeof tnNines === 'function') ? tnNines(baseId) : null;
+  if (!set || !nines) { then(baseId); return; }
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+  const ea = (typeof escAttr === 'function') ? escAttr : (x => x);
+  // Per-nine mapped counts, straight from the same cache the worklist uses.
+  const cnt = k => { try { const r = _adminMappedCache.get(baseId + '#' + k); return (r && r.holes) || 0; } catch (e) { return 0; } };
+  const done = nines.filter(n => cnt(n.key) >= 9).length;
+  const nineBtns = nines.map(n => {
+    const c = cnt(n.key), full = c >= 9;
+    const col = full ? 'var(--money-pos)' : (c > 0 ? '#d98a2b' : 'var(--text-muted)');
+    const sub = full ? 'Mapped \u2713' : (c > 0 ? (c + '/9 \u00b7 ' + (9 - c) + ' green' + ((9 - c) === 1 ? '' : 's') + ' left') : 'Not mapped yet');
+    return '<button class="full" data-nine="' + ea(n.key) + '" style="display:flex;align-items:center;gap:10px;text-align:left;margin-bottom:8px;padding:13px 14px;min-height:52px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);color:var(--text)">'
+      + '<span style="flex:0 0 auto;width:10px;height:10px;border-radius:50%;background:' + col + '"></span>'
+      + '<span style="flex:1;min-width:0"><span style="display:block;font-weight:700;font-size:15px">' + esc(n.name) + '</span>'
+      + '<span style="display:block;font-size:12px;color:var(--text-muted);margin-top:1px">' + sub + '</span></span>'
+      + '<span style="flex:0 0 auto;color:var(--accent);font-weight:700">\u203a</span></button>';
+  }).join('');
+  const loopBtns = (Array.isArray(set.searchCombos) ? set.searchCombos : []).map(p => {
     const f = p[0], b = p[1];
     const fn = (set[f] && set[f].name) || f, bn = (set[b] && set[b].name) || b;
-    return '<button class="primary full" data-loop="' + f + '-' + b + '" style="margin-bottom:8px">\ud83d\uddfa\ufe0f Map ' + escapeHtml(fn + ' / ' + bn) + '</button>';
+    return '<button class="full" data-loop="' + ea(f + '-' + b) + '" style="margin-bottom:8px;padding:13px;min-height:48px;border:1px solid var(--border);border-radius:12px;background:transparent;color:var(--text);font-weight:600">\ud83d\uddfa\ufe0f ' + esc(fn + ' / ' + bn) + '</button>';
   }).join('');
-  const _nNines = Object.keys(set).filter(k => set[k] && Array.isArray(set[k].pars)).length;
-  ov.innerHTML = '<div class="modal" style="max-width:420px"><h2>Which loop to map?</h2>' +
-    '<p class="help-text" style="margin-bottom:12px">Each nine is mapped once \u2014 map the loops to cover all ' + _nNines + ' nines. Already-mapped holes are skipped.</p>' +
-    btns + '<button class="full" id="apl-cancel" style="margin-top:4px">Cancel</button></div>';
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.zIndex = 100092;
+  ov.innerHTML = '<div class="modal" style="max-width:430px"><h2>Map a nine</h2>'
+    + '<p class="help-text" style="margin-bottom:4px">This facility has <strong>' + nines.length + ' nines (' + (nines.length * 9) + ' holes)</strong> \u2014 ' + done + ' fully mapped.</p>'
+    + '<p class="help-text" style="margin-bottom:12px">Map each nine <strong>once</strong>. Every 18-hole combination is built from them automatically, so you never map the same green twice.</p>'
+    + nineBtns
+    + (loopBtns ? ('<button class="full" id="apl-loops-t" style="margin:10px 0 8px;padding:12px;min-height:46px;border:1px solid var(--border);border-radius:12px;background:transparent;color:var(--text-muted);font-size:13px;font-weight:600">\u2699\ufe0f Or map a full 18-hole loop \u203a</button><div id="apl-loops" style="display:none">' + loopBtns + '</div>') : '')
+    + '<button class="full" id="apl-cancel" style="margin-top:4px;padding:13px;min-height:46px">Cancel</button></div>';
   document.body.appendChild(ov);
   const close = () => { try { ov.remove(); } catch (e) {} };
   ov.onclick = (e) => { if (e.target === ov) close(); };
   ov.querySelector('#apl-cancel').onclick = close;
+  { const t = ov.querySelector('#apl-loops-t'); if (t) t.onclick = () => { const d = ov.querySelector('#apl-loops'); if (d) d.style.display = (d.style.display === 'none') ? 'block' : 'none'; }; }
+  ov.querySelectorAll('button[data-nine]').forEach(b => b.onclick = () => { const k = b.dataset.nine; close(); then(baseId + ':' + k); });
   ov.querySelectorAll('button[data-loop]').forEach(b => b.onclick = () => { const fb = b.dataset.loop; close(); then(baseId + ':' + fb); });
 }
 async function adminMapCourse(courseId, opts) {
