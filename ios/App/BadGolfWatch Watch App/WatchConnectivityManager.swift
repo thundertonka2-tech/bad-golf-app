@@ -66,9 +66,16 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
     }
 
     /// Ask the phone to send the current round (e.g. on watch app launch).
+    /// v890: ask WITH a replyHandler — the phone now answers directly with its
+    /// cached handoff, so the round rides back in the SAME round-trip instead of
+    /// hoping a separate push shows up later. (Before v890 the phone received
+    /// this request and dropped it — the notification it posted had no observer —
+    /// so every wake/reconnect re-ask since v829 did nothing.)
     func requestRound() {
         guard WCSession.default.activationState == .activated,
               WCSession.default.isReachable else { return }
-        WCSession.default.sendMessage(["request": "round"], replyHandler: nil, errorHandler: nil)
+        WCSession.default.sendMessage(["request": "round"], replyHandler: { [weak self] payload in
+            self?.handle(payload: payload)
+        }, errorHandler: nil)
     }
 }

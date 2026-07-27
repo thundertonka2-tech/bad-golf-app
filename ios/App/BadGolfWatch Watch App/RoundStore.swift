@@ -23,6 +23,7 @@ final class RoundStore: ObservableObject {
         return dir.appendingPathComponent("active_round.json")
     }()
     private var pendingHoles: Set<Int> = []   // holes with unsynced score writes
+    private var lastPhoneHole: Int = -1       // v890: last hole the PHONE told us about (hole-jump guard)
 
     init() { loadCache(); ensureCourseMatchesRound() }
 
@@ -108,10 +109,42 @@ final class RoundStore: ObservableObject {
         if let pid = payload["playerId"] as? String, !pid.isEmpty {
             SessionStore.shared.playerId = pid
         }
+        // v890: the phone explicitly says the round ENDED — clear it. Nothing
+        // ever told the watch a round finished, so it kept showing yesterday's
+        // round until the NEXT one happened to start.
+        if (payload["roundEnded"] as? Bool) == true {
+            round = nil
+            currentHole = 1
+            lastPhoneHole = -1
+            pendingHoles.removeAll()
+            syncState = .idle
+            signedIn = SessionStore.shared.isSignedIn
+            saveCache()
+            return
+        }
         if let roundRow = payload["round"] as? [String: Any],
            let r = RoundParser.parse(row: roundRow) {
-            self.round = r
-            self.currentHole = r.currentHole
+            // v890: MERGE, don't replace. A score tapped on the WATCH that hasn't
+            // synced yet (pendingHoles) must survive the phone's next handoff —
+            // the 8s heartbeat was overwriting a wrist-entered score with the
+            // phone's stale copy seconds after it was tapped.
+            var merged = r
+            if let cur = self.round, cur.id == r.id {
+                for h in pendingHoles { if let s = cur.scores[h] { merged.scores[h] = s } }
+            } else {
+                pendingHoles.removeAll()          // different round — old queue no longer applies
+                syncState = .idle
+                lastPhoneHole = -1
+            }
+            self.round = merged
+            // v890: only JUMP the watch's hole when the PHONE's hole actually
+            // changed — re-applying the same handoff every 8s was yanking the
+            // watch back to the phone's hole while the wearer browsed other
+            // holes with prev/next.
+            if r.currentHole != lastPhoneHole {
+                self.currentHole = r.currentHole
+                lastPhoneHole = r.currentHole
+            }
         }
         if let courseRow = payload["course"] as? [String: Any],
            let c = CourseParser.parse(row: courseRow) {
