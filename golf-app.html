@@ -7426,7 +7426,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.888';
+const BG_BUILD = 'v2026.11.889';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -21578,6 +21578,12 @@ function _setupDraftActive() {
     const c = document.getElementById('setup-with-game');
     if (!c || c.style.display === 'none') return false;
     if (typeof state !== 'undefined' && state && state.editingLiveRound) return false;
+    // v889: the setup draft is for a NEW round's form ONLY. Tournament Configure-
+    // Day / group-games and the scheduled-round editor REUSE this same form; now
+    // that the draft is actually restored (below), letting those flows write it
+    // would leak tournament/scheduled settings into a later fresh round. They
+    // have their own persistence (t2 day drafts / the event itself), so skip.
+    if (typeof state !== 'undefined' && state && (state._t2DayConfig || state._t2GroupConfig || state._t2GroupGamesConfig || state.editingTourneyId)) return false;
     return true;
   } catch (e) { return false; }
 }
@@ -21911,10 +21917,22 @@ async function setupNewGameForm(prefill) {
       document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') saveSetupDraft(); });
       window.addEventListener('pagehide', saveSetupDraft);
     }
-    // A freshly opened round must start with ONLY the person starting it — never
-    // re-populate the previous group from the autosaved draft (Tyler). Clear any
-    // stale draft so old players can't leak into a brand-new round.
-    if (!prefill) { try { clearSetupDraft(); } catch (e) {} }
+    // v889 (Tyler): the draft was SAVED on every tap but never given back — and a
+    // fresh form open deleted it — so games/bets clicked before stepping out came
+    // back unselected. Now a RECENT draft (≤30 min: clearly the same setup being
+    // resumed) is fully restored, players included. An OLDER draft is cleared,
+    // preserving the June 2026 rule that a brand-new round never re-populates the
+    // previous group. Never runs for prefilled / tournament / edit-live opens.
+    if (!prefill && !(state && (state._t2DayConfig || state._t2GroupConfig || state._t2GroupGamesConfig || state.editingLiveRound || state.editingTourneyId))) {
+      try {
+        const _d = loadSetupDraft();
+        if (_d && (Date.now() - (_d.t || 0) <= 30 * 60 * 1000)) {
+          if (restoreSetupDraft(_d)) { try { if (typeof showToast === 'function') showToast('↩️ Picked up your round setup where you left off'); } catch (e) {} }
+        } else {
+          try { clearSetupDraft(); } catch (e) {}
+        }
+      } catch (e) {}
+    }
   } catch (e) {}
 }
 
@@ -36614,10 +36632,15 @@ async function renderHomeInvites() {
     }
   } catch (e) { console.warn('home invites fetch', e); }
 
+  // v889 PERF: ONE tourneys read shared by sections 2–4 (each used to do its own
+  // await getTourneys() — cache-first, but every call also kicks off a background
+  // cloud refresh, so one card render was triggering three).
+  let _homeTourneys6 = [];
+  try { _homeTourneys6 = (await getTourneys()) || []; } catch (e) { _homeTourneys6 = []; }
   // 2) My scheduled rounds (single-round saved configs). Starting one also lands
   //    in GPS via the normal start flow.
   try {
-    const tourneys = await getTourneys();
+    const tourneys = _homeTourneys6;
     const norm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase();
     const meN = norm(meName || '');
     (tourneys || [])
@@ -36648,7 +36671,7 @@ async function renderHomeInvites() {
   try {
     const _meKeyOR = (typeof _orNorm === 'function') ? _orNorm(meName || '') : String(meName || '').toLowerCase().trim();
     if (_meKeyOR) {
-      const tOpen = await getTourneys();
+      const tOpen = _homeTourneys6;   // v889 PERF: shared read (see above)
       (tOpen || [])
         .filter(t => t && t.status === 'open' && !t.isTemplate
                      && !(typeof schedExpired === 'function' && schedExpired(t))
@@ -36671,7 +36694,7 @@ async function renderHomeInvites() {
   try {
     const _meKeyHG = (typeof _orNorm === 'function') ? _orNorm(meName || '') : String(meName || '').toLowerCase().trim();
     if (_meKeyHG) {
-      const _hgAll = await getTourneys();
+      const _hgAll = _homeTourneys6;   // v889 PERF: shared read (see above)
       const _hgBy = {};
       (_hgAll || []).forEach(t => {
         if (!t || t.status !== 'open' || t.isTemplate || !t.teeGroup) return;
@@ -36741,6 +36764,7 @@ async function renderHomeInvites() {
   //    tab never disagree about what you've played. "Live now" stays separate
   //    and untouched (Tyler, Jul 2026) — this only adds finished/logged rounds.
   try {
+    state._homeRoundsHistTotal = 0;   // v889: reset so a failed read can't leave a stale count on the Show-all button
     const roster6 = await getPlayerRoster();
     const mineP6 = findMyRosterPlayer(roster6, meName);
     if (mineP6 && Array.isArray(mineP6.scoreHistory)) {
@@ -36785,12 +36809,19 @@ async function renderHomeInvites() {
         // Best score first — reads like a mini leaderboard.
         _partners.forEach(arr => arr.sort((a, b) => (Number(a.gross) || 999) - (Number(b.gross) || 999)));
       } catch (e) {}
-      mineP6.scoreHistory.filter(s => {
+      const _histAll6 = mineP6.scoreHistory.filter(s => {
         if (!s) return false;
         if (_sharedTomb6.has(rosterRoundKey(s)) || _sharedTomb6.has(statsRoundKey(s))) return false;
         if (_delKeys6.has(statsRoundKey(s))) return false;
         return true;
-      }).slice().sort((a, b) => (new Date(b.date || 0)) - (new Date(a.date || 0)))
+      }).slice().sort((a, b) => (new Date(b.date || 0)) - (new Date(a.date || 0)));
+      // v889 (Tyler): "These rounds are taking a while to load — only load the last
+      // 10, then if they expand the list load the others at that time." Only the 10
+      // newest completed rounds get BUILT here by default; tapping "Show all"
+      // re-renders this card with the expanded flag set and builds the full history
+      // (local data — no extra network for the older rounds themselves).
+      state._homeRoundsHistTotal = _histAll6.length;
+      (state._homeRoundsExpanded ? _histAll6 : _histAll6.slice(0, 10))
         .forEach(s => {
           const dt6 = s.date ? new Date(s.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
           rows.push({
@@ -36924,6 +36955,9 @@ async function renderHomeInvites() {
   {
     const moreBtn = document.getElementById('home-rounds-showmore');
     const ROUNDS_PREVIEW_HOME = 5;
+    // v889: completed rounds beyond the newest 10 are no longer in the DOM at all
+    // (built on expand instead) — the button still shows the TRUE total.
+    const _unbuilt = Math.max(0, (state._homeRoundsHistTotal || 0) - rows.filter(r => r.kind === 'completed').length);
     const applyHomeRoundsCap = () => {
       const rowEls = Array.from(list.children);
       const shown = state._homeRoundsExpanded ? rowEls : rowEls.slice(0, ROUNDS_PREVIEW_HOME);
@@ -36931,15 +36965,25 @@ async function renderHomeInvites() {
       rowEls.forEach(r => { r.style.display = shownSet.has(r) ? '' : 'none'; r.style.borderBottom = '1px solid var(--border)'; });
       if (shown.length) shown[shown.length - 1].style.borderBottom = 'none';
       if (moreBtn) {
-        if (rowEls.length > ROUNDS_PREVIEW_HOME) {
+        if (rowEls.length > ROUNDS_PREVIEW_HOME || _unbuilt > 0) {
           moreBtn.style.display = '';
-          moreBtn.textContent = state._homeRoundsExpanded ? 'Show fewer' : ('Show all ' + rowEls.length + ' rounds');
+          moreBtn.textContent = state._homeRoundsExpanded ? 'Show fewer' : ('Show all ' + (rowEls.length + _unbuilt) + ' rounds');
         } else {
           moreBtn.style.display = 'none';
         }
       }
     };
-    if (moreBtn) moreBtn.onclick = () => { state._homeRoundsExpanded = !state._homeRoundsExpanded; applyHomeRoundsCap(); };
+    if (moreBtn) moreBtn.onclick = () => {
+      state._homeRoundsExpanded = !state._homeRoundsExpanded;
+      // Expanding with older rounds not yet built (or collapsing back down from a
+      // full build): re-render the card — that's when the rest load (Tyler's ask).
+      if ((state._homeRoundsExpanded && _unbuilt > 0) || (!state._homeRoundsExpanded && Array.from(list.children).length > 10)) {
+        moreBtn.textContent = 'Loading…';
+        try { renderHomeInvites(); } catch (e) { applyHomeRoundsCap(); }
+        return;
+      }
+      applyHomeRoundsCap();
+    };
     applyHomeRoundsCap();
   }
 }
@@ -54486,7 +54530,22 @@ window.switchTab = function(name, opts) {
   // they'd wrongly hide players/handicaps/course in a later normal round setup.
   // Save/Cancel already clear these first, so this only catches the abandon case.
   if (name !== 'setup') {
-    if (state._t2DayConfig || state._t2GroupConfig) { state._t2DayConfig = null; state._t2GroupConfig = null; }
+    if (state._t2DayConfig || state._t2GroupConfig) {
+      // v889 (Tyler): leaving Configure Day via a bottom-nav tab used to throw away
+      // every selection since the last Save Day — while the Back button stashed a
+      // draft first. Same exit, opposite results. Stash the SAME draft here before
+      // the flags clear, so reopening Configure Day restores it exactly like a
+      // Back-out. LOCAL draft only — nothing saves to the event without Save Day.
+      try {
+        const _cfgA = state._t2DayConfig;
+        if (_cfgA && _cfgA.dayNumber != null) {
+          const _dA = { dayNumber: _cfgA.dayNumber, checked: Array.from(document.querySelectorAll('input[type="checkbox"][id^="game-"]:checked')).map(cb => cb.id.slice(5)), participants: Object.fromEntries(Object.entries(state.gameParticipants || {}).map(([k, set]) => [k, Array.from(set || [])])), nassauInstances: JSON.parse(JSON.stringify(state.nassauInstances || [])), matchInstances: JSON.parse(JSON.stringify(state.matchInstances || [])) };
+          state._t2DayDraft = _dA;
+          try { localStorage.setItem('golf:draft:t2day:' + _cfgA.dayNumber, JSON.stringify({ t: Date.now(), v: _dA })); } catch (e) {}
+        }
+      } catch (e) {}
+      state._t2DayConfig = null; state._t2GroupConfig = null;
+    }
     try { document.body.classList.remove('t2-day-config'); document.body.classList.remove('t2-has-course-step'); } catch (e) {}
   }
   if (name !== 'rounds') { try { t2ChatUnsubscribe(); } catch (e) {} }   // leaving Events tab → drop the tournament-chat channel
@@ -56437,6 +56496,11 @@ async function init() {
     await saveTourneys(list);
     // Persist the event image (own singleton, keyed by event id) — '' clears it.
     try { await setEventImg(existingId || _newTourneyId, state.pendingEventImg || ''); } catch (e) {}
+
+    // v889 (Tyler): a game was CREATED (scheduled/template) — clean slate rule.
+    // Drop the setup draft so the next fresh new-round form starts blank instead
+    // of restoring the setup that was just saved. (Round START already does this.)
+    try { clearSetupDraft(); } catch (e) {}
 
     state.pendingTourneySetup = null;
     state.pendingEventImg = '';
