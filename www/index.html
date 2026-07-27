@@ -7399,7 +7399,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.880';
+const BG_BUILD = 'v2026.11.881';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -10981,7 +10981,7 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:course-name-overrides': 'objectMap',    // { id: name }
   'golf:course-detail-overrides': 'objectMap',  // { id: {name,city,st} }
   'golf:state-import-progress': 'objectMap',      // { state: progress }
-  'golf:code-review-queue': 'arrayById',          // Kevin's code-review flags (union by entry id, no lost flags)
+  'golf:code-review-queue': 'crqAudit',           // v881: union by entry id AND union each entry's audit events by event id — an audit trail that can lose an event isn't one
   'golf:crq-attachments': 'objectMap',            // review attachments: { courseId: [{url,at,by}] } (v715)
   'golf:tourneys': 'arrayById',                   // scheduled rounds + tee times: union by id so concurrent saves never clobber (v558)
   'golf:state-locks': 'objectMap'                 // v880: per-state lock records, last writer wins per state
@@ -11002,6 +11002,32 @@ async function _mergeSharedSingletonValue(key, local) {
       const a = Array.isArray(cloud) ? cloud : [];
       const b = Array.isArray(local) ? local : [];
       return Array.from(new Set([...a, ...b]));
+    }
+    if (strat === 'crqAudit') {
+      // v881 CODE-REVIEW AUDIT MERGE. Same union-by-entry-id as arrayById, except
+      // the per-entry `events` array is UNIONED by event id instead of replaced.
+      // Without this, Kevin logging a reply while Tyler logs work would silently
+      // drop one of them (last writer wins per entry) — and an audit trail with
+      // holes in it is worse than none, because it reads as complete.
+      const a = Array.isArray(cloud) ? cloud : [];
+      const b = Array.isArray(local) ? local : [];
+      const map = new Map();
+      a.forEach(x => { if (x && x.id != null) map.set(x.id, x); });
+      b.forEach(x => {
+        if (!x || x.id == null) return;
+        const prev = map.get(x.id);
+        if (!prev) { map.set(x.id, x); return; }
+        const merged = Object.assign({}, prev, x);          // local wins on scalars
+        const seen = new Map();
+        const push = ev => { if (ev && ev.id != null && !seen.has(ev.id)) seen.set(ev.id, ev); };
+        (Array.isArray(prev.events) ? prev.events : []).forEach(push);
+        (Array.isArray(x.events) ? x.events : []).forEach(push);
+        merged.events = Array.from(seen.values()).sort((p, q) => String(p.at || '').localeCompare(String(q.at || '')));
+        map.set(x.id, merged);
+      });
+      const out = Array.from(map.values());
+      b.forEach(x => { if (x && x.id == null) out.push(x); });
+      return out;
     }
     if (strat === 'arrayById') {
       const a = Array.isArray(cloud) ? cloud : [];
@@ -14452,6 +14478,13 @@ async function openCrqAttach(id){
       arr.push({ url:_img, at:new Date().toISOString(), by:((typeof currentUserEmail==='function'&&currentUserEmail())||'admin') });
       m[id]=arr;
       await saveCrqAttachments(m);
+      // v881: an attachment is part of the story — log it on every OPEN review
+      // item for this course so the history explains where the photo came from.
+      try{
+        const _q=await crReadQueue();
+        const _open=_q.filter(function(x){ return x&&x.course&&x.course.id===id&&x.status!=='resolved'&&x.status!=='rejected'; });
+        for(const _en of _open){ await crAppendEvent(_en.id, crMakeEvent('attach',{ text:'Attached a photo to this course.' })); }
+      }catch(e){}
       try{ showToast('Attachment saved ✓'); }catch(e){}
       close();
       try{ if(typeof renderAdminWorklist==='function') renderAdminWorklist(); }catch(e){}
@@ -14468,11 +14501,262 @@ async function crReadQueue(){
   }catch(e){}
   try{ const s=await safeGet(CODE_REVIEW_KEY,true); const a=s?JSON.parse(s):[]; return Array.isArray(a)?a:[]; }catch(e){ return []; }
 }
-async function crSubmitEntry(entry){ const arr=await crReadQueue(); arr.push(entry); await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true); }
-async function crSetStatus(entryId, status, note){ const arr=await crReadQueue(); const e=arr.find(function(x){return x&&x.id===entryId;}); if(!e) return; e.status=status; if(status==='resolved'){ e.resolvedAt=new Date().toISOString(); e.resolvedBy=(currentUserEmail()||'admin'); e.rejectedAt=null; e.rejectedBy=null; } else if(status==='rejected'){ e.rejectedAt=new Date().toISOString(); e.rejectedBy=(currentUserEmail()||'admin'); e.resolvedAt=null; e.resolvedBy=null; if(note!=null && String(note).trim()) e.resolutionNote=String(note).trim(); } else { e.resolvedAt=null; e.resolvedBy=null; e.rejectedAt=null; e.rejectedBy=null; } await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true); }
+async function crSubmitEntry(entry){
+  const arr=await crReadQueue();
+  // v881: every entry starts its audit trail the moment Kevin files it, so there
+  // is never an item whose origin isn't on the record.
+  try{
+    if(entry && !Array.isArray(entry.events)){
+      const cats=(entry.categories&&entry.categories.length)?('Categories: '+entry.categories.join(', ')):'';
+      const ev=crMakeEvent('submitted',{ text:(cats?cats:'')+((cats&&entry.note)?' — ':'')+(entry.note||'') });
+      if(entry.submittedByName) ev.byName=entry.submittedByName;
+      if(entry.submittedBy) ev.by=entry.submittedBy;
+      if(entry.createdAt) ev.at=entry.createdAt;
+      entry.events=[ev]; entry.lastEventAt=ev.at; entry.lastEventBy=ev.byName;
+    }
+  }catch(e){}
+  arr.push(entry);
+  await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true);
+  try{ audit('crq_submitted', entry&&entry.id, ((entry&&entry.course&&entry.course.name)||'')+' — '+((entry&&entry.note)||'')); }catch(e){}
+}
+async function crSetStatus(entryId, status, note, work){ const arr=await crReadQueue(); const e=arr.find(function(x){return x&&x.id===entryId;}); if(!e) return;
+  // v881: log the change BEFORE mutating, onto the entry we already hold, so the
+  // status write and its audit event land in the SAME cloud write — they can
+  // never end up out of step with each other.
+  try{
+    const _base=crEnsureEvents(e).map(function(x){ const y=Object.assign({},x); delete y._seed; return y; });
+    const _f=Object.assign({ to:status }, (work&&typeof work==='object')?work:{});
+    if((!work||typeof work!=='object') && note!=null && String(note).trim()) _f.need=String(note).trim();
+    const _ev=crMakeEvent('status', _f);
+    e.events=_base.concat([_ev]).sort(function(p,q){ return String(p.at||'').localeCompare(String(q.at||'')); });
+    e.lastEventAt=_ev.at; e.lastEventBy=_ev.byName;
+    try{ audit('crq_status_'+status, entryId, [_f.done,_f.cant,_f.need].filter(Boolean).join(' | ').slice(0,300)); }catch(_x){}
+  }catch(_e){}
+  e.status=status; if(status==='resolved'){ e.resolvedAt=new Date().toISOString(); e.resolvedBy=(currentUserEmail()||'admin'); e.rejectedAt=null; e.rejectedBy=null; if(work&&work.done) e.resolutionNote=String(work.done).trim(); } else if(status==='rejected'){ e.rejectedAt=new Date().toISOString(); e.rejectedBy=(currentUserEmail()||'admin'); e.resolvedAt=null; e.resolvedBy=null; if(note!=null && String(note).trim()) e.resolutionNote=String(note).trim(); } else { e.resolvedAt=null; e.resolvedBy=null; e.rejectedAt=null; e.rejectedBy=null; } await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true); }
+
+/* ==========================================================================
+   v881 CODE-REVIEW AUDIT TRAIL (Tyler).
+   "When Kevin submits something for code review we need to log it, then whatever
+    you fix we need to log, then when we kick it back to Kevin we should add a
+    button that shows you the history — why it was sent, what you did or could
+    not do, what is still needed, or what you did to complete it. We need a full
+    audit that is visible to Kevin and it needs to be mobile friendly."
+
+   Every review entry now carries `events: [...]` — an append-only timeline.
+   Nothing is ever edited or removed from it, only added, so the record of who
+   did what and when can't be quietly rewritten. Event shape:
+     { id, at (ISO), by (uid), byName, type, to, done, cant, need, text }
+   types: 'submitted' | 'status' | 'work' | 'reply' | 'attach'
+   The three work fields are exactly what Tyler asked for:
+     done = what I fixed · cant = what I couldn't do and why · need = what's
+     still needed from Kevin.
+   ====================================================================== */
+function crEvId(){ return 'ev-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7); }
+function crWho(){ try{ return (typeof currentUserEmail==='function'&&currentUserEmail())||'admin'; }catch(e){ return 'admin'; } }
+function crWhoId(){ try{ return (typeof _authUser!=='undefined'&&_authUser&&_authUser.id)||null; }catch(e){ return null; } }
+function crMakeEvent(type, f){
+  f=f||{};
+  const ev={ id:crEvId(), at:new Date().toISOString(), by:crWhoId(), byName:crWho(), type:type||'reply' };
+  ['to','done','cant','need','text'].forEach(function(k){ if(f[k]!=null && String(f[k]).trim()) ev[k]=String(f[k]).trim(); });
+  return ev;
+}
+// BACKFILL (Tyler: "backfill from what we know"). Older entries predate the
+// timeline, so synthesise one from the fields the entry already stores — the
+// submission, the send-back reason, the resolve/reject stamps — so nothing shows
+// an empty history on day one. Pure/derived: never persisted on its own, it just
+// becomes real the next time an event is appended.
+function crEnsureEvents(entry){
+  if(!entry) return [];
+  if(Array.isArray(entry.events) && entry.events.length) return entry.events;
+  const out=[];
+  try{
+    const cats=(entry.categories&&entry.categories.length)?entry.categories.join(', '):'';
+    out.push({ id:'ev-seed-sub-'+entry.id, at:entry.createdAt||'', by:entry.submittedBy||null, byName:entry.submittedByName||'admin',
+      type:'submitted', text:(cats?('Categories: '+cats):'')+((cats&&entry.note)?' — ':'')+(entry.note||''), _seed:true });
+    if(entry.status==='rejected'&&entry.rejectedAt){
+      out.push({ id:'ev-seed-rej-'+entry.id, at:entry.rejectedAt, byName:entry.rejectedBy||'admin', type:'status', to:'rejected', need:entry.resolutionNote||'', _seed:true });
+    }
+    if(entry.status==='resolved'&&entry.resolvedAt){
+      out.push({ id:'ev-seed-res-'+entry.id, at:entry.resolvedAt, byName:entry.resolvedBy||'admin', type:'status', to:'resolved', done:entry.resolutionNote||'', _seed:true });
+    }
+    if(entry.status==='investigating'){
+      out.push({ id:'ev-seed-inv-'+entry.id, at:entry.createdAt||'', byName:'admin', type:'status', to:'investigating', _seed:true });
+    }
+  }catch(e){}
+  return out.filter(function(x){ return x; }).sort(function(p,q){ return String(p.at||'').localeCompare(String(q.at||'')); });
+}
+function crEventCount(entry){ try{ return crEnsureEvents(entry).length; }catch(e){ return 0; } }
+// Append one event. Re-reads the queue from the CLOUD first (crReadQueue does a
+// direct row read), so we never append onto a stale copy and lose someone else's
+// entry. The crqAudit merge strategy then unions events on write as a second net.
+async function crAppendEvent(entryId, ev){
+  if(!entryId||!ev) return false;
+  try{
+    const arr=await crReadQueue();
+    const en=arr.find(function(x){ return x&&x.id===entryId; });
+    if(!en) return false;
+    const base=crEnsureEvents(en).map(function(x){ const y=Object.assign({},x); delete y._seed; return y; });
+    if(base.some(function(x){ return x.id===ev.id; })) return true;
+    en.events=base.concat([ev]).sort(function(p,q){ return String(p.at||'').localeCompare(String(q.at||'')); });
+    en.lastEventAt=ev.at; en.lastEventBy=ev.byName;
+    await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true);
+    try{ audit('crq_'+(ev.type||'event'), entryId, [ev.to,ev.done,ev.cant,ev.need,ev.text].filter(Boolean).join(' | ').slice(0,300)); }catch(e){}
+    return true;
+  }catch(e){ return false; }
+}
+
+/* ---- Work-log form. Mobile-first: full-width, 16px inputs (stops iOS zoom),
+   48px submit. mode: 'work' (free log) | 'resolve' (done required) |
+   'reject' (need required) | 'reply' (Kevin's note). Resolves {done,cant,need,text} or null. */
+function crWorkLogModal(name, mode){
+  mode=mode||'work';
+  return new Promise(function(resolve){
+    const cfg={
+      work:   { t:'📝 Log work',            sub:'Record what happened so the history stays complete.', btn:'Save to history', col:'var(--accent)' },
+      resolve:{ t:'✅ Mark complete',        sub:'What did you do to complete it? This is what Kevin will see.', btn:'Mark complete ›', col:'var(--money-pos,#2e9e5b)' },
+      reject: { t:'❌ Send back to Kevin',   sub:'Tell Kevin exactly what still needs doing.', btn:'Send back ›', col:'#c0392b' },
+      reply:  { t:'💬 Add a note',           sub:'Your note is added to this item’s history for everyone.', btn:'Add note', col:'var(--accent)' }
+    }[mode]||{};
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;z-index:10003;background:rgba(0,0,0,0.55);display:flex;align-items:flex-start;justify-content:center;padding:5vh 12px 16px;overflow:auto;-webkit-overflow-scrolling:touch';
+    const card=document.createElement('div');
+    card.onclick=function(ev){ ev.stopPropagation(); };
+    card.style.cssText='background:var(--surface,var(--surface-2));color:var(--text);border-radius:16px;padding:18px;max-width:460px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.45)';
+    const TA='width:100%;margin-top:6px;padding:12px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:9px;resize:vertical;font-family:inherit;box-sizing:border-box';
+    const LB='font-weight:700;font-size:13px;margin-top:12px;display:block';
+    let body='';
+    if(mode==='reply'){
+      body='<label style="'+LB+'">Your note <span style="color:#c0392b">*</span></label>'
+        +'<textarea id="cw-text" rows="4" placeholder="What do you want on the record?" style="'+TA+'"></textarea>';
+    } else {
+      body=''
+        +'<label style="'+LB+'">✅ What I fixed'+(mode==='resolve'?' <span style="color:#c0392b">*</span>':'')+'</label>'
+        +'<textarea id="cw-done" rows="3" placeholder="e.g. Pulled ratings from USGA, mapped all 18 greens, set pars." style="'+TA+'"></textarea>'
+        +'<label style="'+LB+'">⚠️ What I couldn’t do (and why)</label>'
+        +'<textarea id="cw-cant" rows="2" placeholder="e.g. No women’s rating published anywhere." style="'+TA+'"></textarea>'
+        +'<label style="'+LB+'">⏭️ What’s still needed'+(mode==='reject'?' <span style="color:#c0392b">*</span>':'')+'</label>'
+        +'<textarea id="cw-need" rows="3" placeholder="e.g. Kevin: confirm this is the Lakes course, not the Pines." style="'+TA+'"></textarea>';
+    }
+    card.innerHTML='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px"><div style="font-weight:800;font-size:18px;line-height:1.25">'+crEsc(cfg.t)+'</div><button id="cw-x" style="background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:8px 13px;font-size:16px;cursor:pointer;flex:0 0 auto">✕</button></div>'
+      +'<div class="small-text" style="color:var(--text-muted);margin-top:4px">'+crEsc(name||'this item')+' — '+crEsc(cfg.sub)+'</div>'
+      +body
+      +'<button id="cw-go" style="width:100%;margin-top:16px;padding:15px;border-radius:12px;border:none;background:'+cfg.col+';color:#fff;font-size:16px;font-weight:800;cursor:pointer;min-height:50px">'+crEsc(cfg.btn)+'</button>'
+      +'<button id="cw-cancel" style="width:100%;margin-top:8px;padding:13px;border-radius:12px;border:1px solid var(--border);background:transparent;color:var(--text-muted);font-size:14px;font-weight:600;cursor:pointer;min-height:44px">Cancel</button>';
+    ov.appendChild(card); document.body.appendChild(ov);
+    const done=function(v){ try{ov.remove();}catch(e){} resolve(v); };
+    card.querySelector('#cw-x').onclick=function(){ done(null); };
+    card.querySelector('#cw-cancel').onclick=function(){ done(null); };
+    ov.onclick=function(ev){ if(ev.target===ov) done(null); };
+    card.querySelector('#cw-go').onclick=function(){
+      const g=function(id){ const el=card.querySelector(id); return el?(el.value||'').trim():''; };
+      if(mode==='reply'){ const t=g('#cw-text'); if(!t){ try{showToast('Type a note first');}catch(e){} return; } done({text:t}); return; }
+      const o={ done:g('#cw-done'), cant:g('#cw-cant'), need:g('#cw-need') };
+      if(mode==='resolve'&&!o.done){ try{showToast('Say what you fixed — it goes in the history');}catch(e){} return; }
+      if(mode==='reject'&&!o.need){ try{showToast('Tell Kevin what’s still needed');}catch(e){} return; }
+      if(!o.done&&!o.cant&&!o.need){ try{showToast('Fill in at least one field');}catch(e){} return; }
+      done(o);
+    };
+    try{ card.querySelector(mode==='reply'?'#cw-text':(mode==='reject'?'#cw-need':'#cw-done')).focus(); }catch(e){}
+  });
+}
+
+/* ---- The history timeline itself. ---- */
+function crNl(x){ return crEsc(x).replace(/\n/g,'<br>'); }
+function crWhen(iso){
+  try{
+    if(!iso) return '';
+    const d=new Date(iso); if(isNaN(d.getTime())) return String(iso).slice(0,10);
+    return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' · '+d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  }catch(e){ return String(iso||'').slice(0,10); }
+}
+function crEventHtml(ev){
+  const META={ submitted:['📥','Submitted for review','var(--accent)'], status:['🔄','Status changed','var(--text-muted)'],
+    work:['📝','Work logged','var(--accent)'], reply:['💬','Note added','#6b7280'], attach:['📎','Image attached','#6b7280'] };
+  const ST={ 'new':['🆕 Marked new','var(--money-pos)'], 'investigating':['🔍 Started investigating','#d98a2b'],
+    'resolved':['✅ Marked complete','var(--money-pos,#2e9e5b)'], 'rejected':['❌ Sent back to Kevin','#c0392b'] };
+  let icon, title, col;
+  if(ev.type==='status'&&ST[ev.to]){ icon=ST[ev.to][0].slice(0,2); title=ST[ev.to][0].slice(2).trim(); col=ST[ev.to][1]; }
+  else { const m=META[ev.type]||META.reply; icon=m[0]; title=m[1]; col=m[2]; }
+  let rows='';
+  if(ev.done) rows+='<div style="margin-top:6px"><span style="font-weight:700;color:var(--money-pos,#2e9e5b)">✅ Fixed:</span> '+crNl(ev.done)+'</div>';
+  if(ev.cant) rows+='<div style="margin-top:6px"><span style="font-weight:700;color:#d98a2b">⚠️ Couldn’t do:</span> '+crNl(ev.cant)+'</div>';
+  if(ev.need) rows+='<div style="margin-top:6px"><span style="font-weight:700;color:#c0392b">⏭️ Still needed:</span> '+crNl(ev.need)+'</div>';
+  if(ev.text) rows+='<div style="margin-top:6px">'+crNl(ev.text)+'</div>';
+  return '<div style="display:flex;gap:9px;padding:11px 0;border-top:1px solid var(--border)">'
+    +'<div style="flex:0 0 auto;font-size:17px;line-height:1.3">'+icon+'</div>'
+    +'<div style="min-width:0;flex:1">'
+      +'<div style="font-weight:700;font-size:14px;color:'+col+'">'+crEsc(title)+'</div>'
+      +'<div class="small-text" style="color:var(--text-muted);margin-top:1px">'+crEsc(ev.byName||'admin')+' · '+crEsc(crWhen(ev.at))+'</div>'
+      +'<div class="small-text" style="line-height:1.55">'+rows+'</div>'
+    +'</div></div>';
+}
+// The 🕘 History button's sheet. Read by Kevin as much as by Tyler, so it leads
+// with the plain-English story and lets Kevin answer in the same thread rather
+// than texting about it (Tyler: "visible to Kevin", "Kevin can reply").
+async function openCrHistory(entryId){
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:10002;background:rgba(0,0,0,0.55);display:flex;align-items:flex-start;justify-content:center;padding:4vh 12px 16px;overflow:auto;-webkit-overflow-scrolling:touch';
+  const card=document.createElement('div');
+  card.onclick=function(e){ e.stopPropagation(); };
+  card.style.cssText='background:var(--surface,var(--surface-2));color:var(--text);border-radius:16px;padding:18px;max-width:460px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.45)';
+  card.innerHTML='<div class="bg-inline-load"><span class="sp"></span>Loading history…</div>';
+  ov.appendChild(card); document.body.appendChild(ov);
+  const close=function(){ try{ov.remove();}catch(e){} };
+  ov.onclick=function(e){ if(e.target===ov) close(); };
+  const render=async function(){
+    const arr=await crReadQueue();
+    const en=arr.find(function(x){ return x&&x.id===entryId; });
+    if(!en){ card.innerHTML='<div class="small-text" style="padding:16px;text-align:center">That item is gone.</div>'; return; }
+    const c=en.course;
+    const nm=en.missing?('MISSING: '+(en.missing.name||'')):((c&&c.name)||'Unknown course');
+    const loc=en.missing?(en.missing.cityState||''):((c&&[c.city,c.state].filter(Boolean).join(', '))||'');
+    const evs=crEnsureEvents(en);
+    const open=(en.status!=='resolved'&&en.status!=='rejected');
+    // Surface the outstanding ask at the TOP — on a phone nobody scrolls a
+    // timeline to find out what they're supposed to do next.
+    let needNow=''; for(let i=evs.length-1;i>=0;i--){ if(evs[i].need){ needNow=evs[i].need; break; } }
+    let html='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px"><div style="min-width:0"><div style="font-weight:800;font-size:17px;line-height:1.25">🕘 History</div>'
+      +'<div class="small-text" style="color:var(--text-muted);margin-top:2px">'+crEsc(nm)+(loc?(' · '+crEsc(loc)):'')+'</div></div>'
+      +'<button id="crh-x" style="background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:8px 13px;font-size:16px;cursor:pointer;flex:0 0 auto">✕</button></div>';
+    if(needNow) html+='<div style="margin-top:10px;padding:10px 12px;background:rgba(192,57,43,0.10);border:1px solid rgba(192,57,43,0.35);border-radius:10px"><div style="font-weight:800;color:#c0392b;font-size:13px">⏭️ Still needed</div><div class="small-text" style="margin-top:3px;line-height:1.55">'+crNl(needNow)+'</div></div>';
+    html+='<div class="small-text" style="color:var(--text-muted);margin-top:10px">'+evs.length+' event'+(evs.length===1?'':'s')+' · newest last</div>';
+    html+='<div style="margin-top:2px">'+(evs.length?evs.map(crEventHtml).join(''):'<div class="small-text" style="color:var(--text-muted);padding:14px 0;text-align:center">No history recorded yet.</div>')+'</div>';
+    html+='<div style="display:flex;flex-direction:column;gap:8px;margin-top:14px;border-top:1px solid var(--border);padding-top:14px">'
+      +'<button id="crh-reply" class="adm-act" style="width:100%;padding:14px;font-size:15px;font-weight:700;min-height:48px">💬 Add a note</button>'
+      +(open?'<button id="crh-work" class="adm-act" style="width:100%;padding:14px;font-size:15px;font-weight:700;min-height:48px">📝 Log work</button>':'')
+      +'<button id="crh-copy" class="adm-act" style="width:100%;padding:13px;font-size:14px;font-weight:600;min-height:44px">📋 Copy full history</button>'
+      +'</div>';
+    card.innerHTML=html;
+    card.querySelector('#crh-x').onclick=close;
+    card.querySelector('#crh-reply').onclick=async function(){
+      const v=await crWorkLogModal(nm,'reply'); if(!v) return;
+      await crAppendEvent(entryId, crMakeEvent('reply', v)); try{showToast('Note added ✓');}catch(e){} render();
+    };
+    const wb=card.querySelector('#crh-work');
+    if(wb) wb.onclick=async function(){
+      const v=await crWorkLogModal(nm,'work'); if(!v) return;
+      await crAppendEvent(entryId, crMakeEvent('work', v)); try{showToast('Logged ✓');}catch(e){} render();
+    };
+    card.querySelector('#crh-copy').onclick=function(){
+      let t='CODE REVIEW HISTORY — '+nm+(loc?(' ('+loc+')'):'')+'\nStatus: '+(en.status||'new')+'\n\n';
+      evs.forEach(function(x){
+        t+='• '+crWhen(x.at)+' — '+(x.byName||'admin')+' — '+(x.type==='status'?('status → '+x.to):x.type)+'\n';
+        if(x.done) t+='    FIXED: '+x.done+'\n';
+        if(x.cant) t+='    COULD NOT: '+x.cant+'\n';
+        if(x.need) t+='    STILL NEEDED: '+x.need+'\n';
+        if(x.text) t+='    '+x.text+'\n';
+      });
+      try{ if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(t); showToast('Copied ✓'); return; } }catch(e){}
+      try{ const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); showToast('Copied ✓'); }catch(e){ try{showToast('Copy failed');}catch(e2){} }
+    };
+  };
+  render();
+}
 // Ask the reviewer WHY a course is being sent back so Kevin sees exactly what to
 // fix. Mobile-friendly overlay (mirrors the code-review modal). Resolves to the
 // typed reason, or null if cancelled. (Tyler, Jul 2026.)
+// v881: superseded by crWorkLogModal(name,'reject') in the queue — kept because
+// other callers may still reference it.
 function crRejectReason(name){
   return new Promise(function(resolve){
     const ov=document.createElement('div');
@@ -14777,7 +15061,7 @@ async function openCodeReviewQueue(){
     const rows=arr.slice().sort(function(a,b){ const d=(ord[a.status]||0)-(ord[b.status]||0); if(d) return d; return (b.createdAt||'').localeCompare(a.createdAt||''); }).filter(function(e){ return showResolved||(e.status!=='resolved'&&e.status!=='rejected'); });
     const pending=arr.filter(function(e){ return e&&e.status!=='resolved'&&e.status!=='rejected'; });
     let html='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><div style="font-weight:800;font-size:18px">🔎 Code Review queue</div><button id="crq-x" style="background:rgba(0,0,0,0.06);border:none;border-radius:8px;padding:6px 12px;font-size:16px;cursor:pointer">✕</button></div>';
-    html+='<div class="small-text" style="color:var(--text-muted);margin-top:4px">'+pending.length+' pending · '+arr.length+' total. Say “check the code review queue” in a chat and Claude works the list.</div>';
+    html+='<div class="small-text" style="color:var(--text-muted);margin-top:4px">'+pending.length+' pending · '+arr.length+' total. Tap <strong>🕘 History</strong> on any item for the full record — why it was sent, what was done, what\u2019s still needed.</div>';
     html+='<div style="display:flex;gap:8px;margin:10px 0"><button id="crq-copy" class="adm-act" style="flex:1;padding:10px">📋 Copy pending for Claude</button><button id="crq-toggle" class="adm-act" style="flex:0 0 auto;padding:10px 14px">'+(showResolved?'Hide resolved':'Show resolved')+'</button></div>';
     if(!rows.length){ html+='<div class="small-text" style="color:var(--text-muted);padding:14px 0;text-align:center">Nothing here 🎉</div>'; }
     rows.forEach(function(e){
@@ -14791,13 +15075,19 @@ async function openCodeReviewQueue(){
         +crqThumbsHtml(c)
         +((e.status==='rejected'&&e.resolutionNote)?'<div class="small-text" style="margin-top:6px;padding:7px 9px;background:rgba(192,57,43,0.10);border:1px solid rgba(192,57,43,0.35);border-radius:8px"><strong style="color:#c0392b">❌ Sent back:</strong> '+crEsc(e.resolutionNote)+'</div>':'')
         +(e.golfpassUrl?'<div class="small-text" style="margin-top:4px"><a href="'+crEa(e.golfpassUrl)+'" target="_blank" rel="noopener" style="color:var(--accent);font-weight:700;text-decoration:none">🔗 GolfPass ›</a></div>':'')
-        +'<div class="small-text" style="color:var(--text-muted);margin-top:5px">'+crEsc(e.submittedByName||'admin')+' · '+crEsc((e.createdAt||'').slice(0,10))+'</div>'
+        +'<div class="small-text" style="color:var(--text-muted);margin-top:5px">'+crEsc(e.submittedByName||'admin')+' · '+crEsc((e.createdAt||'').slice(0,10))+(e.lastEventAt?(' · last update '+crEsc(crWhen(e.lastEventAt))+' by '+crEsc(e.lastEventBy||'admin')):'')+'</div>'
         +'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
           +'<button class="crq-st" data-id="'+crEa(e.id)+'" data-st="new" title="Mark new" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer">🆕</button>'
           +'<button class="crq-st" data-id="'+crEa(e.id)+'" data-st="investigating" title="Mark investigating" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer">🔍</button>'
           +'<button class="crq-st" data-id="'+crEa(e.id)+'" data-st="resolved" title="Mark resolved" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer">✅</button>'
           +'<button class="crq-st" data-id="'+crEa(e.id)+'" data-st="rejected" title="Mark rejected" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer">❌</button>'
           +'<button class="crq-copy1" data-id="'+crEa(e.id)+'" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;margin-left:auto">📋 Copy</button>'
+        +'</div>'
+        // v881 AUDIT — History is the headline action, so it gets a full-width
+        // 44px row of its own rather than competing with the icon buttons above.
+        +'<div style="display:flex;gap:6px;margin-top:6px">'
+          +'<button class="crq-hist" data-id="'+crEa(e.id)+'" style="flex:1;padding:11px;border-radius:9px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;min-height:44px">🕘 History ('+crEventCount(e)+')</button>'
+          +((e.status==='resolved'||e.status==='rejected')?'':'<button class="crq-work" data-id="'+crEa(e.id)+'" style="flex:1;padding:11px;border-radius:9px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;min-height:44px">📝 Log work</button>')
         +'</div>'
       +'</div>';
     });
@@ -14806,7 +15096,26 @@ async function openCodeReviewQueue(){
     card.querySelector('#crq-toggle').onclick=function(){ showResolved=!showResolved; render(); };
     card.querySelector('#crq-copy').onclick=function(){ const t='CODE REVIEW QUEUE — '+pending.length+' pending\n\n'+pending.map(function(e,i){ return (i+1)+') '+crText(e); }).join('\n'); copyText(t); };
     card.querySelectorAll('.crq-copy1').forEach(function(b){ b.onclick=function(){ const e=arr.find(function(x){return x&&x.id===b.dataset.id;}); if(e) copyText(crText(e)); }; });
-    card.querySelectorAll('.crq-st').forEach(function(b){ b.onclick=async function(){ if(b.dataset.st==='rejected'){ const _e=arr.find(function(x){return x&&x.id===b.dataset.id;}); const _nm=(_e&&_e.course&&_e.course.name)||(_e&&_e.missing&&_e.missing.name)||'this course'; const _reason=await crRejectReason(_nm); if(_reason==null) return; b.disabled=true; try{ await crSetStatus(b.dataset.id,'rejected',_reason); }catch(e){} render(); return; } b.disabled=true; try{ await crSetStatus(b.dataset.id, b.dataset.st); }catch(e){} render(); }; });
+    // v881: History + Log work.
+    card.querySelectorAll('.crq-hist').forEach(function(b){ b.onclick=function(){ try{ openCrHistory(b.dataset.id); }catch(e){} }; });
+    card.querySelectorAll('.crq-work').forEach(function(b){ b.onclick=async function(){
+      const _e=arr.find(function(x){return x&&x.id===b.dataset.id;});
+      const _nm=(_e&&_e.course&&_e.course.name)||(_e&&_e.missing&&_e.missing.name)||'this course';
+      const v=await crWorkLogModal(_nm,'work'); if(!v) return;
+      b.disabled=true; try{ await crAppendEvent(b.dataset.id, crMakeEvent('work', v)); showToast('Logged ✓'); }catch(e){} render();
+    }; });
+    // v881: closing OR kicking back now REQUIRES a note (Tyler) — an audit with
+    // blanks in the places that matter most isn't an audit. 🆕/🔍 stay one tap.
+    card.querySelectorAll('.crq-st').forEach(function(b){ b.onclick=async function(){
+      const _st=b.dataset.st;
+      const _e=arr.find(function(x){return x&&x.id===b.dataset.id;});
+      const _nm=(_e&&_e.course&&_e.course.name)||(_e&&_e.missing&&_e.missing.name)||'this course';
+      if(_st==='rejected'||_st==='resolved'){
+        const v=await crWorkLogModal(_nm, _st==='rejected'?'reject':'resolve'); if(!v) return;
+        b.disabled=true; try{ await crSetStatus(b.dataset.id,_st,(_st==='rejected'?v.need:v.done),v); }catch(e){} render(); return;
+      }
+      b.disabled=true; try{ await crSetStatus(b.dataset.id, _st); }catch(e){} render();
+    }; });
   };
   render();
 }
