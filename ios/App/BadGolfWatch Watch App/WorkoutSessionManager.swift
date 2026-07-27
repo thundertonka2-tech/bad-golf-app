@@ -19,6 +19,7 @@
 
 import Foundation
 import HealthKit
+import Combine   // @Published / ObservableObject live here — build 314 failed without it
 
 final class WorkoutSessionManager: NSObject, ObservableObject {
     static let shared = WorkoutSessionManager()
