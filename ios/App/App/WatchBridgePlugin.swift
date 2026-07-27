@@ -10,6 +10,25 @@ import Capacitor
 @objc(WatchBridgePlugin)
 public class WatchBridgePlugin: CAPPlugin {
 
+    // v891: forward watch score updates to the web app. PhoneWCSession receives
+    // them over WCSession and posts .badGolfWatchScoreUpdate; we raise the
+    // 'watchScore' JS event (retained until the web layer consumes it, so a
+    // score that arrives while the app is waking is not lost). This is the
+    // observer that was famously MISSING for round requests pre-v890 — wired
+    // properly from day one for scores.
+    private var scoreObserver: NSObjectProtocol?
+
+    public override func load() {
+        scoreObserver = NotificationCenter.default.addObserver(
+            forName: .badGolfWatchScoreUpdate, object: nil, queue: .main
+        ) { [weak self] note in
+            var data: [String: Any] = [:]
+            if let rid = note.userInfo?["roundId"] as? String { data["roundId"] = rid }
+            if let sc = note.userInfo?["scores"] as? [String: Any] { data["scores"] = sc }
+            self?.notifyListeners("watchScore", data: data, retainUntilConsumed: true)
+        }
+    }
+
     // Registers the JS-callable method.
     @objc func syncSession(_ call: CAPPluginCall) {
         let token = call.getString("token")

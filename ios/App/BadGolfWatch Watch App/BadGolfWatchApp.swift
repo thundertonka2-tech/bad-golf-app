@@ -43,7 +43,14 @@ struct BadGolfWatchApp: App {
                 .onAppear {
                     WatchConnectivityManager.shared.store = store
                     loc.requestPermission()
-                    if store.round != nil { loc.startUpdating() }
+                    if store.round != nil {
+                        loc.startUpdating()
+                        // v891: an active workout session is what keeps this app
+                        // (and its GPS) RUNNING while the wrist is down — the
+                        // 18Birdies behavior. Without it watchOS suspends us on
+                        // screen-sleep and every raise was a cold GPS start.
+                        WorkoutSessionManager.shared.start()
+                    }
                     // Always ask the phone for the latest as soon as we launch —
                     // requestRound() itself no-ops until reachable, so this is
                     // safe to call even when the phone isn't in range yet.
@@ -54,7 +61,13 @@ struct BadGolfWatchApp: App {
                     }
                 }
                 .onChange(of: store.round?.id) { _, newValue in
-                    if newValue != nil { loc.startUpdating() } else { loc.stopUpdating() }
+                    if newValue != nil {
+                        loc.startUpdating()
+                        WorkoutSessionManager.shared.start()   // v891: keep GPS alive wrist-down
+                    } else {
+                        loc.stopUpdating()
+                        WorkoutSessionManager.shared.stop()    // v891: round over — end the workout
+                    }
                 }
                 .onChange(of: scenePhase) { _, newPhase in
                     guard newPhase == .active else { return }

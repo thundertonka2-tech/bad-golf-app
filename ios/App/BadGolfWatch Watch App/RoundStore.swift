@@ -207,13 +207,22 @@ final class RoundStore: ObservableObject {
     }
 
     // MARK: Sync queue
+    // v891: scores go to the PHONE over WCSession — the phone app saves them
+    // through its normal protected merge path (same code path as tapping the
+    // score on the phone screen). The old SupabaseService.writeScores targeted
+    // columns that don't exist on the real `games` table (`id`, `scores`), so
+    // every watch score write failed with a 400 and sat "queued" forever.
     func flush() async {
         guard let r = round, !pendingHoles.isEmpty else { return }
         syncState = .syncing
-        let ok = await SupabaseService.shared.writeScores(roundId: r.id, scores: r.scores)
+        let pending = pendingHoles
+        let toSend = r.scores.filter { pending.contains($0.key) }
+        let ok = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            WatchConnectivityManager.shared.sendScores(roundId: r.id, scores: toSend) { cont.resume(returning: $0) }
+        }
         if ok {
-            pendingHoles.removeAll()
-            syncState = .synced
+            pendingHoles.subtract(pending)   // only clear what THIS send covered
+            syncState = pendingHoles.isEmpty ? .synced : .queued(pendingHoles.count)
         } else {
             syncState = .queued(pendingHoles.count)
         }

@@ -7426,7 +7426,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.890';
+const BG_BUILD = 'v2026.11.891';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -21577,6 +21577,66 @@ window.BadGolfWatchSync = async function () {
 };
 // Fire-and-forget helper used at hole/score/start hooks.
 function _bgWatchSyncSoon() { try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {} }
+
+// ===== v891: scores entered ON THE WATCH ====================================
+// The watch's old path wrote straight at Supabase with a schema that doesn't
+// exist (games.id / games.scores columns) — every write 400'd, so watch scores
+// NEVER synced. Now the watch sends { roundId, scores } over WCSession; the
+// native side raises a 'watchScore' event here, and we save it through the
+// EXACT same protected path as tapping the score on the phone screen:
+// _markScoreTouched (my cell wins concurrent merges) + saveGame (merge-on-write,
+// dirty queue). Only ever touches MY OWN player's cells in the ACTIVE round.
+window.__onWatchScore = async function (u) {
+  try {
+    if (!u) return;
+    const g = (typeof state !== 'undefined' && state) ? state.game : null;
+    if (!g || !g.code || g.finishedAt || state.viewOnlyMode) return;      // no live round → ignore
+    if (u.roundId && u.roundId !== g.code) return;                        // different round → ignore
+    const pid = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null;
+    if (!pid) return;
+    const incoming = u.scores || {};
+    if (!g.scores) g.scores = {};
+    if (!g.scores[pid]) g.scores[pid] = new Array(18).fill(null);
+    let changed = false;
+    Object.keys(incoming).forEach(k => {
+      const h = parseInt(k, 10);
+      if (!(h >= 1 && h <= 18)) return;
+      const rec = incoming[k];
+      const raw = (rec && rec.strokes != null) ? parseInt(rec.strokes, 10) : null;
+      const val = (raw != null && isFinite(raw) && raw > 0) ? Math.min(15, raw) : null;
+      if (g.scores[pid][h - 1] === val) return;
+      g.scores[pid][h - 1] = val;
+      try { _markScoreTouched('scores', pid, h - 1); } catch (e) {}
+      if (val !== null && !g.firstScoreAt) g.firstScoreAt = Date.now();
+      try { syncGirJunk(g, h); } catch (e) {}
+      try { syncSandyJunk(g, h); } catch (e) {}
+      try { syncArnieJunk(g, h); } catch (e) {}
+      changed = true;
+    });
+    if (!changed) return;
+    await saveGame(g);
+    // Refresh the score screen if it's what's on screen, and confirm on-phone.
+    try { const _at = document.querySelector('.tab.active'); if (_at && _at.dataset.tab === 'score' && typeof renderScoreEntry === 'function') renderScoreEntry(); } catch (e) {}
+    try { showToast('⌚ Score from your watch saved'); } catch (e) {}
+    // Echo the saved round back to the watch so its "queued" state confirms.
+    try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
+  } catch (e) {}
+};
+// Wire the native 'watchScore' event → handler. Retries until the plugin is up
+// (native only); events raised before the listener attaches are retained by the
+// native side (retainUntilConsumed), so an early score isn't lost.
+(function _bgWireWatchScore() {
+  try {
+    if (typeof isNativeApp !== 'function' || !isNativeApp()) return;
+    if (window._bgWatchScoreWired) return;
+    if (!(window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.WatchBridge && typeof Capacitor.Plugins.WatchBridge.addListener === 'function')) {
+      setTimeout(_bgWireWatchScore, 1500);
+      return;
+    }
+    window._bgWatchScoreWired = true;
+    Capacitor.Plugins.WatchBridge.addListener('watchScore', function (d) { try { window.__onWatchScore(d); } catch (e) {} });
+  } catch (e) {}
+})();
 
 // ============================================================
 // SETUP UI

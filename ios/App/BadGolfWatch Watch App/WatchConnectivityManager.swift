@@ -40,7 +40,12 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
         Task { @MainActor in
             let wasReachable = self.isReachable
             self.isReachable = reachable
-            if reachable && !wasReachable { self.requestRound() }
+            if reachable && !wasReachable {
+                self.requestRound()
+                // v891: the link is back — push any wrist-entered scores that
+                // queued up while the phone was out of range.
+                if let st = self.store { await st.flush() }
+            }
         }
     }
 
@@ -77,5 +82,35 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
         WCSession.default.sendMessage(["request": "round"], replyHandler: { [weak self] payload in
             self?.handle(payload: payload)
         }, errorHandler: nil)
+    }
+
+    /// v891: send the wearer's scores to the PHONE, which saves them through the
+    /// app's normal protected merge path. Replaces the old direct Supabase
+    /// writes — those targeted columns that don't exist on `games`, so they
+    /// 400'd on every attempt and watch scores NEVER synced. completion(true)
+    /// only when the phone acknowledged receipt.
+    func sendScores(roundId: String, scores: [Int: HoleScore], completion: @escaping (Bool) -> Void) {
+        var obj: [String: Any] = [:]
+        for (hole, s) in scores {
+            var d: [String: Any] = ["strokes": s.strokes]
+            if let p = s.putts { d["putts"] = p }
+            obj[String(hole)] = d
+        }
+        let update: [String: Any] = ["scoreUpdate": ["roundId": roundId, "scores": obj]]
+        guard WCSession.default.activationState == .activated else { completion(false); return }
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(update, replyHandler: { _ in completion(true) },
+                                          errorHandler: { _ in
+                // Live send failed mid-flight — queue guaranteed delivery and
+                // keep the local pending flag until a future reachable ack.
+                WCSession.default.transferUserInfo(update)
+                completion(false)
+            })
+        } else {
+            // Phone out of range: guaranteed delivery when it reconnects. Stay
+            // "queued" locally so the reconnect flush re-confirms with an ack.
+            WCSession.default.transferUserInfo(update)
+            completion(false)
+        }
     }
 }
