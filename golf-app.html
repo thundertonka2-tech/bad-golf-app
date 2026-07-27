@@ -2424,6 +2424,27 @@
     box-shadow: 0 2px 8px rgba(0,0,0,0.45);
   }
   #gps-overlay.map-only #gps-find-btn { display: flex; }
+  /* v884 (Tyler) — admin map-session COMPASS. Bottom-right, deliberately translucent
+     so it reads as an instrument sitting on the imagery rather than a control fighting
+     it. Sits in the existing right-edge stack ABOVE "Find an address" (bottom +130px)
+     and above MapLibre's attribution ⓘ (bottom +10px), so nothing overlaps.
+     46px visual with a 46px hit area — comfortably past the 44px touch minimum. */
+  #gps-compass {
+    position: absolute; right: 12px; bottom: calc(max(env(safe-area-inset-bottom), 8px) + 180px);
+    z-index: 23; display: none; align-items: center; justify-content: center;
+    width: 46px; height: 46px; padding: 0; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.28);
+    background: rgba(14,58,100,0.40);
+    -webkit-backdrop-filter: blur(5px); backdrop-filter: blur(5px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.38);
+    opacity: 0.70; cursor: pointer; -webkit-tap-highlight-color: transparent;
+    transition: opacity .15s ease;
+  }
+  #gps-compass:active { opacity: 1; }
+  #gps-overlay.map-only #gps-compass { display: flex; }
+  #gps-compass svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+  #gps-compass .cmp-dial { transition: transform .12s linear; }
+  #gps-compass .cmp-heading { display: none; transition: transform .12s linear; }
   /* Hazard map markers: small water (blue) / bunker (tan) dot + live carry yardage. */
   .gps-hazard-marker { display:flex; align-items:center; gap:3px; pointer-events:none; z-index:3; font:700 11px/1 system-ui,-apple-system,sans-serif; white-space:nowrap; }
   .gps-hazard-marker .hz-ic { width:13px; height:13px; border-radius:50%; border:2px solid rgba(255,255,255,0.92); box-shadow:0 1px 4px rgba(0,0,0,0.55); }
@@ -6943,6 +6964,21 @@
        shown upper-right since the top FRONT/MID/BACK bar is hidden while mapping. -->
   <div id="gps-admin-par" aria-hidden="true"><div class="lbl">PAR</div><div class="val">—</div></div>
 
+  <!-- v884: compass for the admin map session. Red needle = north. The thin gold
+       tick on the rim appears only if the device reports a heading, and shows which
+       way the phone is physically pointing. Tap = snap the map back to north-up. -->
+  <button id="gps-compass" type="button" aria-label="Compass. Tap to face north." title="Tap to face north">
+    <svg class="cmp-dial" viewBox="0 0 44 44" aria-hidden="true" focusable="false">
+      <circle cx="22" cy="22" r="19" fill="none" stroke="rgba(255,255,255,0.26)" stroke-width="1"></circle>
+      <polygon points="22,5.5 27,22 22,19 17,22" fill="#e8503a"></polygon>
+      <polygon points="22,38.5 17,22 22,25 27,22" fill="rgba(255,255,255,0.90)"></polygon>
+      <circle cx="22" cy="22" r="2" fill="rgba(255,255,255,0.92)"></circle>
+    </svg>
+    <svg class="cmp-heading" viewBox="0 0 44 44" aria-hidden="true" focusable="false">
+      <polygon points="22,1.5 25,7.5 19,7.5" fill="#ffd34d"></polygon>
+    </svg>
+  </button>
+
   <!-- Tee-box yardage for the current hole (player's selected tee) -->
   <div id="gps-tee-yds" aria-hidden="true">—</div>
 
@@ -7390,7 +7426,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.882';
+const BG_BUILD = 'v2026.11.884';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -57612,6 +57648,15 @@ const gpsView = (() => {
     setTimeout(collapseAttrib, 600); setTimeout(collapseAttrib, 1600);
     map.on('move', () => { if (mode === 'view') positionPills(); });
     map.on('rotate', renderWind);
+    // v884: the compass button lives outside this closure but `map` does not, so hand
+    // it the two things it needs from in here — the live bearing, and a way home.
+    try {
+      window.__gpsCompassResetNorth = function () { try { map.easeTo({ bearing: 0, duration: 300 }); } catch (e) {} };
+      var _cmpSync = function () { try { if (window.__gpsCompassSetBearing) window.__gpsCompassSetBearing(map.getBearing() || 0); } catch (e) {} };
+      map.on('rotate', _cmpSync);
+      map.on('load', _cmpSync);
+      _cmpSync();
+    } catch (e) {}
     map.on('click', e => { if (mode === 'wizard') wizardTap([e.lngLat.lng, e.lngLat.lat]); else if (mode === 'fwc') fwcTap([e.lngLat.lng, e.lngLat.lat]); });
     // Only USER gestures carry an originalEvent — our own easeTo/jumpTo don't, so
     // auto-follow re-frames never count as the player "taking control".
@@ -62830,12 +62875,189 @@ function renderMyShots() {
     window.addEventListener('pagehide', flush);
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { restoreAll(document); });
     else restoreAll(document);
-    // Light catch-up for screens rendered after load (modals/panels): re-scan on focus events
-    // is already covered by focusin; also expose a manual hook for callers if ever needed.
     window.__restoreFormDrafts = restoreAll;
+
+    /* -----------------------------------------------------------------------
+       v883 — THE HOLE IN PHASE 1.
+       Everything above already SAVED reliably. What it didn't do is give the
+       work back. restoreAll() ran exactly once, at page load — and in this app
+       every editor is a modal or panel built AFTER load. So the only thing that
+       restored a dynamically-shown screen was the per-field `focusin` handler:
+       the draft came back only if the user happened to tap that exact box.
+       (window.__restoreFormDrafts was left as a manual hook and never called
+       from anywhere — confirmed across the whole file.)
+
+       From the user's chair that is indistinguishable from losing the work:
+       they take a call, come back, the form is blank, and they retype it. The
+       data was in localStorage the whole time. This closes that gap — when a
+       screen with draftable fields becomes visible, its drafts come back on
+       their own, and we say so.
+
+       Deliberately conservative, because a form filling itself in unasked is
+       worse than an empty one if it guesses wrong:
+         · text inputs + textareas ONLY — never <select>. A select silently
+           re-choosing a value (and firing change) reads as the app doing
+           something on its own, not as recovered typing.
+         · never touches a field that already has a value, so anything the
+           screen prefills always wins.
+         · skips search/filter boxes — those are meant to start empty.
+         · respects data-no-draft, same as everywhere else.
+         · 30-minute window. Restoring what you typed a minute ago is a rescue;
+           restoring yesterday's abandoned text is a bug.
+       ----------------------------------------------------------------------- */
+    var SHOW_MAXAGE = 30 * 60 * 1000;
+    function _searchy(el) {
+      try { return (el.type || '').toLowerCase() === 'search' || /search|filter|query/i.test(el.id || ''); }
+      catch (e) { return false; }
+    }
+    function restoreInto(root) {
+      var n = 0;
+      try {
+        (root || document).querySelectorAll('input[id], textarea[id]').forEach(function (el) {
+          try {
+            if (!eligible(el)) return;
+            if (_searchy(el)) return;
+            if (el.value != null && el.value !== '') return;
+            var raw = localStorage.getItem(keyFor(el)); if (!raw) return;
+            var d = JSON.parse(raw); if (!d || typeof d.v !== 'string' || !d.v) return;
+            if (Date.now() - (d.t || 0) > SHOW_MAXAGE) return;
+            restore(el);
+            if (el.value === d.v) n++;
+          } catch (e) {}
+        });
+      } catch (e) {}
+      return n;
+    }
+    window.__restoreFormDraftsInto = restoreInto;
+
+    function _vis(el) {
+      try { return !!(el.offsetParent !== null || (el.getBoundingClientRect && el.getBoundingClientRect().height > 0)); }
+      catch (e) { return false; }
+    }
+    // Is this node an editor surface (or does it contain one)? Keeps the observer
+    // cheap — the app re-renders big lists constantly and none of that qualifies.
+    function _surface(el) {
+      try {
+        if (!el || el.nodeType !== 1) return false;
+        var c = el.className;
+        if (typeof c === 'string' && /(^|\s)(modal|modal-overlay|panel|sheet|overlay)(\s|$)/.test(c)) return true;
+        var id = el.id || '';
+        return /modal|panel|sheet|-ov$|overlay/i.test(id);
+      } catch (e) { return false; }
+    }
+    var _q = [], _t = null;
+    function _queue(el) {
+      try {
+        if (!el || el.nodeType !== 1) return;
+        if (_q.length > 30) return;                 // runaway guard
+        if (_q.indexOf(el) < 0) _q.push(el);
+        if (_t) return;
+        _t = setTimeout(function () {
+          _t = null;
+          var batch = _q.splice(0), n = 0;
+          batch.forEach(function (node) { try { if (_vis(node)) n += restoreInto(node); } catch (e) {} });
+          if (n > 0) { try { if (typeof showToast === 'function') showToast('\u21a9\ufe0f Restored what you were typing'); } catch (e) {} }
+        }, 140);                                     // let the screen finish prefilling first
+      } catch (e) {}
+    }
+    try {
+      if (typeof MutationObserver === 'function' && document.body) {
+        new MutationObserver(function (muts) {
+          for (var i = 0; i < muts.length; i++) {
+            var m = muts[i];
+            if (m.type === 'attributes') {
+              if (_surface(m.target)) _queue(m.target);
+            } else if (m.type === 'childList' && m.addedNodes) {
+              for (var j = 0; j < m.addedNodes.length; j++) {
+                var nd = m.addedNodes[j];
+                if (!nd || nd.nodeType !== 1) continue;
+                if (!_surface(nd)) continue;
+                if (!nd.querySelector) continue;
+                if (nd.querySelector('input[id], textarea[id]')) _queue(nd);
+              }
+            }
+          }
+        }).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style'] });
+      }
+    } catch (e) {}
   } catch (e) { /* draft system is best-effort; never breaks the app */ }
 })();
 // =================== END FORM DRAFT AUTO-SAVE ===================
+
+/* ===== v884 — GPS admin map compass =========================================
+   Two independent things, on one 46px dial:
+     · the DIAL counter-rotates with the map's bearing, so the red needle always
+       points at real north. Touch-rotate is disabled on the GPS map, so on a
+       phone this is normally a steady north-up reference against the satellite
+       image — which is exactly what you want when placing tees and greens.
+     · the GOLD TICK on the rim is the device's own heading — which way the phone
+       is physically pointing — for whoever is standing on the course. It stays
+       hidden unless the hardware actually reports a heading, so it never shows a
+       number we can't stand behind.
+   Tapping snaps the map back to north-up. That same tap is also the user gesture
+   iOS 13+ requires before it will release heading data, so the needle can only
+   ever appear after a deliberate press — we never fire a permission prompt at
+   someone just for opening the map.
+   All best-effort: any failure leaves a plain, still-useful north dial.
+   ========================================================================== */
+(function GpsAdminCompass() {
+  try {
+    var btn = document.getElementById('gps-compass');
+    if (!btn) return;
+    var dial = btn.querySelector('.cmp-dial');
+    var head = btn.querySelector('.cmp-heading');
+    var bearing = 0, heading = null;
+
+    function paint() {
+      try {
+        if (dial) dial.style.transform = 'rotate(' + (-bearing) + 'deg)';
+        if (head) {
+          if (heading == null) { head.style.display = 'none'; }
+          else { head.style.display = 'block'; head.style.transform = 'rotate(' + (heading - bearing) + 'deg)'; }
+        }
+      } catch (e) {}
+    }
+    window.__gpsCompassSetBearing = function (b) {
+      var n = Number(b); if (!isFinite(n)) n = 0;
+      bearing = n; paint();
+    };
+
+    function onOrient(ev) {
+      try {
+        if (!ev) return;
+        var h = null;
+        // iOS reports compass degrees directly (already true-north referenced).
+        if (typeof ev.webkitCompassHeading === 'number' && !isNaN(ev.webkitCompassHeading)) h = ev.webkitCompassHeading;
+        // Elsewhere only an ABSOLUTE reading is worth showing; a relative alpha is
+        // just "rotation since the page loaded" and would point somewhere arbitrary.
+        else if (ev.absolute === true && typeof ev.alpha === 'number' && !isNaN(ev.alpha)) h = 360 - ev.alpha;
+        if (h == null) return;
+        heading = ((h % 360) + 360) % 360;
+        paint();
+      } catch (e) {}
+    }
+    function listen() {
+      try { window.addEventListener('deviceorientationabsolute', onOrient, true); } catch (e) {}
+      try { window.addEventListener('deviceorientation', onOrient, true); } catch (e) {}
+    }
+    // Platforms that hand out heading without asking (most Android) light up
+    // immediately; iOS stays quiet here and waits for the tap below.
+    listen();
+
+    btn.addEventListener('click', function () {
+      try {
+        var D = window.DeviceOrientationEvent;
+        if (D && typeof D.requestPermission === 'function' && !btn._askedHeading) {
+          btn._askedHeading = true;
+          D.requestPermission().then(function (r) { if (r === 'granted') listen(); }).catch(function () {});
+        }
+      } catch (e) {}
+      try { if (window.__gpsCompassResetNorth) window.__gpsCompassResetNorth(); } catch (e) {}
+    });
+
+    paint();
+  } catch (e) { /* compass is cosmetic — never let it break the map */ }
+})();
 
 // ===== Uniform save status (v216, Phase 3) =====
 // Reflects the REAL committed boolean a save returns, so an editor never shows a
