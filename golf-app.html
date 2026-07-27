@@ -7450,7 +7450,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.901';
+const BG_BUILD = 'v2026.11.902';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -13657,7 +13657,10 @@ async function archiveScoresFromRound(g) {
       scoreMix,
       holeScores: Array.isArray(arr) ? arr.map(v => (v == null ? null : v)) : null,
       pars: Array.isArray(g.pars) ? g.pars.slice() : null,
-      gameCode: g.code || null
+      gameCode: g.code || null,
+      // v902: stamp the tournament id so the trophy on Home / Saved rounds works
+      // offline and keeps working after the tournament_groups rows are gone.
+      t2Id: (g.t2 && g.t2.tournamentId) || null
     };
 
     if (existingIdx >= 0) {
@@ -36796,6 +36799,42 @@ async function leaveHomeRound(r) {
   try { await renderHomeInvites(); } catch (e) {}
 }
 
+// v902 (Tyler): "add a trophy beside the tournament rounds" — Home ▸ Your rounds
+// AND the shared Saved-rounds list (which Events and Stats both render, so those
+// two are one code path, not two).
+//
+// The catch: a finished round's archived scoreHistory entry carries NO tournament
+// marker at all (see the record builder ~13653), so for rounds already played the
+// only way to know one belonged to a tournament is tournament_groups, which maps a
+// tournament's group to the game_code it played. ONE read, cached for 5 minutes and
+// shared by all three lists so they can never disagree about what's a tournament.
+// A failed/offline read is NOT cached (stamp left at 0) so it retries instead of
+// showing a trophy-less list for the next five minutes.
+//
+// Going forward the archive also stamps t2Id on the record (see the record builder),
+// so new tournament rounds keep their trophy offline and outlive the group rows.
+// Deliberately t2 ONLY: g.tourneyId also gets set by plain saved-round configs, so
+// keying off that would put a trophy on ordinary weekly rounds.
+let _tourneyCodesCache = null, _tourneyCodesAt = 0;
+async function tourneyRoundCodes() {
+  if (_tourneyCodesCache && (Date.now() - _tourneyCodesAt) < 300000) return _tourneyCodesCache;
+  const set = new Set();
+  let ok = false;
+  try {
+    if (typeof supa !== 'undefined' && supa) {
+      const { data } = await supa.from('tournament_groups').select('game_code');
+      if (Array.isArray(data)) { ok = true; data.forEach(g => { if (g && g.game_code) set.add(g.game_code); }); }
+    }
+  } catch (e) {}
+  _tourneyCodesCache = set;
+  _tourneyCodesAt = ok ? Date.now() : 0;
+  return set;
+}
+// One definition of the trophy so Home, Events and Stats are pixel-identical.
+function tourneyTrophy(is) {
+  return is ? ' <span title="Tournament round" aria-label="Tournament round" style="font-size:12px;vertical-align:1px">\u{1F3C6}</span>' : '';
+}
+
 async function renderHomeInvites() {
   const card = document.getElementById('home-invites-card');
   const list = document.getElementById('home-invites-list');
@@ -36948,7 +36987,10 @@ async function renderHomeInvites() {
               kind: 't2round', code: g2.game_code, tournamentId: ev.id, courseId: _cid2, dayNumber: d.day_number,
               ownerId: ev.commissioner_id || null, myTpId: (function(){ try { return Array.from(_meIds)[0]; } catch (e) { return null; } })(), isCreator: !!(ev.commissioner_id && _authUser && ev.commissioner_id === _authUser.id),
               course: _g0.course || ev.name || 'Tournament round',
-              sub: '🏆 ' + (ev.name || 'Tournament') + (_days.length > 1 ? ' · Day ' + d.day_number : '') + ' · Group ' + g2.group_number + (_thru ? ' · thru ' + _thru : ''),
+              // v902: the trophy moved OUT of this subtitle and up beside the
+              // course name, so a live tournament round and a finished one wear
+              // it in the same place instead of two different ones.
+              sub: (ev.name || 'Tournament') + (_days.length > 1 ? ' · Day ' + d.day_number : '') + ' · Group ' + g2.group_number + (_thru ? ' · thru ' + _thru : ''),
               action: 'Open'
             });
             break;   // only the group I'm assigned to this day — one card per event-day
@@ -37026,6 +37068,7 @@ async function renderHomeInvites() {
           const dt6 = s.date ? new Date(s.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
           rows.push({
             kind: 'completed', gameCode: s.gameCode || null, manual: !!s.manual, course: s.course || 'Round',
+            t2Id: s.t2Id || null,                      // v902: stamped at archive time (new rounds)
             sub: (dt6 ? dt6 + ' · ' : '') + 'Gross ' + (s.gross != null ? s.gross : '—'),
             others: (_partners.get(_pKey(s)) || []),   // v886: who else played, and what they shot
             action: 'View'
@@ -37035,6 +37078,16 @@ async function renderHomeInvites() {
   } catch (e) { console.warn('home completed rounds fetch', e); }
 
   if (!rows.length) { card.style.display = 'none'; list.innerHTML = ''; return; }
+  // v902: mark which rows are tournament rounds so the row template can trophy
+  // them. t2round rows are tournaments by construction; everything else is matched
+  // by game code (or the stamp on newer archives).
+  try {
+    const _tc = await tourneyRoundCodes();
+    rows.forEach(r => {
+      r.isTourney = (r.kind === 't2round') || !!r.t2Id
+        || !!(r.gameCode && _tc.has(r.gameCode)) || !!(r.code && _tc.has(r.code));
+    });
+  } catch (e) {}
   card.style.display = 'block';
   // v878 (Tyler): "We keep recreating stuff instead of using what we already
   // have... I want the new section on the home page to look just like saved
@@ -37077,7 +37130,7 @@ async function renderHomeInvites() {
     return '<div class="home-invite-row" data-i="' + i + '" style="padding:12px 0;border-bottom:1px solid var(--border)">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
         '<div style="flex:1;min-width:0;cursor:pointer" class="home-row-tap" data-i="' + i + '">' +
-          '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(r.course) + '</div>' +
+          '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(r.course) + tourneyTrophy(r.isTourney) + '</div>' +
           '<div style="font-size:12px;color:var(--text-muted);white-space:normal;line-height:1.4;overflow-wrap:anywhere">' + chipForRow(r) + escapeHtml(r.sub) + '</div>' +
           partnersHtml(r) +
         '</div>' +
@@ -40339,6 +40392,10 @@ async function loadRounds() {
 
   // Sort for display: LIVE/unfinished rounds first, then by the fixed PLAY date
   // (newest first). Avoids a re-touched old round jumping to the top by updatedAt.
+  // v902: same trophy on the shared Saved-rounds list (Events ▸ Saved rounds and
+  // the Stats tab both render THIS function, so one edit covers both).
+  let _tcodes = new Set();
+  try { _tcodes = await tourneyRoundCodes(); } catch (e) {}
   const recentSorted = recent.slice().sort((a, b) => {
     const aLive = !a.finishedAt && !isRoundStale(a), bLive = !b.finishedAt && !isRoundStale(b);
     if (aLive !== bLive) return aLive ? -1 : 1;
@@ -40371,7 +40428,7 @@ async function loadRounds() {
     const btnStyle = (isLive || isScheduled) ? ' style="background:var(--accent);color:#fff;border-color:var(--accent)"' : '';
     row.innerHTML = `
       <div style="flex:1;min-width:0;cursor:pointer" class="recent-row-tap">
-        <div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.course}</div>
+        <div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.course}${tourneyTrophy(!!(r.t2 && r.t2.tournamentId) || (!!r.code && _tcodes.has(r.code)))}</div>
         <div style="font-size:12px;color:var(--text-muted);white-space:normal;line-height:1.4;overflow-wrap:anywhere">${liveTag}${date}${playersStr}</div>
       </div>
       <button class="small recent-open-btn"${btnStyle}>${btnLabel}</button>
@@ -40419,7 +40476,7 @@ async function loadRounds() {
     const _descLine = (_rec && _rec.scoreLine) ? _rec.scoreLine : ('Gross ' + grossStr);
     row.innerHTML =
       '<div style="flex:1;min-width:0;cursor:pointer" class="past-row-tap">' +
-        '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(s.course || 'Past round') + '</div>' +
+        '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(s.course || 'Past round') + tourneyTrophy(!!s.t2Id || (!!s.gameCode && _tcodes.has(s.gameCode))) + '</div>' +
         '<div style="font-size:12px;color:var(--text-muted);white-space:normal;line-height:1.4;overflow-wrap:anywhere">' +
           bgStatusChip(s.manual ? 'past' : 'complete') +
           escapeHtml(date) + ' · ' + escapeHtml(_descLine) + '</div>' +
