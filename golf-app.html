@@ -7390,7 +7390,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.879';
+const BG_BUILD = 'v2026.11.880';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -9110,6 +9110,7 @@ async function renderAdmin() {
       };
       const _gotDel = await _freshDel(KEY_COURSE_DELETES);
       await _freshDel(KEY_COURSE_DELETES_LOCKED);
+      try { await loadStateLocks(true); } catch (e) {}   // v880: locks fresh before the picker renders
       if (_gotDel) { try { invalidateCourseLibraryCache(); if (typeof loadCourseLibrary === 'function') await loadCourseLibrary(true); } catch (e) {} }
     }
   } catch (e) {}
@@ -9141,10 +9142,13 @@ async function renderAdmin() {
   const states = [...new Set((COURSE_LIBRARY || []).map(stCode).filter(Boolean))]
     .sort((a, b) => (stateNames[a] || a).localeCompare(stateNames[b] || b));
   if (states.length) {
-    html += '<select id="adm-state" style="width:100%;margin-bottom:8px"><option value="">All states</option>'
-      + states.map(s => '<option value="' + ea(s) + '"' + (_adminStateFilter === s ? ' selected' : '') + '>' + esc(stateNames[s] || s) + '</option>').join('')
+    html += '<select id="adm-state" style="width:100%;margin-bottom:8px;padding:13px 12px;font-size:16px;min-height:48px"><option value="">All states</option>'
+      + states.map(s => '<option value="' + ea(s) + '"' + (_adminStateFilter === s ? ' selected' : '') + '>' + (isStateLockedSync(s) ? '🔒 ' : '') + esc(stateNames[s] || s) + '</option>').join('')
       + '</select>';
   }
+  // v880 STATE LOCK — lock/unlock control for the state picked above. Full-width
+  // 48px target so it works one-handed on a phone.
+  html += '<div id="adm-lock-bar" style="display:none"></div>';
   html += '<input id="adm-search" type="text" placeholder="Search ANY course (or state)…" value="' + ea(_adminSearch) + '" style="width:100%;margin-bottom:8px;padding:13px 14px;font-size:16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">';
   // Map view — plots the in-scope courses so duplicates / mislabeled locations
   // are obvious; tap a pin to open that course. Collapsed by default for speed.
@@ -9166,6 +9170,7 @@ async function renderAdmin() {
   if (dashBtn) dashBtn.onclick = () => { try { openAdminDashboard(); } catch (e) { console.warn('dash', e); } };
   try { renderAdminSpectate(); } catch (e) {}
   { const _sr = document.getElementById('adm-spectate-refresh'); if (_sr) _sr.onclick = () => { try { renderAdminSpectate(); } catch (e) {} }; }
+  try { renderAdminLockBar(); } catch (e) {}   // v880
   renderAdminWorklist();   // draws the "pick a state" prompt — no data needed yet
   // If a state/search is already active (e.g. this is a refresh after an edit),
   // reload the course data so the list comes right back instead of the prompt.
@@ -9185,6 +9190,7 @@ async function renderAdmin() {
   const stSel = document.getElementById('adm-state');
   if (stSel) stSel.onchange = async () => {
     _adminStateFilter = stSel.value || ''; _adminShow = 0;
+    try { renderAdminLockBar(); } catch (e) {}   // v880
     const _sk = (_adminStateFilter || '') + '|' + (_adminSearch || '');
     if (!_adminDataReady || _adminScopeKey !== _sk) { const l = document.getElementById('adm-list'); if (l) l.innerHTML = '<div class="bg-inline-load"><span class="sp"></span>Loading courses…</div>'; }
     await ensureAdminData();   // refetch counts whenever the scope (state/search) changes
@@ -9274,8 +9280,8 @@ async function renderAdmin() {
     if (t.dataset.sort) { _adminSort = t.dataset.sort; _adminShow = 0; await ensureAdminData(); renderAdminWorklist(); return; }
     if (t.dataset.showmore) { _adminShow = parseInt(t.dataset.showmore, 10) || 0; renderAdminWorklist(); return; }
     if (t.dataset.open) { openCourseDetail(t.dataset.open); return; }
-    if (t.dataset.skip) { _adminSkipped.add(t.dataset.skip); _adminShow = 0; renderAdminWorklist(); persistCourseSkipped(); showToast('Skipped — parked in the Skipped bucket'); return; }
-    if (t.dataset.unskip) { _adminSkipped.delete(t.dataset.unskip); renderAdminWorklist(); persistCourseSkipped(); return; }
+    if (t.dataset.skip) { const _i = t.dataset.skip; courseWriteAllowed(_i, 'change skip status').then(ok => { if (!ok) return; _adminSkipped.add(_i); _adminShow = 0; renderAdminWorklist(); persistCourseSkipped(); showToast('Skipped — parked in the Skipped bucket'); }); return; }
+    if (t.dataset.unskip) { const _i = t.dataset.unskip; courseWriteAllowed(_i, 'change skip status').then(ok => { if (!ok) return; _adminSkipped.delete(_i); renderAdminWorklist(); persistCourseSkipped(); }); return; }
     if (t.dataset.edit) { const ok = await editCourseDetails(t.dataset.edit); if (ok) { showToast('Course updated'); renderAdmin(); } return; }
     if (t.dataset.newcourse) { await adminCreateCourse(); return; }
     if (t.dataset.newmultinine) { adminBuildMultiNine(); return; }
@@ -9455,6 +9461,7 @@ function bgKeyboardSafe(scrollEl) {
 async function adminEditTees(courseId, onSaved) {
   const lib = (COURSE_LIBRARY || []).find(c => c.id === courseId);
   if (!lib) { showToast('Course not found'); return; }
+  if (!(await courseWriteAllowed(courseId, 'edit ratings'))) return;              // v880 state lock
   let sc = null; try { sc = await getCourseScorecard(courseId); } catch (e) {}
   const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
   const ea = (typeof escAttr === 'function') ? escAttr : (x => String(x).replace(/"/g, '&quot;'));
@@ -9857,6 +9864,7 @@ function updateAsiDupLabel() {
 async function adminEditPars(courseId, onSaved) {
   const lib = (COURSE_LIBRARY || []).find(c => c.id === courseId);
   if (!lib) { showToast('Course not found'); return; }
+  if (!(await courseWriteAllowed(courseId, 'edit pars'))) return;                 // v880 state lock
   let sc = null; try { sc = await getCourseScorecard(courseId); } catch (e) {}
   const pars = (sc && Array.isArray(sc.pars) && (sc.pars.length === 18 || sc.pars.length === 9)) ? sc.pars.map(p => parseInt(p) || 4) : new Array(18).fill(4);
   const sis = (sc && Array.isArray(sc.sis) && (sc.sis.length === 18 || sc.sis.length === 9)) ? sc.sis.slice()
@@ -10747,7 +10755,12 @@ const SHARED_SINGLETONS = ['golf:multinine-configs', 'golf:courses', 'golf:recen
   // course-deletes (which the v402 sweep un-tombstones when a course still has
   // ratings), a locked id is NEVER auto-restored. This is the fix for admin
   // deletes silently coming back after a sweep (Kevin's MS/TX deletes).
-  'golf:course-deletes', 'golf:course-deletes-locked', 'golf:course-name-overrides', 'golf:course-detail-overrides', 'golf:code-review-queue', 'golf:crq-attachments'];
+  'golf:course-deletes', 'golf:course-deletes-locked', 'golf:course-name-overrides', 'golf:course-detail-overrides', 'golf:code-review-queue', 'golf:crq-attachments',
+  // v880 STATE LOCK — { ST: {locked,by,byUid,at,note} }. When a state is locked,
+  // EVERY course-data write in that state is refused (edits, GPS, deletes,
+  // verify/skip, three-nine wiring) and every bulk import/sweep/finalize skips it.
+  // Must sync, or a lock set on one device wouldn't protect the data on another.
+  'golf:state-locks'];
 function singletonRowCode(key) {
   // v603: the roster is now a PER-USER row (roster:<uid>) instead of the single
   // global 'shared:player-roster'. Every roster read/write funnels through this,
@@ -10961,7 +10974,8 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:state-import-progress': 'objectMap',      // { state: progress }
   'golf:code-review-queue': 'arrayById',          // Kevin's code-review flags (union by entry id, no lost flags)
   'golf:crq-attachments': 'objectMap',            // review attachments: { courseId: [{url,at,by}] } (v715)
-  'golf:tourneys': 'arrayById'                    // scheduled rounds + tee times: union by id so concurrent saves never clobber (v558)
+  'golf:tourneys': 'arrayById',                   // scheduled rounds + tee times: union by id so concurrent saves never clobber (v558)
+  'golf:state-locks': 'objectMap'                 // v880: per-state lock records, last writer wins per state
 };
 const _MERGE_READ_FAILED = '__BG_MERGE_READ_FAILED__';  // cloud read FAILED (vs. cloud genuinely empty)
 async function _mergeSharedSingletonValue(key, local) {
@@ -13596,6 +13610,14 @@ async function addCourseToLibrary(name, city, note, extra) {
   const trimmed = (name || '').trim();
   const trimmedCity = (city || '').trim();
   if (!trimmed) return null;
+  // v880 STATE LOCK: no NEW courses in a locked state either — that's how a sweep
+  // re-created things Kevin had removed. Ordinary players reach this from round
+  // setup, so it fails OPEN (strict=false) and only blocks on a CONFIRMED lock.
+  try {
+    let _st = _slNorm((extra && extra.st) || '');
+    if (!_st) { const _m = String(trimmedCity).match(/,\s*([A-Za-z]{2})\s*$/); if (_m) _st = _slNorm(_m[1]); }
+    if (_st && !(await stateWriteAllowed(_st, 'add courses', false))) return null;
+  } catch (e) {}
 
   // Re-read the SHARED additions store so we dedupe against the latest state,
   // not just this device's in-memory copy — this is the "saved → added 3x" bug:
@@ -13651,6 +13673,7 @@ async function renameCourse(courseId, newName) {
   const nm = (newName || '').trim();
   if (!courseId || !nm) return false;
   if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can rename courses'); return false; }
+  if (!(await courseWriteAllowed(courseId, 'rename courses'))) return false;      // v880 state lock
   const overrides = await getCourseNameOverrides();
   overrides[courseId] = nm;
   try { invalidateCourseLibraryCache(); } catch (e) {}
@@ -13803,6 +13826,7 @@ function adminFormModal(title, fields) {
 }
 async function editCourseDetails(id) {
   if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can edit courses'); return false; }
+  if (!(await courseWriteAllowed(id, 'edit course info'))) return false;          // v880 state lock
   const c = (COURSE_LIBRARY || []).find(x => x.id === id) || { id };
   const vals = await adminFormModal('Edit course info', [
     { key: 'name', label: 'Course name', value: c.name || '' },
@@ -14957,8 +14981,8 @@ async function openCourseDetail(id) {
     if (act === 'rate') { closeOv(); try { await adminEditTees(id); } catch (e) {} openCourseDetail(id); return; }
     if (act === 'pars') { closeOv(); try { await adminEditPars(id); } catch (e) {} openCourseDetail(id); return; }
     if (act === 'edit') { closeOv(); let ok = false; try { ok = await editCourseDetails(id); } catch (e) {} if (ok) { showToast('Course updated'); } openCourseDetail(id); return; }
-    if (act === 'skip') { _adminSkipped.add(id); persistCourseSkipped(); showToast('Skipped — parked in the Skipped bucket'); advance(); return; }
-    if (act === 'unskip') { _adminSkipped.delete(id); persistCourseSkipped(); closeOv(); renderAdminWorklist(); return; }
+    if (act === 'skip') { if (!(await courseWriteAllowed(id, 'change skip status'))) return; _adminSkipped.add(id); persistCourseSkipped(); showToast('Skipped — parked in the Skipped bucket'); advance(); return; }
+    if (act === 'unskip') { if (!(await courseWriteAllowed(id, 'change skip status'))) return; _adminSkipped.delete(id); persistCourseSkipped(); closeOv(); renderAdminWorklist(); return; }
     if (act === 'del') {
       const nm = it.name || 'this course';
       if (window.confirm('Delete "' + nm + '" from the library for everyone? Removes its scorecard + GPS. Cannot be undone.')) {
@@ -14984,6 +15008,235 @@ function adminRemapFull(courseId) {
   adminMapCourse(courseId);
 }
 
+
+/* ==========================================================================
+   v880 STATE LOCK — freeze a finished state so its course data cannot change.
+   ..........................................................................
+   WHY THIS EXISTS
+   Every data-loss incident in this app's history has the same shape: a state
+   Kevin had already finished got silently rewritten by something running
+   later. `?sweepimport=ST` alone runs courseDataImport(override) ->
+   courseRemoveImport -> sweepDedupeOrphans -> sweepFinalize, and sweepFinalize's
+   v402 restore block un-tombstones any rated course that isn't in the
+   -locked list. Result: deleted courses resurrect, 9-hole conversions revert to
+   18, and hand-fixed ratings get overwritten by a stale CSV. Per-record guards
+   (course-deletes-locked, userEdited, _adminVerified) each plugged one hole.
+   This plugs the whole wall: mark a state COMPLETE and nothing may write to it
+   until an admin explicitly unlocks it.
+
+   SCOPE (Tyler, v880): course/mapping DATA only. Locking a state never affects
+   players — rounds, scoring, bets, handicaps and settle-up all work normally on
+   a locked state's courses. Code-review flags and missing-course reports are
+   still accepted too; they just queue up until the state is unlocked.
+
+   FAILS CLOSED. If the lock list cannot be read, admin writes are REFUSED
+   rather than allowed. A data-protection feature that fails open isn't one.
+   The one exception is addCourseToLibrary, which ordinary users hit — that
+   fails OPEN on an unreadable list and only blocks on a *confirmed* lock.
+   ====================================================================== */
+const KEY_STATE_LOCKS = 'golf:state-locks';
+let _stateLocks = null;          // { ST: {locked,by,byUid,at,note} } — null = never loaded
+let _stateLocksAt = 0;
+let _stateLocksInFlight = null;
+const _STATE_LOCK_TTL = 20000;   // ms a cached copy is trusted for
+
+function _slNorm(s) { return String(s == null ? '' : s).trim().toUpperCase().slice(0, 2); }
+function _slName(st) { const S = _slNorm(st); try { return (typeof US_STATE_NAMES !== 'undefined' && US_STATE_NAMES[S]) || S; } catch (e) { return S; } }
+
+// The state code a course belongs to. Mirrors the stOf() helpers the sweep and
+// import paths already use: explicit .st first, then a trailing ", XX" on city.
+// Three-nine / combo rows persist as "base#front" — the lock follows the base.
+function courseStateFor(idOrObj) {
+  try {
+    let c = idOrObj;
+    if (typeof idOrObj === 'string') {
+      let id = idOrObj;
+      if (id.indexOf('#') > 0) id = id.split('#')[0];
+      c = (typeof COURSE_LIBRARY !== 'undefined' ? (COURSE_LIBRARY || []) : []).find(x => x && x.id === id) || null;
+    }
+    if (!c) return '';
+    if (c.st) return _slNorm(c.st);
+    const m = String(c.city || '').match(/,\s*([A-Za-z]{2})\s*$/);
+    if (m) return _slNorm(m[1]);
+    if (typeof courseStateCode === 'function') { try { return _slNorm(courseStateCode(c)); } catch (e) {} }
+  } catch (e) {}
+  return '';
+}
+
+// AUTHORITATIVE read straight from the shared cloud row. The whole point of a
+// lock is that a stale local cache can't defeat it, so this never trusts
+// localStorage while the cloud is reachable. Returns {map, ok, fresh};
+// ok:false means we genuinely could not establish the lock state.
+async function loadStateLocks(force) {
+  if (!force && _stateLocks && (Date.now() - _stateLocksAt < _STATE_LOCK_TTL)) return { map: _stateLocks, ok: true, fresh: true };
+  if (_stateLocksInFlight) { try { return await _stateLocksInFlight; } catch (e) { return { map: _stateLocks || {}, ok: !!_stateLocks, fresh: false }; } }
+  _stateLocksInFlight = (async () => {
+    let cloud = null;
+    try {
+      if (typeof supaReady !== 'undefined' && !supaReady && typeof initSupabase === 'function') { try { await initSupabase(); } catch (e) {} }
+      if (typeof supa !== 'undefined' && supa && typeof supaOnline !== 'undefined' && supaOnline) {
+        const rc = (typeof singletonRowCode === 'function') ? singletonRowCode(KEY_STATE_LOCKS) : 'shared:state-locks';
+        for (let a = 0; a < 2 && cloud === null; a++) {
+          try {
+            const r = await supa.from('games').select('data').eq('code', rc).maybeSingle();
+            if (r && !r.error) cloud = (r.data && r.data.data && typeof r.data.data === 'object' && !Array.isArray(r.data.data)) ? r.data.data : {};
+          } catch (e) {}
+          if (cloud === null) await new Promise(z => setTimeout(z, 500));
+        }
+      }
+    } catch (e) {}
+    if (cloud !== null) {
+      _stateLocks = cloud; _stateLocksAt = Date.now();
+      try { bgLsSet(KEY_STATE_LOCKS, JSON.stringify(cloud)); } catch (e) {}
+      return { map: cloud, ok: true, fresh: true };
+    }
+    // Cloud unreachable — the last known local copy still beats knowing nothing,
+    // and it can only ever ADD protection (a lock we already saw).
+    try { const raw = localStorage.getItem(KEY_STATE_LOCKS); if (raw) { const p = JSON.parse(raw); if (p && typeof p === 'object' && !Array.isArray(p)) { _stateLocks = p; return { map: p, ok: true, fresh: false }; } } } catch (e) {}
+    return { map: _stateLocks || {}, ok: !!_stateLocks, fresh: false };
+  })();
+  try { return await _stateLocksInFlight; } finally { _stateLocksInFlight = null; }
+}
+
+// SYNC, cache-only — for rendering badges. Never use this to gate a write.
+function stateLockInfo(st) {
+  const S = _slNorm(st); if (!S || !_stateLocks) return null;
+  const e = _stateLocks[S];
+  return (e && e.locked) ? e : null;
+}
+function isStateLockedSync(st) { return !!stateLockInfo(st); }
+
+// THE GATE. Returns true when the write may proceed, false (with a toast) when
+// it must not. strict === false = fail OPEN if the list can't be read (user paths).
+async function stateWriteAllowed(st, what, strict) {
+  const S = _slNorm(st);
+  if (!S) return true;                       // no state on the course — nothing to lock against
+  let res; try { res = await loadStateLocks(false); } catch (e) { res = { map: {}, ok: false }; }
+  if (!res.ok) {
+    if (strict === false) return true;
+    try { showToast("Couldn't verify state locks — try again in a moment"); } catch (e) {}
+    return false;
+  }
+  const e = res.map[S];
+  if (!e || !e.locked) return true;
+  try { showToast('🔒 ' + _slName(S) + ' is locked' + (e.by ? (' by ' + e.by) : '') + ' — unlock it in Admin to ' + (what || 'make changes')); } catch (e2) {}
+  return false;
+}
+async function courseWriteAllowed(courseId, what, strict) {
+  return await stateWriteAllowed(courseStateFor(courseId), what, strict);
+}
+
+// Bulk paths: the set of state codes to SKIP this run.
+async function lockedStateSet(force) {
+  const out = new Set();
+  let res; try { res = await loadStateLocks(force !== false); } catch (e) { res = { map: {}, ok: false }; }
+  try { Object.keys(res.map || {}).forEach(k => { if (res.map[k] && res.map[k].locked) out.add(_slNorm(k)); }); } catch (e) {}
+  return { set: out, ok: res.ok };
+}
+
+// Set / clear a state's lock. Writes locked:false rather than DELETING the key
+// on unlock — objectMap merge starts from the cloud copy, so a deleted key would
+// simply be re-added from the cloud and the state would silently re-lock.
+async function setStateLock(st, locked, note) {
+  const S = _slNorm(st);
+  if (!S) return false;
+  if (typeof isAdmin === 'function' && !isAdmin()) { try { showToast('Only admins can lock or unlock a state'); } catch (e) {} return false; }
+  const res = await loadStateLocks(true);
+  if (!res.ok) { try { showToast("Couldn't reach the server — the lock was NOT changed"); } catch (e) {} return false; }
+  let who = '', uid = '';
+  try {
+    if (typeof _authUser !== 'undefined' && _authUser) {
+      uid = _authUser.id || '';
+      const md = _authUser.user_metadata || {};
+      who = md.full_name || md.name || _authUser.email || '';
+    }
+    if (!who && typeof state !== 'undefined' && state && state.me) who = state.me;
+  } catch (e) {}
+  if (!who) who = 'an admin';
+  const map = Object.assign({}, res.map || {});
+  map[S] = { locked: !!locked, by: who, byUid: uid, at: Date.now(), note: String(note || '').trim().slice(0, 240) };
+  let ok = await safeSet(KEY_STATE_LOCKS, JSON.stringify(map), true);
+  for (let i = 0; i < 2 && !ok; i++) { await new Promise(r => setTimeout(r, 800)); ok = await safeSet(KEY_STATE_LOCKS, JSON.stringify(map), true); }
+  _stateLocks = map; _stateLocksAt = Date.now();
+  try { bgLsSet(KEY_STATE_LOCKS, JSON.stringify(map)); } catch (e) {}
+  try { audit(locked ? 'lock_state' : 'unlock_state', S, _slName(S) + (note ? (' — ' + note) : '')); } catch (e) {}
+  try { await loadStateLocks(true); } catch (e) {}   // confirm from the cloud
+  return !!ok;
+}
+
+/* ---- Admin UI (mobile-first: full-width 44px+ targets, no window.prompt —
+   iOS suppresses the 2nd+ stacked prompt, which is why adminFormModal exists) -- */
+function renderAdminLockBar() {
+  const box = document.getElementById('adm-lock-bar'); if (!box) return;
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+  const S = _slNorm(typeof _adminStateFilter !== 'undefined' ? _adminStateFilter : '');
+  if (!S) { box.innerHTML = ''; box.style.display = 'none'; return; }
+  box.style.display = '';
+  // Locks not loaded yet (offline boot / panel drawn before the cloud read
+  // finished)? Show a neutral placeholder and re-draw once we actually know.
+  if (!_stateLocks) {
+    box.innerHTML = '<div class="help-text" style="margin-bottom:10px">Checking lock status…</div>';
+    if (!box.dataset.slPending) { box.dataset.slPending = '1';
+      loadStateLocks(true).then(() => { try { delete box.dataset.slPending; } catch (e) {} try { renderAdminLockBar(); } catch (e) {} })
+        .catch(() => { try { delete box.dataset.slPending; } catch (e) {} }); }
+    return;
+  }
+  const nm = _slName(S), info = stateLockInfo(S);
+  if (info) {
+    let when = ''; try { when = info.at ? new Date(info.at).toLocaleDateString() : ''; } catch (e) {}
+    box.innerHTML =
+      '<div style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.55);border-radius:12px;padding:12px;margin-bottom:10px">'
+      + '<div style="font-weight:800;font-size:15px;color:#ef4444;margin-bottom:4px">🔒 ' + esc(nm) + ' is LOCKED</div>'
+      + '<div class="small-text" style="color:var(--text-muted);line-height:1.55">Course data here is frozen — no edits, no GPS changes, no deletes, and imports/sweeps skip this state entirely. Players can still play, score and bet normally.'
+      + (info.by ? ('<br>Locked by <strong>' + esc(info.by) + '</strong>' + (when ? (' on ' + esc(when)) : '') + '.') : '')
+      + (info.note ? ('<br><em>' + esc(info.note) + '</em>') : '')
+      + '</div>'
+      + '<button id="adm-unlock-btn" class="adm-act" style="width:100%;margin-top:10px;padding:14px;font-size:15px;font-weight:700;min-height:48px">🔓 Unlock ' + esc(nm) + '</button>'
+      + '</div>';
+    const b = document.getElementById('adm-unlock-btn');
+    if (b) b.onclick = () => adminToggleStateLock(S, false);
+  } else {
+    box.innerHTML =
+      '<button id="adm-lock-btn" class="adm-act" style="width:100%;margin-bottom:4px;padding:14px;font-size:15px;font-weight:700;min-height:48px">🔒 Lock ' + esc(nm) + ' — mark complete &amp; freeze</button>'
+      + '<div class="help-text" style="margin-bottom:10px">Locking freezes every course in ' + esc(nm) + ' so nothing — not an edit, not a sweep or import — can change it until an admin unlocks it.</div>';
+    const b = document.getElementById('adm-lock-btn');
+    if (b) b.onclick = () => adminToggleStateLock(S, true);
+  }
+}
+
+async function adminToggleStateLock(st, lock) {
+  const S = _slNorm(st); if (!S) return;
+  const nm = _slName(S);
+  try {
+    if (lock) {
+      const vals = await adminFormModal('🔒 Lock ' + nm + '?', [
+        { key: 'note', label: 'Note (optional) — e.g. "final review done"', value: '' }
+      ]);
+      if (!vals) return;
+      showToast('Locking ' + nm + '…');
+      const ok = await setStateLock(S, true, vals.note);
+      showToast(ok ? ('🔒 ' + nm + ' is locked') : ('Lock not saved — check your connection'));
+    } else {
+      // Typed confirmation: unlocking is what re-exposes finished data to the
+      // sweeps, so it must never be a one-tap accident.
+      const vals = await adminFormModal('🔓 Unlock ' + nm + '?', [
+        { key: 'confirm', label: 'Type ' + nm + ' to confirm' },
+        { key: 'note', label: 'Why are you unlocking? (optional)', value: '' }
+      ]);
+      if (!vals) return;
+      const typed = String(vals.confirm || '').trim().toLowerCase();
+      if (typed !== nm.toLowerCase() && typed !== S.toLowerCase()) { showToast('That didn\'t match "' + nm + '" — still locked'); return; }
+      showToast('Unlocking ' + nm + '…');
+      const ok = await setStateLock(S, false, vals.note);
+      showToast(ok ? ('🔓 ' + nm + ' is unlocked — edits allowed again') : ('Unlock not saved — check your connection'));
+    }
+  } catch (e) { try { showToast('Lock change failed'); } catch (e2) {} }
+  try { await loadStateLocks(true); } catch (e) {}
+  try { renderAdminLockBar(); } catch (e) {}
+  try { renderAdminWorklist(); } catch (e) {}
+  try { const sel = document.getElementById('adm-state'); if (sel) { const info = stateLockInfo(S); const o = sel.querySelector('option[value="' + S + '"]'); if (o) o.textContent = (info ? '🔒 ' : '') + _slName(S); } } catch (e) {}
+}
+
 const KEY_COURSE_DELETES = 'golf:course-deletes';
 async function getCourseDeletes() {
   const v = await safeGet(KEY_COURSE_DELETES, true);
@@ -15002,6 +15255,8 @@ async function getCourseDeletesLocked() {
 async function deleteCourse(courseId) {
   if (!courseId) return false;
   if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can delete courses'); return false; }
+  // v880 STATE LOCK: a locked state is frozen — deletes included.
+  if (!(await courseWriteAllowed(courseId, 'delete courses'))) return false;
   // v588 MASS-DELETE GUARD: no single page session may delete more than 25 courses
   // unless &force=1 is present. Stops any runaway purge from wiping a whole state.
   try { if (typeof window._bgDelGuard==='undefined') window._bgDelGuard=0; window._bgDelGuard++;
@@ -15090,6 +15345,7 @@ async function deleteCourse(courseId) {
 async function clearCourseMapping(courseId) {
   if (!courseId) return false;
   if (typeof isAdmin === 'function' && !isAdmin()) { showToast('Only admins can clear course mapping'); return false; }
+  if (!(await courseWriteAllowed(courseId, 'clear GPS mapping'))) return false;   // v880 state lock
   const c = COURSE_LIBRARY.find(x => x.id === courseId);
   const nm = c ? c.name : courseId;
   // Shared cloud GPS row — removing it makes every device see the course unmapped.
@@ -19089,6 +19345,7 @@ async function _mnGetStore() {
 
 async function saveMultiNineConfig(libraryId, cfg) {
   if (!libraryId || !cfg) return false;
+  if (!(await courseWriteAllowed(libraryId, 'wire multi-nine courses'))) return false;   // v880 state lock
   const store = await _mnGetStore();
   store[libraryId] = cfg;
   const ok = await safeSet(MULTININE_STORE_KEY, JSON.stringify(store), true);
@@ -56760,6 +57017,9 @@ const gpsView = (() => {
   // — callers surface that so a "saved ✓" is never shown for a write that didn't land.
   async function saveCourseRow(cid) {
     if (!cid || !courseGps[cid]) return false;
+    // v880 STATE LOCK: GPS greens/targets are course data too. Checked before the
+    // three-nine fan-out below so a combo id can't sneak a write past the lock.
+    if (!(await courseWriteAllowed(cid, 'change GPS mapping'))) return false;
     // Three-nine combo: persist to the two per-nine rows (base#nine), not a combo row.
     {
       const _csv = (typeof comboSpecFromId === 'function') ? comboSpecFromId(cid) : null;
@@ -63575,6 +63835,12 @@ window.bgImportCourseGps = (stateFilter, force) => {
 async function courseRemoveImport(file, stateFilter) {
   const log = (m,c)=>{ try{ let box=document.getElementById('crm-log'); if(!box){ const p=document.createElement('div'); p.id='crm-panel'; p.style.cssText='position:fixed;inset:8% 5% auto 5%;max-height:84%;z-index:9000;background:rgba(20,20,22,0.96);color:#fff;border-radius:14px;padding:14px;overflow:auto;font-size:13px'; p.innerHTML='<strong>Removing excluded courses…</strong><div id="crm-log" style="margin-top:8px;line-height:1.6"></div><button onclick="this.parentNode.remove()" style="position:absolute;top:10px;right:12px;background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button>'; document.body.appendChild(p); box=document.getElementById('crm-log'); } const d=document.createElement('div'); if(c)d.style.color=c; d.innerHTML=m; box.appendChild(d); box.scrollTop=box.scrollHeight; }catch(e){} };
   try {
+    // v880 STATE LOCK — the remove list DELETES courses. Never run it on a locked state.
+    try { const _L = await lockedStateSet(true);
+      const _st = _slNorm(stateFilter || '');
+      if (!_L.ok) { log('🔒 Could not verify state locks — remove list skipped for safety.', 'var(--log-err)'); return {removed:0, lockSkipped:true}; }
+      if (_st && _L.set.has(_st)) { log('🔒 <b>' + _slName(_st) + '</b> is LOCKED — remove list skipped, nothing deleted.', 'var(--log-warn)'); return {removed:0, lockSkipped:true}; }
+    } catch(e) { return {removed:0, lockSkipped:true}; }
     const text = await file.text();
     const recs = parseCsvRecords(text);
     if (!recs.length) { log('No rows in remove list.', 'var(--log-warn)'); return {removed:0}; }
@@ -63657,6 +63923,10 @@ window.bgRemoveCourses = (stateFilter) => {
 async function sweepDedupeOrphans(stateFilter) {
   try {
     const ST = (stateFilter||'').toUpperCase(); if (!ST) return { removed:0 };
+    // v880 STATE LOCK — this removes courses; a locked state is skipped entirely.
+    try { const _L = await lockedStateSet(true);
+      if (!_L.ok || _L.set.has(_slNorm(ST))) { console.warn('v880: dedupe skipped for ' + ST + (_L.ok ? ' (LOCKED)' : ' (locks unreadable)')); try{ if(_L.ok) showToast('🔒 ' + _slName(ST) + ' is locked — dedupe skipped'); }catch(e){} return { removed:0, lockSkipped:true }; }
+    } catch(e) { return { removed:0, lockSkipped:true }; }
     const saves = await getCourseSaves();
     const STOP = ['golf','course','club','country','the','at','of','and','cc','gc','g','c','rtj','robert','trent','jones','trail'];
     const norm = s => (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
@@ -63713,6 +63983,13 @@ async function bgEnsureAdmin() {
 async function sweepFinalize(stateFilter) {
   try {
     const ST = (stateFilter||'').toUpperCase(); if (!ST) return { verified:0, purged:0 };
+    // v880 STATE LOCK — the single most important guard in this build. THIS is the
+    // function whose v402 restore block resurrects deleted courses; a locked state
+    // must never reach it. Multi-state runs skip locked states and continue.
+    try { const _L = await lockedStateSet(true);
+      if (!_L.ok) { console.warn('v880: state locks unreadable — sweepFinalize refused for ' + ST); try{showToast("Couldn't verify state locks — finalize skipped");}catch(e){} return { verified:0, purged:0, lockSkipped:true }; }
+      if (_L.set.has(_slNorm(ST))) { console.warn('v880: ' + ST + ' is LOCKED — sweepFinalize skipped'); try{showToast('🔒 ' + _slName(ST) + ' is locked — finalize skipped');}catch(e){} return { verified:0, purged:0, lockSkipped:true }; }
+    } catch(e) { return { verified:0, purged:0, lockSkipped:true }; }
     if (typeof supa === 'undefined' || !supa) { try { await initSupabase(); } catch(e){} }
     // v402: a course that still has real DATA must NEVER stay tombstoned. Remove from
     // course-deletes any id that is a wired three-nine OR still has a real rating/slope in saves
@@ -64751,6 +65028,17 @@ async function courseDataImport(file, stateFilter, override, force) {
       return;
     }
 
+    // v880 STATE LOCK — load once, up front. If the lock list can't be read we
+    // refuse the whole import rather than risk overwriting a finished state.
+    let _lockedStates = new Set(); let lockedStateRows = 0; let lockedStateCourses = 0;
+    try {
+      const _L = await lockedStateSet(true);
+      if (!_L.ok) { log('🔒 Could not verify state locks — import cancelled for safety. Try again in a moment.', 'var(--log-err)'); return; }
+      _lockedStates = _L.set;
+      const _sf = _slNorm(stateFilter || '');
+      if (_sf && _lockedStates.has(_sf)) { log('🔒 <b>' + _slName(_sf) + '</b> is LOCKED — nothing was imported. Unlock it in Admin first.', 'var(--log-warn)'); return; }
+      if (_lockedStates.size) log('🔒 Locked states will be skipped: <b>' + Array.from(_lockedStates).sort().join(', ') + '</b>', 'var(--log-info)');
+    } catch (e) { log('🔒 Could not verify state locks — import cancelled for safety.', 'var(--log-err)'); return; }
     const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const groups = {};
     let teeRows = 0;
@@ -64759,6 +65047,9 @@ async function courseDataImport(file, stateFilter, override, force) {
       let state = (pick(r, STATE) || '').toUpperCase();
       const city = pick(r, CITY);
       if (!state) { const mm = (city || '').match(/,\s*([A-Za-z]{2})$/); if (mm) state = mm[1].toUpperCase(); }
+      // v880 STATE LOCK: drop rows for locked states before they can group/match.
+      // A nationwide CSV still processes every UNLOCKED state normally.
+      if (state && _lockedStates.has(_slNorm(state))) { lockedStateRows++; return; }
       let mRating = parseFloat(pick(r, RATING)), mSlope = parseInt(pick(r, SLOPE), 10);
       let wRating = parseFloat(pick(r, WRATING)), wSlope = parseInt(pick(r, WSLOPE), 10);
       // Gender-column shape: this row's rating/slope belong to women → move them over.
@@ -64862,6 +65153,9 @@ async function courseDataImport(file, stateFilter, override, force) {
         }
       }
       if (lib && _lockedDel.has(lib.id)) { protectedSkips++; return; }  // v595: never re-fill an admin-locked-deleted course
+      // v880: belt-and-braces — a CSV row with no state column can still match a
+      // library course that LIVES in a locked state. Refuse that write too.
+      if (lib && _lockedStates.has(courseStateFor(lib))) { lockedStateCourses++; return; }
       if (!lib) {
         if (override && Array.isArray(g.tees) && g.tees.some(t => t && t.rating != null && t.slope != null)) { toCreate.push(g); }
         else { unmatched.push([g.name, g.state, g.city || '', g.tees.length]); }
@@ -64961,6 +65255,7 @@ async function courseDataImport(file, stateFilter, override, force) {
     log('✅ Filled <b>' + matched + '</b> courses (' + filledTees + ' tees rating/slope, ' + filledPars + ' with per-hole par+SI). Synced to everyone.', 'var(--log-ok)');
     if (createdCount) log('🆕 Created <b>' + createdCount + '</b> new course(s) that were not in the library.', 'var(--log-ok)');
     if (lockedSkips) log('🔒 Skipped <b>' + lockedSkips + '</b> admin-deleted course(s) — not re-created (v595).', 'var(--log-info)');
+    if (lockedStateRows || lockedStateCourses) log('🔒 Skipped <b>' + lockedStateRows + '</b> row(s) and <b>' + lockedStateCourses + '</b> matched course(s) in LOCKED states — untouched (v880).', 'var(--log-info)');
     if (protectedSkips) log('🔒 Left <b>' + protectedSkips + '</b> verified / hand-entered course(s) untouched (protected).', 'var(--log-info)');
     Object.keys(byStateMatched).sort().forEach(st => log('   ' + st + ': ' + byStateMatched[st] + ' courses'));
     if (unmatched.length > 1) {
