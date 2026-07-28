@@ -7459,7 +7459,7 @@ const ROSTER_DUAL_WRITE_LEGACY = true;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.902';
+const BG_BUILD = 'v2026.11.903';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -12700,12 +12700,23 @@ async function getSharedTombstones() {
     if (typeof isSignedIn === 'function' && isSignedIn() && typeof readSharedSingleton === 'function') v = await readSharedSingleton(KEY_ROSTER_TOMBSTONES);
     else { try { v = localStorage.getItem(KEY_ROSTER_TOMBSTONES); } catch (e) {} }
     const o = v ? JSON.parse(v) : {};
-    _tombCache = { players: new Set(Array.isArray(o.players) ? o.players : []), rounds: new Set(Array.isArray(o.rounds) ? o.rounds : []), playersLocked: new Set(Array.isArray(o.playersLocked) ? o.playersLocked : []) };
-  } catch (e) { if (!_tombCache) _tombCache = { players: new Set(), rounds: new Set(), playersLocked: new Set() }; }
+    // v903: roundsAt = { code: whenDeletedMs }. Lets the archive tell a genuinely
+    // deleted round from a NEW round that merely inherited a recycled code.
+    // Tombstones written before v903 have no timestamp and keep the old behaviour.
+    _tombCache = { players: new Set(Array.isArray(o.players) ? o.players : []), rounds: new Set(Array.isArray(o.rounds) ? o.rounds : []), playersLocked: new Set(Array.isArray(o.playersLocked) ? o.playersLocked : []), roundsAt: (o.roundsAt && typeof o.roundsAt === 'object') ? o.roundsAt : {} };
+  } catch (e) { if (!_tombCache) _tombCache = { players: new Set(), rounds: new Set(), playersLocked: new Set(), roundsAt: {} }; }
   return _tombCache;
 }
 async function _writeSharedTombstones(out) {
-  _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds), playersLocked: new Set(out.playersLocked || []) };
+  // v903: keep roundsAt trimmed to the round keys we actually still hold.
+  try {
+    const keep = new Set(out.rounds || []);
+    const src = out.roundsAt || {};
+    const trimmed = {};
+    Object.keys(src).forEach(k => { if (keep.has(k)) trimmed[k] = src[k]; });
+    out.roundsAt = trimmed;
+  } catch (e) { out.roundsAt = out.roundsAt || {}; }
+  _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds), playersLocked: new Set(out.playersLocked || []), roundsAt: out.roundsAt || {} };
   try { bgLsSet(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
   try { if (typeof isSignedIn === 'function' && isSignedIn() && typeof writeSharedSingleton === 'function') await writeSharedSingleton(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
 }
@@ -12714,9 +12725,30 @@ async function addSharedTombstones(players, rounds, lockPlayers) {
     const t = await getSharedTombstones();
     const locked = t.playersLocked || new Set();
     (players || []).forEach(k => { if (k) { t.players.add(k); if (lockPlayers) locked.add(k); } });
-    (rounds || []).forEach(k => { if (k) t.rounds.add(k); });
-    await _writeSharedTombstones({ players: Array.from(t.players).slice(-3000), rounds: Array.from(t.rounds).slice(-5000), playersLocked: Array.from(locked).slice(-3000) });
+    const _at = t.roundsAt || {};
+    const _now = Date.now();
+    (rounds || []).forEach(k => { if (k) { t.rounds.add(k); if (!_at[k]) _at[k] = _now; } });   // v903: stamp WHEN it was deleted
+    await _writeSharedTombstones({ players: Array.from(t.players).slice(-3000), rounds: Array.from(t.rounds).slice(-5000), playersLocked: Array.from(locked).slice(-3000), roundsAt: _at });
   } catch (e) { console.warn('addSharedTombstones', e); }
+}
+// v903: clear ONE round key from the delete list, local + shared. Called when the
+// archive proves a code was recycled (the round in hand was created AFTER the
+// delete), so the stale tombstone can't keep poisoning the new round — and every
+// other screen that filters on this list is fixed at the source rather than each
+// needing its own timestamp check.
+async function unTombstoneRound(key) {
+  if (!key) return;
+  try {
+    const set = getDeletedRoundKeys();
+    if (set.delete(key)) localStorage.setItem(KEY_DELETED_ROUNDS, JSON.stringify(Array.from(set)));
+  } catch (e) {}
+  try {
+    const t = await getSharedTombstones();
+    if (t && t.rounds && t.rounds.delete(key)) {
+      const at = t.roundsAt || {}; delete at[key];
+      await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds), playersLocked: Array.from(t.playersLocked || []), roundsAt: at });
+    }
+  } catch (e) {}
 }
 async function unTombstonePlayers(players) {
   try {
@@ -13422,6 +13454,25 @@ async function archiveScoresFromRound(g) {
       else if (typeof getDeletedRoundKeys === 'function' && getDeletedRoundKeys().has(_rk)) iDeletedThisRound = true;
       else if (typeof getSharedTombstones === 'function') {
         try { var _st = await getSharedTombstones(); if (_st && _st.rounds && _st.rounds.has(_rk)) iDeletedThisRound = true; } catch (e) {}
+      }
+      // v903: RECYCLED-CODE HEAL. Round codes get reused (word + 2 digits), and a
+      // delete keeps the CODE on the tombstone list forever — so a new round can
+      // inherit a poisoned code and silently never reach anyone's stats. If this
+      // round was created AFTER the delete was recorded, it is plainly a different
+      // round: clear the stale tombstone (which un-blocks every other screen that
+      // filters on it too) and archive normally. Tombstones with no timestamp
+      // (written before v903) are left alone — we can't prove it either way, and
+      // ensureUniqueGameCode now stops the collision happening in the first place.
+      if (iDeletedThisRound && g.createdAt) {
+        try {
+          const _st2 = await getSharedTombstones();
+          const _delAt = _st2 && _st2.roundsAt ? _st2.roundsAt[_rk] : null;
+          if (_delAt && g.createdAt > _delAt) {
+            await unTombstoneRound(_rk);
+            iDeletedThisRound = false;
+            try { console.warn('[bg] recycled round code healed:', _rk); } catch (e) {}
+          }
+        } catch (e) {}
       }
     }
   } catch (e) {}
@@ -20934,7 +20985,14 @@ async function bootstrapSeedScorecards() {
 function schedPlayerId(name){ return 'sp-' + normalizeNameSegment(String(name || '')); }
 
 function generateCode() {
-  const words = ['PINE','OAK','ELM','BIRDIE','EAGLE','PAR','TEE','LINK','BACK','FRONT','HOOK','SLICE','FORE','GREEN','ROUGH'];
+  // v903: the pool was 15 words x 90 numbers = 1,350 codes, and ~200 of those are
+  // permanently burned on the delete-tombstone list. That is how a brand-new round
+  // landed on a code a deleted round already owned (see ensureUniqueGameCode).
+  // Doubling the word list quadruples-ish the space without making codes any
+  // longer to read out on the first tee. Old 2-digit codes keep working.
+  const words = ['PINE','OAK','ELM','BIRDIE','EAGLE','PAR','TEE','LINK','BACK','FRONT','HOOK','SLICE','FORE','GREEN','ROUGH',
+                 'ACE','ALBATROSS','APRON','BOGEY','BUNKER','CADDIE','CHIP','DIVOT','DRAW','DRIVE','FADE','FAIRWAY','FLAG','GRIP','LIP',
+                 'MULLIGAN','PITCH','PUTT','SAND','SHANK','SKINS','STANCE','SWING','WEDGE','WHIFF'];
   const w = words[Math.floor(Math.random() * words.length)];
   const n = Math.floor(Math.random() * 90) + 10;
   return w + n;
@@ -20952,12 +21010,26 @@ async function ensureUniqueGameCode(code) {
     if (typeof isSignedIn === 'function' && !isSignedIn()) return c;
     if (!supaReady) { try { await initSupabase(); } catch (e) { return c; } }
     if (!(supa && supaOnline)) return c;
+    // v903 (THE 7/28 "we finished a round and nobody can find it" BUG):
+    // this used to check ONLY the live games table. A DELETED round's row is gone
+    // from that table, but its code stays on the shared delete-tombstone list
+    // FOREVER. So a recycled code looked "free", got handed to a brand-new round,
+    // and every device then refused to file that round into anyone's stats —
+    // the round was born already marked as deleted. Kevin/Tyler/Rolo's Buffalo
+    // Creek round hit exactly this on code SLICE48, tombstoned 8 hours earlier.
+    // A code is only free if it is unused AND was never deleted.
+    let _tombRounds = null;
+    try { const _t = await getSharedTombstones(); if (_t && _t.rounds) _tombRounds = _t.rounds; } catch (e) {}
+    let _localDel = null;
+    try { if (typeof getDeletedRoundKeys === 'function') _localDel = getDeletedRoundKeys(); } catch (e) {}
+    const _burned = (x) => !!((_tombRounds && _tombRounds.has(x)) || (_localDel && _localDel.has(x)));
     for (let i = 0; i < 12; i++) {
+      if (_burned(c)) { c = generateCode(); continue; }   // previously deleted — poisoned, skip
       let r;
       try { r = await supa.from('games').select('code').eq('code', c).maybeSingle(); }
-      catch (e) { return c; }                 // read failed — don't block the round
-      if (r && r.error) return c;
-      if (!r || !r.data) return c;             // code is free
+      catch (e) { return _burned(c) ? (c + (Math.floor(Math.random() * 900) + 100)) : c; }  // read failed — don't block the round
+      if (r && r.error) return _burned(c) ? (c + (Math.floor(Math.random() * 900) + 100)) : c;
+      if (!r || !r.data) return c;             // code is free AND never deleted
       c = generateCode();                      // taken — try another
     }
     return c + (Math.floor(Math.random() * 900) + 100);   // unlucky streak — force uniqueness
@@ -36870,11 +36942,16 @@ async function renderHomeInvites() {
         seenCodes.add(code);
         let g0 = null; try { g0 = await loadGame(code); } catch (e) {}
         if (!g0 || g0.finishedAt) continue;
+        // v903 (Tyler): "Join now should only show up if the round is live."
+        let _invLive = false;
+        try {
+          if (g0.scores) _invLive = Object.keys(g0.scores).some(pid => { const a = g0.scores[pid]; return Array.isArray(a) && a.some(v => v != null); });
+        } catch (e) {}
         rows.push({
-          kind: 'invite', code, fromUser: inv.from_user,
+          kind: 'invite', code, fromUser: inv.from_user, live: _invLive,
           course: g0.course || 'Round',
-          sub: (Array.isArray(g0.players) ? g0.players.map(p => displayFirst(p)).join(', ') : '') || 'Tap to join',
-          action: 'Join'
+          sub: (Array.isArray(g0.players) ? g0.players.map(p => displayFirst(p)).join(', ') : '') || (_invLive ? 'Tap to join' : 'Tap to accept'),
+          action: _invLive ? 'Join' : 'Accept'
         });
       }
     }
@@ -37126,7 +37203,8 @@ async function renderHomeInvites() {
 
   const chipForRow = (r) => {
     if (r.kind === 'completed') return bgStatusChip(r.manual ? 'past' : 'complete');
-    if (r.kind === 'invite' || r.kind === 't2round') return bgStatusChip('live');
+    if (r.kind === 'invite') return bgStatusChip(r.live ? 'live' : 'scheduled');   // v903
+    if (r.kind === 't2round') return bgStatusChip('live');
     return bgStatusChip('scheduled');   // scheduled, openRound, openGroup
   };
   list.innerHTML = rows.map((r, i) => {
@@ -40433,7 +40511,9 @@ async function loadRounds() {
     const isScheduled = unfinished && !started;
     const isLive = unfinished && started && !stale;
     const liveTag = bgStatusChip(isScheduled ? 'scheduled' : (isLive ? 'live' : (unfinished ? 'unfinished' : 'complete')));
-    const btnLabel = (isLive || isScheduled) ? 'Join now' : (unfinished ? 'Resume' : 'View');
+    // v903 (Tyler): "Join now should only show up if the round is live." A round
+    // that is scheduled but not teed off reads Start, not Join now.
+    const btnLabel = isLive ? 'Join now' : (isScheduled ? 'Start' : (unfinished ? 'Resume' : 'View'));
     const btnStyle = (isLive || isScheduled) ? ' style="background:var(--accent);color:#fff;border-color:var(--accent)"' : '';
     row.innerHTML = `
       <div style="flex:1;min-width:0;cursor:pointer" class="recent-row-tap">
@@ -43161,9 +43241,21 @@ async function showIncomingInvite(inv) {
   // Round invites: don't nag for rounds that are already over. Expire them so
   // they never notify again. Also remember I was invited (so the round won't
   // count toward my stats until I actually join).
+  // v903 (Tyler): "when we schedule a round for the future the message says accept
+  // or decline... Join now should only show up if the round is live." Same rule the
+  // rest of the app already uses: a round is LIVE once at least one hole is scored.
+  let _inviteStarted = false;
   if (!isT2 && !isW && !isOR) {
     try {
       const g0 = await loadGame(inv.game_code);
+      try {
+        if (g0 && g0.scores) {
+          _inviteStarted = Object.keys(g0.scores).some(pid => {
+            const a = g0.scores[pid];
+            return Array.isArray(a) && a.some(v => v != null);
+          });
+        }
+      } catch (e) {}
       if (g0 && g0.finishedAt) {
         try { await supa.from('game_invites').update({ status: 'expired' }).eq('id', inv.id); } catch (e) {}
         return false;
@@ -43223,15 +43315,16 @@ async function showIncomingInvite(inv) {
       txt.innerHTML = '<b>' + fromName + '</b> invited you to an open round' +
         (_crs ? ' at <b>' + _crs + '</b>' : '') + _when + ' 📣. Accept to grab a spot?';
     } else {
-      txt.innerHTML = '<b>' + fromName + '</b> invited you to join their round' +
-        (inv.course ? ' at <b>' + inv.course + '</b>' : '') + '. Join now?';
+      txt.innerHTML = '<b>' + fromName + '</b> invited you to' + (_inviteStarted ? ' join their round' : ' a round') +
+        (inv.course ? ' at <b>' + inv.course + '</b>' : '') +
+        (_inviteStarted ? '. Join now?' : '. Accept to add it to your rounds?');
     }
   }
   // Title + join-button label match the kind of invite.
   { const titleEl = document.getElementById('incoming-invite-title');
     if (titleEl) titleEl.textContent = isWB ? '🎲 Bet sent to you' : isW ? '🎲 Bet proposal' : (isOR ? '📣 Open round' : (isT2 ? '🏆 Tournament invite' : '⛳ Game invite')); }
   { const joinBtn = document.getElementById('incoming-invite-join');
-    if (joinBtn) joinBtn.textContent = isWB ? 'View in Wager tab' : isW ? 'Watch in Wager tab' : (isOR ? 'Accept' : (isT2 ? 'Accept' : 'Join now')); }
+    if (joinBtn) joinBtn.textContent = isWB ? 'View in Wager tab' : isW ? 'Watch in Wager tab' : (isOR ? 'Accept' : (isT2 ? 'Accept' : (_inviteStarted ? 'Join now' : 'Accept'))); }
   document.getElementById('incoming-invite-modal').classList.add('show');
   return true;
 }
@@ -55131,7 +55224,7 @@ window.switchTab = function(name, opts) {
       try { await renderOpenRounds(); } catch (e) {}
     })(); });
   }
-  if (name === 'home') renderHome();
+  if (name === 'home') { renderHome(); try { renderClubs(); } catch (e) {} }   // v903: the My clubs card lives in #panel-home, so it has to render here
   if (name === 'stats') { renderStats(); try { renderClubs(); } catch (e) {} }
   if (name === 'crew') { renderCrew(); }
   if (name === 'bets') { try { const a = document.getElementById('doc-admin-row'); if (a) a.style.display = (typeof isAdmin === 'function' && isAdmin()) ? 'block' : 'none'; } catch (e) {} }
@@ -64068,6 +64161,14 @@ function wireClubRows() {
   });
 }
 (function wireClubsPanel() {
+  // v903 (Tyler): "we used to have the ability to go in and change our clubs...
+  // that option went away so now there is no way to see what your clubs are."
+  // The My clubs card sits in #panel-home, but renderClubs() only ever ran on the
+  // Stats tab — so unless you happened to visit Stats first, expanding My clubs
+  // showed the help text, Add/Reset and a Save button over an EMPTY list. Render
+  // on open (cheap, lazy) so the bag is always there, with Save beneath it.
+  { const d = document.getElementById('clubs-details');
+    if (d) d.addEventListener('toggle', () => { if (d.open) { try { renderClubs(); } catch (e) {} } }); }
   const add = document.getElementById('btn-add-club');
   if (add) add.onclick = () => {
     const list = document.getElementById('clubs-list');
