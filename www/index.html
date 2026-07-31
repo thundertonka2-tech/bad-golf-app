@@ -7486,7 +7486,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.906';
+const BG_BUILD = 'v2026.11.907';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -7547,6 +7547,19 @@ let supaOnline = navigator.onLine; // Tracks network state for sync indicator
 let activeRealtimeSub = null; // Current realtime subscription, if any
 let _gamePollTimer = null;    // backstop poll while a round is live (catches missed/delayed realtime score syncs)
 
+// v907 (Tyler): race any promise against a deadline. A network that STALLS (rather
+// than failing) settles nothing — no onload, no onerror, no rejection — so a plain
+// `await` on it hangs forever. Every await on the boot critical path now goes through
+// this so the app can always reach first paint.
+function _bgRaceTimeout(p, ms, label) {
+  var t;
+  return Promise.race([
+    Promise.resolve(p).then(function (v) { clearTimeout(t); return v; },
+                            function (e) { clearTimeout(t); throw e; }),
+    new Promise(function (_, rej) { t = setTimeout(function () { rej(new Error((label || 'operation') + ' timed out')); }, ms); })
+  ]);
+}
+
 // Initialize the Supabase client. Loads the CDN script if not already present.
 async function initSupabase() {
   if (supaReady) return supa;
@@ -7558,6 +7571,11 @@ async function initSupabase() {
         script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js';
         script.onload = resolve;
         script.onerror = reject;
+        // v907: a stalled connection (captive wifi, flaky LTE, DNS black-hole) fires
+        // NEITHER onload nor onerror, so this promise never settled and init() never
+        // reached the reveal — the app sat on "Loading..." forever. Cap the wait; if
+        // the script lands later, the next initSupabase() call picks it straight up.
+        setTimeout(function () { reject(new Error('Supabase CDN timed out')); }, 7000);
         document.head.appendChild(script);
       });
     }
@@ -7638,7 +7656,12 @@ async function fetchMyRole() {
 async function initAuth() {
   if (!supa) return;
   try {
-    const { data } = await supa.auth.getSession();
+    // v907: capped — a stalled network made this never resolve, which hung boot AND
+    // skipped the onAuthStateChange wiring below. On timeout we start as a guest and
+    // the listener still gets installed, so a session that lands late signs us in.
+    let data = null;
+    try { ({ data } = await _bgRaceTimeout(supa.auth.getSession(), 6000, 'getSession')); }
+    catch (e) { console.warn('auth: getSession slow/failed, starting as guest', e); }
     _authUser = (data && data.session) ? data.session.user : null;
     // Remember this device has had a real sign-in — powers the offline grace
     // path (returning users get in offline; brand-new users still must sign in).
@@ -55795,12 +55818,19 @@ async function init() {
   } catch (e) {}
 
   // Initialize Supabase backend (loads CDN script, creates client)
-  await initSupabase();
+  // v907 (Tyler): HARD CAP on the boot network phase. This await had no deadline, so a
+  // stalled connection left the app on the splash indefinitely ("stuck on the loading
+  // screen", not reproducible on a good network). Boot now always proceeds; the app
+  // runs as a guest/offline and reconnects by itself the moment the network recovers.
+  try { await _bgRaceTimeout(initSupabase(), 8000, 'Supabase init'); }
+  catch (e) { console.warn('boot: Supabase init slow/failed — continuing offline', e); }
   updateSyncIndicator();
 
   // Initialize auth (reads any existing session, listens for changes).
   // Optional sign-in — guests are unaffected.
-  await initAuth();
+  // v907: same hard cap (backstop to the inner getSession cap above).
+  try { await _bgRaceTimeout(initAuth(), 8000, 'Auth init'); }
+  catch (e) { console.warn('boot: auth init slow/failed — continuing as guest', e); }
 
   // Phase 2 clean-slate migration, the ?tjoin= invite claim, restoring the last
   // round, and rendering Home are all DEFERRED to the end of init() so the app
