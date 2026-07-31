@@ -7478,7 +7478,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.912';
+const BG_BUILD = 'v2026.11.913';
 
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
@@ -43848,7 +43848,58 @@ async function t2EnsureFreshSession() {
   } catch (e) { /* non-fatal — the insert will still surface a clear error */ }
 }
 
+// v913 (Tyler, Jul 31 2026): "the tourney I created today is showing twice on my
+// events page now." Two "Friday Night Lights" rows landed 1.6 SECONDS apart.
+// ROOT CAUSE: the Create button (t2c-save -> submitT2Create) was never disabled
+// while the create ran, and the create is an RPC plus several awaits -- long
+// enough to look like nothing happened, so a second tap fired a second create.
+// Guarded in TWO places so no caller can reintroduce it: the button disables
+// itself below, and t2Create de-dupes here for EVERY caller (template, daily,
+// convert-to-event, setup-form). An identical create still in flight returns
+// that same promise; one that just succeeded returns the row it made instead of
+// inserting a twin.
+const _t2CreateInFlight = {};   // name|days -> pending Promise
+const _t2CreateRecent = {};     // name|days -> { at, row }
+function _t2CreateKey(opts) {
+  return String((opts && opts.name) || '').trim().toLowerCase() + '|' + ((opts && opts.numDays) || 1);
+}
 async function t2Create(opts) {
+  const _ck = _t2CreateKey(opts);
+  // Belt and braces BELOW the app layer: if an identical event of mine already
+  // exists from the last few minutes, adopt that row instead of making another.
+  // Covers the case a client-side guard structurally cannot -- the create RPC
+  // being re-sent by the transport after a dropped/slow response, which inserts
+  // twice from ONE call.
+  try {
+    if (supa && _authUser && opts && opts.name) {
+      const _since = new Date(Date.now() - 180000).toISOString();
+      const { data: _dup } = await supa.from('tournaments').select('*')
+        .eq('commissioner_id', _authUser.id).eq('name', String(opts.name).trim())
+        .gte('created_at', _since).order('created_at', { ascending: false }).limit(1);
+      if (Array.isArray(_dup) && _dup.length) {
+        showToast('You already have an event by that name — opening it');
+        return _dup[0];
+      }
+    }
+  } catch (e) {}
+  try {
+    const _recent = _t2CreateRecent[_ck];
+    if (_recent && (Date.now() - _recent.at) < 30000) {
+      showToast('That event was just created — opening it');
+      return _recent.row;
+    }
+    if (_t2CreateInFlight[_ck]) return await _t2CreateInFlight[_ck];
+  } catch (e) {}
+  const _p = (async () => {
+    const _row = await _t2CreateRaw(opts);
+    try { if (_row && _row.id) _t2CreateRecent[_ck] = { at: Date.now(), row: _row }; } catch (e) {}
+    return _row;
+  })();
+  _t2CreateInFlight[_ck] = _p;
+  try { return await _p; }
+  finally { try { delete _t2CreateInFlight[_ck]; } catch (e) {} }
+}
+async function _t2CreateRaw(opts) {
   if (!supa || !_authUser) { showToast('Sign in to create a tournament'); return null; }
   await t2EnsureFreshSession();
   try {
@@ -45812,7 +45863,15 @@ function wireT2() {
   const cm = document.getElementById('t2-create-modal');
   if (cm) cm.onclick = (e) => { if (e.target.id === 't2-create-modal') cm.classList.remove('show'); };
   const cs = document.getElementById('t2c-save');
-  if (cs) cs.onclick = () => submitT2Create();
+  // v913: disable the button for the whole create so an impatient second tap
+  // can't make a duplicate event (see t2Create's de-dupe for the other callers).
+  if (cs) cs.onclick = async () => {
+    if (cs.disabled) return;
+    const _lbl = cs.textContent;
+    cs.disabled = true; cs.style.opacity = '0.6'; cs.textContent = 'Creating…';
+    try { await submitT2Create(); }
+    finally { cs.disabled = false; cs.style.opacity = ''; cs.textContent = _lbl; }
+  };
   // Individual events have no teams — hide the team-name fields and default
   // to a single playing day.
   const ty = document.getElementById('t2c-type');
@@ -54105,7 +54164,17 @@ async function _t2RepaintP3GreenieForScope(g, scope) {
 // above already makes) and then one row per player from EVERY round in the
 // event, reusing that round's OWN scramble/ryder-cup team config, hcp strokes,
 // and skin markers so each player's row is exactly correct for their own game.
-function _t2BuildFieldScorecardHtml(rawRounds, headerG, fieldSkinMap) {
+// v913 (Tyler, Jul 31 2026): "There were five people in this tournament but
+// when I click the tournament tab the scorecard only shows our group and is
+// missing Steve."
+// ROOT CAUSE: this builds rows from the saved ROUNDS, so a player only appears
+// if his cart group actually launched a round. Steve's Group 2 was still
+// 'scheduled' (no game_code), so he had no round row and silently vanished from
+// the field scorecard -- while Money standings, which reads tournament_players,
+// listed all five. `fieldPlayers` (the tournament_players roster) is now passed
+// in and anyone with no round is appended as a dashed row, so the card always
+// accounts for every entrant and it's obvious who hasn't teed off yet.
+function _t2BuildFieldScorecardHtml(rawRounds, headerG, fieldSkinMap, fieldPlayers) {
   let html = '<thead><tr><th>Player</th>';
   for (let i = 1; i <= 9; i++) html += '<th>' + i + '</th>';
   html += '<th>Out</th>';
@@ -54179,6 +54248,33 @@ function _t2BuildFieldScorecardHtml(rawRounds, headerG, fieldSkinMap) {
     });
   });
 
+  // v913: every EVENT player who isn't in any round yet (group not started, or
+  // never assigned to one) gets a dashed row so the field scorecard reconciles
+  // with the Money standings above it instead of quietly dropping them.
+  try {
+    const _nk = (v) => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(v || '')) : String(v || '').trim().toLowerCase();
+    const _seen = new Set();
+    rounds.forEach(rg => (rg.players || []).forEach(p => { const k = _nk(p && p.name); if (k) _seen.add(k); }));
+    const _missing = (fieldPlayers || []).filter(fp => {
+      const nm = String((fp && (fp.display_name || fp.name)) || '').trim();
+      if (!nm) return false;
+      const k = _nk(nm);
+      if (!k || _seen.has(k)) return false;
+      _seen.add(k);   // de-dupe the roster against itself too
+      return true;
+    });
+    if (_missing.length) {
+      const _dash = (n) => { let out = ''; for (let i = 0; i < n; i++) out += '<td>—</td>'; return out; };
+      _missing.forEach(fp => {
+        const nm = String((fp.display_name || fp.name) || '').trim();
+        html += '<tr style="opacity:0.62"><td class="player-name">' + t2esc(nm) +
+          '<div class="small-text" style="font-weight:400;color:var(--text-muted)">not started</div></td>' +
+          _dash(9) + '<td class="total">—</td>' + _dash(9) +
+          '<td class="total">—</td><td class="total">—</td></tr>';
+      });
+    }
+  } catch (e) {}
+
   html += '</tbody>';
   return html;
 }
@@ -54200,10 +54296,12 @@ async function _t2RepaintScorecardForScope(g, scope) {
     const tbl = document.getElementById('scorecard');
     if (!tbl) return;
     let fieldSkinMap = null; try { fieldSkinMap = await _t2FetchFieldSkinMap(g); } catch (e) {}
+    // v913: the event roster, so entrants whose group hasn't started still show.
+    let fieldPlayers = []; try { fieldPlayers = await t2GetPlayers(tid); } catch (e) { fieldPlayers = []; }
     if (myToken !== _t2ScorecardRepaintToken) return;
     if (!(state && state.game && state.game.code === g.code)) return;
     if ((_t2BoardFilterScope[g.code] || 'tournament') === 'group') return;
-    tbl.innerHTML = _t2BuildFieldScorecardHtml(raw, g, fieldSkinMap);
+    tbl.innerHTML = _t2BuildFieldScorecardHtml(raw, g, fieldSkinMap, fieldPlayers);
   } catch (e) {}
 }
 
