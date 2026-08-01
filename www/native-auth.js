@@ -148,7 +148,15 @@
         var hashedNonce = await sha256Hex(rawNonce);
         var res = await SocialLogin.login({
           provider: 'google',
-          options: { scopes: ['email', 'profile'], nonce: hashedNonce }
+          // ANDROID (2026-08): do NOT pass `scopes` — Capgo's Android flow throws
+          // "You cannot use scopes without modifying the main activity" when scopes
+          // are requested (needs native MainActivity surgery we don't want in a
+          // generated project). The default Credential Manager flow already returns
+          // an id_token carrying email + profile, which is all Supabase needs.
+          // iOS keeps the explicit scopes (works fine there, matches shipped builds).
+          options: __isAndroid
+            ? { nonce: hashedNonce }
+            : { scopes: ['email', 'profile'], nonce: hashedNonce }
         });
         var result = (res && res.result) || {};
         var idToken = result.idToken ||
