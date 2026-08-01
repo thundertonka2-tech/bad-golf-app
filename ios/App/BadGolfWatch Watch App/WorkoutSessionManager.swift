@@ -64,6 +64,28 @@ final class WorkoutSessionManager: NSObject, ObservableObject {
         }
     }
 
+    /// v926 (Kevin, Aug 2026): an ORPHANED workout session is why the app kept
+    /// "opening for no reason" with no way to close it. If a previous run never
+    /// ended its session (missed round-ended signal, crash, force-quit while a
+    /// stale round was cached), HealthKit still holds the session — and watchOS
+    /// relaunches the owning app to recover it and pins it to every wrist-raise,
+    /// indefinitely. Kevin's only way out was deleting the app. Called on every
+    /// launch that has NO active round: pick up whatever session HealthKit is
+    /// still holding for this app and end it, so watchOS releases us.
+    /// Best-effort and safe: no session to recover → the completion no-ops.
+    func endOrphanedSession() {
+        if session != nil { stop(); return }
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        healthStore.recoverActiveWorkoutSession { [weak self] recovered, _ in
+            guard self != nil, let s = recovered else { return }
+            DispatchQueue.main.async {
+                let b = s.associatedWorkoutBuilder()
+                s.end()
+                b.endCollection(withEnd: Date()) { _, _ in b.finishWorkout { _, _ in } }
+            }
+        }
+    }
+
     /// Call when the round ends / clears. Safe to call when nothing is running.
     func stop() {
         guard let s = session else { return }

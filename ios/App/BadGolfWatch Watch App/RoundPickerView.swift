@@ -25,6 +25,11 @@ struct RoundPickerView: View {
                         .foregroundStyle(Color.white.opacity(0.7))
                     Button {
                         loading = true
+                        // v926: an explicit "Check again" is the user asking to
+                        // reattach — lift any "closed on watch" dismissal, then
+                        // ask the phone AND Supabase for the current round.
+                        store.clearDismissal()
+                        WatchConnectivityManager.shared.requestRound()
                         Task { await store.refreshFromSupabase(); loading = false }
                     } label: {
                         if loading { ProgressView() } else { Label("Check again", systemImage: "arrow.clockwise") }

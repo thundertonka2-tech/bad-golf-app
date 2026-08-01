@@ -24,8 +24,62 @@ final class RoundStore: ObservableObject {
     }()
     private var pendingHoles: Set<Int> = []   // holes with unsynced score writes
     private var lastPhoneHole: Int = -1       // v890: last hole the PHONE told us about (hole-jump guard)
+    private var lastActivityAt: Date?         // v926: stamped on every handoff/score — powers the stale-round guard
+    private var dismissedRoundId: String?     // v926: round explicitly closed ON the watch; heartbeat must not resurrect it
 
-    init() { loadCache(); ensureCourseMatchesRound() }
+    init() { loadCache(); expireStaleRound(); ensureCourseMatchesRound() }
+
+    // MARK: v926 — "End on watch" + stale-round guard (Kevin, Aug 2026)
+    // The watch cached its round FOREVER and the only thing that ever cleared it
+    // was a one-time roundEnded signal from the phone (v890). Miss that signal
+    // (watch out of range at that moment, phone app never reopened, reinstall…)
+    // and the watch believed a round was live for days — which kept an
+    // HKWorkoutSession running, which made watchOS pin/relaunch the app on every
+    // wrist-raise with NO user-visible way out. Kevin's only escape was deleting
+    // the app. Three layers now:
+    //  1) closeOnWatch() — explicit close button (ScoringView). Remembers the
+    //     round id so the phone's 8s heartbeat can't resurrect it seconds later;
+    //     a DIFFERENT round lifts the dismissal automatically, or "Check again"
+    //     on the picker lifts it by hand. Phone scores are never touched.
+    //  2) expireStaleRound() — a cached round with no activity for 12+ hours is
+    //     over; drop it at launch instead of booting into a workout session.
+    //  3) WorkoutSessionManager.endOrphanedSession() — ends zombie workout
+    //     sessions watchOS would otherwise keep "recovering" (see that file).
+    func closeOnWatch() {
+        dismissedRoundId = round?.id
+        round = nil
+        currentHole = 1
+        lastPhoneHole = -1
+        pendingHoles.removeAll()
+        syncState = .idle
+        lastActivityAt = nil
+        saveCache()
+        WorkoutSessionManager.shared.stop()   // belt & braces; App.onChange(round?.id) also stops it
+    }
+
+    /// The user explicitly asked to re-attach (picker's "Check again").
+    func clearDismissal() {
+        if dismissedRoundId != nil { dismissedRoundId = nil; saveCache() }
+    }
+
+    /// Drop a cached round that has clearly been over for hours. A real round
+    /// gets lastActivityAt re-stamped by every phone heartbeat (8s) and every
+    /// wrist-entered score, so 12h of silence means it's long finished. A nil
+    /// stamp (cache written by a pre-v926 build) is treated as stale — if the
+    /// round IS live, the phone re-hands it within seconds anyway.
+    private func expireStaleRound() {
+        guard round != nil else { return }
+        let cutoff: TimeInterval = 12 * 60 * 60
+        if lastActivityAt == nil || Date().timeIntervalSince(lastActivityAt!) > cutoff {
+            round = nil
+            currentHole = 1
+            lastPhoneHole = -1
+            pendingHoles.removeAll()
+            syncState = .idle
+            lastActivityAt = nil
+            saveCache()
+        }
+    }
 
     // MARK: Hole helpers
     // The cached greens ONLY when they belong to the ACTIVE round's course.
@@ -70,6 +124,7 @@ final class RoundStore: ObservableObject {
         round = r
         pendingHoles.insert(h)
         syncState = .queued(pendingHoles.count)
+        lastActivityAt = Date()               // v926: scoring = activity
         saveCache()
         Task { await flush() }   // try immediately; safe if offline
     }
@@ -85,6 +140,9 @@ final class RoundStore: ObservableObject {
 
     // MARK: Handoff from phone
     func apply(handoff: RoundHandoff) {
+        if handoff.round.id == dismissedRoundId { return }   // v926: closed on watch — stay closed
+        dismissedRoundId = nil
+        lastActivityAt = Date()
         if let token = handoff.supabaseAccessToken { SessionStore.shared.accessToken = token }
         self.round = handoff.round
         self.currentHole = handoff.round.currentHole
@@ -118,12 +176,16 @@ final class RoundStore: ObservableObject {
             lastPhoneHole = -1
             pendingHoles.removeAll()
             syncState = .idle
+            lastActivityAt = nil                  // v926
+            dismissedRoundId = nil                // v926: the round is over — dismissal no longer needed
             signedIn = SessionStore.shared.isSignedIn
             saveCache()
             return
         }
         if let roundRow = payload["round"] as? [String: Any],
-           let r = RoundParser.parse(row: roundRow) {
+           let r = RoundParser.parse(row: roundRow),
+           r.id != dismissedRoundId {             // v926: closed on watch — the heartbeat must NOT resurrect it
+            dismissedRoundId = nil                // a different round lifts the dismissal automatically
             // v890: MERGE, don't replace. A score tapped on the WATCH that hasn't
             // synced yet (pendingHoles) must survive the phone's next handoff —
             // the 8s heartbeat was overwriting a wrist-entered score with the
@@ -137,6 +199,7 @@ final class RoundStore: ObservableObject {
                 lastPhoneHole = -1
             }
             self.round = merged
+            lastActivityAt = Date()               // v926: live handoff = activity
             // v890: only JUMP the watch's hole when the PHONE's hole actually
             // changed — re-applying the same handoff every 8s was yanking the
             // watch back to the phone's hole while the wearer browsed other
@@ -172,8 +235,10 @@ final class RoundStore: ObservableObject {
     // MARK: Direct fetch (when no handoff, watch has network)
     func refreshFromSupabase() async {
         guard let pid = SessionStore.shared.playerId else { return }
-        if let r = await SupabaseService.shared.fetchActiveRound(playerId: pid) {
+        if let r = await SupabaseService.shared.fetchActiveRound(playerId: pid),
+           r.id != dismissedRoundId {            // v926: closed on watch — stay closed
             self.round = r
+            self.lastActivityAt = Date()
             self.currentHole = r.currentHole
             if let c = await SupabaseService.shared.fetchCourse(courseId: r.courseId) {
                 self.course = c
@@ -230,19 +295,26 @@ final class RoundStore: ObservableObject {
 
     // MARK: Cache persistence
     private func saveCache() {
-        struct Cache: Codable { var round: Round?; var currentHole: Int; var pending: [Int] }
+        // v926: + lastActivityAt (stale-round guard) + dismissedRoundId ("End on
+        // watch" survives an app relaunch). Both optional, so a pre-v926 cache
+        // still decodes — its nil lastActivityAt makes expireStaleRound() treat
+        // it as stale, which is exactly the healing we want on first run.
+        struct Cache: Codable { var round: Round?; var currentHole: Int; var pending: [Int]; var lastActivityAt: Date?; var dismissedRoundId: String? }
         // Course (greens) cached separately as raw to keep this simple.
-        let c = Cache(round: round, currentHole: currentHole, pending: Array(pendingHoles))
+        let c = Cache(round: round, currentHole: currentHole, pending: Array(pendingHoles),
+                      lastActivityAt: lastActivityAt, dismissedRoundId: dismissedRoundId)
         if let data = try? JSONEncoder().encode(c) { try? data.write(to: cacheURL) }
         if let course = course { CourseCache.save(course) }
     }
     private func loadCache() {
-        struct Cache: Codable { var round: Round?; var currentHole: Int; var pending: [Int] }
+        struct Cache: Codable { var round: Round?; var currentHole: Int; var pending: [Int]; var lastActivityAt: Date?; var dismissedRoundId: String? }
         if let data = try? Data(contentsOf: cacheURL),
            let c = try? JSONDecoder().decode(Cache.self, from: data) {
             self.round = c.round
             self.currentHole = c.currentHole
             self.pendingHoles = Set(c.pending)
+            self.lastActivityAt = c.lastActivityAt
+            self.dismissedRoundId = c.dismissedRoundId
             if !c.pending.isEmpty { self.syncState = .queued(c.pending.count) }
         }
         self.course = CourseCache.load()

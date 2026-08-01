@@ -50,6 +50,13 @@ struct BadGolfWatchApp: App {
                         // 18Birdies behavior. Without it watchOS suspends us on
                         // screen-sleep and every raise was a cold GPS start.
                         WorkoutSessionManager.shared.start()
+                    } else {
+                        // v926 (Kevin): no round, so nothing should be keeping
+                        // this app alive — end any zombie workout session a
+                        // previous run left behind, or watchOS keeps relaunching
+                        // us to "recover" it (the app that opens by itself and
+                        // can't be closed).
+                        WorkoutSessionManager.shared.endOrphanedSession()
                     }
                     // Always ask the phone for the latest as soon as we launch —
                     // requestRound() itself no-ops until reachable, so this is
