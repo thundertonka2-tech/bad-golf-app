@@ -5861,7 +5861,7 @@
             <p>It uses the real World Handicap System formula with a conditions term added:<br>
             <strong>Differential = (113 ÷ slope) × (gross − rating − conditions adjustment)</strong></p>
             <p>The conditions adjustment is <strong>0 to +3 strokes</strong>, driven mostly by wind (gusts count extra), then cold or heat, then rain. Calm, mild, dry days get <strong>0</strong> (no change); a nasty, windy, wet day can reach <strong>+3</strong>, which lowers that round's differential so a bad-weather score doesn't unfairly inflate your index.</p>
-            <p><strong>Note:</strong> this is Bad Golf's <em>live-weather estimate</em>, not the official GHIN PCC (the USGA calculates that from other golfers' scores, not from weather). You can turn it off in ⚙️ Additional settings. Every round stores both the raw and weather-adjusted differential.</p>
+            <p><strong>Note:</strong> this is Bad Golf's <em>live-weather estimate</em>, not the official GHIN PCC (the USGA calculates that from other golfers' scores, not from weather). You can turn it off in ⚙️ Additional settings. Every round stores both the raw and weather-adjusted differential — and your <strong>Handicap Index always uses the raw one</strong>, exactly like GHIN; the weather number is informational.</p>
           </div>
         </details>
 
@@ -5874,12 +5874,12 @@
             • <strong>5 rounds:</strong> lowest 1<br>
             • <strong>6 rounds:</strong> avg of lowest 2 minus 1.0<br>
             • <strong>7-8 rounds:</strong> avg of lowest 2<br>
-            • <strong>9-10 rounds:</strong> avg of lowest 3<br>
-            • <strong>11-12 rounds:</strong> avg of lowest 4<br>
-            • <strong>13-14 rounds:</strong> avg of lowest 5<br>
-            • <strong>15-16 rounds:</strong> avg of lowest 6<br>
-            • <strong>17-18 rounds:</strong> avg of lowest 7<br>
-            • <strong>19+ rounds:</strong> avg of lowest 8 of last 20</p>
+            • <strong>9-11 rounds:</strong> avg of lowest 3<br>
+            • <strong>12-14 rounds:</strong> avg of lowest 4<br>
+            • <strong>15-16 rounds:</strong> avg of lowest 5<br>
+            • <strong>17-18 rounds:</strong> avg of lowest 6<br>
+            • <strong>19 rounds:</strong> avg of lowest 7<br>
+            • <strong>20+ rounds:</strong> avg of lowest 8 of last 20</p>
           </div>
         </details>
 
@@ -7638,7 +7638,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.923';
+const BG_BUILD = 'v2026.11.924';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -13854,11 +13854,36 @@ async function archiveScoresFromRound(g) {
     const _cond = g.conditions || null;
     const _ca = (_cond && _cond.caApplied && typeof _cond.ca === 'number') ? _cond.ca : 0;
     const _rankable = (isComplete && rating != null && slope != null && !g.unranked);
-    const _nineMul = (roundHoles(g) === 9) ? 2 : 1;   // WHS: a 9-hole differential scales to an 18-hole equivalent for the index pool
-    const _d1 = _rankable ? calcDifferential(gross, rating, slope, _ca) : null;
-    const _d0 = _rankable ? calcDifferential(gross, rating, slope, 0) : null;
-    const differential = (_d1 == null) ? null : Math.round(_d1 * _nineMul * 10) / 10;
-    const differentialRaw = (_d0 == null) ? null : Math.round(_d0 * _nineMul * 10) / 10;
+    const _isNine = (roundHoles(g) === 9);
+    // v924 (Tyler/Kevin): GHIN parity — ADJUSTED GROSS. Cap every hole at net
+    // double bogey (par + 2 + strokes received on that hole, USGA Rule 3.1b)
+    // before computing the differential. A player with no course handicap gets
+    // GHIN's pre-index cap of par + 5. Plus-handicaps cap lower on the holes
+    // they give back (strokesOnHole already returns the negative). The REAL
+    // gross is untouched — scorecards, money and stats keep the true score;
+    // only the handicap differential uses the capped total.
+    let _adjGross = gross;
+    try {
+      if (_rankable && Array.isArray(g.pars)) {
+        const _hcpN = (typeof p.hcp === 'number' && isFinite(p.hcp)) ? p.hcp : null;
+        let _t = 0;
+        for (let _i = 0; _i < arr.length; _i++) {
+          const _s = arr[_i];
+          if (_s == null) continue;
+          const _par = g.pars[_i];
+          if (_par == null) { _t += _s; continue; }
+          const _si = (Array.isArray(g.sis) && g.sis[_i]) ? g.sis[_i] : (_i + 1);
+          const _cap = (_hcpN == null) ? (_par + 5) : (_par + 2 + strokesOnHole(_hcpN, _si, _par, null));
+          _t += Math.min(_s, _cap);
+        }
+        _adjGross = _t;
+      }
+    } catch (e) { _adjGross = gross; }
+    // Native-length score differentials. 9-hole rounds are scaled to 18 AFTER
+    // the roster entry is matched — the WHS-2024 expected-differential method
+    // needs the player's prior index (see the finalize block below).
+    const _d1 = _rankable ? calcDifferential(_adjGross, rating, slope, _ca) : null;
+    const _d0 = _rankable ? calcDifferential(_adjGross, rating, slope, 0) : null;
 
     // Match roster by structured firstName + lastName when the saved player
     // record has them. Fall back to combined-name match for legacy data.
@@ -13924,11 +13949,33 @@ async function archiveScoresFromRound(g) {
       existingIdx = entry.scoreHistory.findIndex(s => s.date === date && s.course === g.course);
     }
 
+    // v924: finalize the differentials. 18-hole rounds use the native value.
+    // 9-hole rounds use the WHS-2024 method GHIN uses: 18-hole SD = the 9-hole
+    // SD + an EXPECTED 9-hole SD from the player's index before this round
+    // (USGA's own worked example: index 14.0 → expected 8.5 = index/2 + 1.5;
+    // the exact USGA table is unpublished). The old ×2 doubling over-weighted a
+    // bad nine. No prior index yet (GHIN wouldn't have one either) → fall back
+    // to doubling so the round still counts toward the 54-hole minimum.
+    let differential = (_d1 == null) ? null : Math.round(_d1 * 10) / 10;
+    let differentialRaw = (_d0 == null) ? null : Math.round(_d0 * 10) / 10;
+    if (_isNine && _d1 != null) {
+      let _hi = null;
+      try {
+        const _prior = (entry.scoreHistory || []).filter(s => s && (!g.code || s.gameCode !== g.code));
+        const _hr = (typeof calcHandicapIndex === 'function') ? calcHandicapIndex(_prior) : null;
+        if (_hr && typeof _hr.index === 'number') _hi = _hr.index;
+      } catch (e) {}
+      const _exp = (_hi == null) ? null : Math.round((_hi / 2 + 1.5) * 10) / 10;
+      differential = Math.round(((_exp == null) ? _d1 * 2 : _d1 + _exp) * 10) / 10;
+      differentialRaw = (_d0 == null) ? null : Math.round(((_exp == null) ? _d0 * 2 : _d0 + _exp) * 10) / 10;
+    }
+
     const record = {
       date,
       course: g.course || '',
       courseId: g.courseId || '',
       gross,
+      adjGross: (_rankable && _adjGross !== gross) ? _adjGross : undefined,   // v924: net-double-bogey-capped total (only stored when it differs)
       holesScored,
       complete: isComplete,
       teeLabel: p.teeLabel || (tee ? tee.label : null),
@@ -21640,9 +21687,14 @@ function playerGender(p) {
 // Returns { index: number | null, n: count, basis: string }
 function calcHandicapIndex(scoreHistory) {
   const _list = Array.isArray(scoreHistory) ? scoreHistory : [];
+  // v924 (Tyler): the INDEX uses the RAW differential — no weather adjustment.
+  // GHIN has no weather PCC, so weather-adjusted values drifted from GHIN.
+  // The 🌦️ adjustment still displays on each round; rounds saved before
+  // differentialRaw existed fall back to `differential` (identical for them).
+  const _dOf = s => (s && s.differentialRaw != null) ? s.differentialRaw : (s ? s.differential : null);
   // Use most recent 20 rounds (sorted by date desc) that carry a differential.
   const recent = [..._list]
-    .filter(s => s.differential != null)
+    .filter(s => _dOf(s) != null)
     .sort((a, b) => (b.date || 0) - (a.date || 0))
     .slice(0, 20);
   const n = recent.length;
@@ -21657,7 +21709,7 @@ function calcHandicapIndex(scoreHistory) {
     return { index: null, n, holes, basis: 'need 54 holes (' + holes + '/54)' };
   }
 
-  const diffs = recent.map(s => s.differential).sort((a, b) => a - b);
+  const diffs = recent.map(_dOf).sort((a, b) => a - b);
 
   let useCount, adjustment, basis;
   if      (n === 3)  { useCount = 1; adjustment = -2.0; basis = 'lowest 1 of 3, −2.0'; }
@@ -21665,11 +21717,14 @@ function calcHandicapIndex(scoreHistory) {
   else if (n === 5)  { useCount = 1; adjustment = 0;    basis = 'lowest 1 of 5'; }
   else if (n === 6)  { useCount = 2; adjustment = -1.0; basis = 'avg of lowest 2 of 6, −1.0'; }
   else if (n <= 8)   { useCount = 2; adjustment = 0;    basis = 'avg of lowest 2 of ' + n; }
-  else if (n <= 10)  { useCount = 3; adjustment = 0;    basis = 'avg of lowest 3 of ' + n; }
-  else if (n <= 12)  { useCount = 4; adjustment = 0;    basis = 'avg of lowest 4 of ' + n; }
-  else if (n <= 14)  { useCount = 5; adjustment = 0;    basis = 'avg of lowest 5 of ' + n; }
-  else if (n <= 16)  { useCount = 6; adjustment = 0;    basis = 'avg of lowest 6 of ' + n; }
-  else if (n <= 18)  { useCount = 7; adjustment = 0;    basis = 'avg of lowest 7 of ' + n; }
+  // v924 (Tyler/Kevin): corrected to the EXACT USGA Rule 5.2a bands — the old
+  // bands (9-10→3, 11-12→4, 13-14→5, 15-16→6, 17-18→7, 19+→8) averaged one
+  // extra differential for 11/13-19 rounds, inflating the index vs GHIN.
+  else if (n <= 11)  { useCount = 3; adjustment = 0;    basis = 'avg of lowest 3 of ' + n; }
+  else if (n <= 14)  { useCount = 4; adjustment = 0;    basis = 'avg of lowest 4 of ' + n; }
+  else if (n <= 16)  { useCount = 5; adjustment = 0;    basis = 'avg of lowest 5 of ' + n; }
+  else if (n <= 18)  { useCount = 6; adjustment = 0;    basis = 'avg of lowest 6 of ' + n; }
+  else if (n === 19) { useCount = 7; adjustment = 0;    basis = 'avg of lowest 7 of 19'; }
   else               { useCount = 8; adjustment = 0;    basis = 'avg of lowest 8 of ' + n; }
 
   const used = diffs.slice(0, useCount);
@@ -21735,8 +21790,36 @@ async function recalcMyDifferentials() {
       const _rs = pickTeeRS(tee, _myG);
       if (_rs.rating == null || _rs.slope == null) continue;
       const _scaR = (typeof s.ca === 'number' ? s.ca : 0);
-      const newDiff = calcDifferential(s.gross, _rs.rating, _rs.slope, _scaR);
-      const newDiffRaw = calcDifferential(s.gross, _rs.rating, _rs.slope, 0);
+      // v924: GHIN parity in the rebuild too. (a) Cap holes at net double bogey
+      // when the record stored hole scores + pars — uses the player's CURRENT
+      // roster hcp and a default 1..18 stroke index, since the round's exact
+      // values weren't archived (close approximation, off by at most a stroke
+      // on a couple holes). (b) 9-hole rounds scale with the expected-
+      // differential method instead of doubling.
+      let _g24 = s.gross;
+      try {
+        if (Array.isArray(s.holeScores) && Array.isArray(s.pars)) {
+          const _hcpN = (typeof p.hcp === 'number' && isFinite(p.hcp)) ? p.hcp : null;
+          let _t = 0, _any = false;
+          for (let _i = 0; _i < s.holeScores.length; _i++) {
+            const _sc = s.holeScores[_i]; if (_sc == null) continue;
+            const _par = s.pars[_i];
+            if (_par == null) { _t += _sc; continue; }
+            const _cap = (_hcpN == null) ? (_par + 5) : (_par + 2 + strokesOnHole(_hcpN, _i + 1, _par, null));
+            _t += Math.min(_sc, _cap); _any = true;
+          }
+          if (_any) _g24 = _t;
+        }
+      } catch (e) { _g24 = s.gross; }
+      let newDiff = calcDifferential(_g24, _rs.rating, _rs.slope, _scaR);
+      let newDiffRaw = calcDifferential(_g24, _rs.rating, _rs.slope, 0);
+      if (s.holesScored === 9 && newDiff != null) {
+        let _hi9 = null;
+        try { const _hr9 = calcHandicapIndex((p.scoreHistory || []).filter(x => x !== s)); if (_hr9 && typeof _hr9.index === 'number') _hi9 = _hr9.index; } catch (e) {}
+        const _exp9 = (_hi9 == null) ? null : Math.round((_hi9 / 2 + 1.5) * 10) / 10;
+        newDiff = (_exp9 == null) ? Math.round(newDiff * 2 * 10) / 10 : Math.round((newDiff + _exp9) * 10) / 10;
+        newDiffRaw = (newDiffRaw == null) ? null : ((_exp9 == null) ? Math.round(newDiffRaw * 2 * 10) / 10 : Math.round((newDiffRaw + _exp9) * 10) / 10);
+      }
       if (newDiff != null && (newDiff !== s.differential || _rs.rating !== s.rating || _rs.slope !== s.slope)) {
         s.differential = newDiff; s.differentialRaw = newDiffRaw; s.rating = _rs.rating; s.slope = _rs.slope; changed++;
       }
@@ -47606,7 +47689,9 @@ async function saveRoundTemplate(tpl) {
   const rec = {
     id: 'rt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
     name: tpl.name, course: tpl.course || '', courseId: tpl.courseId || '',
-    savedConfig: tpl.savedConfig, createdBy: _creator || null, createdAt: Date.now()
+    savedConfig: tpl.savedConfig, createdBy: _creator || null,
+    createdByUid: (typeof _authUser !== 'undefined' && _authUser) ? _authUser.id : null,   // v924: uid stamp — name matching alone is brittle
+    createdAt: Date.now()
   };
   // Replace a same-named template by the same creator instead of piling up dupes.
   const _i = list.findIndex(x => x && x.name === rec.name && (!x.createdBy || x.createdBy === rec.createdBy));
@@ -47619,6 +47704,24 @@ async function renderRoundTemplates() {
   if (typeof isSignedIn === 'function' && !isSignedIn()) { box.innerHTML = '<div class="help-text">Sign in to save and use round templates.</div>'; return; }
   let list = [];
   try { list = await getRoundTemplates(); } catch (e) {}
+  // v924 (Tyler): round templates are PERSONAL. The blob is shared across every
+  // user (SHARED_SINGLETONS), and this card rendered it unfiltered — so Tyler
+  // was seeing Kevin's "Tuesday Mornings" template. Show only templates I
+  // created: uid match when stamped (v924+), else normalized creator-name match
+  // (older records). Untagged legacy templates (no creator recorded) stay
+  // visible to everyone — there's no way to tell whose they are.
+  try {
+    let _me = ''; try { _me = (await getMeName()) || ''; } catch (e) {}
+    const _n = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
+    const _meKey = _n(_me);
+    const _uid = (typeof _authUser !== 'undefined' && _authUser) ? _authUser.id : null;
+    list = list.filter(function (tp) {
+      if (!tp) return false;
+      if (tp.createdByUid) return !!_uid && tp.createdByUid === _uid;
+      if (tp.createdBy) return !!_meKey && _n(tp.createdBy) === _meKey;
+      return true;   // legacy untagged
+    });
+  } catch (e) {}
   if (!list.length) {
     box.innerHTML = '<div class="help-text">No round templates yet. Tap <strong>New Round Template</strong>, build your setup, then Start — it saves so you can reuse it in one tap.</div>';
   } else {
@@ -47636,7 +47739,11 @@ async function renderRoundTemplates() {
   box.querySelectorAll('.rt-del').forEach(function (b) { b.onclick = async function () {
     var tp = list.find(function (x) { return x.id === b.dataset.id; });
     if (!(await uiConfirm('Delete template "' + ((tp && tp.name) || '') + '"?', { title: 'Delete template?', okLabel: 'Delete' }))) return;
-    await saveRoundTemplates(list.filter(function (x) { return x.id !== b.dataset.id; }));
+    // v924: re-fetch the FULL shared list and remove by id — writing back the
+    // creator-filtered `list` would silently wipe everyone else's templates.
+    var _full = [];
+    try { _full = await getRoundTemplates(); } catch (e) { _full = list; }
+    await saveRoundTemplates(_full.filter(function (x) { return x && x.id !== b.dataset.id; }));
     await renderRoundTemplates();
   }; });
   var nb = document.getElementById('rt-new-btn');
@@ -51875,7 +51982,10 @@ async function renderTourneyList() {
     if (!t) return false;
     if (t.type === 'teetime') return false;   // Times-tab tee times live on the Times calendar, not the Events list (was rendering as "undefined")
     const createdByMe = !!_meKeyT && !!t.createdBy && _normT(t.createdBy) === _meKeyT;
-    if (t.isTemplate) return createdByMe || !t.createdBy;        // templates I created (legacy w/o creator stays visible)
+    if (t.isTemplate) {                                          // templates I created only (v924: uid match preferred; legacy w/o creator stays visible)
+      if (t.createdByUid) { const _u = (typeof _authUser !== 'undefined' && _authUser) ? _authUser.id : null; return !!_u && t.createdByUid === _u; }
+      return createdByMe || !t.createdBy;
+    }
     const _st = t.status || 'scheduled';
     if (_st === 'open') {                                        // open rounds normally live in their own card,
       // but a committed (non-host) player keeps it on THEIR schedule with live open
@@ -56173,13 +56283,15 @@ async function bnavCenter() {
 function bnavOpenMore() {
   const grid = document.getElementById('bnav-sheet-grid'); if (!grid) return;
   const admin = (typeof isAdmin === 'function' && isAdmin());
-  const items = [
-    { tab: 'times', icon: 'cal', lbl: 'Times' },
-    { tab: 'stats', icon: 'stats', lbl: 'Stats' },
-    { tab: 'tourneys', icon: 'trophy', lbl: 'Tourney' },   // v922: takes the slot the Wager item vacated — the sheet stays the same size
-    { tab: 'bets', icon: 'info', lbl: 'Info' }
-  ];
+  // v924 (Tyler): alphabetical order — Admin, Info, Stats, Times, Tourney.
+  const items = [];
   if (admin) items.push({ tab: 'admin', icon: 'admin', lbl: 'Admin' });
+  items.push(
+    { tab: 'bets', icon: 'info', lbl: 'Info' },
+    { tab: 'stats', icon: 'stats', lbl: 'Stats' },
+    { tab: 'times', icon: 'cal', lbl: 'Times' },
+    { tab: 'tourneys', icon: 'trophy', lbl: 'Tourney' }
+  );
   grid.style.gridTemplateColumns = 'repeat(' + items.length + ', minmax(0, 1fr))';
   grid.innerHTML = items.map(i => '<button type="button" class="s-item" onclick="bnavSheetGo(\'' + i.tab + '\')"><span class="sic"><svg><use href="#bn-' + i.icon + '"/></svg></span>' + i.lbl + '</button>').join('');
   const sc = document.getElementById('bnav-scrim'), sh = document.getElementById('bnav-sheet');
@@ -58243,6 +58355,7 @@ async function init() {
         status: 'scheduled',
         plannedCode: (typeof generateCode === 'function' ? generateCode() : null),   // v640: invite link needs the join code now
         createdBy: _creator || null, // only the creator can edit the settings later
+        createdByUid: (typeof _authUser !== 'undefined' && _authUser) ? _authUser.id : null,   // v924: uid stamp for exact ownership
         createdAt: Date.now()
       });
     }
