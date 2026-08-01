@@ -41,7 +41,9 @@
   // application" OAuth client that Supabase's Google provider already uses.
   // While it is empty, Android simply KEEPS the app's web OAuth flow for
   // Google (still works) — only iOS gets the native sheet.
-  var GOOGLE_WEB_CLIENT_ID = '';
+  // 2026-08-01 (Tyler): filled in — "Web client 1" from the Google Cloud
+  // credentials page (same web client Supabase's Google provider uses).
+  var GOOGLE_WEB_CLIENT_ID = '56040088868-o6q8hrq6hqlvmit1i40uckdbq1ojj18b.apps.googleusercontent.com';
 
   // --- helpers --------------------------------------------------------
   function randomNonce(len) {
