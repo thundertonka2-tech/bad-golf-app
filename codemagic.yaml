@@ -225,3 +225,101 @@ workflows:
         auth: integration
         submit_to_testflight: true
         # (Add your testers in App Store Connect -> TestFlight after the first upload.)
+
+  # =========================================================================
+  # ANDROID — builds the Play Store bundle (.aab) on a cloud Linux machine and
+  # uploads it to Google Play (internal testing track first).
+  #
+  # ONE-TIME setup in the Codemagic web UI (see Bad_Golf_Android_Setup_Guide):
+  #   1. Teams -> code signing identities -> Android keystores -> "Generate new"
+  #      NAME IT EXACTLY:  badgolf_upload   (Codemagic makes + stores the keystore)
+  #   2. Team settings -> Integrations: none needed — Play publishing uses a
+  #      service-account JSON stored as a SECURE group variable instead:
+  #      Add environment group "google_play" with variable
+  #      GCLOUD_SERVICE_ACCOUNT_CREDENTIALS = (paste the service-account .json)
+  #   3. Add environment group "firebase" with variable
+  #      GOOGLE_SERVICES_JSON = (paste the google-services.json contents).
+  #      Until this exists the app still BUILDS — push notifications just stay
+  #      off on Android (the gradle google-services plugin only applies when the
+  #      file is present; Capacitor's template guards it).
+  # =========================================================================
+  android-play:
+    name: Bad Golf Android -> Google Play
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      android_signing:
+        - badgolf_upload            # must match the keystore name in the UI
+      groups:
+        - google_play               # GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+        - firebase                  # GOOGLE_SERVICES_JSON (optional until Firebase exists)
+      vars:
+        PACKAGE_NAME: "com.simplisticfishing.badgolf"
+      node: 20.18.0
+      java: 17
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/node_modules
+        - $HOME/.gradle/caches
+    scripts:
+      - name: Install npm dependencies
+        script: npm install
+      - name: Bundle Supabase locally (offline support)
+        script: |
+          mkdir -p www/lib
+          cp node_modules/@supabase/supabase-js/dist/umd/supabase.js www/lib/supabase.min.js || true
+      - name: Add Android platform if missing
+        script: |
+          if [ ! -d "android" ]; then npx cap add android; fi
+      - name: Drop in google-services.json (Android push) when configured
+        script: |
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            echo "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+            echo "google-services.json written — FCM push enabled."
+          else
+            echo "GOOGLE_SERVICES_JSON not set — building WITHOUT Android push (fine for first builds)."
+          fi
+      - name: Generate Bad Golf app icon & splash (from assets/)
+        script: |
+          npx --yes @capacitor/assets generate --android
+      - name: Capacitor sync (copies web app + plugins into the native project)
+        script: npx cap sync android
+      - name: Target the Android API level Google Play requires
+        script: |
+          # Play requires new apps/updates to target a current API level. Bump the
+          # Capacitor template's variables to 35 (compile + target).
+          sed -i "s/compileSdkVersion = [0-9]*/compileSdkVersion = 35/" android/variables.gradle || true
+          sed -i "s/targetSdkVersion = [0-9]*/targetSdkVersion = 35/" android/variables.gradle || true
+          grep -E "compileSdkVersion|targetSdkVersion" android/variables.gradle
+      - name: Set version name (BG_BUILD) + version code (timestamp)
+        script: |
+          # versionName = the app's own BG_BUILD footer version, so Play Console,
+          # the app footer and TestFlight all read the same number.
+          # versionCode = Unix timestamp (must always climb; fits Play's int cap).
+          VER=$(grep -oE "BG_BUILD *= *'[^']+'" www/index.html | head -1 | sed -E "s/.*'v?([0-9.]+)'.*/\1/")
+          CODE="$(date +%s)"
+          GRADLE="android/app/build.gradle"
+          [ -n "$VER" ] && sed -i "s/versionName \"[^\"]*\"/versionName \"$VER\"/" "$GRADLE"
+          sed -i "s/versionCode [0-9]*/versionCode $CODE/" "$GRADLE"
+          grep -E "versionName|versionCode" "$GRADLE"
+      - name: Build the release bundle (.aab)
+        script: |
+          cd android
+          chmod +x gradlew
+          ./gradlew bundleRelease
+      - name: Sign the bundle with the upload keystore
+        script: |
+          AAB=$(find android/app/build/outputs -name "*.aab" | head -1)
+          echo "Signing $AAB"
+          jarsigner -sigalg SHA256withRSA -digestalg SHA-256 \
+            -keystore "$CM_KEYSTORE_PATH" -storepass "$CM_KEYSTORE_PASSWORD" \
+            -keypass "$CM_KEY_PASSWORD" "$AAB" "$CM_KEY_ALIAS"
+          jarsigner -verify "$AAB" && echo "Signature OK"
+    artifacts:
+      - android/app/build/outputs/**/*.aab
+      - android/app/build/outputs/**/mapping.txt
+    publishing:
+      google_play:
+        credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+        track: internal
+        submit_as_draft: true

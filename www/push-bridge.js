@@ -25,8 +25,13 @@
       // which is why iPhone pushes never arrived. Keep the token and let
       // _flushToken() save it the moment the user is available. (v696)
       if (!u || !u.id || !window.supa) return false;
+      // ANDROID (2026-08): the registration event delivers an FCM token here, an
+      // APNs token on iOS. Tag the row with the real platform so the send-push
+      // edge function routes each token to the right service (APNs vs FCM).
+      var _plat = 'ios';
+      try { if (window.Capacitor && window.Capacitor.getPlatform) _plat = window.Capacitor.getPlatform(); } catch (e) {}
       await window.supa.from('push_tokens').upsert({
-        user_id: u.id, token: token || _lastToken, platform: 'ios', updated_at: new Date().toISOString()
+        user_id: u.id, token: token || _lastToken, platform: _plat, updated_at: new Date().toISOString()
       }, { onConflict: 'token' });
       return true;
     } catch (e) { console.warn('push upsertToken', e); return false; }

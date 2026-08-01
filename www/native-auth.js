@@ -28,6 +28,21 @@
   }
   var P = (window.Capacitor && window.Capacitor.Plugins) ? window.Capacitor.Plugins : {};
 
+  // ANDROID (2026-08): which native platform are we on? Apple sign-in is an
+  // iOS-only sheet — on Android we hide the "Continue with Apple" button
+  // entirely (Google + email cover Android sign-in).
+  var __plat = 'ios';
+  try { if (__cap && __cap.getPlatform) __plat = __cap.getPlatform(); } catch (e) {}
+  var __isAndroid = (__plat === 'android');
+
+  // Google WEB client id — REQUIRED for native Google sign-in on ANDROID
+  // (Capgo SocialLogin returns the id_token against the web client there).
+  // Fill this in from Google Cloud Console -> Credentials -> the "Web
+  // application" OAuth client that Supabase's Google provider already uses.
+  // While it is empty, Android simply KEEPS the app's web OAuth flow for
+  // Google (still works) — only iOS gets the native sheet.
+  var GOOGLE_WEB_CLIENT_ID = '';
+
   // --- helpers --------------------------------------------------------
   function randomNonce(len) {
     var chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._';
@@ -113,10 +128,12 @@
     try {
       if (!__socialLoginInit) {
         await SocialLogin.initialize({
-          google: {
-            iOSClientId: '56040088868-larmg07pd7d9ue6crq69ka7e9pto6m4j.apps.googleusercontent.com',
-            mode: 'online'   // force a FRESH id_token (not a cached one) — Capgo docs
-          }
+          google: __isAndroid
+            ? { webClientId: GOOGLE_WEB_CLIENT_ID, mode: 'online' }   // Android: id_token comes back against the WEB client
+            : {
+                iOSClientId: '56040088868-larmg07pd7d9ue6crq69ka7e9pto6m4j.apps.googleusercontent.com',
+                mode: 'online'   // force a FRESH id_token (not a cached one) — Capgo docs
+              }
         });
         __socialLoginInit = true;
       }
@@ -169,6 +186,24 @@
 
   // --- override the app's auth entry points once it has loaded --------
   function install() {
+    if (__isAndroid) {
+      // Android: no Apple sheet — hide the "Continue with Apple" button. Google
+      // gets the native sheet ONLY once GOOGLE_WEB_CLIENT_ID is filled in;
+      // until then the app's existing web OAuth for Google stays in place.
+      try {
+        var st = document.createElement('style');
+        st.textContent = '#auth-apple{display:none !important}';
+        document.head.appendChild(st);
+      } catch (e) {}
+      if (GOOGLE_WEB_CLIENT_ID) {
+        window.signInWithGoogle = nativeSignInWithGoogle;
+        console.log('[native-auth] Android: native Google sign-in installed, Apple hidden.');
+      } else {
+        console.log('[native-auth] Android: Apple hidden; web Google OAuth kept (GOOGLE_WEB_CLIENT_ID not set).');
+      }
+      window.__nativeAuthInstalled = true;
+      return;
+    }
     window.signInWithApple = nativeSignInWithApple;
     window.signInWithGoogle = nativeSignInWithGoogle;
     window.__nativeAuthInstalled = true;
