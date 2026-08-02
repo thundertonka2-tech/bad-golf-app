@@ -7645,7 +7645,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.933';
+const BG_BUILD = 'v2026.11.934';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -41504,8 +41504,11 @@ async function loadRoundsInto(target) { _roundsTarget = target; try { return awa
 async function loadRounds() {
   const T = _roundsTarget || { empty:'rounds-empty-card', listCard:'rounds-list-card', list:'rounds-list', search:'rounds-search', showmore:'rounds-showmore', sched:'rounds-scheduled-card', schedList:'rounds-scheduled-list' };
   _roundsTarget = null;
-  try { await reconcileMyScoreHistory(); } catch (e) {}
-  try { await healRecentScoreLines(); } catch (e) {}   // repair any NET/partial cached score lines to true gross
+  // v934 PERF (Tyler: "saved rounds take a while to load"): the two HEALING
+  // passes (score-history reconcile + NET/partial score-line repair) do cloud
+  // work and were blocking the list's FIRST PAINT. They now run AFTER the list
+  // is on screen (see the end of this function) and re-render once if either
+  // changed anything. Same data, same healing — just not in the user's way.
   // Only rounds YOU played in. Spectating other groups lives on the Crew tab
   // (Live now / recent feed) — this list is your personal round history.
   let meName = null;
@@ -41516,17 +41519,28 @@ async function loadRounds() {
   // though its game record is complete — which is why opening it correctly says
   // "Round complete". Reconcile the cached flag against the real game record.
   // Only the entries currently marked LIVE need checking (finished never reverts).
+  // v934 PERF: this verification used to AWAIT one cloud read per LIVE row
+  // before anything painted. It now runs in the background; if any flag heals,
+  // the list re-renders once with the corrected state. Guarded to one at a time.
   try {
     const liveEntries = fullRecent.filter(r => r && !r.finishedAt && r.code);
-    if (liveEntries.length) {
-      let patched = false;
-      await Promise.all(liveEntries.map(async r => {
+    if (liveEntries.length && !window._roundsLiveVerify) {
+      window._roundsLiveVerify = true;
+      (async () => {
         try {
-          const g = await loadGame(r.code);
-          if (g && g.finishedAt) { r.finishedAt = g.finishedAt; patched = true; }
-        } catch (e) {}
-      }));
-      if (patched) { try { await safeSet(KEY_RECENT, JSON.stringify(fullRecent), true); } catch (e) {} }
+          let patched = false;
+          await Promise.all(liveEntries.map(async r => {
+            try {
+              const g = await loadGame(r.code);
+              if (g && g.finishedAt) { r.finishedAt = g.finishedAt; patched = true; }
+            } catch (e) {}
+          }));
+          if (patched) {
+            try { await safeSet(KEY_RECENT, JSON.stringify(fullRecent), true); } catch (e) {}
+            try { await loadRounds(); } catch (e) {}
+          }
+        } finally { window._roundsLiveVerify = false; }
+      })();
     }
   } catch (e) {}
   // Shared round tombstones: a round deleted on ANY device stays gone here too.
@@ -41802,6 +41816,23 @@ async function loadRounds() {
   searchInput.oninput = applyRoundsFilter;
   if (moreBtn) moreBtn.onclick = () => { state._roundsExpanded = !state._roundsExpanded; applyRoundsFilter(); };
   applyRoundsFilter(); // apply any existing query / collapse state on reload
+
+  // v934 PERF: the healing passes deferred from the top of this function run
+  // NOW — after the list is on screen. If either reports a change, re-render
+  // once so the healed lines/history appear. One background run at a time.
+  try {
+    if (!window._roundsHealing) {
+      window._roundsHealing = true;
+      (async () => {
+        try {
+          let changed = false;
+          try { const r1 = await reconcileMyScoreHistory(); if (r1) changed = true; } catch (e) {}
+          try { const r2 = await healRecentScoreLines(); if (r2) changed = true; } catch (e) {}
+          if (changed) { try { await loadRounds(); } catch (e) {} }
+        } finally { window._roundsHealing = false; }
+      })();
+    }
+  } catch (e) {}
 
   // "Clear all" removed (too dangerous — one tap could wipe every saved round).
   // Rounds are removed one at a time with the × button instead.
