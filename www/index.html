@@ -7654,6 +7654,29 @@ const BG_BUILD = 'v2026.11.935';
 // functions themselves are untouched.
 const WAGER_ENABLED = false;
 
+// v935: global error visibility. Unhandled promise rejections and uncaught
+// errors used to vanish silently — now they console.warn and surface a gentle
+// toast, throttled to at most once per 60s. Purely observational: never calls
+// preventDefault, never alters default behavior, and can never throw itself.
+let _bgLastErrToastAt = 0;
+function _bgSoftErrorNotice(kind, reason) {
+  try {
+    try { console.warn('[bg ' + kind + ']', reason); } catch (e) {}
+    const now = Date.now();
+    if (now - _bgLastErrToastAt < 60000) return;
+    _bgLastErrToastAt = now;
+    try { if (typeof showToast === 'function') showToast("Something didn't work — check your connection"); } catch (e) {}
+  } catch (e) {}
+}
+try {
+  window.addEventListener('unhandledrejection', function (ev) {
+    try { _bgSoftErrorNotice('unhandledrejection', ev && ev.reason); } catch (e) {}
+  });
+  window.addEventListener('error', function (ev) {
+    try { _bgSoftErrorNotice('error', (ev && (ev.error || ev.message)) || ev); } catch (e) {}
+  });
+} catch (e) {}
+
 // ── localStorage quota guard (WKWebView has a small storage quota) ───────────
 // The app caches large course / GPS blobs in localStorage. On a device the store
 // can fill up, and then the NEXT write — critically the Supabase auth session on
@@ -7760,10 +7783,14 @@ async function initSupabase() {
     // and iPhone push never works (push_tokens stayed EMPTY). Additive + guarded.
     try {
       window.supa = supa;
+      // v935: mirror the auth user immediately too — the interval below is only a
+      // slow safety net now (10s, was 1s), with instant direct assignments here
+      // and in onAuthStateChange where it actually matters.
+      try { window._authUser = (typeof _authUser !== 'undefined') ? _authUser : null; } catch (e) {}
       if (!window.__bgAuthMirror) {
         window.__bgAuthMirror = setInterval(function () {
           try { window.supa = supa; window._authUser = (typeof _authUser !== 'undefined') ? _authUser : null; } catch (e) {}
-        }, 1000);
+        }, 10000);
       }
     } catch (e) {}
     return supa;
@@ -7844,6 +7871,8 @@ async function initAuth() {
       .catch(() => {});
     supa.auth.onAuthStateChange(async (_event, session) => {
       _authUser = session ? session.user : null;
+      // v935: instant window mirror (the 10s interval is just a backstop).
+      try { window.supa = supa; window._authUser = _authUser; } catch (e) {}
       // Session isolation: when the signed-in identity actually CHANGES, drop the
       // previous account's in-memory caches + once-gates so their stats/clubs can't
       // bleed into the new user. (An explicit SIGNED_OUT clears via signOutUser.)
@@ -8009,6 +8038,8 @@ function resetSessionIdentity() {
     window._statsSyncedOnce = false;
     window._hcpSnapOnce = false;
   } catch (e) {}
+  // v935: drop the 60s social caches so a new account never sees the prior account's friend graph.
+  try { _bgSocialCacheBust(); } catch (e) {}
   // Non-namespaced per-account localStorage. For a signed-in user, clubs/shots are
   // read from their OWN RLS-protected profile row, so dropping the device cache is
   // safe AND closes the shared-phone leak where loadMyClubs() would migrate the
@@ -11978,8 +12009,17 @@ function subscribeToGame(code) {
 }
 // One backstop pull of the live game; applies + re-renders only if a strictly
 // newer version exists and the user isn't mid-typing (so it never clobbers input).
+// v935: when the realtime subscription is up and healthy this 12s backstop only
+// actually fetches on every 4th tick (~48s) — realtime already pushes changes
+// instantly. When realtime is down it fetches every tick, exactly as before.
+let _bgGamePollTick = 0;
 async function pollGameOnce(code) {
   try {
+    try {
+      _bgGamePollTick++;
+      const _rtUp = !!(typeof activeRealtimeSub !== 'undefined' && activeRealtimeSub && activeRealtimeSub.state === 'joined'); // v935: truthiness isn't health — a dead socket must not slow the backstop
+      if (_rtUp && (_bgGamePollTick % 4 !== 0)) return; // realtime covers it; slow backstop only
+    } catch (e) { /* any doubt about realtime health → fetch as before */ }
     if (!state.game || state.game.code !== code || state.game.finishedAt) return;
     const f = document.activeElement;
     if (f && (f.tagName === 'INPUT' || f.tagName === 'SELECT' || f.tagName === 'TEXTAREA')) return;
@@ -12029,15 +12069,73 @@ function _promiseTimeout(p, ms, tag) {
 // Per-session record of which (player,hole) cells THIS device edited, per field. Local
 // edits win the merge for the whole session; every other cell mirrors the cloud. Reset
 // when the active round changes so a previous round's edits never leak in.
-function _touchStore() {
-  const code = (state.game && state.game.code) || '';
-  if (!state._scoreTouch || state._scoreTouch.code !== code) {
-    state._scoreTouch = { code: code, scores: {}, puttsData: {}, girData: {}, fairwaysData: {}, penaltiesData: {}, sandData: {} };
+// v935: the registry is now MIRRORED to localStorage ('golf:score-touch:'+code)
+// so it survives an app restart. Before, the dirty-game queue persisted but the
+// touch registry didn't — so after a relaunch, flushDirtyGames merged with an
+// EMPTY registry and cloud nulls wiped offline-entered scores. The mirror is
+// written on every touch, restored on demand (per round code), and removed when
+// the round's dirty entry clears. All additive + try/catch — any failure falls
+// back to the old in-memory-only behavior.
+const _BG_TOUCH_FIELDS = ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData'];
+function _bgTouchEmpty(code) {
+  return { code: code, scores: {}, puttsData: {}, girData: {}, fairwaysData: {}, penaltiesData: {}, sandData: {} };
+}
+// Restore a persisted registry for `code`, or null. Rehydrates the serialized
+// arrays back into Sets — the exact shape _isTouched(touch, field, pid, i) expects.
+function _bgTouchRestore(code) {
+  try {
+    if (!code) return null;
+    const raw = localStorage.getItem('golf:score-touch:' + code);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (!p || p.code !== code) return null;
+    const st = _bgTouchEmpty(code);
+    let any = false;
+    _BG_TOUCH_FIELDS.forEach(f => {
+      const pf = p[f]; if (!pf || typeof pf !== 'object') return;
+      Object.keys(pf).forEach(pid => { if (Array.isArray(pf[pid])) { st[f][pid] = new Set(pf[pid]); any = true; } });
+    });
+    return any ? st : null;
+  } catch (e) { return null; }
+}
+// Mirror the registry to localStorage (Sets serialized as arrays).
+function _bgTouchPersist(s) {
+  try {
+    if (!s || !s.code) return;
+    const out = { code: s.code };
+    _BG_TOUCH_FIELDS.forEach(f => {
+      const src = s[f]; if (!src || typeof src !== 'object') return;
+      const o = {};
+      Object.keys(src).forEach(pid => { const set = src[pid]; if (set && typeof set.forEach === 'function') o[pid] = Array.from(set); });
+      out[f] = o;
+    });
+    localStorage.setItem('golf:score-touch:' + s.code, JSON.stringify(out));
+  } catch (e) {}
+}
+// Optional `forCode`: the round being merged (defaults to the current round).
+// When it differs from the current round (e.g. flushDirtyGames pushing another
+// round's queued write), we use a restored/temporary store for THAT round and
+// never clobber the live round's in-memory registry.
+function _touchStore(forCode) {
+  const cur = (state.game && state.game.code) || '';
+  const code = forCode || cur;
+  if (state._scoreTouch && state._scoreTouch.code === code) return state._scoreTouch;
+  // No matching in-memory registry — try the persisted mirror for this round.
+  let restored = null;
+  try { restored = _bgTouchRestore(code); } catch (e) { restored = null; }
+  if (code !== cur) {
+    // Merging a different round than the one on screen: never reset the live
+    // registry. Use the restored copy (or an empty temp store, = old behavior).
+    return restored || _bgTouchEmpty(code);
   }
+  state._scoreTouch = restored || _bgTouchEmpty(code);
   return state._scoreTouch;
 }
 function _markScoreTouched(field, pid, holeIdx) {
-  try { const s = _touchStore(); if (!s[field]) s[field] = {}; if (!s[field][pid]) s[field][pid] = new Set(); s[field][pid].add(holeIdx); } catch (e) {}
+  try {
+    const s = _touchStore(); if (!s[field]) s[field] = {}; if (!s[field][pid]) s[field][pid] = new Set(); s[field][pid].add(holeIdx);
+    try { _bgTouchPersist(s); } catch (e) {}
+  } catch (e) {}
 }
 function _isTouched(s, field, pid, holeIdx) {
   return !!(s && s[field] && s[field][pid] && s[field][pid].has(holeIdx));
@@ -12048,7 +12146,10 @@ function _isTouched(s, field, pid, holeIdx) {
 // old values are NOT folded back over them (the cleared nulls stick). Without this the
 // clear silently reverted because the cleared cells were never in the per-cell touch set.
 function _mergeGameArrays(local, cloud, opts) {
-  const touch = _touchStore();
+  // v935: key the touch store to the round actually being merged (flushDirtyGames
+  // can push a round other than the one on screen, incl. after an app restart).
+  let touch;
+  try { touch = _touchStore((local && local.code) || undefined); } catch (e) { touch = _touchStore(); }
   const auth = (opts && opts.authoritative) || null;
   const isAuth = (field, pid) => {
     if (!auth || !auth[field]) return false;
@@ -12191,7 +12292,7 @@ function _applyMyTouchedCells(incoming) {
 function _dirtyGames() { try { return JSON.parse(localStorage.getItem('golf:dirty-games') || '[]') || []; } catch (e) { return []; } }
 function _dirtyGamesSave(a) { try { localStorage.setItem('golf:dirty-games', JSON.stringify(Array.from(new Set(a)).filter(Boolean))); } catch (e) {} }
 function markGameDirty(code) { try { if (!code) return; const a = _dirtyGames(); if (a.indexOf(code) < 0) { a.push(code); _dirtyGamesSave(a); } } catch (e) {} }
-function clearGameDirty(code) { try { const a = _dirtyGames(); const i = a.indexOf(code); if (i >= 0) { a.splice(i, 1); _dirtyGamesSave(a); } } catch (e) {} }
+function clearGameDirty(code) { try { const a = _dirtyGames(); const i = a.indexOf(code); if (i >= 0) { a.splice(i, 1); _dirtyGamesSave(a); } } catch (e) {} try { if (code) localStorage.removeItem('golf:score-touch:' + code); } catch (e) {} }
 async function flushDirtyGames() {
   const pending = _dirtyGames();
   if (!pending.length) return;
@@ -12387,7 +12488,10 @@ async function saveGame(game, opts) {
 async function loadGame(code) {
   const v = await safeGet('game:' + code, true);
   if (!v) return null;
-  const g = JSON.parse(v);
+  let g = null;
+  // v935: a corrupt cached/fetched payload used to throw out of every caller —
+  // treat it as "no game" instead.
+  try { g = JSON.parse(v); } catch (e) { console.warn('loadGame: corrupt game payload for ' + code, e); return null; }
   migrateLegacyData(g);
   return g;
 }
@@ -28091,36 +28195,6 @@ function renderGameBanners() {
         header.textContent = 'Each player picks their bet. Player press doubles their own bet. Banker press doubles every player\'s bet (stacks on top of player presses).';
         playerBetsCtr.appendChild(header);
 
-        // v935 (Tyler): "everyone just kept taking the max bet, so I was re-typing
-        // the same bet over and over" — ONE control that sets the SAME bet for
-        // every player in a single tap. Prefills with the last value applied this
-        // round, so most holes are literally one tap ("Set all"). Individual
-        // inputs below still override any player afterwards.
-        const allRow = document.createElement('div');
-        allRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:9px 10px;margin:8px 0 4px;background:var(--accent-light,rgba(24,95,165,0.08));border:1px solid var(--border);border-radius:12px;flex-wrap:nowrap';
-        const _lastAll = (g.bankerData && g.bankerData.lastAllBet != null) ? g.bankerData.lastAllBet : '';
-        allRow.innerHTML = `
-          <div style="flex:1;min-width:70px;font-size:13px;font-weight:700">Same bet for everyone</div>
-          <span class="small-text">$</span>
-          <input type="number" id="banker-bet-all-input" value="${_lastAll}" placeholder="—" min="0" step="0.5" style="width:64px">
-          <button class="small primary" id="banker-bet-all-apply" style="font-weight:800;white-space:nowrap">Set all</button>
-        `;
-        playerBetsCtr.appendChild(allRow);
-        const _allBtn = allRow.querySelector('#banker-bet-all-apply');
-        if (_allBtn) _allBtn.onclick = async () => {
-          const _inp = allRow.querySelector('#banker-bet-all-input');
-          const v = parseFloat(((_inp && _inp.value) || '').trim());
-          if (isNaN(v) || v < 0) { showToast('Enter a bet of $0 or more first'); return; }
-          if (!g.bankerData.holes[h]) g.bankerData.holes[h] = {};
-          if (!g.bankerData.holes[h].playerBets) g.bankerData.holes[h].playerBets = {};
-          let _n = 0;
-          g.players.forEach(p => { if (banker && p.id === banker.id) return; g.bankerData.holes[h].playerBets[p.id] = v; _n++; });
-          g.bankerData.lastAllBet = v;   // remembered for the rest of the round
-          await saveGame(g);
-          renderGameBanners();
-          showToast('$' + v.toFixed(2) + ' set for ' + _n + ' player' + (_n === 1 ? '' : 's') + ' \u2713');
-        };
-
         g.players.forEach(p => {
           if (banker && p.id === banker.id) return;
           // No default — input stays blank until the user enters a value.
@@ -28274,14 +28348,14 @@ function renderGameBanners() {
     if (pickMissing) {
       body += `<div style="color:var(--warn, var(--gold));font-weight:700;margin-bottom:4px">⚠️ Captain pick needed</div>`;
     }
-    body += `<div><strong>Captain:</strong> ${displayFirst(captain)}</div>`;
+    body += `<div><strong>Captain:</strong> ${escapeHtml(displayFirst(captain))}</div>`;
     if (hd.choice === 'lone') {
       body += `<div class="small-text">Going Lone Wolf (2x)</div>`;
     } else if (hd.choice === 'blind') {
       body += `<div class="small-text">Blind Lone Wolf (3x) — called before tee</div>`;
     } else if (hd.choice === 'partner' && hd.partnerId) {
       const p = g.players.find(x => x.id === hd.partnerId);
-      body += `<div class="small-text">Partner: ${p ? displayFirst(p) : '—'}</div>`;
+      body += `<div class="small-text">Partner: ${p ? escapeHtml(displayFirst(p)) : '—'}</div>`;
     } else if (pickMissing) {
       body += `<div class="small-text" style="color:var(--warn, var(--gold))">Scores entered but no choice made. Pick before advancing.</div>`;
     } else {
@@ -30613,7 +30687,7 @@ function maybeShowProExplainer(){
 // explainer until no other dialog is open.
 try {
   setTimeout(injectProBadges, 1500);
-  setInterval(injectProBadges, 4000);
+  setInterval(injectProBadges, 15000);   // v935: was 4s — cheap but needless churn
 } catch(e){}
 
 // ===== GUEST badges (v2026.11.637) ==========================================
@@ -36662,7 +36736,7 @@ function renderBoard() {
         const fmtLabel = 'group stroke';
         const namesStr = (m.playerNames || []).join(', ');
         const valStr = m.value != null ? ` · $${m.value}/side · ${fmtLabel}` : '';
-        div.innerHTML += `<div class="sub">${namesStr}${valStr}</div>`;
+        div.innerHTML += `<div class="sub">${escapeHtml(namesStr)}${valStr}</div>`;
         div.innerHTML += `<div class="sub" style="padding-left:8px"> F: ${m.front || '— (in progress)'}</div>`;
         div.innerHTML += `<div class="sub" style="padding-left:8px"> B: ${m.back || '— (in progress)'}</div>`;
         div.innerHTML += `<div class="sub" style="padding-left:8px"> O: ${m.overall || '— (in progress)'}</div>`;
@@ -36670,13 +36744,13 @@ function renderBoard() {
         // Head-to-head (2 players)
         const fmtLabel = ((nassau.instances && nassau.instances[m.instanceIdx] && nassau.instances[m.instanceIdx].format) || 'stroke') === 'match' ? 'match' : 'stroke';
         const valStr = m.value != null ? ` · $${m.value}/side · ${fmtLabel}` : '';
-        div.innerHTML += `<div class="sub">${m.a} vs ${m.b}${valStr}: F=${m.front || '—'} · B=${m.back || '—'} · O=${m.overall || '—'}</div>`;
+        div.innerHTML += `<div class="sub">${escapeHtml(m.a)} vs ${escapeHtml(m.b)}${valStr}: F=${m.front || '—'} · B=${m.back || '—'} · O=${m.overall || '—'}</div>`;
       }
     });
     if (nassau.specials && nassau.specials.length > 0) {
       div.innerHTML += `<div class="sub" style="margin-top:6px;font-weight:600;color:var(--gold)">Special-score payouts:</div>`;
       nassau.specials.forEach(sp => {
-        div.innerHTML += `<div class="sub">H${sp.hole}: ${sp.player} ${sp.kind.toLowerCase()} +$${(sp.amt || 0).toFixed(2)}</div>`;
+        div.innerHTML += `<div class="sub">H${sp.hole}: ${escapeHtml(sp.player)} ${sp.kind.toLowerCase()} +$${(sp.amt || 0).toFixed(2)}</div>`;
       });
     }
     gr.appendChild(div);
@@ -36699,11 +36773,11 @@ function renderBoard() {
       const amtStr = betAmt > 0 ? ` · $${betAmt}` : '';
       if (h.groupMode) {
         const oppsStr = (h.opponents || []).map(o => {
-          if (o.status === 'in progress') return `vs ${o.name}: in progress`;
-          if (o.winnerId == null) return `vs ${o.name}: tied`;
+          if (o.status === 'in progress') return `vs ${escapeHtml(o.name)}: in progress`;
+          if (o.winnerId == null) return `vs ${escapeHtml(o.name)}: tied`;
           return o.winnerId === h.callerId
-            ? `vs ${o.name}: <strong>${h.callerName} won</strong> (${o.status})`
-            : `vs ${o.name}: <strong>${o.name} won</strong> (${o.status})`;
+            ? `vs ${escapeHtml(o.name)}: <strong>${escapeHtml(h.callerName)} won</strong> (${o.status})`
+            : `vs ${escapeHtml(o.name)}: <strong>${escapeHtml(o.name)} won</strong> (${o.status})`;
         }).join(' · ');
         hDiv.innerHTML += `<div class="sub"><strong>${escapeHtml(h.callerName)}</strong> huckled all (${segLbl} from h${h.callHole}${amtStr})<br><span style="font-size:11px">${oppsStr}</span></div>`;
       } else {
@@ -36721,7 +36795,7 @@ function renderBoard() {
           // (h.status, e.g. "+5" strokes or "3&2") is the win amount, NOT the money
           // — dim it so it isn't misread as the payout.
           const payStr = betAmt > 0 ? `won <strong>+$${betAmt}</strong>` : 'won';
-          resultStr = `<span style="color:var(--accent);font-weight:600">${h.winnerName} ${payStr}</span> <span style="color:var(--text-muted);font-size:11px">(by ${String(h.status).replace(/^\+/, '')})</span>`;
+          resultStr = `<span style="color:var(--accent);font-weight:600">${escapeHtml(h.winnerName)} ${payStr}</span> <span style="color:var(--text-muted);font-size:11px">(by ${String(h.status).replace(/^\+/, '')})</span>`;
         }
         hDiv.innerHTML += `<div class="sub"><strong>${escapeHtml(callerName)}</strong> vs ${escapeHtml(oppName)} — ${segLbl} from h${h.callHole}: ${resultStr}</div>`;
       }
@@ -36733,7 +36807,7 @@ function renderBoard() {
     const div = document.createElement('div');
     div.className = 'game-result';
     if (stroke.complete) {
-      div.innerHTML = `<div class="head"><span class="lbl">Stroke pot</span><span class="val">${stroke.winners.join(', ')} +$${stroke.winShare.toFixed(2)}</span></div>
+      div.innerHTML = `<div class="head"><span class="lbl">Stroke pot</span><span class="val">${escapeHtml(stroke.winners.join(', '))} +$${stroke.winShare.toFixed(2)}</span></div>
         <div class="sub">Pot $${stroke.pot.toFixed(2)} · ${g.games.stroke.net ? 'net' : 'gross'}</div>`;
     } else {
       div.innerHTML = `<div class="head"><span class="lbl">Stroke pot</span><span class="val">$${stroke.pot.toFixed(2)} pot</span></div>
@@ -36771,7 +36845,7 @@ function renderBoard() {
         let html = `<div class="banker-hole-card">
           <div class="banker-hole-header">
             <strong>H${r.hole}</strong>
-            <span class="banker-name-tag">${r.banker} (banker)</span>
+            <span class="banker-name-tag">${escapeHtml(r.banker)} (banker)</span>
             ${r.birdieDoubled ? '<span class="banker-birdie-tag">🐦 birdie 2x</span>' : ''}
             <span class="money ${colorClass}" style="margin-left:auto;font-variant-numeric:tabular-nums">${sign}$${Math.abs(bankerNet).toFixed(2)}</span>
           </div>`;
@@ -36828,7 +36902,7 @@ function renderBoard() {
     const rowsToShow = showAll ? vegas.holeResults : vegas.holeResults.slice(-6);
     const hidden = vegas.holeResults.length - rowsToShow.length;
     rowsToShow.forEach(r => {
-      const winnerStr = r.winner === 'Tie' ? 'Tie' : r.winner + ' wins ' + r.points + 'pt';
+      const winnerStr = r.winner === 'Tie' ? 'Tie' : escapeHtml(r.winner) + ' wins ' + r.points + 'pt';
       const multStr = r.multiplier > 1 ? ` (${r.multiplier}x)` : '';
       const notes = [r.streakNote, r.flipNote].filter(Boolean).join(' · ');
       div.innerHTML += `<div class="sub">H${r.hole}: ${r.aScore} vs ${r.bScore} → ${winnerStr}${multStr}${notes ? ' · ' + notes : ''}</div>`;
@@ -36851,10 +36925,10 @@ function renderBoard() {
     const rowsToShow = showAll ? dvegas.holeResults : dvegas.holeResults.slice(-6);
     const hidden = dvegas.holeResults.length - rowsToShow.length;
     rowsToShow.forEach(r => {
-      const winnerStr = r.winner === 'Tie' ? 'Tie' : r.winner + ' wins ' + r.points + 'pt';
+      const winnerStr = r.winner === 'Tie' ? 'Tie' : escapeHtml(r.winner) + ' wins ' + r.points + 'pt';
       const multStr = r.multiplier > 1 ? ` (${r.multiplier}x)` : '';
       const notes = [r.streakNote, r.flipNote].filter(Boolean).join(' · ');
-      div.innerHTML += `<div class="sub">H${r.hole}: ${r.teamA} (${r.aScore}) vs ${r.teamB} (${r.bScore}) → ${winnerStr}${multStr}${notes ? ' · ' + notes : ''}</div>`;
+      div.innerHTML += `<div class="sub">H${r.hole}: ${escapeHtml(r.teamA)} (${r.aScore}) vs ${escapeHtml(r.teamB)} (${r.bScore}) → ${winnerStr}${multStr}${notes ? ' · ' + notes : ''}</div>`;
     });
     if (hidden > 0) {
       div.innerHTML += `<button class="small dvegas-show-all" style="margin-top:8px;width:100%">Show all ${dvegas.holeResults.length} holes (${hidden} earlier)</button>`;
@@ -36871,7 +36945,7 @@ function renderBoard() {
     div.className = 'game-result';
     div.innerHTML = `<div class="head"><span class="lbl">6's</span></div>`;
     sixes.segments.forEach(s => {
-      div.innerHTML += `<div class="sub">Seg ${s.seg}: ${s.teamA} (${s.aScore || '—'}) vs ${s.teamB} (${s.bScore || '—'})${s.winner ? ` — ${s.winner === 'Tie' ? 'Tie' : s.winner + ' wins'}` : ' — in progress'}</div>`;
+      div.innerHTML += `<div class="sub">Seg ${s.seg}: ${escapeHtml(s.teamA)} (${s.aScore || '—'}) vs ${escapeHtml(s.teamB)} (${s.bScore || '—'})${s.winner ? ` — ${s.winner === 'Tie' ? 'Tie' : escapeHtml(s.winner) + ' wins'}` : ' — in progress'}</div>`;
     });
     gr.appendChild(div);
   }
@@ -36882,7 +36956,7 @@ function renderBoard() {
     const div = document.createElement('div');
     div.className = 'game-result';
     const sorted3 = [...parts].sort((a, b) => (splixSixes.points[b.id] || 0) - (splixSixes.points[a.id] || 0));
-    const totalPtsStr = sorted3.map(p => `${displayFull(p)}: ${splixSixes.points[p.id] || 0} pts`).join(' · ');
+    const totalPtsStr = sorted3.map(p => `${escapeHtml(displayFull(p))}: ${splixSixes.points[p.id] || 0} pts`).join(' · ');
     const isPerPoint = cfg.mode === 'perpoint';
     const buyin = cfg.buyin != null ? cfg.buyin : 0;
     const payoutLabel = cfg.payout === '8020' ? '80/20' : 'winner-takes-all';
@@ -36898,7 +36972,7 @@ function renderBoard() {
       sorted3.forEach(p => {
         const m = splixSixes.money[p.id] || 0;
         const mStr = m > 0 ? `+$${m.toFixed(2)}` : (m < 0 ? `-$${Math.abs(m).toFixed(2)}` : 'even');
-        div.innerHTML += `<div class="sub">${displayFull(p)}: ${splixSixes.points[p.id] || 0} pts → ${mStr}</div>`;
+        div.innerHTML += `<div class="sub">${escapeHtml(displayFull(p))}: ${splixSixes.points[p.id] || 0} pts → ${mStr}</div>`;
       });
     } else {
       div.innerHTML += `<div class="sub" style="color:var(--text-muted,#888);font-style:italic">No buy-in set — points only</div>`;
@@ -36949,7 +37023,7 @@ function renderBoard() {
         const mStr = m > 0 ? `+$${m.toFixed(2)}` : (m < 0 ? `-$${Math.abs(m).toFixed(2)}` : 'even');
         tail = ` → ${mStr}`;
       }
-      div.innerHTML += `<div class="sub">${displayFull(p)}: ${stableford.points[p.id] || 0} pts${tail}</div>`;
+      div.innerHTML += `<div class="sub">${escapeHtml(displayFull(p))}: ${stableford.points[p.id] || 0} pts${tail}</div>`;
     });
     if (sfPending) div.innerHTML += `<div class="sub" style="color:var(--text-muted);font-style:italic">${sfIsField ? 'Whole-field pool — settles across all groups (see the tournament leaderboard)' : 'Pool pays out at the end — points only for now'}</div>`;
     gr.appendChild(div);
@@ -36966,12 +37040,12 @@ function renderBoard() {
     const bbbProgress = bbbHoles === 18 ? 'Complete' : bbbHoles > 0 ? `${bbbHoles}/18 holes` : 'Not started';
     div.innerHTML = `<div class="head"><span class="lbl">Bingo Bango Bongo</span><span class="val">${valueStr}</span></div>`;
     div.innerHTML += `<div class="sub" style="color:var(--text-muted)">${bbbProgress}</div>`;
-    const totalPtsStr = sortedBBB.map(p => `${displayFull(p)}: ${bingoBangoBongo.points[p.id] || 0} pts`).join(' · ');
+    const totalPtsStr = sortedBBB.map(p => `${escapeHtml(displayFull(p))}: ${bingoBangoBongo.points[p.id] || 0} pts`).join(' · ');
     div.innerHTML += `<div class="sub">${totalPtsStr}</div>`;
     sortedBBB.forEach(p => {
       const m = bingoBangoBongo.money[p.id] || 0;
       const mStr = m > 0 ? `+$${m.toFixed(2)}` : (m < 0 ? `-$${Math.abs(m).toFixed(2)}` : 'even');
-      div.innerHTML += `<div class="sub">${displayFull(p)}: ${bingoBangoBongo.points[p.id] || 0} pts → ${mStr}</div>`;
+      div.innerHTML += `<div class="sub">${escapeHtml(displayFull(p))}: ${bingoBangoBongo.points[p.id] || 0} pts → ${mStr}</div>`;
     });
     gr.appendChild(div);
   }
@@ -36985,7 +37059,7 @@ function renderBoard() {
     const hidden = wolf.holeResults.length - rowsToShow.length;
     rowsToShow.forEach(r => {
       const choice = r.choice === 'lone' ? 'Lone' : r.choice === 'blind' ? 'Blind' : 'Partner';
-      div.innerHTML += `<div class="sub">H${r.hole} ${r.captain} (${choice}, ${r.mult}x): ${r.winner === 'Tie' ? 'Tie' : r.winner + ' wins'}</div>`;
+      div.innerHTML += `<div class="sub">H${r.hole} ${escapeHtml(r.captain)} (${choice}, ${r.mult}x): ${r.winner === 'Tie' ? 'Tie' : escapeHtml(r.winner) + ' wins'}</div>`;
     });
     if (hidden > 0) {
       div.innerHTML += `<button class="small wolf-show-all" style="margin-top:8px;width:100%">Show all ${wolf.holeResults.length} holes (${hidden} earlier)</button>`;
@@ -37008,15 +37082,15 @@ function renderBoard() {
       let line;
       if (m.complete) {
         if (m.winner === 'AS') {
-          line = `${m.a} vs ${m.b}: All square (no money)${valStr}`;
+          line = `${escapeHtml(m.a)} vs ${escapeHtml(m.b)}: All square (no money)${valStr}`;
         } else {
-          line = `${m.winner} def. ${m.winner === m.a ? m.b : m.a} ${m.closedScore || ''}${valStr}`;
+          line = `${escapeHtml(m.winner)} def. ${escapeHtml(m.winner === m.a ? m.b : m.a)} ${m.closedScore || ''}${valStr}`;
         }
       } else {
         const lead = m.finalUp;
-        const lbl = lead === 0 ? 'AS' : (lead > 0 ? `${m.a} ${lead} up` : `${m.b} ${-lead} up`);
+        const lbl = lead === 0 ? 'AS' : (lead > 0 ? `${escapeHtml(m.a)} ${lead} up` : `${escapeHtml(m.b)} ${-lead} up`);
         const provTag = m.provisional && lead !== 0 ? ' <span style="color:var(--warn);font-style:italic">provisional</span>' : '';
-        line = `${m.a} vs ${m.b}: ${lbl} (thru ${m.played})${valStr}${provTag}`;
+        line = `${escapeHtml(m.a)} vs ${escapeHtml(m.b)}: ${lbl} (thru ${m.played})${valStr}${provTag}`;
       }
       div.innerHTML += `<div class="sub">${line}</div>`;
     });
@@ -37031,14 +37105,14 @@ function renderBoard() {
     let line;
     if (r.complete) {
       if (r.winner === 'Tie') {
-        line = `${r.teamA} vs ${r.teamB} — All square ${r.aHolesWon}-${r.bHolesWon} (${r.halved} halved)`;
+        line = `${escapeHtml(r.teamA)} vs ${escapeHtml(r.teamB)} — All square ${r.aHolesWon}-${r.bHolesWon} (${r.halved} halved)`;
       } else {
         const winningHoles = Math.max(r.aHolesWon, r.bHolesWon);
         const losingHoles = Math.min(r.aHolesWon, r.bHolesWon);
-        line = `${r.winner} won ${winningHoles}-${losingHoles}${r.halved ? ` (${r.halved} halved)` : ''}`;
+        line = `${escapeHtml(r.winner)} won ${winningHoles}-${losingHoles}${r.halved ? ` (${r.halved} halved)` : ''}`;
       }
     } else {
-      line = `${r.teamA} ${r.aHolesWon} — ${r.bHolesWon} ${r.teamB} (thru ${r.played}, ${r.halved} halved)`;
+      line = `${escapeHtml(r.teamA)} ${r.aHolesWon} — ${r.bHolesWon} ${escapeHtml(r.teamB)} (thru ${r.played}, ${r.halved} halved)`;
     }
     div.innerHTML += `<div class="sub">${line}</div>`;
     gr.appendChild(div);
@@ -37063,12 +37137,12 @@ function renderBoard() {
     let line;
     if (r.complete) {
       if (r.winner === 'Tie') {
-        line = `${r.teamA} ${r.aTotal} — ${r.bTotal} ${r.teamB} (Tie)`;
+        line = `${escapeHtml(r.teamA)} ${r.aTotal} — ${r.bTotal} ${escapeHtml(r.teamB)} (Tie)`;
       } else {
-        line = `${r.teamA} ${r.aTotal} — ${r.bTotal} ${r.teamB} → ${r.winner} wins`;
+        line = `${escapeHtml(r.teamA)} ${r.aTotal} — ${r.bTotal} ${escapeHtml(r.teamB)} → ${escapeHtml(r.winner)} wins`;
       }
     } else {
-      line = `${r.teamA} ${r.aTotal || '—'} — ${r.bTotal || '—'} ${r.teamB} (thru ${r.played})`;
+      line = `${escapeHtml(r.teamA)} ${r.aTotal || '—'} — ${r.bTotal || '—'} ${escapeHtml(r.teamB)} (thru ${r.played})`;
     }
     div.innerHTML += `<div class="sub">${line}</div>`;
     gr.appendChild(div);
@@ -37083,11 +37157,11 @@ function renderBoard() {
     div.innerHTML = `<div class="head"><span class="lbl">⛳ Par 3 Greenie ($${cfg.value}${bfNote})</span><span class="val">${p3greenie.events.length} event${p3greenie.events.length === 1 ? '' : 's'}</span></div>`;
     p3greenie.events.forEach(e => {
       let lbl = '';
-      if (e.kind === 'greenie') lbl = '🟢 ' + e.name + ' won greenie';
-      else if (e.kind === 'greenie-forfeit') lbl = '⚠️ ' + e.name;
-      else if (e.kind === 'buddyfucker') lbl = '💩 ' + e.name;
-      else if (e.kind === 'greenie-no-par') lbl = '✗ ' + e.name;
-      else if (e.kind === 'greenie-override-lost') lbl = '🐦 ' + e.name;
+      if (e.kind === 'greenie') lbl = '🟢 ' + escapeHtml(e.name) + ' won greenie';
+      else if (e.kind === 'greenie-forfeit') lbl = '⚠️ ' + escapeHtml(e.name);
+      else if (e.kind === 'buddyfucker') lbl = '💩 ' + escapeHtml(e.name);
+      else if (e.kind === 'greenie-no-par') lbl = '✗ ' + escapeHtml(e.name);
+      else if (e.kind === 'greenie-override-lost') lbl = '🐦 ' + escapeHtml(e.name);
       const amtStr = e.amt > 0 ? ' +$' + e.amt.toFixed(2) : (e.amt < 0 ? ' -$' + Math.abs(e.amt).toFixed(2) : '');
       div.innerHTML += `<div class="sub">H${e.hole} ${lbl}${amtStr}</div>`;
     });
@@ -37137,7 +37211,7 @@ function renderBoard() {
       if (girUsed) bits.push(girs + ' GIR' + (girTracked ? ' (' + Math.round(girs / girTracked * 100) + '%)' : ''));
       if (fwUsed) bits.push(fwHit + ' FW' + (fwTracked ? ' (' + Math.round(fwHit / fwTracked * 100) + '%)' : ''));
       if (sandUsed) bits.push(sandSaves + ' sand save' + (sandSaves === 1 ? '' : 's') + (sandTracked ? ' (' + Math.round(sandSaves / sandTracked * 100) + '%)' : ''));
-      if (bits.length) div.innerHTML += `<div class="sub"><strong>${displayFirst(p)}</strong> — ${bits.join(' · ')}</div>`;
+      if (bits.length) div.innerHTML += `<div class="sub"><strong>${escapeHtml(displayFirst(p))}</strong> — ${bits.join(' · ')}</div>`;
       if (pTracked || girTracked) div.innerHTML += `<div class="sub" style="overflow-x:auto;white-space:nowrap;font-family:ui-monospace,Menlo,monospace;font-size:11px">${cells}</div>`;
     });
     gr.appendChild(div);
@@ -37151,7 +37225,7 @@ function renderBoard() {
     div.innerHTML = `<div class="head"><span class="lbl">🎯 Closest to Pin ($${cfg.value}/player · holes ${holesStr})</span><span class="val">${ctp.events.length} of ${(cfg.holes || []).length} logged</span></div>`;
     (cfg.holes || []).forEach(h => {
       const e = ctp.events.find(x => x.hole === h);
-      if (e) div.innerHTML += `<div class="sub">H${e.hole} 🎯 ${e.name} +$${e.amt.toFixed(2)}</div>`;
+      if (e) div.innerHTML += `<div class="sub">H${e.hole} 🎯 ${escapeHtml(e.name)} +$${e.amt.toFixed(2)}</div>`;
       else div.innerHTML += `<div class="sub" style="color:var(--text-muted)">H${h} — not logged yet</div>`;
     });
     gr.appendChild(div);
@@ -37163,7 +37237,7 @@ function renderBoard() {
     div.innerHTML = `<div class="head"><span class="lbl">Junk</span><span class="val">${junk.events.length} earned</span></div>`;
     junk.events.forEach(e => {
       const jdef = JUNK_TYPES.find(x => x.id === e.junk);
-      div.innerHTML += `<div class="sub">H${e.hole} ${jdef ? jdef.name : e.junk}: ${e.winner} +$${e.amt.toFixed(2)}</div>`;
+      div.innerHTML += `<div class="sub">H${e.hole} ${jdef ? jdef.name : e.junk}: ${escapeHtml(e.winner)} +$${e.amt.toFixed(2)}</div>`;
     });
     gr.appendChild(div);
   }
@@ -39689,22 +39763,31 @@ async function syncMyStatsToCloud(roster, visOverride){
     // has that our local roster is missing. This stops a shared-blob overwrite (or
     // an app reopen with a diminished roster) from wiping the backup, and keeps
     // player_stats a durable superset we can restore from.
+    // v935: a FAILED cloud read used to be treated as "cloud is empty", and the
+    // unchecked upsert then shrank the durable backup to whatever was local.
+    // Now: read error → bail (next archive retries); and an empty local list is
+    // only written when the read CONFIRMED the cloud row is empty too.
+    let _cloudEmptyConfirmed = false;
     try {
-      const { data } = await supa.from('player_stats').select('stats').eq('user_id', _authUser.id).maybeSingle();
+      const { data, error } = await supa.from('player_stats').select('stats').eq('user_id', _authUser.id).maybeSingle();
+      if (error) { console.warn('syncMyStatsToCloud: cloud read failed — skipping upsert (will retry)', error); return; }
       const cloud = (data && Array.isArray(data.stats)) ? data.stats : [];
+      _cloudEmptyConfirmed = cloud.length === 0;
       if (cloud.length) {
         const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
         const have = new Set(stats.map(keyOf));
         cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k) && !_deleted.has(k)) { stats.push(s); have.add(k); } });
       }
-    } catch (e) {}
-    await supa.from('player_stats').upsert({
+    } catch (e) { console.warn('syncMyStatsToCloud: cloud read failed — skipping upsert (will retry)', e); return; }
+    if (!stats.length && !_cloudEmptyConfirmed) return;   // never shrink the backup to empty without confirmation
+    const _up = await supa.from('player_stats').upsert({
       user_id: _authUser.id,
       player_name: meNm || (me && me.name) || null,
       stats,
       visibility: visOverride || statsVisibilityLocal(),
       updated_at: new Date().toISOString()
     }, { onConflict: 'user_id' });
+    if (_up && _up.error) console.warn('syncMyStatsToCloud: upsert failed', _up.error);
   } catch (e) { console.warn('syncMyStatsToCloud failed', e); }
 }
 
@@ -40095,7 +40178,10 @@ async function openPastRoundModal() {
   ['past-total', 'past-putts', 'past-fw', 'past-gir', 'past-rating', 'past-slope'].forEach(id => { if ($(id)) $(id).value = ''; });
   $('past-error').style.display = 'none';
   $('past-course-warn').style.display = 'none';
-  const iso = new Date().toISOString().slice(0, 10);
+  // v935: LOCAL date, not UTC — toISOString() flipped to "tomorrow" in the
+  // evening (US timezones), defaulting past rounds to the wrong day.
+  const _d = new Date();
+  const iso = _d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0');
   $('past-date').value = iso; $('past-date').max = iso;
   try { await loadCourseLibrary(); } catch (e) {}
   pastRenderCourseList('');
@@ -43127,6 +43213,7 @@ function _finishSeen() { try { return JSON.parse(localStorage.getItem('golf:fini
 function _finishMark(code) { try { const l = _finishSeen(); if (l.indexOf(code) < 0) { l.push(code); localStorage.setItem('golf:finish-alerts-shown', JSON.stringify(l.slice(-100))); } } catch (e) {} }
 async function checkFriendFinishAlerts() {
   try {
+    if (document.hidden) return;   // v935: don't burn network while backgrounded
     try { if (!isSignedIn()) return; } catch (e) { return; }
     if (!supa || !supaOnline) return;
     const allowed = await friendNameSet();
@@ -43381,6 +43468,7 @@ function _wagerPingMark(code) { try { const l = _wagerPingSeen(); if (l.indexOf(
 let _wagerPingBusy = false;
 async function checkMyWagerStartAlerts() {
   try {
+    if (document.hidden) return;   // v935: don't burn network while backgrounded
     if (_wagerPingBusy) return;
     try { if (!isSignedIn()) return; } catch (e) { return; }
     if (!supa || !supaOnline || !_authUser) return;
@@ -43500,7 +43588,7 @@ window.openSpectateGps = openSpectateGps;
 // Persist MY profile photo to the cloud ACCOUNT (profiles.avatar) so it survives
 // rebuilds, cache clears, and another device overwriting the shared roster blob.
 async function saveMyAvatarToCloud(dataUrl) {
-  try { if (!supaReady) await initSupabase(); if (supa && supaOnline && _authUser && _authUser.id) { await supa.from('profiles').update({ avatar: dataUrl }).eq('id', _authUser.id); } } catch (e) {}
+  try { if (!supaReady) await initSupabase(); if (supa && supaOnline && _authUser && _authUser.id) { await supa.from('profiles').update({ avatar: dataUrl }).eq('id', _authUser.id); try { _bgSocialCacheBust(); } catch (e2) {} } } catch (e) {}
 }
 // On boot: if my roster record lost its photo but my cloud account still has one,
 // restore it into the roster so a wiped/blank avatar self-heals.
@@ -43610,14 +43698,32 @@ let _friendsCache = [];     // accepted friends' profiles
 let _invitesSub = null;
 let _pendingInvite = null;
 
+// v935: 60s memo on both fetchers. They're hit by the 25s/60s/90s pollers and
+// re-downloaded the FULL profiles table (incl. base64 avatars) + friendships
+// table every time. Successful results are cached for 60s; errors/misses are
+// never cached. _bgSocialCacheBust() invalidates after any friendship/profile write.
+let _profilesCache = null, _profilesCacheAt = 0;
+let _friendshipsCache = null, _friendshipsCacheAt = 0;
+function _bgSocialCacheBust() { try { _profilesCacheAt = 0; _friendshipsCacheAt = 0; } catch (e) {} }
 async function fetchProfiles() {
   if (!supa || !_authUser) return [];
-  try { const { data } = await supa.from('profiles').select('id,display_name,my_player,avatar'); return (data || []).filter(p => { try { return friendFullName(p) !== 'Player'; } catch (e) { return true; } }); }   // v757: hide nameless "Player" placeholder profiles (junk/test accounts) from every crew/friend list
+  try { if (_profilesCache && (Date.now() - _profilesCacheAt) < 60000) return _profilesCache; } catch (e) {}
+  try {
+    const { data } = await supa.from('profiles').select('id,display_name,my_player,avatar');
+    const out = (data || []).filter(p => { try { return friendFullName(p) !== 'Player'; } catch (e) { return true; } });   // v757: hide nameless "Player" placeholder profiles (junk/test accounts) from every crew/friend list
+    if (data) { _profilesCache = out; _profilesCacheAt = Date.now(); }   // cache successes only
+    return out;
+  }
   catch (e) { console.warn('fetchProfiles failed', e); return []; }
 }
 async function fetchFriendships() {
   if (!supa || !_authUser) return [];
-  try { const { data } = await supa.from('friendships').select('*'); return data || []; }
+  try { if (_friendshipsCache && (Date.now() - _friendshipsCacheAt) < 60000) return _friendshipsCache; } catch (e) {}
+  try {
+    const { data } = await supa.from('friendships').select('*');
+    if (data) { _friendshipsCache = data; _friendshipsCacheAt = Date.now(); }   // cache successes only
+    return data || [];
+  }
   catch (e) { console.warn('fetchFriendships failed', e); return []; }
 }
 // Display a friend as "First L." — never the raw email or anything derived
@@ -43792,16 +43898,17 @@ async function sendFriendRequest(toId) {
   if (!supa || !_authUser || !toId || toId === _authUser.id) return;
   try {
     await supa.from('friendships').insert({ requester: _authUser.id, addressee: toId, status: 'pending' });
+    try { _bgSocialCacheBust(); } catch (e) {}
     try { const myName = (await getMeName().catch(function () { return null; })) || 'Someone'; sendPush(toId, 'Bad Golf', myName + ' wants to be friends on Bad Golf', { type: 'friend_request' }, 'fr:' + _authUser.id + ':' + toId); } catch (e) {}
     showToast('Friend request sent');
   } catch (e) { console.warn('sendFriendRequest', e); showToast('Could not send request'); }
 }
 async function acceptFriend(id) {
-  try { await supa.from('friendships').update({ status: 'accepted' }).eq('id', id); showToast('Friend added'); }
+  try { await supa.from('friendships').update({ status: 'accepted' }).eq('id', id); try { _bgSocialCacheBust(); } catch (e2) {} showToast('Friend added'); }
   catch (e) { showToast('Failed'); }
 }
 async function removeFriendship(id) {
-  try { await supa.from('friendships').delete().eq('id', id); } catch (e) {}
+  try { await supa.from('friendships').delete().eq('id', id); try { _bgSocialCacheBust(); } catch (e2) {} } catch (e) {}
 }
 
 let _crewFriendsOpen = false;   // friends list starts COLLAPSED
@@ -44474,7 +44581,7 @@ function showIncomingFriendRequest(edge, fromName) {
   wireFriendRequestModal();
   _pendingFriendReq = edge;
   const txt = document.getElementById('friend-request-text');
-  if (txt) txt.innerHTML = '<b>' + (fromName || 'Someone') + '</b> wants to be friends on Bad Golf. Accept so you can invite each other to live rounds.';
+  if (txt) txt.innerHTML = '<b>' + escapeHtml(fromName || 'Someone') + '</b> wants to be friends on Bad Golf. Accept so you can invite each other to live rounds.';
   const m = document.getElementById('friend-request-modal');
   if (m) m.classList.add('show');
   return true;
@@ -44574,13 +44681,13 @@ async function showIncomingInvite(inv) {
   const txt = document.getElementById('incoming-invite-text');
   if (txt) {
     if (isT2) {
-      txt.innerHTML = '<b>' + fromName + '</b> invited you to the tournament <b>' + (inv.course || '') + '</b> 🏆. Accept to add it to your rounds?';
+      txt.innerHTML = '<b>' + escapeHtml(fromName) + '</b> invited you to the tournament <b>' + escapeHtml(inv.course || '') + '</b> 🏆. Accept to add it to your rounds?';
     } else if (isW) {
-      txt.innerHTML = '<b>' + fromName + '</b> put a bet on' +
-        (inv.course ? ' <b>' + inv.course + '</b>' : ' a round') + ' 🎲. Watch it in your Wager tab — live updates + the final result. You won\'t be joining their round.';
+      txt.innerHTML = '<b>' + escapeHtml(fromName) + '</b> put a bet on' +
+        (inv.course ? ' <b>' + escapeHtml(inv.course) + '</b>' : ' a round') + ' 🎲. Watch it in your Wager tab — live updates + the final result. You won\'t be joining their round.';
     } else if (isWB) {
-      txt.innerHTML = '<b>' + fromName + '</b> sent you a bet on' +
-        (inv.course ? ' <b>' + inv.course + '</b>' : ' a round') + ' 🎲. View it in your Wager tab — live updates and the final result. You won\'t be joining their round.';
+      txt.innerHTML = '<b>' + escapeHtml(fromName) + '</b> sent you a bet on' +
+        (inv.course ? ' <b>' + escapeHtml(inv.course) + '</b>' : ' a round') + ' 🎲. View it in your Wager tab — live updates and the final result. You won\'t be joining their round.';
     } else if (isOR) {
       let _orInfo = null; try { _orInfo = (await getTourneys()).find(x => x && x.id === code0.slice(3)); } catch (e) {}
       let _when = '';
@@ -44590,11 +44697,11 @@ async function showIncomingInvite(inv) {
         _when = (_d ? ' on <b>' + _d + '</b>' : '') + (_tm ? ' at <b>' + _tm + '</b>' : '');
       }
       const _crs = inv.course || (_orInfo && (_orInfo.course || _orInfo.name)) || '';
-      txt.innerHTML = '<b>' + fromName + '</b> invited you to an open round' +
-        (_crs ? ' at <b>' + _crs + '</b>' : '') + _when + ' 📣. Accept to grab a spot?';
+      txt.innerHTML = '<b>' + escapeHtml(fromName) + '</b> invited you to an open round' +
+        (_crs ? ' at <b>' + escapeHtml(_crs) + '</b>' : '') + _when + ' 📣. Accept to grab a spot?';
     } else {
-      txt.innerHTML = '<b>' + fromName + '</b> invited you to' + (_inviteStarted ? ' join their round' : ' a round') +
-        (inv.course ? ' at <b>' + inv.course + '</b>' : '') +
+      txt.innerHTML = '<b>' + escapeHtml(fromName) + '</b> invited you to' + (_inviteStarted ? ' join their round' : ' a round') +
+        (inv.course ? ' at <b>' + escapeHtml(inv.course) + '</b>' : '') +
         (_inviteStarted ? '. Join now?' : '. Accept to add it to your rounds?');
     }
   }
@@ -46075,7 +46182,11 @@ function wHolesScored(g) {
 // RLS lets the creator void their own row; other viewers' attempts no-op.
 async function wVoidUnmatchedIfOver(code, g, wagers) {
   if (!supa || !g || !Array.isArray(wagers)) return false;
-  const roundOver = !!g.finishedAt || wHolesScored(g) >= 9;
+  // v935: was `!!g.finishedAt || wHolesScored(g) >= 9` — that voided every open
+  // wager the moment 9 holes were scored, killing legitimate back-nine bets
+  // minutes after they were posted. Only a truly finished round voids now;
+  // the finish-time cleanup elsewhere still handles the rest.
+  const roundOver = !!g.finishedAt;
   if (!roundOver) return false;
   const stale = wagers.filter(w => w.status === 'open' &&
     (w.bet_type === 'h2h' || w.bet_type === 'ou' || w.bet_type === 'team' || w.bet_type === 'match'));
@@ -46305,6 +46416,18 @@ function computeWagerResults(g, wagers) {
   }).sort((a, b) => (a.net - b.net) || (a.gross - b.gross));
   const winnerId = wRoundWinnerId(g, ranked);
   const grossById = {}; ranked.forEach(r => { grossById[r.id] = r.gross; });
+  // v935: never settle a win/h2h/ou wager against an INCOMPLETE scorecard —
+  // calcTotals sums only scored holes, so a player who quit after 12 holes used
+  // to "win" on the lower partial total. If any referenced player hasn't scored
+  // every hole of the round, the wager is left open (skipped) instead.
+  let _cardFull = function () { return true; };   // any doubt → old behavior
+  try {
+    const _rh = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+    const _countById = {};
+    const _totals2 = totals || {};
+    (g.players || []).forEach(p => { const t = _totals2[p.id]; _countById[p.id] = t ? (t.count || 0) : 0; });
+    _cardFull = function (pid) { return _countById[pid] != null && _countById[pid] >= _rh; };
+  } catch (e) {}
 
   const results = [];
   (wagers || []).forEach(w => {
@@ -46312,9 +46435,13 @@ function computeWagerResults(g, wagers) {
     let result = null;
     if (w.bet_type === 'win') {
       // Unmatched conceptually never applies — anyone can join a win pool.
+      // v935: the round winner is decided across ALL players' totals — every
+      // scorecard must be complete or the pool stays open.
+      try { if (!(g.players || []).every(p => _cardFull(p.id))) return; } catch (e) {}
       result = (w.pick_player_id && w.pick_player_id === winnerId) ? 'won' : 'lost';
     } else if (w.bet_type === 'h2h') {
       if (w.status !== 'matched') return; // unmatched h2h never settles
+      try { if (!_cardFull(w.player_a_id) || !_cardFull(w.player_b_id)) return; } catch (e) {}  // v935: incomplete card → leave open
       const ga = grossById[w.player_a_id];
       const gb = grossById[w.player_b_id];
       if (ga == null || gb == null) return;
@@ -46327,6 +46454,7 @@ function computeWagerResults(g, wagers) {
       }
     } else if (w.bet_type === 'ou') {
       if (w.status !== 'matched') return; // unmatched o/u never settles
+      try { if (!_cardFull(w.ou_player_id)) return; } catch (e) {}  // v935: incomplete card → leave open
       const gv = grossById[w.ou_player_id];
       if (gv == null || w.ou_line == null) return;
       // Metric: 'gross' compares total strokes; 'topar' compares score vs par
