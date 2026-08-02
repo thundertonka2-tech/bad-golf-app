@@ -7645,7 +7645,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.935';
+const BG_BUILD = 'v2026.11.936';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -68832,6 +68832,255 @@ window.bgNextState = () => runNextStateFull();
     }, 4000);
   }
 }
+
+// ===== v936: VOICE SCORE ENTRY ==============================================
+// A 🎤 button on the Score tab lets the scorer SAY the hole's scores instead of
+// tapping: "Kevin 5 with 2 putts, Tyler 4, Mike bogey". Understands digits,
+// number words, and golf terms (par / birdie / bogey / double / triple / eagle /
+// ace / snowman). Second number for a player = putts (only saved when putt
+// tracking is on). Where the browser supports live speech recognition (web,
+// most Android browsers) it listens directly; in the iOS/Android app the box
+// auto-focuses so the keyboard's own dictation mic does the listening — same
+// flow either way. Scores are written through the EXACT same protected path as
+// tapping (_markScoreTouched + saveGame + junk syncs + consent checks), so
+// merges, Snake auto-detect and consent rules all still apply. Fully additive:
+// everything is wrapped in try/catch and the button only appears when a live,
+// editable round is on screen.
+function _bgVoiceSR() {
+  try { return window.SpeechRecognition || window.webkitSpeechRecognition || null; } catch (e) { return null; }
+}
+// Parse a spoken/typed transcript into [{pid, name, score, putts}] for hole h.
+function bgVoiceParse(text, g, h) {
+  const out = [];
+  try {
+    if (!text || !g || !Array.isArray(g.players)) return out;
+    const par = (g.pars && g.pars[h - 1]) || 4;
+    const NUM = { one:1, won:1, two:2, to:2, too:2, three:3, tree:3, four:4, 'for':4, fore:4, five:5, six:6, seven:7, eight:8, ate:8, nine:9, ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15 };
+    const toks = String(text).toLowerCase().replace(/[^a-z0-9À-ɏ\s]/g, ' ').split(/\s+/).filter(Boolean);
+    // Build name lookup: first word of each player's display/first/full name.
+    const names = [];
+    g.players.forEach(p => {
+      const cands = [];
+      try { if (typeof displayFirst === 'function') cands.push(displayFirst(p)); } catch (e) {}
+      if (p.firstName) cands.push(p.firstName);
+      if (p.name) { cands.push(String(p.name).split(/\s+/)[0]); cands.push(p.name); }
+      cands.forEach(c => {
+        const k = String(c || '').toLowerCase().replace(/[^a-z0-9À-ɏ]/g, '');
+        if (k && !names.some(n => n.k === k && n.p === p)) names.push({ k: k, p: p });
+      });
+    });
+    const matchName = w => {
+      const t = String(w || '').replace(/s$/, '');   // "kevins" → "kevin"
+      let hit = names.find(n => n.k === w) || names.find(n => n.k === t);
+      if (!hit && t.length >= 3) hit = names.find(n => n.k.indexOf(t) === 0 || t.indexOf(n.k) === 0);
+      return hit ? hit.p : null;
+    };
+    const GOLF = w => {
+      if (w === 'ace' || w === 'holeinone') return 1;
+      if (w === 'eagle') return Math.max(1, par - 2);
+      if (w === 'birdie' || w === 'birdy') return Math.max(1, par - 1);
+      if (w === 'par') return par;
+      if (w === 'bogey' || w === 'bogie' || w === 'bogey1') return par + 1;
+      if (w === 'double') return par + 2;
+      if (w === 'triple') return par + 3;
+      if (w === 'quad' || w === 'quadruple') return par + 4;
+      if (w === 'snowman') return 8;
+      return null;
+    };
+    let cur = null;
+    const push = p => { cur = { pid: p.id, name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), score: null, putts: null }; out.push(cur); };
+    for (let i = 0; i < toks.length; i++) {
+      const w = toks[i];
+      const p = matchName(w);
+      if (p) { if (!out.some(r => r.pid === p.id)) push(p); else cur = out.find(r => r.pid === p.id); continue; }
+      if (!cur) continue;                          // numbers before any name → ignore
+      let n = null;
+      if (/^\d{1,2}$/.test(w)) n = parseInt(w, 10);
+      else if (NUM[w] != null) n = NUM[w];
+      else {
+        const gterm = GOLF(w === 'bogey' && toks[i - 1] === 'double' ? 'double' : w);
+        // "double bogey"/"triple bogey": the bogey token after double/triple is skipped
+        if ((w === 'bogey' || w === 'bogie') && (toks[i - 1] === 'double' || toks[i - 1] === 'triple' || toks[i - 1] === 'quadruple' || toks[i - 1] === 'quad')) continue;
+        if (gterm != null && cur.score === null) { cur.score = Math.min(15, Math.max(1, gterm)); }
+        continue;
+      }
+      if (n == null) continue;
+      const nextIsPutt = /^putts?$/.test(toks[i + 1] || '');
+      if (nextIsPutt || cur.score !== null) {
+        if (cur.putts === null) cur.putts = Math.min(10, Math.max(0, n));
+      } else {
+        cur.score = Math.min(15, Math.max(1, n));
+      }
+    }
+  } catch (e) {}
+  return out.filter(r => r.score !== null || r.putts !== null);
+}
+// Apply parsed voice results through the same protected write path as tapping.
+async function bgVoiceApply(results) {
+  try {
+    const g = state.game;
+    if (!g || state.viewOnlyMode || g.finishedAt) return;
+    const h = state.currentHole;
+    const done = [], blocked = [];
+    let changed = false, puttsIgnored = false;
+    results.forEach(r => {
+      const player = g.players.find(p => p.id === r.pid);
+      if (!player) return;
+      try { if (typeof consentBlockState === 'function' && consentBlockState(g, player.name)) { blocked.push(r.first); return; } } catch (e) {}
+      let bit = r.first;
+      if (r.score !== null) {
+        if (!g.scores) g.scores = {};
+        if (!g.scores[r.pid]) g.scores[r.pid] = new Array(18).fill(null);
+        if (g.scores[r.pid][h - 1] !== r.score) {
+          g.scores[r.pid][h - 1] = r.score;
+          try { _markScoreTouched('scores', r.pid, h - 1); } catch (e) {}
+          if (!g.firstScoreAt) g.firstScoreAt = Date.now();
+          changed = true;
+        }
+        bit += ' ' + r.score;
+      }
+      if (r.putts !== null) {
+        if (g.trackPutts) {
+          if (!g.puttsData) g.puttsData = {};
+          if (!Array.isArray(g.puttsData[r.pid])) g.puttsData[r.pid] = new Array(18).fill(null);
+          if (g.puttsData[r.pid][h - 1] !== r.putts) {
+            g.puttsData[r.pid][h - 1] = r.putts;
+            try { _markScoreTouched('puttsData', r.pid, h - 1); } catch (e) {}
+            changed = true;
+          }
+          bit += ' (' + r.putts + ' putt' + (r.putts === 1 ? '' : 's') + ')';
+          // Same auto-Snake rule as tapping putts (3-putt hands over the snake).
+          try {
+            if (g.games && g.games.junk && (g.games.junk.snake || 0) > 0) {
+              if (!g.junkData) g.junkData = {};
+              if (!g.junkData[h]) g.junkData[h] = {};
+              let sn = g.junkData[h]['snake'];
+              if (typeof sn === 'string') sn = [sn];
+              if (!Array.isArray(sn)) sn = [];
+              const has = sn.includes(r.pid);
+              if (r.putts >= 3) { if (!has) sn.push(r.pid); }
+              else if (has) { sn = sn.filter(x => x !== r.pid); }
+              if (sn.length) g.junkData[h]['snake'] = sn; else delete g.junkData[h]['snake'];
+            }
+          } catch (e) {}
+        } else puttsIgnored = true;
+      }
+      done.push(bit);
+    });
+    if (changed) {
+      try { syncGirJunk(g, h); } catch (e) {}
+      try { syncSandyJunk(g, h); } catch (e) {}
+      try { syncArnieJunk(g, h); } catch (e) {}
+      try { syncRoloJunk(g, h); } catch (e) {}
+      try { syncChipInJunk(g, h); } catch (e) {}
+      await saveGame(g);
+    }
+    try { if (typeof renderScoreEntry === 'function') renderScoreEntry(); } catch (e) {}
+    let msg = done.length ? '🎤 Saved: ' + done.join(', ') : '🎤 Nothing to save';
+    if (blocked.length) msg += ' — ' + blocked.join(', ') + ' hasn\'t accepted yet';
+    if (puttsIgnored) msg += ' (putt tracking is off, putts skipped)';
+    try { showToast(msg); } catch (e) {}
+  } catch (e) { try { showToast('Couldn\'t save voice scores'); } catch (e2) {} }
+}
+// The voice sheet: live speech recognition where supported, otherwise the box
+// auto-focuses so the phone keyboard's dictation mic does the listening.
+function bgVoiceOpen() {
+  try {
+    const g = state.game;
+    if (!g || state.viewOnlyMode || g.finishedAt) return;
+    const h = state.currentHole;
+    const old = document.getElementById('bg-voice-ov');
+    if (old) old.remove();
+    const SR = _bgVoiceSR();
+    const firsts = g.players.map(p => { try { return typeof displayFirst === 'function' ? displayFirst(p) : p.name; } catch (e) { return p.name; } }).join(', ');
+    const ov = document.createElement('div');
+    ov.id = 'bg-voice-ov';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+    ov.innerHTML = '<div style="background:var(--surface,#1c232c);color:var(--text,#eef2f6);border-radius:16px 16px 0 0;padding:18px 16px 22px;width:100%;max-width:520px;border:1px solid var(--border,#2a323c)">'
+      + '<div style="font-weight:800;font-size:16px;margin-bottom:2px">🎤 Voice scores — Hole ' + h + '</div>'
+      + '<div class="help-text" style="font-size:12px;color:var(--text-muted,#9aa7b4);margin-bottom:10px">Say a name, the score, then putts. Like: &ldquo;' + (firsts.split(',')[0] || 'Kevin') + ' 5 with 2 putts&rdquo;. Players: ' + firsts + '</div>'
+      + '<div id="bg-voice-status" style="font-size:13px;font-weight:700;margin-bottom:8px;color:var(--text-muted,#9aa7b4)"></div>'
+      + '<input id="bg-voice-input" type="text" autocomplete="off" placeholder="' + (SR ? 'Listening… or type here' : 'Tap the mic on your keyboard, then talk') + '" style="width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid var(--border,#2a323c);background:var(--surface-2,#141a21);color:inherit;font-size:16px">'
+      + '<div id="bg-voice-preview" style="font-size:13px;margin:10px 2px;min-height:18px;color:var(--text-muted,#9aa7b4)"></div>'
+      + '<div style="display:flex;gap:10px">'
+      + '<button id="bg-voice-cancel" style="flex:1;padding:13px;border-radius:12px;border:1px solid var(--border,#2a323c);background:transparent;color:inherit;font-weight:700">Cancel</button>'
+      + '<button id="bg-voice-add" style="flex:2;padding:13px;border-radius:12px;border:0;background:var(--accent,#2b78c8);color:#fff;font-weight:800">Add scores</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+    const input = ov.querySelector('#bg-voice-input');
+    const prev = ov.querySelector('#bg-voice-preview');
+    const stat = ov.querySelector('#bg-voice-status');
+    let rec = null;
+    const refresh = () => {
+      try {
+        const rs = bgVoiceParse(input.value, g, h);
+        prev.textContent = rs.length
+          ? 'Heard: ' + rs.map(r => r.first + (r.score !== null ? ' ' + r.score : '') + (r.putts !== null ? ' · ' + r.putts + ' putt' + (r.putts === 1 ? '' : 's') : '')).join(',  ')
+          : (input.value ? 'No player names recognized yet…' : '');
+      } catch (e) {}
+    };
+    input.oninput = refresh;
+    const close = () => { try { if (rec) { rec.onend = null; rec.stop(); } } catch (e) {} try { ov.remove(); } catch (e) {} };
+    ov.querySelector('#bg-voice-cancel').onclick = close;
+    ov.onclick = e => { if (e.target === ov) close(); };
+    ov.querySelector('#bg-voice-add').onclick = async () => {
+      const rs = bgVoiceParse(input.value, g, h);
+      if (!rs.length) { try { showToast('Didn\'t catch any player names — try again'); } catch (e) {} return; }
+      close();
+      await bgVoiceApply(rs);
+    };
+    if (SR) {
+      try {
+        rec = new SR();
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.lang = 'en-US';
+        stat.textContent = '● Listening…';
+        stat.style.color = '#e05555';
+        rec.onresult = ev => {
+          try {
+            let t = '';
+            for (let i = 0; i < ev.results.length; i++) t += ev.results[i][0].transcript + ' ';
+            input.value = t.trim();
+            refresh();
+          } catch (e) {}
+        };
+        rec.onerror = () => { try { stat.textContent = 'Mic unavailable — type or use keyboard dictation'; stat.style.color = ''; input.focus(); } catch (e) {} };
+        rec.onend = () => { try { stat.textContent = input.value ? 'Done listening — check &amp; tap Add' : 'Tap the box to type instead'; stat.textContent = stat.textContent.replace('&amp;', '&'); stat.style.color = ''; } catch (e) {} };
+        rec.start();
+      } catch (e) { try { input.focus(); } catch (e2) {} }
+    } else {
+      // Native app / no in-page recognition: the keyboard's dictation mic is the
+      // recognizer — focus the box so the keyboard pops right up.
+      setTimeout(() => { try { input.focus(); } catch (e) {} }, 150);
+    }
+  } catch (e) {}
+}
+// Inject the 🎤 button above the score rows on every Score-tab render.
+(function _bgVoiceWire() {
+  try {
+    if (typeof renderScoreEntry !== 'function') return;
+    const _orig = renderScoreEntry;
+    renderScoreEntry = function () {
+      const r = _orig.apply(this, arguments);
+      try {
+        const g = state.game;
+        const c = $('score-entries');
+        if (!g || !c || state.viewOnlyMode || g.finishedAt) return r;
+        if (g.games && g.games.scramble) return r;             // team scores only
+        if (document.getElementById('bg-voice-btn')) return r; // already injected
+        const b = document.createElement('button');
+        b.id = 'bg-voice-btn';
+        b.textContent = '🎤 Say the scores';
+        b.style.cssText = 'display:block;width:100%;box-sizing:border-box;margin:0 0 10px;padding:11px;border-radius:12px;border:1px dashed var(--border,#2a323c);background:var(--surface-2,rgba(255,255,255,.04));color:var(--text-muted,#9aa7b4);font-weight:700;font-size:13px';
+        b.onclick = () => { try { bgVoiceOpen(); } catch (e) {} };
+        c.insertBefore(b, c.firstChild);
+      } catch (e) {}
+      return r;
+    };
+  } catch (e) {}
+})();
+// ===== end v936 voice score entry ==========================================
 
 // Boot the app. If anything throws, surface it on the loading screen so we
 // don't get stuck silently.
