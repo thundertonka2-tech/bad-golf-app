@@ -7649,7 +7649,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.958';
+const BG_BUILD = 'v2026.11.960';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -22243,8 +22243,14 @@ function libHoles(lib, sc, id){
 function roundHoles(g){
   try {
     if (g){
-      if (g.holes === 9) return 9;
-      if (Array.isArray(g.pars) && g.pars.filter(function(p){return p!=null;}).length === 9) return 9;
+      var _n = 18;
+      if (g.holes === 9) _n = 9;
+      else if (Array.isArray(g.pars) && g.pars.filter(function(p){return p!=null;}).length === 9) _n = 9;
+      // v960: record the hole count on the round's handicap rules so stroke
+      // allocation (strokesOnHole) uses the right number of holes even where the
+      // count isn't passed explicitly. Additive; 18-hole rounds unaffected.
+      try { if (g.hcpRules && g.hcpRules.holes !== _n) g.hcpRules.holes = _n; } catch(e){}
+      return _n;
     }
   } catch(e){}
   return 18;
@@ -22334,30 +22340,34 @@ function rebuildParSiGrids(n){
 // =============================================================================
 // Compute strokes received by player on hole based on HCP and SI.
 // `par` and `rules` are optional; if rules.noPar3Strokes is set, par-3 holes give 0.
-function strokesOnHole(playerHcp, holeSi, par, rules) {
+function strokesOnHole(playerHcp, holeSi, par, rules, nHoles) {
   if (rules && rules.noPar3Strokes && par === 3) return 0;
+  // v960: allocate over the number of holes actually played. On a 9-hole round the
+  // stroke indexes run 1–9, so the 2nd-stroke threshold is nH+SI (9+SI), not 18+SI —
+  // a 12-handicap correctly gets 1 stroke everywhere plus a 2nd on SI 1–3 instead of
+  // being capped at 9. 18-hole rounds are unchanged (nH defaults to 18).
+  const nH = nHoles || (rules && rules.holes) || 18;
   // Plus handicap (better than scratch, stored as a negative): the player GIVES
-  // strokes back, starting from the EASIEST hole (stroke index 18) upward. A +2
-  // gives a stroke back on SI 18 and SI 17. Returns NEGATIVE strokes so net
-  // ends up higher than gross on those holes.
+  // strokes back, starting from the EASIEST hole (highest stroke index) upward.
+  // Returns NEGATIVE strokes so net ends up higher than gross on those holes.
   if (playerHcp < 0) {
     const give = -playerHcp;               // how many strokes to give back
-    const rank = 19 - holeSi;              // SI 18 → 1 (first given back), SI 1 → 18
+    const rank = (nH + 1) - holeSi;        // easiest SI given back first
     let strokes = 0;
     if (give >= rank) strokes--;
-    if (give >= 18 + rank) strokes--;      // second pass for extreme plus handicaps
+    if (give >= nH + rank) strokes--;      // second pass for extreme plus handicaps
     return strokes;
   }
   let strokes = 0;
   if (playerHcp >= holeSi) strokes++;
-  if (playerHcp >= 18 + holeSi) strokes++;
+  if (playerHcp >= nH + holeSi) strokes++;
   return strokes;
 }
 
 // Net score on a single hole. `par` and `rules` optional for no-par-3 logic.
-function netHoleScore(grossScore, playerHcp, holeSi, par, rules) {
+function netHoleScore(grossScore, playerHcp, holeSi, par, rules, nHoles) {
   if (grossScore == null) return null;
-  return grossScore - strokesOnHole(playerHcp, holeSi, par, rules);
+  return grossScore - strokesOnHole(playerHcp, holeSi, par, rules, nHoles);
 }
 
 // Effective handicap for a player given current game rules. Returns 0 when:
@@ -32038,8 +32048,9 @@ function pairwiseStandings(g, aId, bId, fromHole, toHole, useNet) {
     const bScore = bArr[idx];
     if (aScore == null || bScore == null) continue;
     holesPlayed++;
-    const aNet = (useNet === false) ? aScore : netHoleScore(aScore, effectiveHcp(a, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
-    const bNet = (useNet === false) ? bScore : netHoleScore(bScore, effectiveHcp(b, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
+    const _nH = roundHoles(g);
+    const aNet = (useNet === false) ? aScore : netHoleScore(aScore, effectiveHcp(a, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules, _nH);
+    const bNet = (useNet === false) ? bScore : netHoleScore(bScore, effectiveHcp(b, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules, _nH);
     aStrokes += aNet;
     bStrokes += bNet;
     if (aNet < bNet) aHolesWon++;
@@ -32130,7 +32141,7 @@ function groupStrokeStandings(g, playerIds, fromHole, toHole, useNet) {
       const raw = arr[idx];
       if (raw == null) continue;
       holesPlayed++;
-      net += (useNet === false) ? raw : netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
+      net += (useNet === false) ? raw : netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules, roundHoles(g));
     }
     return { id: p.id, name: p.name, net, holesPlayed };
   });
@@ -32611,7 +32622,8 @@ function calcStroke(g) {
     const hcp = Math.round((p.baseHcp != null ? p.baseHcp : effectiveHcp(p, g.hcpRules)) * _sPct);   // v957: pot% replaces the round allowance (baseHcp), not stacks
     const arr = g.scores[p.id] || [];
     let net = 0;
-    arr.forEach((s, i) => { if (s != null && s !== undefined) net += (g.sis ? netHoleScore(s, hcp, g.sis[i], g.pars[i], g.hcpRules) : s); });
+    const _nH = roundHoles(g);
+    arr.forEach((s, i) => { if (s != null && s !== undefined) net += (g.sis ? netHoleScore(s, hcp, g.sis[i], g.pars[i], g.hcpRules, _nH) : s); });
     return net;
   };
   const score = p => cfg.net ? _netAllow(p) : totals[p.id].gross;
@@ -40357,6 +40369,9 @@ async function fillSummaryWagers(g) {
   const resById = {};
   try { (computeWagerResults(g, live) || []).forEach(r => { resById[r.id] = r.result; }); } catch (e) {}
   const resultOf = (w) => (w.status === 'settled' ? w.result : (resById[w.id] || null));
+  // v959: parimutuel net per win bet, so the per-bet lines and the ledger agree.
+  const _shapedAll = live.map(w => (w.status === 'settled' ? w : Object.assign({}, w, { status: 'settled', result: resById[w.id] })));
+  const _winById = (typeof winPoolNets === 'function') ? winPoolNets(_shapedAll) : {};
 
   let html = '';
   const meId = _authUser && _authUser.id;
@@ -40367,7 +40382,14 @@ async function fillSummaryWagers(g) {
       const res = resultOf(w);
       const amt = Number(w.amount) || 0;
       let label;
-      if (res === 'won') { label = '<span style="color:var(--ok,var(--money-pos));font-weight:700">✅ Won $' + amt + '</span>'; net += amt; }
+      if (w.bet_type === 'win' && (res === 'won' || res === 'lost')) {
+        // v959: show the actual share of the pot, not a flat stake.
+        const wn = Math.round((_winById[w.id] || 0) * 100) / 100; net += wn;
+        if (wn > 0) label = '<span style="color:var(--ok,var(--money-pos));font-weight:700">✅ Won $' + wn + '</span>';
+        else if (wn < 0) label = '<span style="color:var(--bad,var(--money-neg));font-weight:700">❌ You owe $' + Math.abs(wn) + '</span>';
+        else label = '<span style="color:var(--text-muted)">➖ Push</span>';
+      }
+      else if (res === 'won') { label = '<span style="color:var(--ok,var(--money-pos));font-weight:700">✅ Won $' + amt + '</span>'; net += amt; }
       else if (res === 'lost') { label = '<span style="color:var(--bad,var(--money-neg));font-weight:700">❌ You owe $' + amt + '</span>'; net -= amt; }
       else if (res === 'push') { label = '<span style="color:var(--text-muted)">➖ Push</span>'; }
       else { label = '<span style="color:var(--text-muted)">⏳ Pending</span>'; }
@@ -40381,8 +40403,7 @@ async function fillSummaryWagers(g) {
   // Group ledger (everyone's net) — map computed results onto settled-shaped copies.
   let ledger = {};
   try {
-    const shaped = live.map(w => (w.status === 'settled' ? w : Object.assign({}, w, { status: 'settled', result: resById[w.id] })));
-    ledger = computeWagerLedger(shaped) || {};
+    ledger = computeWagerLedger(_shapedAll) || {};   // v959: reuse the shaped copies built above
   } catch (e) {}
   const names = Object.keys(ledger);
   if (names.length) {
@@ -47346,6 +47367,11 @@ function computeWagerResults(g, wagers) {
     return { id: p.id, gross: t.gross, net: t.net };
   }).sort((a, b) => (a.net - b.net) || (a.gross - b.gross));
   const winnerId = wRoundWinnerId(g, ranked);
+  // v959: the win pool pays whoever won on LOW NET (handicaps applied). A pick on ANY
+  // player tied for the lowest net is correct; those pickers split the pot (see
+  // computeWagerLedger). ranked is already sorted by net, then gross.
+  const _winLowNet = (ranked && ranked.length) ? ranked[0].net : null;
+  const _winWinners = new Set((ranked || []).filter(r => _winLowNet != null && r.net === _winLowNet).map(r => r.id));
   const grossById = {}; ranked.forEach(r => { grossById[r.id] = r.gross; });
   // v935: never settle a win/h2h/ou wager against an INCOMPLETE scorecard —
   // calcTotals sums only scored holes, so a player who quit after 12 holes used
@@ -47369,7 +47395,7 @@ function computeWagerResults(g, wagers) {
       // v935: the round winner is decided across ALL players' totals — every
       // scorecard must be complete or the pool stays open.
       try { if (!(g.players || []).every(p => _cardFull(p.id))) return; } catch (e) {}
-      result = (w.pick_player_id && w.pick_player_id === winnerId) ? 'won' : 'lost';
+      result = (w.pick_player_id && _winWinners.has(w.pick_player_id)) ? 'won' : 'lost';   // v959: any tied low-net winner counts
     } else if (w.bet_type === 'h2h') {
       if (w.status !== 'matched') return; // unmatched h2h never settles
       try { if (!_cardFull(w.player_a_id) || !_cardFull(w.player_b_id)) return; } catch (e) {}  // v935: incomplete card → leave open
@@ -47436,17 +47462,43 @@ async function autoSettleWagers(code, g, wagers) {
 
 // Net per spectator name from settled wagers. Winners +stake, losers -stake.
 // Pushes and unmatched/unsettled wagers are excluded.
+// v959: win pools settle PARIMUTUEL. Bets are grouped by round + stake; the pot (every
+// stake in the group) splits EQUALLY among the correct pickers. Nobody correct -> the
+// pool pushes (everyone refunded, net 0). Returns { wagerId: netDelta } for settled win
+// bets; non-win bet types are untouched (straight +/- their stake).
+function winPoolNets(wagers) {
+  const groups = {};
+  (wagers || []).forEach(w => {
+    if (!w || w.bet_type !== 'win' || w.status !== 'settled') return;
+    if (!w.result || w.result === 'void' || w.result === 'push') return;
+    const key = (w.round_code || '') + '|' + (Number(w.amount) || 0);
+    (groups[key] = groups[key] || []).push(w);
+  });
+  const byId = {};
+  Object.keys(groups).forEach(k => {
+    const grp = groups[k];
+    const stake = Number(grp[0].amount) || 0;
+    const pot = grp.length * stake;
+    const winners = grp.filter(w => w.result === 'won');
+    if (!winners.length) { grp.forEach(w => { byId[w.id] = 0; }); return; }   // push/refund
+    const share = pot / winners.length;
+    grp.forEach(w => { byId[w.id] = (w.result === 'won') ? (share - stake) : -stake; });
+  });
+  return byId;
+}
 function computeWagerLedger(wagers) {
   const ledger = {};
   const add = (name, delta) => {
     const k = name || 'Someone';
     ledger[k] = (ledger[k] || 0) + delta;
   };
+  const winById = winPoolNets(wagers);
   (wagers || []).forEach(w => {
     if (w.status !== 'settled') return;
     if (!w.result || w.result === 'push' || w.result === 'void') return;
-    const amt = Number(w.amount) || 0;
     const creator = w.creator_name || 'Someone';
+    if (w.bet_type === 'win') { add(creator, winById[w.id] || 0); return; }   // v959: parimutuel
+    const amt = Number(w.amount) || 0;
     if (w.result === 'won') add(creator, amt);
     else if (w.result === 'lost') add(creator, -amt);
   });
