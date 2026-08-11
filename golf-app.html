@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.946';
+const BG_BUILD = 'v2026.11.947';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -14553,23 +14553,74 @@ async function getCourseScorecard(courseId) {
     _blobP,
     new Promise(r => setTimeout(() => r('__bg_timeout__'), 600))
   ]);
-  if (_fast && _fast !== '__bg_timeout__') return _fast;      // warm blob — unchanged behaviour
+  if (_fast && _fast !== '__bg_timeout__') { _bgNoteCardLoaded(courseId, _fast); return _fast; }   // warm blob — unchanged
+  let _row = null;
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
       const { data, error } = await supa.from('games').select('data').eq('code', 'scorecard:' + courseId).maybeSingle();
-      if (!error && data && data.data && Array.isArray(data.data.pars) && data.data.pars.length) return data.data;
+      if (!error && data && data.data && Array.isArray(data.data.pars) && data.data.pars.length) _row = data.data;
     }
   } catch (e) {}
-  try { return await _blobP; } catch (e) { return null; }     // nothing quick — wait it out
+  if (_row) {
+    _bgNoteCardLoaded(courseId, _row);
+    // v947 SAFETY: we answered from the small per-course row before the blob landed.
+    // If the blob turns out to hold a NEWER card, record that — _cardLoadedTs is what
+    // persistCourseScorecard checks before any AUTOMATIC (round-start) write, so a
+    // provisional read can never be written back over fresher data.
+    _blobP.then(b => {
+      try { if (b && _bgCardTs(b) > _bgCardTs(_row)) _bgNoteCardLoaded(courseId, _row); } catch (e) {}
+    }).catch(() => {});
+    return _row;
+  }
+  try { const b = await _blobP; _bgNoteCardLoaded(courseId, b); return b; } catch (e) { return null; }
 }
 
-async function persistCourseScorecard(courseId, name, pars, sis, tees) {
+// v947 — provenance of the scorecard currently shown in the setup form.
+// updatedAt has been written as BOTH epoch-ms and an ISO string over the years, so
+// normalise before ever comparing them.
+const _cardLoadedTs = {};
+function _bgCardTs(card) {
+  try {
+    const v = card && card.updatedAt;
+    if (v == null || v === '') return 0;
+    if (typeof v === 'number') return v;
+    if (/^\d+$/.test(String(v))) return parseInt(v, 10);
+    const t = Date.parse(v);
+    return isNaN(t) ? 0 : t;
+  } catch (e) { return 0; }
+}
+function _bgNoteCardLoaded(courseId, card) {
+  try { if (courseId) _cardLoadedTs[courseId] = _bgCardTs(card); } catch (e) {}
+}
+
+async function persistCourseScorecard(courseId, name, pars, sis, tees, opts) {
   if (!courseId) return false;
   // Read the FRESHEST copy right before merging (don't trust the 20s cache) so a
   // save can never clobber a different course's rating saved moments earlier.
   invalidateCourseSavesCache();
   const saves = await getCourseSaves();
+  // v947 ANTI-CLOBBER (Tyler: "make sure the blob will not overwrite any user inputs").
+  // Starting or saving a round auto-writes whatever scorecard the setup form happens to
+  // be showing — no user edit required. If that form was populated from a card that is
+  // now out of date (a slow/provisional read, or another device saving meanwhile), the
+  // auto-write silently replaced good pars/tees/stroke-indexes with older ones. Measured
+  // on 2026-08-11: 822 course rows were stale and 84 real user edits were being masked.
+  // An AUTOMATIC write now yields to anything fresher; a deliberate edit still wins.
+  if (opts && opts.auto) {
+    try {
+      const cur = saves[courseId];
+      if (cur) {
+        const _same = JSON.stringify([cur.pars || [], cur.sis || [], cur.tees || []]) ===
+                      JSON.stringify([pars || [], sis || [], Array.isArray(tees) ? tees : []]);
+        if (_same) return true;                                              // nothing to write
+        const _curTs = _bgCardTs(cur);
+        const _loadedTs = _cardLoadedTs[courseId] || 0;
+        if (_curTs > _loadedTs) return true;                                 // cloud moved on — yield
+        if (cur.userEdited && !_loadedTs) return true;                       // human edit vs unknown provenance — yield
+      }
+    } catch (e) {}
+  }
   saves[courseId] = {
     name,
     pars: pars.slice(),
@@ -58120,7 +58171,7 @@ async function init() {
     // Persist Kevin's scorecard + tee edits to the course library so the launched
     // rounds use them. Before this, Configure Day only stored a course REFERENCE, so
     // tee/scorecard edits made in the form were lost at launch. (Tyler v521 NEW-A)
-    try { if (_cid && setup && Array.isArray(setup.tees) && setup.tees.length) { await persistCourseScorecard(_cid, _cnm || (setup.course || ''), setup.pars, setup.sis, setup.tees); } } catch (e) {}
+    try { if (_cid && setup && Array.isArray(setup.tees) && setup.tees.length) { await persistCourseScorecard(_cid, _cnm || (setup.course || ''), setup.pars, setup.sis, setup.tees, { auto: true }); } } catch (e) {}
     // v841 (Tyler): "he set it up originally with two games, then went back in
     // and removed one of them" — but an already-launched group's round kept
     // BOTH. Push this edit into every group that's already launched for the
@@ -58878,7 +58929,7 @@ async function init() {
       // Deferred from saveGame above (deferRecent): update the Rounds list now —
       // a cloud read + write that play doesn't need to wait on.
       try { await addToRecent(game); } catch (e) {}
-      try { if (courseId) await persistCourseScorecard(courseId, setup.course, setup.pars, setup.sis, setup.tees); } catch (e) {}
+      try { if (courseId) await persistCourseScorecard(courseId, setup.course, setup.pars, setup.sis, setup.tees, { auto: true }); } catch (e) {}
       try {
         await Promise.all(setup.players.map(p => upsertPlayerInRoster(
           p.firstName || p.name, p.lastName || '', p.rawHcp != null ? p.rawHcp : p.hcp
@@ -58954,7 +59005,7 @@ async function init() {
       // corrected pars/SIs/tees STICK for future rounds (the Rockwall "par 4
       // reverts to par 5" bug, #18). Marked userEdited so the seed never clobbers it.
       if (g.courseId) {
-        try { await persistCourseScorecard(g.courseId, g.course, g.pars, g.sis, g.tees); }
+        try { await persistCourseScorecard(g.courseId, g.course, g.pars, g.sis, g.tees, { auto: true }); }
         catch (e) { console.warn('persist scorecard on edit failed:', e); }
       }
     })();
