@@ -7649,7 +7649,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.944';
+const BG_BUILD = 'v2026.11.945';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -11322,6 +11322,11 @@ function singletonRowCode(key) {
   // code only when there's no signed-in user id (guest/pre-auth) — guests are
   // localStorage-only anyway, so that row is never actually written.
   if (key === KEY_PLAYER_ROSTER) return rosterRowCode();
+  // v945: the RECENT-ROUNDS list was a single GLOBAL document that every account read
+  // and wrote — so every user saw every other user's rounds in their Rounds list, and
+  // one person's round could touch another person's roster entry. Same cutover shape
+  // as the v603 roster move: redirect here and every read/write follows at once.
+  if (key === KEY_RECENT) return recentRowCode();
   return 'shared:' + key.replace(/^golf:/, '');
 }
 
@@ -12580,6 +12585,7 @@ function migrateLegacyData(g) {
 
 async function addToRecent(game) {
   let recent = [];
+  try { await migrateRecentToPerUser(); } catch (e) {}   // v945: seed recent:<uid> before first use
   const v = await safeGet(KEY_RECENT, true);
   if (v) try { recent = JSON.parse(v); } catch (e) {}
   const prevEntry = recent.find(g => g.code === game.code);
@@ -12605,9 +12611,11 @@ async function addToRecent(game) {
   });
   recent = recent.slice(0, 50);
   await safeSet(KEY_RECENT, JSON.stringify(recent), true);
+  try { await _mirrorRecentToLegacy(recent); } catch (e) {}   // v945 transitional
 }
 
 async function getRecent() {
+  try { await migrateRecentToPerUser(); } catch (e) {}   // v945: seed recent:<uid> before first use
   const v = await safeGet(KEY_RECENT, true);
   if (!v) return [];
   try { return JSON.parse(v); } catch (e) { return []; }
@@ -13307,7 +13315,14 @@ function applyTombstonesToRoster(roster, tomb) {
   try {
     if (!Array.isArray(roster) || !tomb) return roster;
     let out = roster;
-    if (tomb.players && tomb.players.size) out = out.filter(p => !tomb.players.has(rosterPlayerKey(p)));
+    // v945: tombstones match on the player's STABLE ID when the entry has one, and on
+    // the normalized NAME only for legacy id-less entries. A name-keyed tombstone used
+    // to bury every future person who happened to share that name — deleting one
+    // "Paul Renner" would silently block a genuinely different Paul Renner from ever
+    // existing. Modern entries (v848+) always carry a fresh id, so an id tombstone can
+    // only ever hide the exact player it was written for.
+    if (tomb.players && tomb.players.size) out = out.filter(p =>
+      (p && p.id) ? !tomb.players.has('pid:' + p.id) : !tomb.players.has(rosterPlayerKey(p)));
     if (tomb.rounds && tomb.rounds.size) out.forEach(p => { if (Array.isArray(p.scoreHistory)) p.scoreHistory = p.scoreHistory.filter(s => !(tomb.rounds.has(rosterRoundKey(s)) || tomb.rounds.has(statsRoundKey(s)))); });
     return out;
   } catch (e) { return roster; }
@@ -13318,6 +13333,98 @@ function applyTombstonesToRoster(roster, tomb) {
 function rosterRowCode() {
   try { if (typeof _authUser !== 'undefined' && _authUser && _authUser.id) return 'roster:' + _authUser.id; } catch (e) {}
   return LEGACY_ROSTER_ROW;
+}
+
+// v945 — PER-USER recent-rounds row. recent:<uid> when signed in; the legacy global
+// row only for guests/pre-auth (localStorage is the real store for them anyway).
+const LEGACY_RECENT_ROW = 'shared:recent-games';
+// Transitional: keep mirroring this account's list into the legacy global row so
+// devices still on an older build (web deploys instantly, TestFlight lags) don't lose
+// their Rounds list mid-rollout. Flip to false one release after everyone is on v945+
+// and the global row stops being read by anything.
+const RECENT_DUAL_WRITE_LEGACY = true;
+function recentRowCode() {
+  try { if (typeof _authUser !== 'undefined' && _authUser && _authUser.id) return 'recent:' + _authUser.id; } catch (e) {}
+  return LEGACY_RECENT_ROW;
+}
+// One-time-per-account SEED of recent:<uid> from the legacy global list.
+// SAFETY, and the whole reason this is not a bare cutover: healMyScoreHistory prunes
+// a player's scoreHistory down to the rounds present in the recent list. If this row
+// came up EMPTY on first boot, that prune would delete every user's stats and handicap
+// history. So the seed is deliberately generous — it takes every legacy entry this
+// account actually played in, UNIONED with a synthetic entry for every gameCode already
+// in my scoreHistory. By construction the seed is a superset of my scoreHistory, so the
+// prune can never drop anything. (healMyScoreHistory also now refuses to prune on an
+// empty list, as a second belt.)
+let _recentMigrated = false, _recentMigrating = false;
+async function migrateRecentToPerUser() {
+  if (_recentMigrated || _recentMigrating) return;
+  _recentMigrating = true;
+  try {
+    if (!isSignedIn() || !_authUser || !_authUser.id) return;
+    if (!supaReady) await initSupabase();
+    if (!(supa && supaOnline)) return;
+    const per = recentRowCode();
+    if (per === LEGACY_RECENT_ROW) return;
+    const { data: pRow, error: pErr } = await supa.from('games').select('data').eq('code', per).maybeSingle();
+    if (pErr) return;                                    // read failed — retry next call
+    if (pRow && Array.isArray(pRow.data)) { _recentMigrated = true; return; }
+    // 1) legacy global entries where I was actually one of the players
+    let legacy = [];
+    try {
+      const { data: lRow, error: lErr } = await supa.from('games').select('data').eq('code', LEGACY_RECENT_ROW).maybeSingle();
+      if (!lErr && lRow && Array.isArray(lRow.data)) legacy = lRow.data;
+    } catch (e) {}
+    let meNorm = '';
+    try { meNorm = normalizeNameSegment((await getMeName()) || ''); } catch (e) {}
+    const _mine = r => {
+      if (!r || !r.code) return false;
+      if (!meNorm) return false;
+      try {
+        if (normalizeNameSegment(r.createdBy || '') === meNorm) return true;
+        return String(r.players || '').split(/\s*,\s*/).some(n => normalizeNameSegment(n) === meNorm);
+      } catch (e) { return false; }
+    };
+    const seed = legacy.filter(_mine);
+    const have = new Set(seed.map(r => r && r.code).filter(Boolean));
+    // 2) UNION every round already in my scoreHistory (the anti-data-loss half)
+    try {
+      const roster = await getPlayerRoster();
+      const mine = findMyRosterPlayer(roster, await getMeName());
+      ((mine && mine.scoreHistory) || []).forEach(s => {
+        if (!s || !s.gameCode || have.has(s.gameCode)) return;
+        have.add(s.gameCode);
+        const fromLegacy = legacy.find(r => r && r.code === s.gameCode);
+        seed.push(fromLegacy || {
+          code: s.gameCode, course: s.course || 'Untitled course',
+          players: (mine && mine.name) || '', scoreLine: '', createdBy: null,
+          createdAt: s.date || null, updatedAt: s.date || null,
+          finishedAt: s.date || null, t2: null
+        });
+      });
+    } catch (e) {}
+    seed.sort((a, b) => ((b && (b.createdAt || b.updatedAt)) || 0) - ((a && (a.createdAt || a.updatedAt)) || 0));
+    const { error: wErr } = await supa.from('games').upsert({ code: per, data: seed.slice(0, 50), updated_at: new Date().toISOString() });
+    if (!wErr) { _recentMigrated = true; try { bgLsSet(KEY_RECENT, JSON.stringify(seed.slice(0, 50))); } catch (e) {} }
+  } catch (e) { console.warn('migrateRecentToPerUser', e); }
+  finally { _recentMigrating = false; }
+}
+// Transitional mirror of MY rounds into the legacy global row, so an older-build
+// device keeps showing them. Merges (never blind-writes) so we can't wipe anyone else.
+async function _mirrorRecentToLegacy(rows) {
+  try {
+    if (!RECENT_DUAL_WRITE_LEGACY) return;
+    if (!(supa && supaOnline) || !Array.isArray(rows)) return;
+    if (recentRowCode() === LEGACY_RECENT_ROW) return;
+    let legacy = [];
+    try { const { data, error } = await supa.from('games').select('data').eq('code', LEGACY_RECENT_ROW).maybeSingle(); if (!error && data && Array.isArray(data.data)) legacy = data.data; } catch (e) {}
+    const byCode = {};
+    legacy.forEach(r => { if (r && r.code) byCode[r.code] = r; });
+    rows.forEach(r => { if (r && r.code) byCode[r.code] = r; });
+    const merged = Object.keys(byCode).map(k => byCode[k])
+      .sort((a, b) => ((b && (b.createdAt || b.updatedAt)) || 0) - ((a && (a.createdAt || a.updatedAt)) || 0));
+    await supa.from('games').upsert({ code: LEGACY_RECENT_ROW, data: merged.slice(0, 200), updated_at: new Date().toISOString() });
+  } catch (e) { /* best-effort; the per-user row is the source of truth */ }
 }
 // One-time-per-device SEED of this account's per-user roster row from the legacy
 // global row (+ whatever is in local). Idempotent and SAFE: it only writes the
@@ -13495,6 +13602,12 @@ async function deletePlayerFromRoster(firstName, lastName) {
   // Explicit removal so the merge-on-write actually drops this player (the cloud
   // copy would otherwise re-add them on union).
   const rmKey = rosterPlayerKey({ firstName, lastName });
+  // v945: tombstone the exact player(s) removed, by stable id where available, so the
+  // delete can never spill onto a different person with the same name.
+  const _removed = roster.filter(p =>
+    (p.firstName || '').toLowerCase() === fLower && (p.lastName || '').toLowerCase() === lLower);
+  const _tombKeys = _removed.map(p => (p && p.id) ? ('pid:' + p.id) : rosterPlayerKey(p));
+  if (!_tombKeys.length) _tombKeys.push(rmKey);
   await savePlayerRoster(filtered, { removals: { players: new Set([rmKey]) } });
   // v699: ALWAYS tombstone a delete so a passive re-add from one of this player's
   // past rounds can't resurrect them (Tyler: "Tyler Test keeps coming back after we
@@ -13503,7 +13616,7 @@ async function deletePlayerFromRoster(firstName, lastName) {
   // if they deliberately re-add the player later.
   try {
     const _adminLock = (typeof isAdmin === 'function' && isAdmin());
-    await addSharedTombstones([rmKey], null, _adminLock);
+    await addSharedTombstones(_tombKeys, null, _adminLock);
   } catch (e) {}
 }
 
@@ -41662,7 +41775,12 @@ async function reconcileMyScoreHistory() {
     //    handicap history. Entries with no gameCode are always kept (unmatchable).
     try {
       const recent = await getRecent();
-      if (Array.isArray(recent) && recent.length < 50) {
+      // v945 SAFETY: an EMPTY recent list is NEVER proof that every round was deleted.
+      // It is far more likely a failed or racing cloud read, a fresh device, or the
+      // per-account recent row not seeded yet. Pruning against it would wipe this
+      // player's entire scoreHistory — stats, averages and handicap. Require a
+      // non-empty list before this step is allowed to delete anything.
+      if (Array.isArray(recent) && recent.length > 0 && recent.length < 50) {
         const liveCodes = new Set((recent || []).map(r => r && r.code).filter(Boolean));
         // Keep a stats round ONLY if it matches a round in your list (by code) or
         // is a manually-added past round (intentional, code 'manual-…'). Everything
