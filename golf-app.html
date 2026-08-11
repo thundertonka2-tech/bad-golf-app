@@ -6564,7 +6564,7 @@
 <!-- Player roster picker modal -->
 <div class="modal-overlay" id="roster-modal">
   <div class="modal">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h2 style="margin:0">Bad Golf Users</h2><span id="roster-pick-count" style="flex:0 0 auto;background:var(--accent);color:#fff;border-radius:999px;padding:3px 11px;font-size:12px;font-weight:700;display:none"></span></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h2 style="margin:0">Bad Golf Users</h2><div style="display:flex;align-items:center;gap:8px;flex:0 0 auto"><span id="roster-pick-count" style="flex:0 0 auto;background:var(--accent);color:#fff;border-radius:999px;padding:3px 11px;font-size:12px;font-weight:700;display:none"></span><!-- v946 (Tyler): a Done button pinned at the TOP as well, so a long user list never has to be scrolled just to finish. Same action as the bottom Done. --><button type="button" class="primary" id="roster-done-top" style="flex:0 0 auto;min-height:34px;padding:6px 16px;font-weight:700">Done</button></div></div>
     <p class="help-text" style="margin-bottom:8px">Tap to add. Names are saved automatically when you start a round — or use ➕ Add a player to store a guest (non-user) now so they're here next time.</p>
     <input type="text" id="roster-search" placeholder="Search names…" style="width:100%;margin-bottom:10px">
     <!-- v618: Friends / All users filter -->
@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.945';
+const BG_BUILD = 'v2026.11.946';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -13347,9 +13347,16 @@ function recentRowCode() {
 // in my scoreHistory. By construction the seed is a superset of my scoreHistory, so the
 // prune can never drop anything. (healMyScoreHistory also now refuses to prune on an
 // empty list, as a second belt.)
-let _recentMigrated = false, _recentMigrating = false;
+let _recentMigrated = false, _recentMigrating = false, _recentMigrateNextTry = 0;
 async function migrateRecentToPerUser() {
   if (_recentMigrated || _recentMigrating) return;
+  // v946: getRecent() is on hot paths (Rounds list, archive, admin). If this bailed
+  // early — signed out, offline, a failed read — nothing latched, so EVERY subsequent
+  // getRecent() re-ran it and could fire another Supabase round-trip. Back off between
+  // attempts so an unmigrated/offline session can never turn the recent list into a
+  // per-call network hit.
+  if (Date.now() < _recentMigrateNextTry) return;
+  _recentMigrateNextTry = Date.now() + 15000;
   _recentMigrating = true;
   try {
     if (!isSignedIn() || !_authUser || !_authUser.id) return;
@@ -14529,12 +14536,24 @@ async function saveCourseSaves(saves) {
 
 async function getCourseScorecard(courseId) {
   if (!courseId) return null;
-  const saves = await getCourseSaves();
-  if (saves[courseId]) return saves[courseId];
-  // Fallback (v557): the shared:courses blob is ~2MB and a device that can't
-  // fully load it shows recently-added/edited courses as blank. Each card also
-  // lives in its own 'scorecard:<id>' row — read that directly when the blob
-  // doesn't have this course. Blob stays the source of truth; this only fires on a miss.
+  // v946 PERF (Tyler, Links GC / New Palestine IN): picking a course left the TEE
+  // dropdown empty for MINUTES. Cause: this waited on getCourseSaves(), which pulls the
+  // ~2 MB shared course blob plus its shard overlay, before it could answer — and only
+  // fell back to the tiny per-course row on a MISS. On a cold cache or a weak
+  // course-side connection that is a multi-minute block on the one thing the user is
+  // waiting for, even though a ~1 KB row with the same card was sitting right there.
+  //
+  // Now: give the blob a short head start (it is cache-first, so a warm device still
+  // wins instantly and the blob remains the source of truth), and if it has not
+  // answered in 600ms, unblock the UI from the per-course row instead.
+  const _blobP = (async () => {
+    try { const s = await getCourseSaves(); return (s && s[courseId]) || null; } catch (e) { return null; }
+  })();
+  const _fast = await Promise.race([
+    _blobP,
+    new Promise(r => setTimeout(() => r('__bg_timeout__'), 600))
+  ]);
+  if (_fast && _fast !== '__bg_timeout__') return _fast;      // warm blob — unchanged behaviour
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
@@ -14542,7 +14561,7 @@ async function getCourseScorecard(courseId) {
       if (!error && data && data.data && Array.isArray(data.data.pars) && data.data.pars.length) return data.data;
     }
   } catch (e) {}
-  return null;
+  try { return await _blobP; } catch (e) { return null; }     // nothing quick — wait it out
 }
 
 async function persistCourseScorecard(courseId, name, pars, sis, tees) {
@@ -58317,6 +58336,8 @@ async function init() {
 
   // Roster modal wiring
   $('roster-cancel').onclick = () => { $('roster-modal').classList.remove('show'); try { _rosterT2Close(); } catch (e) {} };
+  // v946: top Done mirrors the bottom one exactly.
+  try { const _rdt = $('roster-done-top'); if (_rdt) _rdt.onclick = () => { $('roster-modal').classList.remove('show'); try { _rosterT2Close(); } catch (e) {} }; } catch (e) {}
   // ➕ Add a guest / non-user straight to Bad Golf Users (no round needed) — the
   // modern replacement for the old no-email test users. Stored in the shared
   // roster via upsertPlayerInRoster, so they're findable everywhere. (Tyler, June 2026.)
