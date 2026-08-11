@@ -7649,7 +7649,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.939';
+const BG_BUILD = 'v2026.11.940';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -10878,7 +10878,15 @@ function renderAccountUI() {
   if (status) {
     if (isSignedIn()) {
       const tag = (_authRole === 'admin' || _authRole === 'commissioner') ? ' · admin' : '';
-      status.textContent = 'Signed in as ' + (currentUserEmail() || 'you') + tag;
+      // v940 (Tyler): Apple's "Hide My Email" returns a machine address like
+      // by8r4f7hfj@privaterelay.appleid.com. Printing it looked broken and told
+      // the user nothing, so relay accounts now read "Signed in with Apple".
+      // A real address (Google / email sign-up) still shows, so people can still
+      // confirm WHICH account they're on. The "You're playing as <name>" line
+      // below is unchanged and remains the useful identity.
+      const _em = currentUserEmail() || '';
+      const _relay = /@privaterelay\.appleid\.com$/i.test(_em);
+      status.textContent = (_relay ? 'Signed in with Apple' : ('Signed in as ' + (_em || 'you'))) + tag;
     } else {
       status.textContent = 'Playing as a guest. Sign in to manage the roster and keep your identity.';
     }
@@ -38385,7 +38393,13 @@ async function renderHomeInvites() {
         if (seenCodes.has(code)) continue;
         seenCodes.add(code);
         let g0 = null; try { g0 = await loadGame(code); } catch (e) {}
-        if (!g0 || g0.finishedAt) continue;
+        // v940: the row was only SKIPPED here, so it stayed pending forever and
+        // came back on the popup path every launch. Retire it for good.
+        if (g0 && g0.finishedAt) {
+          try { await supa.from('game_invites').update({ status: 'expired' }).eq('id', inv.id); } catch (e) {}
+          continue;
+        }
+        if (!g0) continue;
         // v903 (Tyler): "Join now should only show up if the round is live."
         let _invLive = false;
         try {
@@ -39063,6 +39077,7 @@ async function renderHomeLive() {
         const g = await loadGame(b.dataset.code);
         if (g && !g.finishedAt) {
           g.finishedAt = Date.now(); await saveGame(g);
+          try { expireInvitesForRound(g.code); } catch (e) {}   // v940: kill outstanding invites for the ended round
           try { if (typeof liveActivity !== 'undefined') liveActivity.endIfCode(g.code); } catch (e) {} // end the lock-screen card for the ender
           try { notifyPlayersRoundSummary(g); } catch (e) {} // fire the end-of-round payment/summary notification (the quick End action skipped it)
         }
@@ -42284,6 +42299,7 @@ async function deleteRecentGame(code) {
   // vanish, when the round is deleted.
   try { await restoreScheduledRoundForCode(code); } catch (e) {}
   try { tombstoneRound(code); } catch (e) {}   // shared tombstone → can't resurrect on any device
+  try { expireInvitesForRound(code); } catch (e) {}   // v940: a deleted round must not keep inviting people
   try { if (typeof liveActivity !== 'undefined') liveActivity.endIfCode(code); } catch (e) {}   // v635: clear the lock-screen Live Activity card for this round
   // Remove from recent list (now shared across devices)
   let recent = [];
@@ -44467,6 +44483,39 @@ function subscribeToFriendRequests() {
   } catch (e) { console.warn('subscribeToFriendRequests failed', e); }
 }
 
+// v940 (Tyler): "the invite never goes away even if the round was deleted or
+// finished." ROOT CAUSE was in the DATABASE, not here: game_invites.status had a
+// CHECK constraint allowing only pending/accepted/declined, so every
+// `update({status:'expired'})` this app has ever issued was rejected by Postgres
+// and swallowed by the surrounding try/catch — no invite ever expired. The
+// constraint now allows 'expired'/'seen', and RLS now lets the SENDER retire
+// invites they sent (it previously only allowed the recipient, which is also why
+// the .delete() dedupe calls silently no-opped and duplicates piled up).
+//
+// With that unblocked, retire a round's outstanding invites at the source: the
+// moment the round is finished or deleted, anyone who hadn't opened the app yet
+// never sees the invite at all. Covers the round's own invites plus the wager
+// proposals (W:) and sent bets (WB:) that hang off it. Best-effort and silent —
+// a failure here must never block finishing or deleting a round.
+async function expireInvitesForRound(code) {
+  try {
+    if (!code) return;
+    if (!supaReady) { try { await initSupabase(); } catch (e) {} }
+    if (!supa || !supaOnline || !_authUser) return;
+    const codes = [String(code), 'W:' + code];
+    // Sent bets are keyed 'WB:<code>~<betId>', so match them by prefix.
+    try {
+      await supa.from('game_invites').update({ status: 'expired' })
+        .in('status', ['pending', 'seen']).like('game_code', 'WB:' + code + '%');
+    } catch (e) {}
+    try {
+      await supa.from('game_invites').update({ status: 'expired' })
+        .in('status', ['pending', 'seen']).in('game_code', codes);
+    } catch (e) {}
+  } catch (e) { /* never let invite cleanup break finish/delete */ }
+}
+window.expireInvitesForRound = expireInvitesForRound;
+
 // Queued delivery: on launch / sign-in, show the newest pending invite.
 async function checkPendingInvites() {
   if (!supa || !_authUser) return;
@@ -44687,6 +44736,22 @@ async function showIncomingInvite(inv) {
       } catch (e) {}
       if (g0 && g0.finishedAt) {
         try { await supa.from('game_invites').update({ status: 'expired' }).eq('id', inv.id); } catch (e) {}
+        return false;
+      }
+      // v940: the round is GONE (deleted). Previously `g0 && g0.finishedAt` was
+      // false for a missing round, so the invite fell through and was SHOWN —
+      // a deleted round nagged forever with a Join button that went nowhere.
+      // Expire it when a tombstone proves the delete; otherwise just don't show
+      // it (a missing read could be a network blip, and wrongly expiring a valid
+      // invite is worse than deferring it to the next launch).
+      if (!g0) {
+        let _deleted = false;
+        try {
+          const _tb = (typeof getSharedTombstones === 'function') ? await getSharedTombstones() : null;
+          if (_tb && _tb.rounds && _tb.rounds.has(inv.game_code)) _deleted = true;
+        } catch (e) {}
+        try { if (!_deleted && typeof getDeletedRoundKeys === 'function' && getDeletedRoundKeys().has(inv.game_code)) _deleted = true; } catch (e) {}
+        if (_deleted) { try { await supa.from('game_invites').update({ status: 'expired' }).eq('id', inv.id); } catch (e) {} }
         return false;
       }
     } catch (e) {}
@@ -59286,6 +59351,9 @@ async function init() {
       try { if (typeof playSwingSound === 'function') playSwingSound(); } catch (e) {}   // v696: club-swing sound on round finish
       try { if (typeof liveActivity !== 'undefined') liveActivity.end(); } catch (e) {}
       try { await saveGame(g); } catch (e) { console.warn('saveGame on finish failed:', e); }
+      // v940: retire any invites still outstanding for this round — nobody should
+      // be invited to a round that just ended.
+      try { expireInvitesForRound(g.code); } catch (e) {}
       try { notifyFriendsRoundComplete(g); } catch (e) {} // #3 push my friends that I finished
       try { notifyPlayersRoundSummary(g); } catch (e) {} // push the round's players the final summary
       // Void any single-sided wagers nobody took, then auto-settle the rest, so a
