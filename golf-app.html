@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.952';
+const BG_BUILD = 'v2026.11.953';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -11533,7 +11533,14 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:code-review-queue': 'crqAudit',           // v881: union by entry id AND union each entry's audit events by event id — an audit trail that can lose an event isn't one
   'golf:crq-attachments': 'objectMap',            // review attachments: { courseId: [{url,at,by}] } (v715)
   'golf:tourneys': 'arrayById',                   // scheduled rounds + tee times: union by id so concurrent saves never clobber (v558)
-  'golf:state-locks': 'objectMap'                 // v880: per-state lock records, last writer wins per state
+  'golf:state-locks': 'objectMap',                // v880: per-state lock records, last writer wins per state
+  // v953 THE RESURRECTION BUG. The delete list was the ONLY shared blob with no
+  // merge strategy, so every write BLIND-OVERWROTE the cloud row from a possibly
+  // stale cache-first read. unTombstonePlayers runs on every sign-in self-upsert
+  // and every round start, so any device whose cache predated a delete quietly
+  // erased that tombstone for EVERYONE and the round came back. Same reasoning
+  // that made course-deletes a stringSet in v582 — never applied to rounds/players.
+  'golf:roster-tombstones': 'tombstones'
 };
 const _MERGE_READ_FAILED = '__BG_MERGE_READ_FAILED__';  // cloud read FAILED (vs. cloud genuinely empty)
 async function _mergeSharedSingletonValue(key, local) {
@@ -11551,6 +11558,58 @@ async function _mergeSharedSingletonValue(key, local) {
       const a = Array.isArray(cloud) ? cloud : [];
       const b = Array.isArray(local) ? local : [];
       return Array.from(new Set([...a, ...b]));
+    }
+    if (strat === 'tombstones') {
+      // v953 DELETE-LIST MERGE. Resolution is per KEY, never per blob:
+      //   · players / rounds / playersLocked  -> UNION (a stale device can only ever
+      //     ADD; it can no longer drop a tombstone it never heard about).
+      //   · roundsAt / playersAt              -> WHEN it was deleted, max wins.
+      //   · roundsCleared / playersCleared    -> WHEN it was deliberately un-deleted.
+      // A key is live (still tombstoned) unless it was cleared at or after the time
+      // it was deleted. That keeps the two legitimate un-tombstone paths working —
+      // the v903 recycled-code heal and an admin's deliberate player re-add — while
+      // making a passive, stale-cache write incapable of resurrecting anything.
+      const _o = x => (x && typeof x === 'object' && !Array.isArray(x)) ? x : {};
+      const a = _o(cloud), b = _o(local);
+      const arr = (o, k) => Array.isArray(o[k]) ? o[k] : [];
+      const mp  = (o, k) => _o(o[k]);
+      const maxMerge = (x, y) => {            // newest timestamp wins per key
+        const out = Object.assign({}, x);
+        Object.keys(y).forEach(k => { const v = +y[k] || 0; if (!((+out[k] || 0) > v)) out[k] = v; });
+        return out;
+      };
+      const rAt = maxMerge(mp(a, 'roundsAt'),        mp(b, 'roundsAt'));
+      const pAt = maxMerge(mp(a, 'playersAt'),       mp(b, 'playersAt'));
+      const rCl = maxMerge(mp(a, 'roundsCleared'),   mp(b, 'roundsCleared'));
+      const pCl = maxMerge(mp(a, 'playersCleared'),  mp(b, 'playersCleared'));
+      // cleared >= deleted  ->  the un-delete is the newer fact, drop the tombstone.
+      // A legacy tombstone (no timestamp) reads as deleted-at-0, so an explicit
+      // clear still wins over it — which is the intended behaviour.
+      // A tie goes to the DELETE, never the clear: if the two facts carry the same
+      // millisecond we keep the thing hidden. Re-deleting is cheap; a round Tyler
+      // deleted popping back up is the bug this whole strategy exists to kill.
+      const live = (keys, at, cl) => Array.from(new Set(keys)).filter(k => {
+        const c = +cl[k] || 0;
+        return !(c > 0 && c > (+at[k] || 0));
+      });
+      const rounds        = live([].concat(arr(a, 'rounds'),        arr(b, 'rounds')),        rAt, rCl);
+      const players       = live([].concat(arr(a, 'players'),       arr(b, 'players')),       pAt, pCl);
+      const playersLocked = live([].concat(arr(a, 'playersLocked'), arr(b, 'playersLocked')), pAt, pCl);
+      const trim = (m, keys) => { const s = new Set(keys), out = {}; Object.keys(m).forEach(k => { if (s.has(k)) out[k] = m[k]; }); return out; };
+      // The cleared maps are the anti-resurrection record and must outlive the keys
+      // they cleared (a stale device can surface an old tombstone long after). Cap
+      // them at the 4000 most recent so they cannot grow without bound.
+      const capNewest = (m, n) => {
+        const ks = Object.keys(m);
+        if (ks.length <= n) return m;
+        ks.sort((x, y) => (+m[y] || 0) - (+m[x] || 0));
+        const out = {}; ks.slice(0, n).forEach(k => { out[k] = m[k]; }); return out;
+      };
+      return {
+        players: players.slice(-3000), rounds: rounds.slice(-5000), playersLocked: playersLocked.slice(-3000),
+        roundsAt: trim(rAt, rounds), playersAt: trim(pAt, players),
+        roundsCleared: capNewest(rCl, 4000), playersCleared: capNewest(pCl, 4000)
+      };
     }
     if (strat === 'crqAudit') {
       // v881 CODE-REVIEW AUDIT MERGE. Same union-by-entry-id as arrayById, except
@@ -11650,7 +11709,7 @@ async function writeSharedSingleton(key, value) {
             // blind overwrite could SHRINK the cloud and silently drop another device's
             // entries (this is how Kevin's verified courses reverted). Skip the write,
             // keep it DIRTY, and let the 15s / online retry union once the cloud is back.
-            if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'objectMap') { return false; }
+            if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'objectMap' || _SHARED_MERGE_STRATEGY[key] === 'tombstones') { return false; }
             // other merge keys: keep prior behavior (write the local copy cached above)
           } else if (_merged !== undefined) {
             parsed = _merged; try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {}
@@ -11699,7 +11758,7 @@ async function flushDirtySingletons() {
         if (_m === _MERGE_READ_FAILED) {
           // Still can't read the cloud — for accumulate sets, do NOT blind-overwrite
           // (would shrink/drop entries). Leave it DIRTY and retry on the next tick.
-          if (_SHARED_MERGE_STRATEGY[key] === 'stringSet') { continue; }
+          if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'tombstones') { continue; }
         } else if (_m !== undefined) { _data = _m; try { localStorage.setItem(key, JSON.stringify(_data)); } catch (e) {} }
       } catch (e) {}
       const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: _data, updated_at: new Date().toISOString() });
@@ -13231,24 +13290,35 @@ async function getSharedTombstones() {
     // v903: roundsAt = { code: whenDeletedMs }. Lets the archive tell a genuinely
     // deleted round from a NEW round that merely inherited a recycled code.
     // Tombstones written before v903 have no timestamp and keep the old behaviour.
-    _tombCache = { players: new Set(Array.isArray(o.players) ? o.players : []), rounds: new Set(Array.isArray(o.rounds) ? o.rounds : []), playersLocked: new Set(Array.isArray(o.playersLocked) ? o.playersLocked : []), roundsAt: (o.roundsAt && typeof o.roundsAt === 'object') ? o.roundsAt : {} };
-  } catch (e) { if (!_tombCache) _tombCache = { players: new Set(), rounds: new Set(), playersLocked: new Set(), roundsAt: {} }; }
+    // v953: playersAt / roundsCleared / playersCleared join roundsAt. The cleared
+    // maps are what let a deliberate un-delete beat the union merge.
+    const _m = k => (o[k] && typeof o[k] === 'object' && !Array.isArray(o[k])) ? o[k] : {};
+    _tombCache = { players: new Set(Array.isArray(o.players) ? o.players : []), rounds: new Set(Array.isArray(o.rounds) ? o.rounds : []), playersLocked: new Set(Array.isArray(o.playersLocked) ? o.playersLocked : []), roundsAt: _m('roundsAt'), playersAt: _m('playersAt'), roundsCleared: _m('roundsCleared'), playersCleared: _m('playersCleared') };
+  } catch (e) { if (!_tombCache) _tombCache = { players: new Set(), rounds: new Set(), playersLocked: new Set(), roundsAt: {}, playersAt: {}, roundsCleared: {}, playersCleared: {} }; }
   return _tombCache;
 }
 async function _writeSharedTombstones(out) {
   // v903: keep roundsAt trimmed to the round keys we actually still hold.
   try {
     const keep = new Set(out.rounds || []);
-    // v942 FAILSAFE: a caller that forgets to pass roundsAt must NOT wipe the whole
-    // map. Fall back to what we already hold in cache. (unTombstonePlayers did exactly
-    // this for months, erasing every delete-timestamp and disabling the v903 heal.)
-    const src = (out.roundsAt && typeof out.roundsAt === 'object') ? out.roundsAt
-              : ((_tombCache && _tombCache.roundsAt) ? _tombCache.roundsAt : {});
-    const trimmed = {};
-    Object.keys(src).forEach(k => { if (keep.has(k)) trimmed[k] = src[k]; });
-    out.roundsAt = trimmed;
+    const keepP = new Set(out.players || []);
+    // v942 FAILSAFE, generalised in v953: a caller that forgets to pass ANY of the
+    // side maps must NOT wipe it. Fall back to what we already hold in cache.
+    // (unTombstonePlayers did exactly this to roundsAt for months, erasing every
+    // delete-timestamp and disabling the v903 heal. Same trap, four maps now — so
+    // the failsafe is written once and covers all of them.)
+    const _c = k => (out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) ? out[k]
+                  : ((_tombCache && _tombCache[k]) ? _tombCache[k] : {});
+    const trim = (src, s) => { const o2 = {}; Object.keys(src).forEach(k => { if (s.has(k)) o2[k] = src[k]; }); return o2; };
+    out.roundsAt  = trim(_c('roundsAt'),  keep);
+    out.playersAt = trim(_c('playersAt'), keepP);
+    // The cleared maps are deliberately NOT trimmed to the live keys: their whole
+    // job is to keep proving "this was un-deleted on purpose" after the key is gone
+    // from the set, so a stale device re-offering the old tombstone loses the merge.
+    out.roundsCleared  = _c('roundsCleared');
+    out.playersCleared = _c('playersCleared');
   } catch (e) { out.roundsAt = out.roundsAt || {}; }
-  _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds), playersLocked: new Set(out.playersLocked || []), roundsAt: out.roundsAt || {} };
+  _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds), playersLocked: new Set(out.playersLocked || []), roundsAt: out.roundsAt || {}, playersAt: out.playersAt || {}, roundsCleared: out.roundsCleared || {}, playersCleared: out.playersCleared || {} };
   try { bgLsSet(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
   try { if (typeof isSignedIn === 'function' && isSignedIn() && typeof writeSharedSingleton === 'function') await writeSharedSingleton(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
 }
@@ -13256,11 +13326,27 @@ async function addSharedTombstones(players, rounds, lockPlayers) {
   try {
     const t = await getSharedTombstones();
     const locked = t.playersLocked || new Set();
-    (players || []).forEach(k => { if (k) { t.players.add(k); if (lockPlayers) locked.add(k); } });
     const _at = t.roundsAt || {};
+    const _pat = t.playersAt || {};
+    const _rcl = t.roundsCleared || {};
+    const _pcl = t.playersCleared || {};
     const _now = Date.now();
-    (rounds || []).forEach(k => { if (k) { t.rounds.add(k); if (!_at[k]) _at[k] = _now; } });   // v903: stamp WHEN it was deleted
-    await _writeSharedTombstones({ players: Array.from(t.players).slice(-3000), rounds: Array.from(t.rounds).slice(-5000), playersLocked: Array.from(locked).slice(-3000), roundsAt: _at });
+    // v953: a DELETE always wins over an earlier un-delete. Drop the cleared stamp
+    // and (re-)stamp the delete time, otherwise the merge would keep resolving in
+    // favour of the old clear and this delete would never stick.
+    (players || []).forEach(k => {
+      if (!k) return;
+      t.players.add(k); if (lockPlayers) locked.add(k);
+      if (_pcl[k]) { delete _pcl[k]; _pat[k] = _now; }
+      if (!_pat[k]) _pat[k] = _now;
+    });
+    (rounds || []).forEach(k => {
+      if (!k) return;
+      t.rounds.add(k);
+      if (_rcl[k]) { delete _rcl[k]; _at[k] = _now; }
+      if (!_at[k]) _at[k] = _now;                                  // v903: stamp WHEN it was deleted
+    });
+    await _writeSharedTombstones({ players: Array.from(t.players).slice(-3000), rounds: Array.from(t.rounds).slice(-5000), playersLocked: Array.from(locked).slice(-3000), roundsAt: _at, playersAt: _pat, roundsCleared: _rcl, playersCleared: _pcl });
   } catch (e) { console.warn('addSharedTombstones', e); }
 }
 // v903: clear ONE round key from the delete list, local + shared. Called when the
@@ -13278,7 +13364,11 @@ async function unTombstoneRound(key) {
     const t = await getSharedTombstones();
     if (t && t.rounds && t.rounds.delete(key)) {
       const at = t.roundsAt || {}; delete at[key];
-      await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds), playersLocked: Array.from(t.playersLocked || []), roundsAt: at });
+      // v953: record WHEN it was cleared. Without this stamp the union merge would
+      // simply re-add the key from any device still holding the old tombstone, and
+      // the v903 recycled-code heal could never actually free a poisoned code.
+      const cl = t.roundsCleared || {}; cl[key] = Date.now();
+      await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds), playersLocked: Array.from(t.playersLocked || []), roundsAt: at, playersAt: (t.playersAt || {}), roundsCleared: cl, playersCleared: (t.playersCleared || {}) });
     }
   } catch (e) {}
 }
@@ -13291,6 +13381,8 @@ async function unTombstonePlayers(players) {
     // for months (Tyler: "Tyler Test still appearing after multiple deletes").
     // Only an ADMIN session may clear a locked delete (deliberate re-add).
     const admin = (typeof isAdmin === 'function' && isAdmin());
+    const _pat = t.playersAt || {};
+    const _pcl = t.playersCleared || {};
     let changed = false;
     (players || []).forEach(k => {
       if (!k) return;
@@ -13298,14 +13390,16 @@ async function unTombstonePlayers(players) {
         if (!admin) return;
         locked.delete(k); changed = true;
       }
-      if (t.players.delete(k)) changed = true;
+      // v953: stamp the clear (and drop the delete stamp) so the union merge keeps
+      // this player un-deleted instead of another device's stale copy re-burying them.
+      if (t.players.delete(k)) { _pcl[k] = Date.now(); delete _pat[k]; changed = true; }
     });
     // v942 (Paul Kim / TEE69): MUST pass roundsAt through. _writeSharedTombstones
     // trims roundsAt to the keys it is HANDED, so omitting it here silently wiped the
     // ENTIRE delete-timestamp map every time a player was passively re-added (sign-in
     // self-upsert, round-start upsert) -- which is constantly. That is why 221 of 222
     // tombstones carried no timestamp and the v903 recycled-code heal could never fire.
-    if (changed) await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds), playersLocked: Array.from(locked), roundsAt: (t.roundsAt || {}) });
+    if (changed) await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds), playersLocked: Array.from(locked), roundsAt: (t.roundsAt || {}), playersAt: _pat, roundsCleared: (t.roundsCleared || {}), playersCleared: _pcl });
   } catch (e) {}
 }
 // Drop tombstoned players + rounds from a roster array. Failsafe: returns the
