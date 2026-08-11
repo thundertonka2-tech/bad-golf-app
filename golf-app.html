@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.951';
+const BG_BUILD = 'v2026.11.952';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -39193,8 +39193,49 @@ function setHomeFeedScope(v){ /* no-op: scope is locked to friends (v901) */ }
 //     so one scope select can never disagree with the feed above it.
 //   · getMeName()/crewAvatarHtml()/escapeHtml() -> existing identity + render bits.
 const KEY_CREW_BOARD = 'golf:crew-board';
-const BOARD_PREVIEW = 10, BOARD_MAX = 200;   // show 10, collapse the rest
+// v952 (Tyler): "If there is more than three messages will this collapse and
+//  expand? Also I need the ability to edit or delete the message if I created
+//  it or if I am an admin. Once a message is on the post for 30 days auto
+//  delete it."
+// Three changes, all additive and guarded so a failure can never break Home:
+//   1. BOARD_PREVIEW 10 -> 3. More than 3 messages collapses behind
+//      "Show more (N)". Replies inside a thread collapse at 3 the same way.
+//   2. Edit + Delete on your OWN message, or anything if you're an admin.
+//      Ownership is by ACCOUNT EMAIL (the identity-by-email rule), with a
+//      name fallback so messages posted before this build stay editable by
+//      the person who wrote them instead of going admin-only overnight.
+//      Deleting a top-level message takes its replies with it (confirmed).
+//   3. 30-day auto-delete, measured from the thread's LAST activity, so a
+//      live conversation survives and a dead one clears itself out. Pruned
+//      on load and written back once (throttled) by whoever notices first.
+const BOARD_PREVIEW = 3, BOARD_REPLY_PREVIEW = 3, BOARD_MAX = 200;
+const BOARD_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
 let _boardCache = null;
+let _boardPurgedAt = 0;
+
+// Last activity on a thread = the newest of the post itself and its replies.
+function _boardLastAt(m) {
+  let t = (m && m.at) || 0;
+  try {
+    if (m && Array.isArray(m.replies)) {
+      for (let i = 0; i < m.replies.length; i++) {
+        const r = m.replies[i];
+        if (r && (r.at || 0) > t) t = r.at;
+      }
+    }
+  } catch (e) {}
+  return t;
+}
+// Drop threads whose last activity is older than 30 days. Anything with no
+// timestamp at all (legacy/corrupt row) is KEPT — we never delete on a guess.
+function _boardPrune(msgs) {
+  const cut = Date.now() - BOARD_TTL_MS;
+  return (msgs || []).filter(m => {
+    if (!m) return false;
+    const t = _boardLastAt(m);
+    return !t || t >= cut;
+  });
+}
 
 async function loadCrewBoard() {
   try {
@@ -39202,6 +39243,22 @@ async function loadCrewBoard() {
     const j = raw ? JSON.parse(raw) : null;
     _boardCache = (j && Array.isArray(j.msgs)) ? j.msgs : [];
   } catch (e) { _boardCache = _boardCache || []; }
+  // 30-day auto-delete. Prune the copy we're about to render immediately, and
+  // push the pruned list back to the shared row at most once a minute so ten
+  // renders in a row don't turn into ten writes.
+  try {
+    const kept = _boardPrune(_boardCache);
+    if (kept.length !== _boardCache.length) {
+      _boardCache = kept;
+      if (Date.now() - _boardPurgedAt > 60000) {
+        _boardPurgedAt = Date.now();
+        try {
+          Promise.resolve(writeSharedSingleton(KEY_CREW_BOARD, JSON.stringify({ msgs: kept })))
+            .catch(function () {});
+        } catch (e) {}
+      }
+    }
+  } catch (e) {}
   return _boardCache;
 }
 async function saveCrewBoard(msgs) {
@@ -39216,6 +39273,38 @@ function _boardTimeAgo(t) {
   if (s < 86400) return Math.floor(s / 3600) + 'h ago';
   return Math.floor(s / 86400) + 'd ago';
 }
+function _boardMyEmail() {
+  try { return String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').trim().toLowerCase(); }
+  catch (e) { return ''; }
+}
+// Can I edit/delete this one? Admins: always (Kevin still moderates). Otherwise
+// match the stored account email; if the message predates v952 and has no email
+// on it, fall back to the display name so the author doesn't lose their own post.
+function _boardCanEdit(m, meEmail, meName) {
+  try {
+    if (typeof isAdmin === 'function' && isAdmin()) return true;
+    const own = String((m && m.email) || '').trim().toLowerCase();
+    if (own) return !!meEmail && own === meEmail;
+    const mn = (m && m.name) ? normalizeNameSegment(m.name) : '';
+    return !!mn && !!meName && mn === normalizeNameSegment(meName);
+  } catch (e) { return false; }
+}
+// Locate a message OR a reply by id, with enough context to splice it out.
+function _boardFind(msgs, id) {
+  if (!id) return null;
+  for (let i = 0; i < (msgs || []).length; i++) {
+    const m = msgs[i];
+    if (!m) continue;
+    if (m.id === id) return { msg: m, parent: null, list: msgs, idx: i };
+    if (Array.isArray(m.replies)) {
+      for (let k = 0; k < m.replies.length; k++) {
+        const r = m.replies[k];
+        if (r && r.id === id) return { msg: r, parent: m, list: m.replies, idx: k };
+      }
+    }
+  }
+  return null;
+}
 async function postCrewBoardMessage(txt, parentId) {
   const clean = String(txt || '').trim().slice(0, 500);
   if (!clean) return;
@@ -39223,7 +39312,8 @@ async function postCrewBoardMessage(txt, parentId) {
   try { me = (await getMeName()) || ''; } catch (e) {}
   if (!me) { showToast('Link your player before posting'); return; }
   const msgs = await loadCrewBoard();
-  const entry = { id: 'm' + Date.now() + Math.floor(Math.random() * 1000), name: me, txt: clean, at: Date.now() };
+  // email is stamped from v952 on: it's what edit/delete ownership keys off.
+  const entry = { id: 'm' + Date.now() + Math.floor(Math.random() * 1000), name: me, email: _boardMyEmail(), txt: clean, at: Date.now() };
   if (parentId) {
     const p = msgs.find(m => m && m.id === parentId);
     if (!p) return;
@@ -39236,12 +39326,56 @@ async function postCrewBoardMessage(txt, parentId) {
   await saveCrewBoard(msgs);
   renderHomeBoard();
 }
+// Edit in place. Re-reads the board first so two people editing at once can't
+// clobber each other's messages, and re-checks ownership against the SAVED
+// message (not the rendered one) so a stale button can't be used as a bypass.
+async function editCrewBoardMessage(id, txt) {
+  const clean = String(txt || '').trim().slice(0, 500);
+  if (!clean) { showToast('Message can’t be empty — use Delete'); return; }
+  let msgs = [];
+  try { msgs = await loadCrewBoard(); } catch (e) {}
+  const hit = _boardFind(msgs, id);
+  if (!hit) { showToast('That message is gone'); renderHomeBoard(); return; }
+  let meName = '';
+  try { meName = (await getMeName()) || ''; } catch (e) {}
+  if (!_boardCanEdit(hit.msg, _boardMyEmail(), meName)) { showToast('You can only edit your own messages'); return; }
+  if (clean === String(hit.msg.txt || '')) { renderHomeBoard(); return; }
+  hit.msg.txt = clean;
+  hit.msg.editedAt = Date.now();
+  await saveCrewBoard(msgs);
+  showToast('Message updated');
+  renderHomeBoard();
+}
+// Delete. A top-level message takes its replies with it (Tyler's call), so the
+// confirm spells out how many are going. A reply only removes itself.
+async function deleteCrewBoardMessage(id) {
+  let msgs = [];
+  try { msgs = await loadCrewBoard(); } catch (e) {}
+  const hit = _boardFind(msgs, id);
+  if (!hit) { renderHomeBoard(); return; }
+  let meName = '';
+  try { meName = (await getMeName()) || ''; } catch (e) {}
+  if (!_boardCanEdit(hit.msg, _boardMyEmail(), meName)) { showToast('You can only delete your own messages'); return; }
+  const n = (!hit.parent && Array.isArray(hit.msg.replies)) ? hit.msg.replies.length : 0;
+  const ask = hit.parent ? 'Delete this reply?'
+    : (n ? ('Delete this message and its ' + n + ' repl' + (n === 1 ? 'y' : 'ies') + '?') : 'Delete this message?');
+  let ok = true;
+  try { ok = confirm(ask); } catch (e) { ok = true; }
+  if (!ok) return;
+  hit.list.splice(hit.idx, 1);
+  await saveCrewBoard(msgs);
+  showToast('Deleted');
+  renderHomeBoard();
+}
 
 async function renderHomeBoard() {
   const el = document.getElementById('home-board');
   if (!el) return;
   let msgs = [];
   try { msgs = await loadCrewBoard(); } catch (e) {}
+  let _meName = '';
+  try { _meName = (await getMeName()) || ''; } catch (e) {}
+  const _meEmail = _boardMyEmail();
   // v898 (Tyler): FRIENDS ONLY — ALWAYS. The board deliberately ignores the
   // scope select (which still drives Live now + Crew highlights): "we don't
   // want a giant public board right now." Two things changed vs v895:
@@ -39259,7 +39393,7 @@ async function renderHomeBoard() {
       try { names = await friendNameSet(); } catch (e) {}
       if (!names.size) {
         let _me = '';
-        try { _me = (await getMeName()) || ''; } catch (e) {}
+        try { _me = _meName || (await getMeName()) || ''; } catch (e) {}
         names = new Set(_me ? [normalizeNameSegment(_me)] : []);
       }
       const _isCrew = m => !!(m && m.name && names.has(normalizeNameSegment(m.name)));
@@ -39273,10 +39407,31 @@ async function renderHomeBoard() {
   msgs = msgs.slice().sort((a, b) => (b.at || 0) - (a.at || 0));
   const expanded = !!state._homeBoardExpanded;
   const shown = msgs.slice(0, expanded ? BOARD_MAX : BOARD_PREVIEW);
+  const repOpen = (state._boardRepliesOpen = state._boardRepliesOpen || {});
   // Mobile-first: single column, inputs use min-width:0 inside flex so they can
   // shrink instead of pushing the Post button off-screen (the same fix the
   // highlight comment row needed).
   const rowCss = 'padding:7px 0;border-top:1px solid var(--border)';
+  const linkCss = 'border:none;background:transparent;color:var(--text-muted);cursor:pointer;font-size:12px;padding:2px 0';
+  // Edit/Delete only render for a message you own (or for an admin), so the
+  // buttons can't be shown to someone the save would reject anyway.
+  const tools = (m, small) => {
+    if (!_boardCanEdit(m, _meEmail, _meName)) return '';
+    const fs = small ? 'font-size:11px' : 'font-size:12px';
+    const id = escAttr(m.id || '');
+    return '<button class="bd-edit" type="button" data-id="' + id + '" style="' + linkCss + ';' + fs + ';margin-left:10px">Edit</button>' +
+           '<button class="bd-del" type="button" data-id="' + id + '" style="' + linkCss + ';' + fs + ';margin-left:10px;color:var(--danger,#c0392b)">Delete</button>';
+  };
+  const editedTag = m => (m && m.editedAt) ? ' <span class="small-text" style="color:var(--text-muted);font-size:11px">(edited)</span>' : '';
+  const editBox = (m, small) => _boardCanEdit(m, _meEmail, _meName) ?
+    ('<div class="bd-editbox" data-id="' + escAttr(m.id || '') + '" style="display:none;margin-top:4px">' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<input class="bd-edit-input" maxlength="500" value="' + escAttr(m.txt || '') + '" style="flex:1;min-width:0;font-size:' + (small ? '12' : '13') + 'px;padding:6px 8px">' +
+        '<button class="bd-edit-save" type="button" style="flex:0 0 auto;border:none;background:var(--accent);color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px">Save</button>' +
+        '<button class="bd-edit-cancel" type="button" style="flex:0 0 auto;' + linkCss + '">Cancel</button>' +
+      '</div>' +
+    '</div>') : '';
+
   el.innerHTML =
     '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">' +
       '<div style="font-weight:600;margin-bottom:6px">&#128172; Crew message board <span class="small-text" style="color:var(--text-muted);font-weight:400">friends only</span></div>' +
@@ -39284,32 +39439,43 @@ async function renderHomeBoard() {
         '<input id="home-board-input" placeholder="Post to the crew&#8230;" maxlength="500" style="flex:1;min-width:0;font-size:13px;padding:8px 10px">' +
         '<button id="home-board-post" style="flex:0 0 auto;border:none;background:var(--accent);color:#fff;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px">Post</button>' +
       '</div>' +
-      (shown.length ? shown.map(m =>
-        '<div class="bd-item" data-id="' + escAttr(m.id || '') + '" style="' + rowCss + '">' +
+      (shown.length ? shown.map(m => {
+        const reps = Array.isArray(m.replies) ? m.replies : [];
+        const rOpen = !!repOpen[m.id];
+        const rShown = rOpen ? reps : reps.slice(0, BOARD_REPLY_PREVIEW);
+        return '<div class="bd-item" data-id="' + escAttr(m.id || '') + '" style="' + rowCss + '">' +
           '<div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap">' +
             '<span style="font-weight:600;font-size:13px">' + escapeHtml(m.name || '') + '</span>' +
             '<span class="small-text" style="color:var(--text-muted);font-size:11px">' + _boardTimeAgo(m.at) + '</span>' +
           '</div>' +
-          '<div style="font-size:13px;margin-top:2px;overflow-wrap:anywhere">' + escapeHtml(m.txt || '') + '</div>' +
-          ((Array.isArray(m.replies) && m.replies.length) ?
+          '<div class="bd-txt" data-id="' + escAttr(m.id || '') + '" style="font-size:13px;margin-top:2px;overflow-wrap:anywhere">' + escapeHtml(m.txt || '') + editedTag(m) + '</div>' +
+          editBox(m, false) +
+          (reps.length ?
             '<div style="margin:4px 0 0 12px;padding-left:8px;border-left:2px solid var(--border)">' +
-              m.replies.map(r =>
+              rShown.map(r =>
                 '<div style="padding:3px 0">' +
                   '<span style="font-weight:600;font-size:12px">' + escapeHtml(r.name || '') + '</span> ' +
                   '<span class="small-text" style="color:var(--text-muted);font-size:11px">' + _boardTimeAgo(r.at) + '</span>' +
-                  '<div style="font-size:12px;overflow-wrap:anywhere">' + escapeHtml(r.txt || '') + '</div>' +
+                  '<div class="bd-txt" data-id="' + escAttr(r.id || '') + '" style="font-size:12px;overflow-wrap:anywhere">' + escapeHtml(r.txt || '') + editedTag(r) + '</div>' +
+                  editBox(r, true) +
+                  (tools(r, true) ? '<div style="margin-top:1px">' + tools(r, true) + '</div>' : '') +
                 '</div>'
               ).join('') +
+              // More than 3 replies collapses too, per thread.
+              (reps.length > BOARD_REPLY_PREVIEW ?
+                '<button class="bd-more-replies" type="button" data-id="' + escAttr(m.id || '') + '" style="' + linkCss + ';margin-top:2px">' +
+                  (rOpen ? 'Show fewer replies' : 'Show ' + (reps.length - BOARD_REPLY_PREVIEW) + ' more repl' + ((reps.length - BOARD_REPLY_PREVIEW) === 1 ? 'y' : 'ies')) +
+                '</button>' : '') +
             '</div>' : '') +
-          '<div style="margin-top:3px"><button class="bd-reply small" type="button" style="border:none;background:transparent;color:var(--text-muted);cursor:pointer;font-size:12px;padding:2px 0">Reply</button></div>' +
+          '<div style="margin-top:3px"><button class="bd-reply small" type="button" style="' + linkCss + '">Reply</button>' + tools(m, false) + '</div>' +
           '<div class="bd-reply-box" style="display:none;margin:2px 0 0 12px">' +
             '<div style="display:flex;gap:6px;align-items:center">' +
               '<input class="bd-reply-input" placeholder="Reply&#8230;" maxlength="500" style="flex:1;min-width:0;font-size:12px;padding:6px 8px">' +
               '<button class="bd-reply-send" style="flex:0 0 auto;border:none;background:var(--accent);color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px">Send</button>' +
             '</div>' +
           '</div>' +
-        '</div>'
-      ).join('') : '<div class="help-text" style="padding:8px 0">No messages from your crew yet &#8212; say something.</div>') +
+        '</div>';
+      }).join('') : '<div class="help-text" style="padding:8px 0">No messages from your crew yet &#8212; say something.</div>') +
       (msgs.length > BOARD_PREVIEW ?
         '<button id="home-board-showmore" class="small" type="button" style="width:100%;margin-top:6px">' +
           (expanded ? 'Show fewer' : 'Show more (' + msgs.length + ')') +
@@ -39331,6 +39497,41 @@ async function renderHomeBoard() {
     if (send && rin) send.onclick = () => { const v = rin.value; rin.value = ''; postCrewBoardMessage(v, id); };
     if (rin) rin.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); const v = rin.value; rin.value = ''; postCrewBoardMessage(v, id); } };
   });
+  // Edit / Delete / per-thread reply expansion. Wired by data-id off the whole
+  // board (not per .bd-item) so a reply's buttons find their own box, not the
+  // parent's.
+  try {
+    const _boxes = {}, _texts = {};
+    el.querySelectorAll('.bd-editbox').forEach(b => { _boxes[b.dataset.id] = b; });
+    el.querySelectorAll('.bd-txt').forEach(t => { _texts[t.dataset.id] = t; });
+    el.querySelectorAll('.bd-edit').forEach(b => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        const bid = b.dataset.id, box = _boxes[bid], txt = _texts[bid];
+        if (!box) return;
+        const open = box.style.display !== 'none';
+        box.style.display = open ? 'none' : 'block';
+        if (txt) txt.style.display = open ? '' : 'none';
+        const i3 = box.querySelector('.bd-edit-input');
+        if (i3 && !open) { i3.focus(); try { i3.setSelectionRange(i3.value.length, i3.value.length); } catch (e2) {} }
+      };
+    });
+    el.querySelectorAll('.bd-editbox').forEach(box => {
+      const bid = box.dataset.id;
+      const i4 = box.querySelector('.bd-edit-input');
+      const sv = box.querySelector('.bd-edit-save');
+      const cx = box.querySelector('.bd-edit-cancel');
+      if (sv && i4) sv.onclick = (e) => { e.stopPropagation(); editCrewBoardMessage(bid, i4.value); };
+      if (i4) i4.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); editCrewBoardMessage(bid, i4.value); } };
+      if (cx) cx.onclick = (e) => { e.stopPropagation(); box.style.display = 'none'; const t2 = _texts[bid]; if (t2) t2.style.display = ''; };
+    });
+    el.querySelectorAll('.bd-del').forEach(b => {
+      b.onclick = (e) => { e.stopPropagation(); deleteCrewBoardMessage(b.dataset.id); };
+    });
+    el.querySelectorAll('.bd-more-replies').forEach(b => {
+      b.onclick = (e) => { e.stopPropagation(); const bid = b.dataset.id; repOpen[bid] = !repOpen[bid]; renderHomeBoard(); };
+    });
+  } catch (e) {}
   const rf = document.getElementById('home-crew-refresh');
   if (rf) rf.onclick = () => { try { renderHomeLive(); } catch (e) {} renderHomeBoard(); };
 }
