@@ -7649,7 +7649,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.950';
+const BG_BUILD = 'v2026.11.951';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -8423,7 +8423,7 @@ async function removeMyStatRound(idx) {
     // Also blacklist its code so a cloud/recent sync can't resurrect it.
     if (s.gameCode) { try { const h = getHiddenRounds(); if (!h.includes(s.gameCode)) { h.push(s.gameCode); setHiddenRounds(h); } } catch (e) {} }
     try { tombstoneRound(s); } catch (e) {}   // so the cloud backup can't resurrect it
-    if (mine.scoreHistory.length !== before) { await savePlayerRoster(roster, { removals: { rounds: new Map([[rosterPlayerKey(mine), new Set([rosterRoundKey(s)])]]) } }); try { showToast('Removed from your stats'); } catch (e) {} }
+    if (mine.scoreHistory.length !== before) { await savePlayerRoster(roster, { removals: { rounds: new Map([[rosterRemovalKey(mine), new Set([rosterRoundKey(s)])]]) } }); try { showToast('Removed from your stats'); } catch (e) {} }
     else { try { showToast('Round not found in your stats'); } catch (e) {} }
     const rc = document.getElementById('round-card-ov'); if (rc) rc.remove();
     const sr = document.getElementById('stat-rounds-ov'); if (sr) sr.remove();
@@ -13125,6 +13125,18 @@ function rosterPlayerKey(p) {
   }
   return normalizeNameSegment(f) + '\x1f' + normalizeNameSegment(l);
 }
+// v951 — the key used to REMOVE a roster entry. Prefers the entry's stable id and
+// falls back to the normalized name only for legacy id-less entries — exactly the rule
+// applyTombstonesToRoster() has used since v945.
+//
+// This matters more than a per-save detail: savePlayerRoster() passes these same keys
+// straight to addSharedTombstones(), so a name-keyed removal used to mint a GLOBAL
+// name tombstone. That is where the legacy name tombstones came from, and why deleting
+// one "Paul Renner" could bury a genuinely different Paul Renner forever.
+function rosterRemovalKey(p) {
+  try { if (p && p.id) return 'pid:' + p.id; } catch (e) {}
+  return rosterPlayerKey(p);
+}
 function rosterRoundKey(s) {
   if (!s) return '';
   return s.gameCode || ((s.date || '') + '|' + (s.course || '') + '|' + (s.gross == null ? '' : s.gross));
@@ -13203,8 +13215,8 @@ function mergeRosters(base, incoming, removals) {
   let result = Array.from(map.values());
   if (removals) {
     const rmP = removals.players, rmR = removals.rounds;
-    if (rmP && rmP.size) result = result.filter(p => !rmP.has(rosterPlayerKey(p)));
-    if (rmR && rmR.size) result.forEach(p => { const set = rmR.get(rosterPlayerKey(p)); if (set && set.size && Array.isArray(p.scoreHistory)) p.scoreHistory = p.scoreHistory.filter(s => !set.has(rosterRoundKey(s))); });
+    if (rmP && rmP.size) result = result.filter(p => !rmP.has(rosterRemovalKey(p)) && !((p && p.id) ? false : rmP.has(rosterPlayerKey(p))));
+    if (rmR && rmR.size) result.forEach(p => { const set = rmR.get(rosterRemovalKey(p)) || ((p && p.id) ? null : rmR.get(rosterPlayerKey(p))); if (set && set.size && Array.isArray(p.scoreHistory)) p.scoreHistory = p.scoreHistory.filter(s => !set.has(rosterRoundKey(s))); });
   }
   return result;
 }
@@ -13686,7 +13698,7 @@ async function deletePlayerFromRoster(firstName, lastName) {
     (p.firstName || '').toLowerCase() === fLower && (p.lastName || '').toLowerCase() === lLower);
   const _tombKeys = _removed.map(p => (p && p.id) ? ('pid:' + p.id) : rosterPlayerKey(p));
   if (!_tombKeys.length) _tombKeys.push(rmKey);
-  await savePlayerRoster(filtered, { removals: { players: new Set([rmKey]) } });
+  await savePlayerRoster(filtered, { removals: { players: new Set(_tombKeys) } });   // v951: id-preferred, so this can't tombstone a same-named stranger
   // v699: ALWAYS tombstone a delete so a passive re-add from one of this player's
   // past rounds can't resurrect them (Tyler: "Tyler Test keeps coming back after we
   // delete it"). Admins get a LOCKED tombstone (only an admin can ever clear it);
@@ -13993,7 +14005,7 @@ async function mergeRosterPlayers(winnerKey, loserKeys) {
   // the additive merge-on-write (the v86 lost-update fix) re-add the loser from the
   // cloud copy on the next union — that's why a merged duplicate "came back". Routing
   // through savePlayerRoster + removals makes the merge STICK across devices/boots.
-  await savePlayerRoster(filtered.slice(0, 200), { removals: { players: new Set(losers.map(p => rosterPlayerKey(p))) } });
+  await savePlayerRoster(filtered.slice(0, 200), { removals: { players: new Set(losers.map(p => rosterRemovalKey(p))) } });
   // Repoint any signed-in ACCOUNT that was linked to a merged-away entry onto the
   // winner, so a merged user never loses their identity — past rounds, stats and round
   // invites all follow profiles.my_player.
@@ -22507,7 +22519,7 @@ async function restoreRoundsFromCloud() {
     const keepKeys = new Set(finalRounds.map(rosterRoundKey));
     const dropKeys = new Set();
     originals.concat(cloud).forEach(s => { const rk = rosterRoundKey(s); if (rk && !keepKeys.has(rk)) dropKeys.add(rk); });
-    const removals = dropKeys.size ? { removals: { rounds: new Map([[rosterPlayerKey(p), dropKeys]]) } } : undefined;
+    const removals = dropKeys.size ? { removals: { rounds: new Map([[rosterRemovalKey(p), dropKeys]]) } } : undefined;
     await savePlayerRoster(roster, removals);
     try { renderStats(); } catch (e) {}
     try { renderHome(); } catch (e) {}
@@ -42328,7 +42340,7 @@ async function loadRounds() {
           // Drop the in-memory stats backup copy too, so it isn't re-unioned this session.
           try { if (Array.isArray(window._myStatsBackupRounds)) window._myStatsBackupRounds = window._myStatsBackupRounds.filter(x => !matches(x)); } catch (e) {}
           const rmSet = new Set(removed.map(rosterRoundKey));
-          await savePlayerRoster(roster3, { removals: { rounds: new Map([[rosterPlayerKey(mine3), rmSet]]) } });
+          await savePlayerRoster(roster3, { removals: { rounds: new Map([[rosterRemovalKey(mine3), rmSet]]) } });
         }
       } catch (err) {}
       showToast('Round removed — handicap recalculated');
@@ -58578,7 +58590,7 @@ async function init() {
       const names = toDelete.map(p => displayFull(p) || p.firstName).join(', ');
       if (!(await uiConfirm('Permanently DELETE ' + toDelete.length + ' player' + (toDelete.length === 1 ? '' : 's') + ' (' + names + ')? This removes them and their saved rounds from the roster and cannot be undone.', { title: 'Delete players?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
       const filtered = roster.filter(p => !keys.includes(rosterKey(p)));
-      const rmKeys = new Set(toDelete.map(p => rosterPlayerKey(p)));
+      const rmKeys = new Set(toDelete.map(p => rosterRemovalKey(p)));
       const ok = await savePlayerRoster(filtered, { removals: { players: rmKeys } });
       showToast(ok ? ('Deleted ' + toDelete.length + ' player' + (toDelete.length === 1 ? '' : 's')) : 'Delete failed');
       closeManualMerge();
