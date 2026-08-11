@@ -7649,7 +7649,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.947';
+const BG_BUILD = 'v2026.11.948';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -14525,9 +14525,9 @@ async function saveCourseSaves(saves) {
   // frozen; getCourseSaves overlays these shards over it. Local edits are already in
   // the cache above, so an offline/failed write just re-syncs on the next save.
   try {
-    var changed = {}, id;
-    for (id in saves) { if (JSON.stringify(saves[id]) !== JSON.stringify(prev[id])) changed[_courseShard(id)] = 1; }
-    for (id in prev) { if (!(id in saves)) changed[_courseShard(id)] = 1; }
+    var changed = {}, id, _changedIds = [], _removedIds = [];
+    for (id in saves) { if (JSON.stringify(saves[id]) !== JSON.stringify(prev[id])) { changed[_courseShard(id)] = 1; _changedIds.push(id); } }
+    for (id in prev) { if (!(id in saves)) { changed[_courseShard(id)] = 1; _removedIds.push(id); } }
     var shardKeys = Object.keys(changed);
     if (!shardKeys.length) return true;
     if (!supaReady) await initSupabase();
@@ -14538,6 +14538,36 @@ async function saveCourseSaves(saves) {
         return { code: 'shared:courses:' + sh, data: obj, updated_at: new Date().toISOString() };
       });
       for (var i = 0; i < rows.length; i += 20) { var e = (await supa.from('games').upsert(rows.slice(i, i + 20))).error; if (e) { console.warn('saveCourseSaves shard write error', e); return false; } }
+      // v948 SINGLE SOURCE OF TRUTH. A course card lived in three places: the legacy
+      // 'shared:courses' blob, the 64 'shared:courses:XX' shards, and the per-course
+      // 'scorecard:<id>' row. Only persistCourseScorecard kept the row in step, so the
+      // FOUR other writers that come through here -- the bulk ratings import, the admin
+      // course delete, and the two seed bootstraps -- silently left the row behind. That
+      // drift is what produced 822 stale rows and 84 masked user edits on 2026-08-11.
+      // The per-course row is now the authoritative record and the shards are a cache
+      // rebuilt from it, so every writer that reaches this function keeps both in step
+      // with no call-site churn -- the same shape as the singletonRowCode redirect.
+      try {
+        var _cardRows = _changedIds.map(function (cid) {
+          return { code: 'scorecard:' + cid, data: saves[cid], updated_at: new Date().toISOString() };
+        });
+        for (var ci = 0; ci < _cardRows.length; ci += 20) {
+          var _ce = (await supa.from('games').upsert(_cardRows.slice(ci, ci + 20))).error;
+          if (_ce) { console.warn('saveCourseSaves card row write error', _ce); break; }
+        }
+        // Deletes are deliberately capped. One course being removed is a real admin
+        // delete; a hundred "removals" in one save means the caller handed us a partial
+        // saves map (a failed/short read), and obeying it would wipe good per-course
+        // records. Refuse and say so -- the cloud rebuild can always restore a cache,
+        // it cannot restore rows that were deleted on bad evidence.
+        if (_removedIds.length) {
+          if (_removedIds.length > 25) {
+            console.warn('saveCourseSaves: refusing to delete', _removedIds.length, 'per-course rows - saves map looks partial');
+          } else {
+            await supa.from('games').delete().in('code', _removedIds.map(function (cid) { return 'scorecard:' + cid; }));
+          }
+        }
+      } catch (_e2) { console.warn('saveCourseSaves per-course row sync failed', _e2); }
     }
   } catch (e) { console.warn('saveCourseSaves failed', e); return false; }
   return true;
