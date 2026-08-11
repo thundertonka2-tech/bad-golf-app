@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.953';
+const BG_BUILD = 'v2026.11.954';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -11534,13 +11534,25 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:crq-attachments': 'objectMap',            // review attachments: { courseId: [{url,at,by}] } (v715)
   'golf:tourneys': 'arrayById',                   // scheduled rounds + tee times: union by id so concurrent saves never clobber (v558)
   'golf:state-locks': 'objectMap',                // v880: per-state lock records, last writer wins per state
+  // v954: the ROUNDS LIST. Same blind-overwrite exposure v953 fixed for the delete
+  // list — a stale device could drop a round somebody else had just finished, or
+  // re-add one that was deleted. Union by round code, newest wins per field, then
+  // drop anything tombstoned so a merge can never resurrect a deleted round.
+  //
+  // NOT given a strategy, deliberately: 'golf:round-templates',
+  // 'golf:multinine-configs' and 'golf:course-gps'. All three express DELETION by
+  // omitting the entry (e.g. saveRoundTemplates(list.filter(x => x.id !== id))), so
+  // a plain union would resurrect deleted entries — trading this bug for the one
+  // v953 just fixed. They need the tombstone treatment (union + a per-key
+  // removed-at stamp), not a union. See the v954 handoff.
   // v953 THE RESURRECTION BUG. The delete list was the ONLY shared blob with no
   // merge strategy, so every write BLIND-OVERWROTE the cloud row from a possibly
   // stale cache-first read. unTombstonePlayers runs on every sign-in self-upsert
   // and every round start, so any device whose cache predated a delete quietly
   // erased that tombstone for EVERYONE and the round came back. Same reasoning
   // that made course-deletes a stringSet in v582 — never applied to rounds/players.
-  'golf:roster-tombstones': 'tombstones'
+  'golf:roster-tombstones': 'tombstones',
+  'golf:recent-games': 'recentGames'
 };
 const _MERGE_READ_FAILED = '__BG_MERGE_READ_FAILED__';  // cloud read FAILED (vs. cloud genuinely empty)
 async function _mergeSharedSingletonValue(key, local) {
@@ -11558,6 +11570,43 @@ async function _mergeSharedSingletonValue(key, local) {
       const a = Array.isArray(cloud) ? cloud : [];
       const b = Array.isArray(local) ? local : [];
       return Array.from(new Set([...a, ...b]));
+    }
+    if (strat === 'recentGames') {
+      // Identity is the round CODE. Deletion is expressed by a TOMBSTONE (not by
+      // omission), which is what makes a union safe here: nothing is removed by
+      // being absent, so a stale list can only ever contribute rounds back.
+      const a = Array.isArray(cloud) ? cloud : [];
+      const b = Array.isArray(local) ? local : [];
+      const map = new Map();
+      const put = x => {
+        if (!x || !x.code) return;
+        const prev = map.get(x.code);
+        if (!prev) { map.set(x.code, x); return; }
+        const newer = ((x.updatedAt || 0) >= (prev.updatedAt || 0)) ? x : prev;
+        const older = (newer === x) ? prev : x;
+        const out = Object.assign({}, older, newer);
+        // Object.assign lets an explicit '' or null from the newer copy win, so a
+        // half-written row could blank a good score line. Never let empty beat filled.
+        ['scoreLine', 'players', 'course', 'createdBy', 't2'].forEach(f => { if (!out[f] && older[f]) out[f] = older[f]; });
+        // A finished round never un-finishes (a stale copy still thinks it's live).
+        if (!out.finishedAt && older.finishedAt) out.finishedAt = older.finishedAt;
+        // Keep the ORIGINAL creation date so the Rounds date can't crawl forward.
+        if (older.createdAt && (!out.createdAt || older.createdAt < out.createdAt)) out.createdAt = older.createdAt;
+        map.set(x.code, out);
+      };
+      a.forEach(put); b.forEach(put);
+      let out = Array.from(map.values());
+      b.forEach(x => { if (x && !x.code) out.push(x); });   // id-less locals can't be merged; keep them
+      // A deleted round must not ride back in on a merge. Guarded: if the tombstone
+      // read fails we get an empty set and drop nothing — never the other way round.
+      try {
+        const _t = await getSharedTombstones();
+        if (_t && _t.rounds && _t.rounds.size) out = out.filter(x => !(x && x.code && _t.rounds.has(x.code)));
+      } catch (e) {}
+      // Same rolling window the writer applies (recent.slice(0, 50)) — without this
+      // the union would grow the list past the cap and revive rounds that aged out.
+      out.sort((x, y) => (y.createdAt || y.updatedAt || 0) - (x.createdAt || x.updatedAt || 0));
+      return out.slice(0, 50);
     }
     if (strat === 'tombstones') {
       // v953 DELETE-LIST MERGE. Resolution is per KEY, never per blob:
@@ -11709,7 +11758,7 @@ async function writeSharedSingleton(key, value) {
             // blind overwrite could SHRINK the cloud and silently drop another device's
             // entries (this is how Kevin's verified courses reverted). Skip the write,
             // keep it DIRTY, and let the 15s / online retry union once the cloud is back.
-            if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'objectMap' || _SHARED_MERGE_STRATEGY[key] === 'tombstones') { return false; }
+            if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'objectMap' || _SHARED_MERGE_STRATEGY[key] === 'tombstones' || _SHARED_MERGE_STRATEGY[key] === 'recentGames') { return false; }
             // other merge keys: keep prior behavior (write the local copy cached above)
           } else if (_merged !== undefined) {
             parsed = _merged; try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {}
@@ -11758,7 +11807,7 @@ async function flushDirtySingletons() {
         if (_m === _MERGE_READ_FAILED) {
           // Still can't read the cloud — for accumulate sets, do NOT blind-overwrite
           // (would shrink/drop entries). Leave it DIRTY and retry on the next tick.
-          if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'tombstones') { continue; }
+          if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'tombstones' || _SHARED_MERGE_STRATEGY[key] === 'recentGames') { continue; }
         } else if (_m !== undefined) { _data = _m; try { localStorage.setItem(key, JSON.stringify(_data)); } catch (e) {} }
       } catch (e) {}
       const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: _data, updated_at: new Date().toISOString() });
