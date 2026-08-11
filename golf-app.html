@@ -4639,8 +4639,12 @@
               <input type="checkbox" id="p3greenie-birdieoverride" class="bg-ck" checked style="width:auto;margin:0">
               <span style="font-size:13px"><strong>🐦 Birdie Override</strong> — if the closest-to-pin player doesn't birdie, a player who birdies <strong>on the green</strong> takes the greenie (chip-ins don't steal). If the greenie is stolen this way, the original winner owes no Hero Tax even if they 3-putt.</span>
             </label>
+            <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+              <input type="checkbox" id="p3greenie-ignore3putt" class="bg-ck" style="width:auto;margin:0">
+              <span style="font-size:13px"><strong>🥅 3-putts still win</strong> — the greenie pays no matter what: no par-or-better requirement, and a 3-putt doesn't forfeit. Turning this on switches Hero Tax off for the round.</span>
+            </label>
             <div class="help-text">
-              Closest to pin on par 3s wins from each other player — but only if you make par or better. If Hero Tax is on and the winner 3-putts, they get $0 for the greenie AND owe each player the same amount (the greenie stake).
+              Closest to pin on par 3s wins from each other player — but only if you make par or better. If Hero Tax is on and the winner 3-putts, they get $0 for the greenie AND owe each player the same amount (the greenie stake). With <strong>3-putts still win</strong> on, the greenie pays no matter what — no par requirement, no forfeit, no Hero Tax.
             </div>
           </div>
 
@@ -7262,8 +7266,8 @@
       <div class="val">—</div>
       <div class="sub">—</div>
     </div>
-    <div id="gps-nassau-bubble" title="Nassau — current-nine net leader">
-      <div class="lbl">F9 LEADER</div>
+    <div id="gps-nassau-bubble" title="Low Net Pool — current net leader">
+      <div class="lbl">LEADER</div>
       <div class="val">—</div>
       <div class="sub">—</div>
     </div>
@@ -7636,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.938';
+const BG_BUILD = 'v2026.11.939';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -10977,10 +10981,14 @@ function wireAuthUI() {
 
   const g = document.getElementById('auth-google');
   if (g) g.onclick = () => signInWithGoogle();
-  // Apple: provider not enabled yet (waiting on Apple Developer account).
-  // When it's live, replace this with: () => signInWithApple();
+  // v939: Apple sign-in RESTORED. This line had regressed to a placeholder toast
+  // (in the Jul 20 2026 v728-v741 build flurry an old pre-Apple-Developer block
+  // came back in), so the button never called the real sign-in even though all
+  // the native machinery still worked. On the native iOS app, native-auth.js
+  // overrides window.signInWithApple with the native Apple sheet; on the web
+  // this starts Supabase's Apple OAuth.
   const a = document.getElementById('auth-apple');
-  if (a) a.onclick = () => showToast('Apple sign-in unlocks once our Apple Developer account is live');
+  if (a) a.onclick = () => signInWithApple();
 
   const si = document.getElementById('auth-signin');
   if (si) si.onclick = async () => {
@@ -11816,6 +11824,14 @@ async function safeSet(key, value, shared, opts) {
         // an intentionally-cleared stat array from being re-folded from the cloud.
         try { parsed = await _mergeGameForWrite(parsed, opts); } catch (e) {}
         try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {} // cache the merged copy
+        // v939: merge-read failed on a MULTI-SCORER round → don't blind-write the
+        // whole blob over the other phone's cells. Queue it instead; flushDirtyGames
+        // retries with a proper merge within 15s. Solo rounds (and the Finish tap,
+        // which must land immediately) keep the old direct-write path.
+        if (window._bgMergeReadOk === false && parsed && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) {
+          markGameDirty(code); updateSyncIndicator(false);
+          return true;
+        }
         try {
           const r = await _promiseTimeout(
             supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'saveGame');
@@ -12182,11 +12198,24 @@ async function _mergeGameForWrite(local, opts) {
   try {
     if (!supa || !supaOnline || !local || !local.code) return local;
     let cloud = null;
+    window._bgMergeReadOk = true;   // v939: tracks whether the pre-write cloud read worked
     try {
       const r = await _promiseTimeout(
         supa.from('games').select('data').eq('code', local.code).maybeSingle(), 3000, 'mergeRead');
-      if (r && !r.error && r.data) cloud = r.data.data;
-    } catch (e) { return local; } // read failed/timed out → write local as-is (prior behavior)
+      if (r && r.error) throw r.error;
+      if (r && r.data) cloud = r.data.data;
+    } catch (e) {
+      // v939: one retry with a longer window. A single 3s hiccup (course wifi /
+      // weak LTE) used to fall straight through to a BLIND whole-blob write —
+      // exactly the clobber that wiped a co-scorer's just-entered cells. If the
+      // retry also fails, flag it so multi-scorer saves QUEUE instead of blind-writing.
+      try {
+        const r2 = await _promiseTimeout(
+          supa.from('games').select('data').eq('code', local.code).maybeSingle(), 5000, 'mergeRead2');
+        if (r2 && r2.error) throw r2.error;
+        if (r2 && r2.data) cloud = r2.data.data;
+      } catch (e2) { window._bgMergeReadOk = false; return local; }
+    }
     if (!cloud || typeof cloud !== 'object') return local;
     // v796: CODE-COLLISION guard. A brand-new round can land on a code an OLD,
     // unrelated round already used (small code space). That old row is NOT a
@@ -12265,6 +12294,7 @@ function _applyMyTouchedCells(incoming) {
   try {
     const prev = state.game; if (!prev || !incoming) return incoming;
     const touch = _touchStore();
+    let _wiped = false;   // v939: did the incoming cloud row LOSE cells I entered?
     ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData'].forEach(field => {
       const pf = prev[field]; if (!pf) return;
       const tf = touch[field] || {};
@@ -12272,9 +12302,17 @@ function _applyMyTouchedCells(incoming) {
         const ts = tf[pid]; if (!ts || !Array.isArray(pf[pid])) return;
         if (!incoming[field]) incoming[field] = {};
         if (!Array.isArray(incoming[field][pid])) incoming[field][pid] = pf[pid].slice();
-        ts.forEach(i => { incoming[field][pid][i] = pf[pid][i]; });
+        ts.forEach(i => {
+          // v939: a concurrent write race (the other phone's save read the cloud
+          // BEFORE my save landed) can wipe my cell from the cloud row. Re-assert
+          // it locally (as before) AND queue a re-push so the cloud gets my cell
+          // back within ~15s — before, the wipe stuck unless I happened to save again.
+          if (incoming[field][pid][i] == null && pf[pid][i] != null) _wiped = true;
+          incoming[field][pid][i] = pf[pid][i];
+        });
       });
     });
+    if (_wiped) { try { markGameDirty(prev.code); } catch (e) {} }
   } catch (e) {}
   return incoming;
 }
@@ -12295,6 +12333,9 @@ async function flushDirtyGames() {
     try {
       let parsed = JSON.parse(v);
       parsed = await _mergeGameForWrite(parsed);
+      // v939: merge-read failed on a multi-scorer round → leave it QUEUED for the
+      // next 15s pass rather than blind-writing over the other phone's cells.
+      if (window._bgMergeReadOk === false && parsed && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) continue;
       try { localStorage.setItem('game:' + code, JSON.stringify(parsed)); } catch (e) {}
       const r = await _promiseTimeout(
         supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'flushGame');
@@ -23243,7 +23284,7 @@ const GAME_BLURBS = {
   },
   p3greenie: {
     title: 'Par 3 Greenie',
-    body: 'On every par 3, closest to the pin (or lowest score) wins the greenie. Optional "Hero Tax" makes a 3-putt forfeit the greenie AND pay every other player.'
+    body: 'On every par 3, closest to the pin (or lowest score) wins the greenie. Optional "Hero Tax" makes a 3-putt forfeit the greenie AND pay every other player. Optional "3-putts still win" pays the greenie no matter what — no par requirement, no forfeit.'
   },
   junk: {
     title: 'Junk',
@@ -26509,6 +26550,7 @@ function applySavedConfig(config) {
     if (games.p3greenie.value != null) $('p3greenie-value').value = games.p3greenie.value;
     $('p3greenie-bf-enabled').checked = games.p3greenie.bfEnabled !== false;
     if ($('p3greenie-birdieoverride')) $('p3greenie-birdieoverride').checked = !!games.p3greenie.birdieOverride;
+    if ($('p3greenie-ignore3putt')) $('p3greenie-ignore3putt').checked = !!games.p3greenie.ignore3Putt;   // v939
   }
 
   // Closest to the Pin
@@ -27180,7 +27222,8 @@ function gatherSetup() {
       value: parseFloat($('p3greenie-value').value) || 0,
       bfEnabled: $('p3greenie-bf-enabled').checked,
       bfValue: parseFloat($('p3greenie-value').value) || 0, // Hero Tax always matches the greenie stake
-      birdieOverride: !!($('p3greenie-birdieoverride') && $('p3greenie-birdieoverride').checked)
+      birdieOverride: !!($('p3greenie-birdieoverride') && $('p3greenie-birdieoverride').checked),
+      ignore3Putt: !!($('p3greenie-ignore3putt') && $('p3greenie-ignore3putt').checked)   // v939: greenie pays no matter what
     };
   }
   if ($('game-ctp').checked) {
@@ -29260,13 +29303,13 @@ function renderP3GreenieEntry() {
   const cfg = _p3cfg;
   const winners = g.p3greenieData[h].winners;
   const threePutts = g.p3greenieData[h].threePutts;
-  const bfOn = cfg.bfEnabled !== false;
+  const bfOn = cfg.bfEnabled !== false && !cfg.ignore3Putt;   // v939: no Hero Tax when 3-putts still win
 
   // Header + winner chips
   const forfeitedCount = winners.filter(id => threePutts.includes(id)).length;
   const paidCount = winners.length - forfeitedCount;
   let html = `<div class="junk-section" style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
-    <div class="lbl" style="color:var(--accent)">⛳ Par 3 Greenie ($${cfg.value} per other player) — closest to pin, must make par</div>
+    <div class="lbl" style="color:var(--accent)">⛳ Par 3 Greenie ($${cfg.value} per other player) — closest to pin${cfg.ignore3Putt ? ' — pays no matter what' : ', must make par'}</div>
     <div style="margin-bottom:8px">
       <div style="font-size:12px;font-weight:500;margin-bottom:4px;display:flex;justify-content:space-between">
         <span>Winner(s)</span>
@@ -34164,7 +34207,7 @@ function calcP3Greenie(g) {
       if (!w) return;
       const score = (g.scores[wid] && g.scores[wid][h - 1] != null) ? g.scores[wid][h - 1] : null;
       const madePar = score != null && score <= g.pars[h - 1];
-      const threePutted = threePutts.includes(wid);
+      const threePutted = threePutts.includes(wid) && !cfg.ignore3Putt;   // v939: "3-putts still win" waives the forfeit
 
       // Birdie Override in effect — an on-green birdie STOLE the greenie, so this
       // closest-to-pin winner lost it and collects nothing. They also owe NO Hero
@@ -34204,7 +34247,8 @@ function calcP3Greenie(g) {
       }
 
       // Not flagged as 3-putt — pay out only if they made par or better
-      if (!madePar) {
+      // (v939: unless "3-putts still win" is on — then the greenie pays regardless)
+      if (!madePar && !cfg.ignore3Putt) {
         events.push({
           hole: h,
           kind: 'greenie-no-par',
@@ -61093,11 +61137,12 @@ const gpsView = (() => {
       b.style.display = 'block';
     } catch (e) { hide(); }
   }
-  // Nassau leader bubble: who leads the CURRENT nine on net, and their net-to-par.
-  // Front 9 while on holes 1–9, back 9 on 10–18. Ranks all Nassau participants by
-  // net-to-par over the holes each has played this nine (so partial progress is
-  // comparable). v304: leader within this round's group; field-wide pool leader
-  // comes with the pool engine. Taps to the Board.
+  // v939 (Tyler): this right-stack bubble is the NET-POOL leader readout. It was
+  // guarded on games.nassau, so a plain Nassau round (whose standing already shows
+  // in the chips at the top of the screen) grew a stray "LEADER / net" bubble.
+  // The right stack is only for Quota and the Low Net Pool — guard on
+  // games.lowNetPool and rank the pool's participants by running NET-to-par
+  // (with the pool's handicap allowance applied, same math as the settlement).
   function updateNassauBubble() {
     const b = el('gps-nassau-bubble');
     if (!b) return;
@@ -61105,35 +61150,31 @@ const gpsView = (() => {
     try {
       if (mode !== 'view') return hide();
       const g = state.game;
-      if (!g || !g.games || !g.games.nassau) return hide();
-      if (typeof segmentRange !== 'function' || typeof netHoleScore !== 'function' || typeof effectiveHcp !== 'function') return hide();
-      const cfg = g.games.nassau;
-      const insts = (Array.isArray(cfg.instances) && cfg.instances.length) ? cfg.instances : [cfg];
-      const idSet = new Set();
-      insts.forEach(inst => (inst.participants || []).forEach(id => idSet.add(id)));
-      const ids = Array.from(idSet).filter(id => (g.players || []).find(p => p.id === id));
-      if (ids.length < 2) return hide();
-      const onBack = (hole >= 10);
-      const seg = onBack ? 'back' : 'front';
-      const rng = segmentRange(seg); const from = rng[0], to = rng[1];
-      const rules = g.hcpRules || null;
+      if (!g || !g.games || !g.games.lowNetPool) return hide();
+      const cfg = g.games.lowNetPool;
+      const parts = (typeof getParticipants === 'function') ? getParticipants(g, cfg) : (g.players || []);
+      if (!parts || parts.length < 2) return hide();
+      if (typeof _bgPoolStats !== 'function') return hide();
+      const stats = _bgPoolStats(g, parts, (cfg.hcpPct != null) ? cfg.hcpPct : null);
+      const pars = Array.isArray(g.pars) ? g.pars : null;
       let best = null;
-      ids.forEach(id => {
-        const p = (g.players || []).find(x => x.id === id); if (!p) return;
-        const arr = (g.scores && g.scores[id]) || [];
-        let net = 0, parSum = 0, thru = 0;
-        for (let h = from; h <= to; h++) {
-          const raw = arr[h - 1]; if (raw == null) continue;
-          net += netHoleScore(raw, effectiveHcp(p, rules), g.sis[h - 1], g.pars[h - 1], rules);
-          parSum += (g.pars ? (g.pars[h - 1] || 4) : 4); thru++;
+      stats.forEach(st => {
+        if (!st || !st.scored) return;
+        // Net-to-par over the holes this player has actually scored, so partial
+        // progress stays comparable mid-round.
+        let parSum = 0;
+        const sc = (g.scores && g.scores[st.id]) || [];
+        for (let h = 0; h < (pars ? pars.length : 18); h++) {
+          if (sc[h] == null) continue;
+          parSum += pars ? (pars[h] || 4) : 4;
         }
-        if (!thru) return;
-        const toPar = net - parSum;
-        const cand = { name: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), toPar: toPar, thru: thru };
+        const toPar = st.net - parSum;
+        const p = (g.players || []).find(x => x.id === st.id);
+        const cand = { name: p ? (typeof displayFirst === 'function' ? displayFirst(p) : p.name) : '?', toPar: toPar, thru: st.scored };
         if (!best || cand.toPar < best.toPar || (cand.toPar === best.toPar && cand.thru > best.thru)) best = cand;
       });
       if (!best) return hide();
-      const lbl = b.querySelector('.lbl'); if (lbl) lbl.textContent = onBack ? 'B9 LEADER' : 'F9 LEADER';
+      const lbl = b.querySelector('.lbl'); if (lbl) lbl.textContent = 'LEADER';
       const v = b.querySelector('.val'); if (v) v.textContent = best.name;
       const s = b.querySelector('.sub');
       if (s) { const tp = best.toPar > 0 ? ('+' + best.toPar) : (best.toPar < 0 ? String(best.toPar) : 'E'); s.textContent = 'net ' + tp; }
