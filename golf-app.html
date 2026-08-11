@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.955';
+const BG_BUILD = 'v2026.11.958';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -11301,7 +11301,7 @@ const SHARED_SINGLETONS = ['golf:multinine-configs', 'golf:courses', 'golf:recen
   // EVERY course-data write in that state is refused (edits, GPS, deletes,
   // verify/skip, three-nine wiring) and every bulk import/sweep/finalize skips it.
   // Must sync, or a lock set on one device wouldn't protect the data on another.
-  'golf:state-locks'];
+  'golf:state-locks', 'golf:deleted-tourneys'];
 function singletonRowCode(key) {
   // v603: the roster is now a PER-USER row (roster:<uid>) instead of the single
   // global 'shared:player-roster'. Every roster read/write funnels through this,
@@ -11354,7 +11354,7 @@ function bgIsQuotaError(e) {
 // to free space (evicting them is exactly the data loss we're preventing).
 var BG_LS_PROTECTED = ['golf:player-roster', 'golf:roster-tombstones', 'golf:hidden-rounds',
   'golf:deleted-rounds', 'golf:recent-games', 'golf:tourneys', 'golf:round-templates',
-  'golf:dirty-singletons'];
+  'golf:dirty-singletons', 'golf:deleted-tourneys'];
 function bgLsEvict(keepKey) {
   var freed = 0;
   // 1) GPS hole caches — always safe (re-fetched from course_gps on demand).
@@ -11524,6 +11524,7 @@ const _SHARED_MERGE_STRATEGY = {
   'golf:courses': 'objectMap',                  // scorecards keyed by course id
   'golf:course-library-additions': 'arrayById', // user-added courses
   'golf:course-deletes': 'stringSet',           // deleted course ids (accumulate)
+  'golf:deleted-tourneys': 'stringSet',         // v956: deleted round ids (accumulate; never resurrect)
   'golf:course-deletes-locked': 'stringSet',    // admin-locked deletes (accumulate, never auto-restored)
   'golf:course-skipped': 'stringSet',           // admin skip set (accumulate)
   'golf:course-verified': 'stringSet',          // admin verified set (accumulate)
@@ -12970,10 +12971,40 @@ async function getLastGameCode() {
   return await safeGet(KEY_LAST, false);
 }
 
+const KEY_DELETED_TOURNEYS = 'golf:deleted-tourneys';
+// v956: deleted scheduled/tournament rounds used to resurrect. golf:tourneys is a
+// union ("arrayById") cloud merge, so removing a round by omission let the next sync
+// (or any stale device) re-add it. Fix: a SHARED stringSet of deleted ids the merge
+// can only ever grow, filtered on read. Tourney ids never recur, so a legitimately
+// re-created round is never hidden.
+async function getDeletedTourneyIds() {
+  try {
+    const v = await safeGet(KEY_DELETED_TOURNEYS, true);
+    const a = v ? JSON.parse(v) : [];
+    return new Set(Array.isArray(a) ? a : []);
+  } catch (e) { return new Set(); }
+}
+async function addDeletedTourneyId(id) {
+  if (!id) return;
+  try {
+    const cur = await getDeletedTourneyIds();
+    if (cur.has(id)) return;
+    cur.add(id);
+    await safeSet(KEY_DELETED_TOURNEYS, JSON.stringify(Array.from(cur).slice(-4000)), true);
+  } catch (e) {}
+}
 async function getTourneys() {
   const v = await safeGet(KEY_TOURNEYS, true);
-  if (!v) return [];
-  try { return JSON.parse(v); } catch (e) { return []; }
+  let arr = [];
+  if (v) { try { arr = JSON.parse(v); } catch (e) { arr = []; } }
+  if (!Array.isArray(arr)) arr = [];
+  // Drop tombstoned ids so a cloud-merge union can never resurrect a deleted round.
+  // Fail SAFE: if the tombstone read fails, show the rounds rather than hide them.
+  try {
+    const dead = await getDeletedTourneyIds();
+    if (dead && dead.size) arr = arr.filter(t => t && !dead.has(t.id));
+  } catch (e) {}
+  return arr;
 }
 
 async function saveTourneys(list) {
@@ -14585,6 +14616,7 @@ async function archiveScoresFromRound(g) {
       const newFirst = pFirst || ((p.name || '').trim().split(/\s+/)[0] || '');
       const newLast = pLast || ((p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
       entry = {
+        id: genRosterPlayerId(),   // v958: stable id so this entry never falls back to name-keyed tombstones/removals
         firstName: newFirst,
         lastName: newLast,
         name: combineName(newFirst, newLast),
@@ -32059,7 +32091,7 @@ function settleMatch(g, aId, bId, fromHole, toHole, format, useNet) {
   }
   // stroke: settle on the full segment — or on the holes played if the
   // round was finished early.
-  if (s.holesPlayed < totalPossible && !(g && g.finishedAt)) return { winnerId: null, loserId: null, status: 'in progress', open: true };
+  if (s.holesPlayed < totalPossible) return { winnerId: null, loserId: null, status: (g && g.finishedAt) ? 'unfinished' : 'in progress', open: true };   // v957: don't pay a quitter on a half-played side
   if (s.aStrokes === s.bStrokes) return { winnerId: null, loserId: null, status: 'tied', open: false };
   const winner = s.aStrokes < s.bStrokes ? aId : bId;
   const loser = winner === aId ? bId : aId;
@@ -32567,7 +32599,7 @@ function calcStroke(g) {
   // nearest whole stroke to set the net used for THIS pot. Gross is unaffected.
   const _sPct = (cfg.hcpPct != null ? cfg.hcpPct : 100) / 100;
   const _netAllow = p => {
-    const hcp = Math.round(effectiveHcp(p, g.hcpRules) * _sPct);
+    const hcp = Math.round((p.baseHcp != null ? p.baseHcp : effectiveHcp(p, g.hcpRules)) * _sPct);   // v957: pot% replaces the round allowance (baseHcp), not stacks
     const arr = g.scores[p.id] || [];
     let net = 0;
     arr.forEach((s, i) => { if (s != null && s !== undefined) net += (g.sis ? netHoleScore(s, hcp, g.sis[i], g.pars[i], g.hcpRules) : s); });
@@ -33376,6 +33408,14 @@ function calcSplixSixes(g) {
   const buyin = cfg.buyin != null ? cfg.buyin : 0;
   const totalPot = participants.length * buyin;
   const payout = cfg.payout || 'winner';
+
+  // v957: a buy-in pool isn't realized until the round ENDS (mirrors Stableford) —
+  // nobody owes anything mid-round, so report points only (money 0) until then.
+  const _spPoolDone = !!(g && g.finishedAt) || (typeof allHolesScored === 'function' && allHolesScored(g));
+  if (!_spPoolDone) {
+    participants.forEach(p => { money[p.id] = 0; });
+    return { points, money, holePoints, totalPot, buyin, payout, mode: 'pool', pending: true };
+  }
 
   participants.forEach(p => { money[p.id] = -buyin; }); // everyone antes up
 
@@ -34874,6 +34914,12 @@ function calcNiners(g) {
   const buyin = cfg.buyin != null ? cfg.buyin : 0;
   const totalPot = participants.length * buyin;
   const payout = cfg.payout || 'winner';
+  // v957: pool pays only when the round ENDS (mirrors Stableford) — no mid-round money.
+  const _spPoolDone = !!(g && g.finishedAt) || (typeof allHolesScored === 'function' && allHolesScored(g));
+  if (!_spPoolDone) {
+    participants.forEach(p => { money[p.id] = 0; });
+    return { points, money, holePoints, totalPot, buyin, payout, mode: 'pool', pending: true };
+  }
   participants.forEach(p => { money[p.id] = -buyin; });
   const sorted = [...participants].sort((a, b) => points[b.id] - points[a.id]);
   if (payout === '8020') {
@@ -40640,7 +40686,7 @@ async function visiblePlayersForStats(list, meName) {
     let visByName = null; const accountNames = new Set();
     try {
       const { data: vp, error } = await supa.from('profiles').select('my_player,stats_visibility');
-      if (!error && vp) { visByName = {}; vp.forEach(pr => { if (pr && pr.my_player) { const n = normalizeNameSegment(pr.my_player); accountNames.add(n); visByName[n] = pr.stats_visibility || 'friends'; } }); }
+      if (!error && vp) { visByName = {}; const _visRank = { 'just-me': 2, 'friends': 1, 'everyone': 0 }; vp.forEach(pr => { if (pr && pr.my_player) { const n = normalizeNameSegment(pr.my_player); accountNames.add(n); const _v = pr.stats_visibility || 'friends'; const _cur = visByName[n]; if (_cur == null || (_visRank[_v] || 1) > (_visRank[_cur] || 1)) visByName[n] = _v; } }); }   // v958: same-name collision keeps the MOST restrictive visibility
     } catch (e) { visByName = null; }
     if (!friendNames.size && !meNorm && !visByName) return list;
     const canSee = (p) => {
@@ -54097,6 +54143,7 @@ async function _orCancelRound(){
 // tourneys blob. (v361 — fixes "cancelled but stayed in saved rounds")
 async function _orDeleteTourneyEverywhere(t){
   if (!t) return;
+  try { await addDeletedTourneyId(t.id); } catch(e){}   // v956: tombstone so it can't resurrect
   try { if (typeof _orCancelInvites==='function') await _orCancelInvites(t.id); } catch(e){}
   var codes=[];
   if (t.plannedCode) codes.push(t.plannedCode);
@@ -57338,6 +57385,7 @@ async function deleteTourney(id) {
   let list = await getTourneys();
   const _gone = list.find(t => t && t.id === id) || null;
   list = list.filter(t => t.id !== id);
+  try { await addDeletedTourneyId(id); } catch (e) {}   // v956
   await saveTourneys(list);
   try { if (_gone && typeof _orDeleteTourneyEverywhere === 'function') await _orDeleteTourneyEverywhere(_gone); } catch (e) {}
   renderTourneyList();
