@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.941';
+const BG_BUILD = 'v2026.11.942';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -13212,7 +13212,11 @@ async function _writeSharedTombstones(out) {
   // v903: keep roundsAt trimmed to the round keys we actually still hold.
   try {
     const keep = new Set(out.rounds || []);
-    const src = out.roundsAt || {};
+    // v942 FAILSAFE: a caller that forgets to pass roundsAt must NOT wipe the whole
+    // map. Fall back to what we already hold in cache. (unTombstonePlayers did exactly
+    // this for months, erasing every delete-timestamp and disabling the v903 heal.)
+    const src = (out.roundsAt && typeof out.roundsAt === 'object') ? out.roundsAt
+              : ((_tombCache && _tombCache.roundsAt) ? _tombCache.roundsAt : {});
     const trimmed = {};
     Object.keys(src).forEach(k => { if (keep.has(k)) trimmed[k] = src[k]; });
     out.roundsAt = trimmed;
@@ -13269,7 +13273,12 @@ async function unTombstonePlayers(players) {
       }
       if (t.players.delete(k)) changed = true;
     });
-    if (changed) await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds), playersLocked: Array.from(locked) });
+    // v942 (Paul Kim / TEE69): MUST pass roundsAt through. _writeSharedTombstones
+    // trims roundsAt to the keys it is HANDED, so omitting it here silently wiped the
+    // ENTIRE delete-timestamp map every time a player was passively re-added (sign-in
+    // self-upsert, round-start upsert) -- which is constantly. That is why 221 of 222
+    // tombstones carried no timestamp and the v903 recycled-code heal could never fire.
+    if (changed) await _writeSharedTombstones({ players: Array.from(t.players), rounds: Array.from(t.rounds), playersLocked: Array.from(locked), roundsAt: (t.roundsAt || {}) });
   } catch (e) {}
 }
 // Drop tombstoned players + rounds from a roster array. Failsafe: returns the
@@ -13972,6 +13981,32 @@ async function archiveScoresFromRound(g) {
             await unTombstoneRound(_rk);
             iDeletedThisRound = false;
             try { console.warn('[bg] recycled round code healed:', _rk); } catch (e) {}
+          } else if (!_delAt) {
+            // v942 (Paul Kim, 8/8 Links Golf Club, code TEE69): a LEGACY tombstone with
+            // no timestamp used to be left alone -- "we can't prove it either way" -- so a
+            // real, completed round born onto a poisoned code stayed invisible FOREVER,
+            // in every player's history, on every device. There IS a proof available:
+            // a genuinely deleted round has its ROW removed from the games table. If the
+            // row is still live in the cloud AND carries real scoring, this cannot be the
+            // round that was deleted -- it is a recycled code. Heal it.
+            let _rowLive = false;
+            try {
+              if (supa && supaOnline && g.code) {
+                const _rr = await supa.from('games').select('code').eq('code', g.code).maybeSingle();
+                _rowLive = !!(_rr && !_rr.error && _rr.data);
+              }
+            } catch (e) {}
+            let _realScoring = false;
+            try {
+              _realScoring = !!g.finishedAt && Object.keys(g.scores || {}).some(function (k) {
+                return (g.scores[k] || []).filter(function (v) { return v != null; }).length >= 9;
+              });
+            } catch (e) {}
+            if (_rowLive && _realScoring) {
+              await unTombstoneRound(_rk);
+              iDeletedThisRound = false;
+              try { console.warn('[bg] legacy tombstone healed (round row still live):', _rk); } catch (e) {}
+            }
           }
         } catch (e) {}
       }
@@ -21589,9 +21624,29 @@ function generateCode() {
 async function ensureUniqueGameCode(code) {
   try {
     let c = code || generateCode();
-    if (typeof isSignedIn === 'function' && !isSignedIn()) return c;
-    if (!supaReady) { try { await initSupabase(); } catch (e) { return c; } }
-    if (!(supa && supaOnline)) return c;
+    // v942: even with NO cloud, never hand out a code that is already burned on the
+    // local delete list / cached shared tombstones. The old early-returns below skipped
+    // every poison check when the phone was offline or not yet signed in -- which is
+    // exactly the situation standing on the first tee -- so a brand-new round could
+    // still be born onto a dead code and never reach anyone's history.
+    const _localBurned = function (x) {
+      if (!x) return false;
+      try { if (typeof getDeletedRoundKeys === 'function' && getDeletedRoundKeys().has(x)) return true; } catch (e) {}
+      try { if (_tombCache && _tombCache.rounds && _tombCache.rounds.has(x)) return true; } catch (e) {}
+      try {
+        const raw = localStorage.getItem(KEY_ROSTER_TOMBSTONES);
+        if (raw) { const o = JSON.parse(raw); if (o && Array.isArray(o.rounds) && o.rounds.indexOf(x) >= 0) return true; }
+      } catch (e) {}
+      return false;
+    };
+    const _offlineSafeCode = function () {
+      let x = c;
+      for (let i = 0; i < 12 && _localBurned(x); i++) x = generateCode();
+      return _localBurned(x) ? (x + (Math.floor(Math.random() * 900) + 100)) : x;
+    };
+    if (typeof isSignedIn === 'function' && !isSignedIn()) return _offlineSafeCode();
+    if (!supaReady) { try { await initSupabase(); } catch (e) { return _offlineSafeCode(); } }
+    if (!(supa && supaOnline)) return _offlineSafeCode();
     // v903 (THE 7/28 "we finished a round and nobody can find it" BUG):
     // this used to check ONLY the live games table. A DELETED round's row is gone
     // from that table, but its code stays on the shared delete-tombstone list
