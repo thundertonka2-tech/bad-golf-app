@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.942';
+const BG_BUILD = 'v2026.11.944';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -11176,6 +11176,17 @@ async function createMyPlayerFromAccount() {
   let name = accountSuggestedName();
   let first = '', last = '';
   if (name) {
+    // v944 — CONFIRM the account name, never silently adopt it. Google/Apple hand back
+    // a LEGAL name, which is very often not the name someone's crew knows them by: a
+    // middle name, a maiden name, "Robert" vs "Bob". Paul Kim's Google profile reads
+    // "Paul Renner" (his middle name), so the app invented a "Paul Renner" player he
+    // never asked for; untangling it meant editing 33 rosters by hand. One editable
+    // prompt here kills that entire class of problem at the source, before any player
+    // record exists to go wrong.
+    const _confirmed = ((await uiPrompt('This is the name your crew sees on scorecards and leaderboards. Change it if they know you by something else.', {
+      title: 'You\u2019ll play as\u2026', okLabel: 'Looks right', cancelLabel: 'Use this', value: name
+    })) || '').trim();
+    if (_confirmed) name = _confirmed;   // cancelled/dismissed -> keep the account name
     const parts = name.split(/\s+/);
     first = parts[0] || name;
     last = parts.slice(1).join(' ') || '';
@@ -13783,21 +13794,26 @@ async function mergeRosterPlayers(winnerKey, loserKeys) {
   // cloud copy on the next union — that's why a merged duplicate "came back". Routing
   // through savePlayerRoster + removals makes the merge STICK across devices/boots.
   await savePlayerRoster(filtered.slice(0, 200), { removals: { players: new Set(losers.map(p => rosterPlayerKey(p))) } });
-  // Repoint any signed-in ACCOUNT that was linked to a loser name onto the winner, so
-  // a merged user never loses their identity — past rounds, stats and round invites all
-  // follow profiles.my_player. (This is exactly what broke Kylan: the misspelled roster
-  // entry was absorbed, but his account still pointed at the removed name.) Best-effort,
-  // admin-only; relies on the same admin profile-update RLS that "Make admin" uses.
+  // Repoint any signed-in ACCOUNT that was linked to a merged-away entry onto the
+  // winner, so a merged user never loses their identity — past rounds, stats and round
+  // invites all follow profiles.my_player.
+  // v943: this now matches on the roster entry's stable ID (profiles.linked_player_id),
+  // NOT on the name. The old version rewrote my_player for EVERY profile in the whole
+  // database whose my_player merely NORMALIZED to a loser's name — so one admin merging
+  // two same-named strangers silently reassigned an unrelated person's account to
+  // someone else's player, taking their history and money ledger with it. A name is not
+  // an identity; the linked id (and the email behind it) is.
   try {
     if (supa && supaOnline && (typeof isAdmin !== 'function' || isAdmin())) {
       const winnerName = winner.name;
-      const wNorm = normalizeNameSegment(winnerName);
-      const normLosers = new Set(losers.map(p => p && p.name).filter(Boolean).map(n => normalizeNameSegment(n)));
-      const { data: profs } = await supa.from('profiles').select('id,my_player');
-      for (const pr of (profs || [])) {
-        const pn = pr && pr.my_player ? normalizeNameSegment(pr.my_player) : '';
-        if (pn && normLosers.has(pn) && pn !== wNorm) {
-          try { await supa.from('profiles').update({ my_player: winnerName }).eq('id', pr.id); } catch (e) {}
+      const loserIds = new Set([...losers].map(p => p && p.id).filter(Boolean));
+      if (loserIds.size) {
+        const { data: profs } = await supa.from('profiles').select('id,my_player,linked_player_id');
+        for (const pr of (profs || [])) {
+          if (!pr || !pr.linked_player_id || !loserIds.has(pr.linked_player_id)) continue;
+          const patch = { my_player: winnerName };
+          if (winner.id) patch.linked_player_id = winner.id;
+          try { await supa.from('profiles').update(patch).eq('id', pr.id); } catch (e) {}
         }
       }
     }
@@ -39793,7 +39809,20 @@ async function ensureMyNameSet() {
 // a normalized (apostrophe/hyphen/case-insensitive) match so we always land on
 // the right player.
 function findMyRosterPlayer(roster, me) {
-  if (!me || !Array.isArray(roster)) return null;
+  if (!Array.isArray(roster)) return null;
+  // v943: resolve "me" by EMAIL FIRST. The name path below is what let one account
+  // land on a different person's player when two people share a name — the exact
+  // failure behind the Paul Kim / Paul Renner crossover. The account's email is the
+  // only thing here that is actually unique, so it wins; the name match survives only
+  // as a fallback for guests and for rows saved before entries carried an email.
+  try {
+    const em = String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').trim().toLowerCase();
+    if (em) {
+      const byEmail = roster.find(x => x && String((x.email || '')).trim().toLowerCase() === em);
+      if (byEmail) return byEmail;
+    }
+  } catch (e) {}
+  if (!me) return null;
   const exact = roster.find(x => x && x.name === me);
   if (exact) return exact;
   const n = normalizeNameSegment(me);
@@ -43935,16 +43964,61 @@ async function saveMyName() {
   const _hasEmail = p => !!(p && p.email && String(p.email).trim());
   const sameName = roster.filter(p => p !== entry &&
     normalizeNameSegment(p.firstName) === fNorm && normalizeNameSegment(p.lastName) === lNorm);
-  const collision = sameName.find(p => !_hasEmail(p));   // only no-email players are mergeable
-  if (!collision && sameName.some(_hasEmail)) {
-    // The only same-name match already belongs to a registered account — decline.
-    showToast('That name is already registered to another account. Try adding a middle initial or a different spelling.');
-    return;
+  // v943/v944 — IDENTITY IS THE EMAIL, NEVER THE NAME.
+  // This used to treat ANY same-name player carrying no email as "almost always the
+  // SAME person" and offer a one-tap merge. That let a signed-in account absorb a
+  // COMPLETE STRANGER's rounds, handicap and money ledger, and stamped the claimer's
+  // email onto the stranger's record in every roster it propagated to. Two unrelated
+  // Paul Kims / Mike Smiths is not a rare edge case at a few thousand users.
+  // v943 fixed that by demanding an exact email match — but that was too strict: it
+  // also blocked the LEGITIMATE case this app is full of, where your buddies added you
+  // as a guest long before you signed up, so "your" entry has no email at all and you
+  // could never reclaim your own history.
+  // v944 splits the two: an email match is you, full stop. Otherwise an UNCLAIMED entry
+  // is only offered when there is real evidence you know each other — you have actually
+  // played a round together — and the claim is confirmed with the rounds count on screen
+  // and stamped with claimedBy/claimedAt so a bad claim can be traced and undone.
+  const _myEmail = String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').trim().toLowerCase();
+  const _emailOf = p => String((p && p.email) || '').trim().toLowerCase();
+  const _codesOf = p => new Set(((p && p.scoreHistory) || []).map(r => r && r.gameCode).filter(Boolean));
+  const _myCodes = _codesOf(entry);
+  // Have we shared a scorecard? A zero-round entry is harmless to absorb (nothing to
+  // steal); anything with history must overlap one of MY rounds.
+  const _knownToMe = p => {
+    const theirs = _codesOf(p);
+    if (!theirs.size) return true;
+    for (const c of theirs) if (_myCodes.has(c)) return true;
+    return false;
+  };
+  let collision = _myEmail ? sameName.find(p => _emailOf(p) === _myEmail) : null;
+  let _needsClaimConfirm = false;
+  if (!collision) {
+    const _claimable = sameName.filter(p => !_emailOf(p) && _knownToMe(p));
+    if (_claimable.length === 1) { collision = _claimable[0]; _needsClaimConfirm = true; }
+    else if (sameName.length) {
+      // Either someone else's registered account holds this name, or it belongs to a
+      // player we have never shared a round with. Not provably us — refuse.
+      showToast('That name is already taken by another player. Try a middle initial or a different spelling.');
+      return;
+    }
+  }
+  if (collision && _needsClaimConfirm) {
+    const _n = ((collision.scoreHistory || []).length);
+    const _ok2 = await uiConfirm('"' + collision.name + '" already exists with ' + _n + ' round' + (_n === 1 ? '' : 's') +
+      '. Claiming it moves those rounds, handicap and winnings onto your account. Only do this if that player is you.',
+      { title: 'Is this you?', okLabel: 'Yes, that\u2019s me', cancelLabel: 'Cancel', danger: false });
+    if (!_ok2) { showToast('No problem \u2014 pick a different name if that is not you'); return; }
+    try { collision.claimedBy = (typeof currentUserEmail === 'function' && currentUserEmail()) || ''; collision.claimedAt = Date.now(); } catch (e) {}
   }
   if (collision) {
-    // Same name, no email — almost always the SAME person, played as a guest
-    // before they signed up. Offer to merge (claim) that player.
-    const ok = await uiConfirm('"' + collision.name + '" is already in the crew roster. Is this you?\n\nMerging pulls that player\'s rounds and history into your account — duplicates are removed and your handicap recalculates.', { title: 'Is this you?', okLabel: 'Yes, merge', cancelLabel: 'Cancel', danger: false });
+    // Reaching here means one of two things, both already proven above:
+    //  * the entry's email MATCHES this account (same human, different device), or
+    //  * it is an UNCLAIMED entry we have shared a scorecard with, and the claim was
+    //    just confirmed with the rounds count on screen.
+    // v944: only prompt when we have NOT already asked, so the claim path shows exactly
+    // one dialog instead of two.
+    const _unusedHasEmail = _hasEmail;   // retained: name-only merge path removed in v943
+    const ok = _needsClaimConfirm ? true : await uiConfirm('"' + collision.name + '" is already in the crew roster. Is this you?\n\nMerging pulls that player\'s rounds and history into your account — duplicates are removed and your handicap recalculates.', { title: 'Is this you?', okLabel: 'Yes, merge', cancelLabel: 'Cancel', danger: false });
     if (!ok) { showToast('No problem — pick a different name if that is not you'); return; }
     const histA = Array.isArray(collision.scoreHistory) ? collision.scoreHistory : [];
     const histB = (entry && Array.isArray(entry.scoreHistory)) ? entry.scoreHistory : [];
