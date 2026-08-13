@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.964';
+const BG_BUILD = 'v2026.11.965';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -8539,36 +8539,122 @@ function _dashBuckets(times, from, to) {
   return b;
 }
 async function _dashLoadRaw() {
-  const out = { rounds: [], rosterRaw: [], users: [], wagers: [], requests: [], live: 0,
-    courses: { total: 0, complete: 0, verified: 0, open: 0, needsGps: 0, needsRs: 0, needsTargets: 0, dupes: 0 } };
+  const out = { rounds: [], grosses: [], rosterRaw: [], users: [], wagers: [], requests: [], live: 0, roundsSource: 'games',
+    courses: { total: 0, complete: 0, verified: 0, open: 0, needsGps: 0, needsRs: 0, needsTargets: 0, dupes: 0, scopeLabel: '' } };
   let roster = [];
   try { roster = await getPlayerRoster(); } catch (e) {}
   out.rosterRaw = roster || [];
-  const seen = new Set();
-  (roster || []).forEach(p => {
-    const hist = Array.isArray(p.scoreHistory) ? p.scoreHistory : [];
-    hist.forEach(s => {
-      const key = s.gameCode || ((s.date || '') + '|' + (s.course || ''));
-      if (seen.has(key)) return; seen.add(key);
-      out.rounds.push(s);
-    });
+  // v964 CRITICAL FIX (Tyler: "these charts don't look like the correct data").
+  // Every engagement number on this dashboard was derived from getPlayerRoster(),
+  // which reads the row 'roster:<my uid>' — the SIGNED-IN ADMIN'S OWN roster. So
+  // "Rounds played", "Holes played", "Avg score" and "Active players" described
+  // whoever the admin personally plays with, not the app. Two admins looking at the
+  // same dashboard saw different numbers for the same business.
+  // The app-wide truth is the real game rows, so read those instead. Only ~168 of
+  // the 13k rows in `games` are actual games (the rest is the key-value store), and
+  // a game code never contains a colon — same filter the live/spectate views use.
+  let gameRows = [];
+  try {
+    if (typeof initSupabase === 'function' && !supaReady) await initSupabase();
+    if (supa && supaOnline) {
+      const gr = await supa.from('games').select('code,data,updated_at')
+        .not('code', 'like', '%:%')
+        .order('updated_at', { ascending: false }).limit(1000);
+      if (gr && !gr.error && Array.isArray(gr.data)) gameRows = gr.data;
+    }
+  } catch (e) { console.warn('dashboard game scan failed', e); }
+  const _seenCodes = new Set();
+  gameRows.forEach(row => {
+    try {
+      const g = row && row.data;
+      if (!g || !Array.isArray(g.players) || !g.players.length) return;
+      if (row.code && _seenCodes.has(row.code)) return;
+      if (row.code) _seenCodes.add(row.code);
+      const scores = g.scores || {};
+      // Round-level aggregation. The old code kept ONE arbitrary player's record and
+      // let it speak for the whole round, so a four-ball where one person quit early
+      // was logged as "unfinished". finishedAt is the app's own durable done-signal.
+      let roundHoles = 0, playerHoles = 0;
+      const names = [];
+      g.players.forEach(p => {
+        if (!p) return;
+        if (p.name) names.push(p.name);
+        const arr = scores[p.id];
+        if (!Array.isArray(arr)) return;
+        const scored = arr.filter(v => v != null);
+        playerHoles += scored.length;
+        if (scored.length > roundHoles) roundHoles = scored.length;
+        // Avg score must compare like with like: only FULL 18-hole cards. A finished
+        // nine-hole round stores a gross around 42, and averaging that against
+        // 18-hole scores was dragging the number down for everyone.
+        if (scored.length === 18) {
+          const tot = scored.reduce((a, v) => a + (Number(v) || 0), 0);
+          if (tot > 0) out.grosses.push({ date: (g.createdAt || g.updatedAt || Date.parse(row.updated_at) || 0), gross: tot });
+        }
+      });
+      if (!roundHoles) return;   // nothing actually scored — not a played round
+      out.rounds.push({
+        date: (g.createdAt || g.updatedAt || Date.parse(row.updated_at) || 0),
+        complete: !!g.finishedAt,
+        holesScored: roundHoles,
+        playerHoles: playerHoles,
+        players: names
+      });
+    } catch (e) {}
   });
   try { out.users = await getAdminUsers(); } catch (e) {}
-  try { if (supa) { const r = await supa.from('wagers').select('*'); out.wagers = (r && r.data) || []; } } catch (e) {}
+  // v964: `.select('*')` with no status filter counted VOIDED/cancelled wagers.
+  // wCancelMine deletes a wager by setting status:'void' — the row stays behind, so
+  // a stake someone posted and immediately pulled still showed as activity.
+  try { if (supa) { const r = await supa.from('wagers').select('*').neq('status', 'void'); out.wagers = (r && r.data) || []; } } catch (e) {}
   try { out.requests = await crFetchAll(); } catch (e) {}
-  try { const rec = await getRecent(); out.live = (rec || []).filter(r => r && r.code && !r.finishedAt && !isRoundStale(r) && r.scoreLine && String(r.scoreLine).trim()).length; } catch (e) {}
+  // v964: "Live rounds now" read getRecent() — again the admin's OWN per-user row —
+  // so it showed 0 while other people were mid-round, and only counted the admin's
+  // own play. Derive it from the same app-wide game rows, using the live view's own
+  // 3-hour window rather than the 12-hour staleness rule this used before.
+  try {
+    const cutoff = Date.now() - 3 * 60 * 60 * 1000;
+    out.live = gameRows.filter(row => {
+      const g = row && row.data;
+      if (!g || g.finishedAt || !Array.isArray(g.players) || !g.players.length) return false;
+      const t = row.updated_at ? Date.parse(row.updated_at) : (g.updatedAt || 0);
+      if (!(t >= cutoff)) return false;
+      const sc = g.scores || {};
+      return g.players.some(p => p && Array.isArray(sc[p.id]) && sc[p.id].some(v => v != null));
+    }).length;
+  } catch (e) {}
   try {
     await ensureAdminData();
-    const work = _adminWork || [];
-    out.courses.total = (typeof COURSE_LIBRARY !== 'undefined' ? COURSE_LIBRARY : []).length;
+    // v964: ensureAdminData only fetches GPS hole-counts for the courses in the
+    // Admin tab's CURRENT state/search scope, but _adminWork is built over the whole
+    // library — so every course outside that scope came back with holes=0 and was
+    // counted as "Needs GPS" and "not complete". Since the worklist forces a state
+    // pick before it loads, that meant these tiles were effectively reporting
+    // "the whole library minus the one state I'm looking at". Count only the
+    // courses we actually have real data for, and say so in the heading.
+    const _scopeIds = new Set((typeof adminScopeLibIds === 'function' ? adminScopeLibIds() : []) || []);
+    const _scoped = _scopeIds.size > 0;
+    const work = (_adminWork || []).filter(c => !_scoped || (c && _scopeIds.has(c.id)));
+    const lib = (typeof COURSE_LIBRARY !== 'undefined' ? COURSE_LIBRARY : []);
+    const libScoped = _scoped ? lib.filter(c => c && _scopeIds.has(c.id)) : lib;
+    try {
+      const _stName = (typeof US_STATE_NAMES !== 'undefined' && _adminStateFilter) ? (US_STATE_NAMES[_adminStateFilter] || _adminStateFilter) : '';
+      out.courses.scopeLabel = (_adminSearch ? ('search "' + _adminSearch + '"') : (_stName || ''));
+    } catch (e) {}
+    out.courses.total = libScoped.length;
     out.courses.complete = work.filter(c => c.complete).length;
     out.courses.open = Math.max(0, out.courses.total - out.courses.complete);
     out.courses.needsGps = work.filter(c => !c.hasGPS).length;
     out.courses.needsRs = work.filter(c => !c.hasRS).length;
     out.courses.needsTargets = work.filter(c => c.needsTargets).length;
-    out.courses.verified = (_adminVerified && _adminVerified.size) || 0;
-    const nm = {}; (typeof COURSE_LIBRARY !== 'undefined' ? COURSE_LIBRARY : []).forEach(c => { const k = (c.name || '').trim().toLowerCase(); if (k) nm[k] = (nm[k] || 0) + 1; });
-    out.courses.dupes = Object.keys(nm).filter(k => nm[k] > 1).reduce((a, k) => a + nm[k], 0);
+    // v964: this was the raw all-time set of every id any admin ever verified —
+    // never intersected with the library, never pruned when a course was deleted,
+    // so "Verified" could exceed "Complete" and even approach "Total courses".
+    out.courses.verified = libScoped.filter(c => _adminVerified && _adminVerified.has(c.id)).length;
+    const nm = {}; libScoped.forEach(c => { const k = (c.name || '').trim().toLowerCase(); if (k) nm[k] = (nm[k] || 0) + 1; });
+    // v964: this summed every copy, so three duplicate PAIRS reported 6. What the
+    // admin needs is the number of EXTRA copies to merge away.
+    out.courses.dupes = Object.keys(nm).filter(k => nm[k] > 1).reduce((a, k) => a + (nm[k] - 1), 0);
   } catch (e) {}
   return out;
 }
@@ -8581,7 +8667,7 @@ function openAdminDashboard() {
     '<div style="max-width:760px;margin:0 auto;padding:14px 14px calc(env(safe-area-inset-bottom,16px) + 28px)">'
     + '<div style="display:flex;align-items:center;gap:8px;position:sticky;top:0;background:var(--bg);padding:8px 0 10px;z-index:2">'
     +   '<div style="flex:1;font-size:20px;font-weight:800">📊 Admin Dashboard</div>'
-    +   '<button onclick="_dashCache=null;renderDashboard()" class="small" style="padding:8px 10px">↻ Refresh</button>'
+    +   '<button onclick="_dashCache=null;_adminDataReady=false;_adminScopeKey=null;try{_adminMappedCache.clear()}catch(e){};renderDashboard()" class="small" style="padding:8px 10px">↻ Refresh</button>'
     +   '<button aria-label="Close" onclick="var o=document.getElementById(\'admin-dash-ov\');if(o)o.remove()" style="width:38px;height:38px;border-radius:50%;border:none;background:var(--surface-2);color:var(--text);font-size:18px;font-weight:800;cursor:pointer">✕</button>'
     + '</div>'
     + '<div id="dash-filter"></div>'
@@ -8621,8 +8707,19 @@ async function renderDashboard() {
   if (!_dashCache) { try { _dashCache = await _dashLoadRaw(); } catch (e) { _dashCache = {}; } }
   const d = _dashCache || {};
   const r = dashRange(_dashRangeKey, _dashFrom, _dashTo);
-  const span = r.to - r.from;
+  // v964: dashRange returns the END of the period, not "now". For "This month" on
+  // the 12th that meant the current window held 12 days of data while the comparison
+  // window held a FULL previous month — so almost every delta showed a big red
+  // negative no matter how the app was really trending (on the 1st it read -97%),
+  // and the sparklines spread their buckets across ~19 days of guaranteed-zero
+  // future, which is why every one of them trailed off to a flat line.
+  // Clamp the live end of the window to now, and compare against the SAME length of
+  // time immediately before it.
+  const rEndRaw = r.to;
+  r.to = Math.min(r.to, Date.now());
+  const span = Math.max(1, r.to - r.from);
   const pr = { from: r.from - span - 1, to: r.from - 1 };
+  const isPartial = rEndRaw > Date.now();
   const inR = (t, a, b) => t != null && !isNaN(t) && t >= a && t <= b;
   const parseT = v => typeof v === 'number' ? v : (v ? Date.parse(v) : NaN);
   // --- engagement (rounds) ---
@@ -8632,11 +8729,16 @@ async function renderDashboard() {
   const completed = rIn.filter(s => s.complete);
   const unfinished = rIn.length - completed.length;
   const holes = rIn.reduce((a, s) => a + (s.holesScored || (s.complete ? 18 : 0)), 0);
-  const grossArr = completed.filter(s => s.gross != null).map(s => s.gross);
+  const playerHoles = rIn.reduce((a, s) => a + (s.playerHoles || 0), 0);
+  // v964: only full 18-hole cards feed the average (see _dashLoadRaw) — mixing in
+  // finished nine-hole rounds at ~42 strokes was pulling this well below reality.
+  const grossArr = (d.grosses || []).filter(x => inR(x.date, r.from, r.to)).map(x => x.gross);
   const avg = grossArr.length ? Math.round(grossArr.reduce((a, b) => a + b, 0) / grossArr.length) : null;
   // --- players ---
+  // v964: was counting names in the ADMIN'S OWN roster. Now it's everyone who
+  // actually appears in a round played in this window, app-wide.
   const activeSet = new Set();
-  (d.rosterRaw || []).forEach(p => { const h = Array.isArray(p.scoreHistory) ? p.scoreHistory : []; if (h.some(s => inR(s.date, r.from, r.to))) activeSet.add(p.name); });
+  rIn.forEach(s => (s.players || []).forEach(n => { if (n) activeSet.add(String(n).trim()); }));
   const totalAcct = (d.users || []).length;
   const userTimes = (d.users || []).map(u => parseT(u.created_at)).filter(t => !isNaN(t));
   const hasAcctDates = userTimes.length > 0;
@@ -8670,14 +8772,14 @@ async function renderDashboard() {
   const grid = cards => '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:4px">' + cards.join('') + '</div>';
   const section = (t, extra) => '<h3 style="margin:18px 0 8px;font-size:15px">' + t + (extra ? ' <span class="small-text" style="font-weight:500;color:var(--text-muted);font-size:11px">' + extra + '</span>' : '') + '</h3>';
   let html = '';
-  html += '<div class="small-text" style="color:var(--text-muted);margin:2px 0 4px">Showing: <strong>' + r.label + '</strong></div>';
+  html += '<div class="small-text" style="color:var(--text-muted);margin:2px 0 4px">Showing: <strong>' + r.label + '</strong>' + (isPartial ? ' <span style="opacity:.8">(so far \u2014 compared against the same length of time before it)</span>' : '') + '</div>';
   // Engagement
   html += section('⛳ Engagement', '· ' + r.label);
   html += grid([
     card('Rounds played', rIn.length, { delta: delta(rIn.length, rPrev.length), spark: _dashSpark(_dashBuckets(rIn.map(s => s.date), r.from, r.to)) }),
     card('Rounds completed', completed.length, { sub: unfinished + ' unfinished' }),
-    card('Holes played', holes, {}),
-    card('Avg score', avg != null ? avg : '—', { sub: grossArr.length ? 'over ' + grossArr.length + ' rounds' : 'no completed rounds' })
+    card('Holes played', holes, { sub: playerHoles ? playerHoles + ' player-holes' : '' }),
+    card('Avg score', avg != null ? avg : '—', { sub: grossArr.length ? 'over ' + grossArr.length + ' full 18-hole cards' : 'no 18-hole cards yet' })
   ]);
   // Players
   html += section('👥 Players & accounts');
@@ -8700,7 +8802,7 @@ async function renderDashboard() {
     card('Re-map requests', reqRemap, { sub: 'awaiting action' })
   ]);
   // Course library
-  html += section('🗺️ Course library', '· current');
+  html += section('🗺️ Course library', (c.scopeLabel ? '· ' + escapeHtml(String(c.scopeLabel)) + ' only' : '· current'));
   html += grid([
     card('Verified', c.verified || 0, {}),
     card('Complete', c.complete || 0, { sub: pctComplete + '% of library' }),
