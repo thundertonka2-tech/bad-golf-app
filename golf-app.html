@@ -7655,7 +7655,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.974';
+const BG_BUILD = 'v2026.11.975';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -9207,17 +9207,115 @@ function tnNines(id) {
     return out.length ? out : null;
   } catch (e) { return null; }
 }
+// =========================================================================
+// v975 — ONE course-completeness predicate.  THE BUG (Tyler: "Bethpage Black
+// shows as not done but when you open it up it looks complete"):
+//
+// There were FOUR different "is this course complete?" checks in this file and
+// they disagreed.  The killer was where targetsNeeded came from —
+//   * the ADMIN LIST (buildAdminWorklist) counted required fairway targets from
+//     the SCORECARD pars, while
+//   * the DETAIL modal (fetchCourseGpsDetail) counted them from the GPS row's
+//     OWN per-hole par (the deliberate v640 fix, because three-nine base rows
+//     have no scorecard).
+// GPS rows are written wholesale by the GolfPass importer, so a hole's GPS par
+// routinely disagrees with the card.  Bethpage Black is par 71 with four par-3s
+// => 14 holes need a target, but one par-4 is stored in course_gps as a par-3:
+//   list  -> needs 14, has 13 -> INCOMPLETE (excluded from the "N complete" tally,
+//            sorted to the top under "Incomplete first")
+//   modal -> needs 13, has 13 -> "Complete - everything is set."
+// Library-wide, every state: Gamble Sands / Longview CC / Red Wolf in WA are the
+// same thing.  It was ALSO a stale index — the v825 write-back only refreshed
+// holes/fwcCount/hasGPS, never `complete`/`flag`/`targetsNeeded`, which are
+// exactly the fields the header tally, the sort, the filter chips and the map
+// pin colour read.
+//
+// Fix: bgGpsDigest + bgCountGps + bgCourseStatus below are the single source of
+// truth, used by the list, the counter, the sort, the dashboard, the map AND the
+// detail modal.  Unified on the MODAL's rule (GPS row par wins, scorecard is the
+// fallback) — Tyler's call: it matches what the modal already claimed, needs no
+// re-work from Kevin, and can't un-complete an already-verified course.  The
+// underlying GPS-par-vs-card-par data mismatch is filed as a separate audit.
+// =========================================================================
+// Per-hole {green, target, par} for a raw course_gps `holes` object.
+function bgGpsDigest(holes) {
+  const out = [];
+  try {
+    const hs = holes || {};
+    for (let h = 1; h <= 18; h++) {
+      const hd = hs[String(h)] || hs[h] || null;
+      out.push({
+        g: !!(hd && (hd.tee || hd.front || hd.back || hd.mid)),
+        t: !!(hd && Array.isArray(hd.fwc) && hd.fwc.length === 2),
+        p: (hd && hd.par != null && isFinite(Number(hd.par))) ? Number(hd.par) : null
+      });
+    }
+  } catch (e) {}
+  return out;
+}
+// THE counter. A GREEN is any of tee/front/back/mid. A hole NEEDS a fairway
+// target when its par is not 3 — GPS row's own par first, scorecard second,
+// 4 last (identical to what fetchCourseGpsDetail has always done).
+function bgCountGps(dig, pars, nH) {
+  const res = { perHole: {}, greens: 0, targetsDone: 0, targetsNeeded: 0 };
+  try {
+    dig = dig || []; nH = (nH === 9) ? 9 : 18;
+    for (let h = 1; h <= nH; h++) {
+      const d = dig[h - 1] || { g: false, t: false, p: null };
+      const par = (d.p != null) ? d.p : ((pars && pars[h - 1] != null) ? Number(pars[h - 1]) : 4);
+      const needTarget = (par !== 3);
+      res.perHole[h] = { green: !!d.g, target: !!d.t, par: par, needTarget: needTarget };
+      if (d.g) res.greens++;
+      if (needTarget) { res.targetsNeeded++; if (d.t) res.targetsDone++; }
+    }
+  } catch (e) {}
+  return res;
+}
+// THE predicate. Pure — the caller supplies the counts. Never throws.
+function bgCourseStatus(o) {
+  try {
+    o = o || {};
+    const id = o.id, sc = o.sc || null;
+    const isTN = (typeof THREE_NINE_COURSES === 'object') && !!THREE_NINE_COURSES[id];
+    const parArr = (sc && Array.isArray(sc.pars) && (sc.pars.length === 18 || sc.pars.length === 9)) ? sc.pars : null;
+    const hasCard = !!parArr || isTN;
+    const hasRS = isTN
+      || !!(sc && Array.isArray(sc.tees) && sc.tees.some(t => t && t.rating != null && t.slope != null))
+      || !!(sc && sc.rating != null && sc.slope != null);
+    const expHoles = (o.expHoles != null) ? o.expHoles : 18;
+    const greens = o.greens || 0;
+    const hasGPS = greens >= expHoles;
+    const targetsNeeded = (o.targetsNeeded != null) ? o.targetsNeeded
+      : (parArr ? parArr.filter(p => Number(p) !== 3).length : 18);
+    const targetsDone = o.targetsDone || 0;
+    const targetsComplete = (targetsNeeded === 0) || (targetsDone >= targetsNeeded);
+    const complete = hasGPS && hasRS && hasCard && targetsComplete;
+    const flag = complete ? 'done'
+      : (!hasGPS ? (hasRS ? 'gps' : 'both') : (!hasCard ? 'card' : (!hasRS ? 'rs' : 'targets')));
+    return { hasGPS, hasRS, hasCard, greens, expHoles, targetsNeeded, targetsDone, targetsComplete, complete, flag };
+  } catch (e) {
+    return { hasGPS: false, hasRS: false, hasCard: false, greens: 0, expHoles: 18,
+             targetsNeeded: 0, targetsDone: 0, targetsComplete: false, complete: false, flag: 'both' };
+  }
+}
+function _bgParArr(sc) {
+  try { return (sc && Array.isArray(sc.pars) && (sc.pars.length === 18 || sc.pars.length === 9)) ? sc.pars : null; } catch (e) { return null; }
+}
 function _storeMappedRow(r) {
   if (!r || !r.course_id) return;
-  const hs = r.holes || {}; let greens = 0, fc = 0, nd = 0, cen = null;
+  const hs = r.holes || {}; let cen = null;
   for (const k in hs) {
     const h = hs[k]; if (!h) continue;
-    if (h.tee || h.front || h.back || h.mid) greens++;   // v825 (Tyler): count a GREEN the SAME way the guided-verify modal does (fetchCourseGpsDetail) so the list card + modal always agree
-    if (Array.isArray(h.fwc) && h.fwc.length === 2) fc++;
-    if (h.par != null && Number(h.par) !== 3) nd++;   // par-4/5 holes that need a fairway target
-    if (!cen) { const p = h.mid || h.tee || h.front || h.back; if (Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number') cen = { lng: p[0], lat: p[1] }; }
+    if (!cen) { const p = h.mid || h.tee || h.front || h.back; if (Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number') { cen = { lng: p[0], lat: p[1] }; break; } }
   }
-  _adminMappedCache.set(r.course_id, { holes: greens, fwc: fc, need: nd, center: cen });
+  // v975: keep the per-hole DIGEST as well as the derived counts, so the list can
+  // apply exactly the same counting rule as the modal instead of re-deriving
+  // targetsNeeded from the scorecard. The old `fwc` also counted a stray target on
+  // a par-3 (it counted every hole with an fwc pair); bgCountGps only counts one
+  // on a hole that actually needs it.
+  const dig = bgGpsDigest(hs);
+  const c = bgCountGps(dig, null, 18);
+  _adminMappedCache.set(r.course_id, { holes: c.greens, fwc: c.targetsDone, need: c.targetsNeeded, dig: dig, center: cen });
 }
 // Per-course mapped-hole counts. Pass an ARRAY of course ids to fetch ONLY those
 // (scoped to what the admin is viewing). The old call read the WHOLE course_gps
@@ -9229,6 +9327,7 @@ async function getMappedCourseIdSet(ids) {
   counts.fwc = new Map();
   counts.need = new Map();
   counts.center = new Map();
+  counts.dig = new Map();          // v975: per-hole GPS digest, so the list can use bgCountGps
   counts.has = function (id) { return (this.get(id) || 0) >= 18; };
   try {
     if (!supaReady) await initSupabase();
@@ -9277,7 +9376,7 @@ async function getMappedCourseIdSet(ids) {
     }
   } catch (e) { console.warn('mapped hole-count fetch failed', e); }
   const wanted = Array.isArray(ids) ? ids : Array.from(_adminMappedCache.keys());
-  wanted.forEach(id => { const m = _adminMappedCache.get(id); if (!m) return; if (m.holes) counts.set(id, m.holes); if (m.fwc) counts.fwc.set(id, m.fwc); if (m.need != null) counts.need.set(id, m.need); if (m.center) counts.center.set(id, m.center); });
+  wanted.forEach(id => { const m = _adminMappedCache.get(id); if (!m) return; if (m.holes) counts.set(id, m.holes); if (m.fwc) counts.fwc.set(id, m.fwc); if (m.need != null) counts.need.set(id, m.need); if (m.dig) counts.dig.set(id, m.dig); if (m.center) counts.center.set(id, m.center); });
   return counts;
 }
 
@@ -9344,19 +9443,41 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
         holes = _g; fwcCount = _f; _expH = _nines.length * 9; _tnNeed = _n;
       }
     } catch (e) {}
-    const hasGPS = holes >= _expH;                 // every green mapped (9 or 18)
-    const hasRS = !!(sc && Array.isArray(sc.tees) && sc.tees.some(t => t && t.rating != null && t.slope != null))
-      || !!(sc && sc.rating != null && sc.slope != null)
-      || !!(typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]);
-    // Fairway targets are part of "done": every par 4/5 needs a fairway center.
-    const _parArr = (sc && Array.isArray(sc.pars) && (sc.pars.length === 18 || sc.pars.length === 9)) ? sc.pars : null;
-    const targetsNeeded = (_tnNeed != null) ? _tnNeed : (_parArr ? _parArr.filter(p => Number(p) !== 3).length : ((mappedSet && mappedSet.need && typeof mappedSet.need.get === 'function' && mappedSet.need.get(id) != null) ? mappedSet.need.get(id) : 18));
-    const targetsComplete = targetsNeeded === 0 || fwcCount >= targetsNeeded;
-    const hasCard = !!_parArr || !!(typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[id]); const complete = hasGPS && hasRS && targetsComplete && hasCard;   // greens + rating + every fairway target
+    // v975: ONE predicate — the same counting rule the guided-verify modal uses.
+    // Recount from the per-hole digest when we have it (GPS par wins, card par is
+    // the fallback); fall back to the pre-v975 numbers when the digest is missing
+    // (offline / cache miss) so nothing regresses.
+    const _parArr = _bgParArr(sc);
+    let _greens = holes, _tDone = fwcCount, _tNeed = _tnNeed;
+    try {
+      const _digOf = k => (mappedSet && mappedSet.dig && typeof mappedSet.dig.get === 'function') ? mappedSet.dig.get(k) : null;
+      const _nines = (_tnNeed != null && typeof tnNines === 'function') ? tnNines(id) : null;
+      if (_nines) {
+        // Three-nine facility: roll the PER-NINE rows up with the shared counter.
+        let g = 0, td = 0, tn = 0, any = false;
+        _nines.forEach(nn => {
+          const d = _digOf(id + '#' + nn.key);
+          if (!d) return;
+          any = true;
+          const c = bgCountGps(d, nn.pars, 9);
+          g += c.greens; td += c.targetsDone; tn += c.targetsNeeded;
+        });
+        if (any) { _greens = g; _tDone = td; _tNeed = tn; }
+      } else {
+        const d = _digOf(id);
+        if (d) { const c = bgCountGps(d, _parArr, (_expH === 9 ? 9 : 18)); _greens = c.greens; _tDone = c.targetsDone; _tNeed = c.targetsNeeded; }
+        else if (_tNeed == null && mappedSet && mappedSet.need && typeof mappedSet.need.get === 'function' && mappedSet.need.get(id) != null) _tNeed = mappedSet.need.get(id);
+      }
+    } catch (e) {}
+    holes = _greens; fwcCount = _tDone;
+    const _st = bgCourseStatus({ id: id, sc: sc, expHoles: _expH, greens: _greens, targetsDone: _tDone, targetsNeeded: _tNeed });
+    const hasGPS = _st.hasGPS, hasRS = _st.hasRS, hasCard = _st.hasCard;
+    const targetsNeeded = _st.targetsNeeded, targetsComplete = _st.targetsComplete;
+    const complete = _st.complete;
     // Keep COMPLETE courses in the list too so an admin can search any course and
     // re-map / alter it. They're hidden from the default worklist view (in
     // renderAdminWorklist) until the admin searches or picks a state.
-    const flag = complete ? 'done' : (!hasGPS ? (hasRS ? 'gps' : 'both') : (!hasCard ? 'card' : (!hasRS ? 'rs' : 'targets')));
+    const flag = _st.flag;
     const st = lib.st || (typeof courseStateCode === 'function' ? courseStateCode(lib) : '') || '';
     const _cen = (mappedSet && mappedSet.center && typeof mappedSet.center.get === 'function') ? mappedSet.center.get(id) : null;
     items.push({ id, name, displayName: dispName, holesLabel: holesLabel, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, fwcCount, targetsNeeded, targetsComplete, needsTargets: hasGPS && !targetsComplete, expHoles: _expH, nineProg: nineProg, pop: playCount[name.toLowerCase()] || 0,
@@ -16264,18 +16385,17 @@ async function fetchCourseGpsDetail(courseId, pars) {
   let row = null, ok = false;
   try { if (!supaReady) await initSupabase(); if (supa && supaOnline) { const { data, error } = await supa.from('course_gps').select('holes').eq('course_id', courseId).maybeSingle(); if (!error) { row = data; ok = true; } } } catch (e) {}
   if (!ok) return null;   // couldn't read (offline) — caller falls back to cached counts
+  // v975: this loop WAS the modal's private counter and the list had its own —
+  // that divergence is the Bethpage bug. Both now go through bgCountGps, so there
+  // is literally one implementation. (The v640 rule it encoded — prefer the GPS
+  // row's own per-hole par — is preserved inside bgCountGps.)
   const hs = (row && row.holes) || {};
   const _nH = (Array.isArray(pars) && pars.length === 9) ? 9 : 18;
-  for (let h = 1; h <= _nH; h++) {
-    const hd = hs[String(h)] || hs[h] || null;
-    const green = !!(hd && (hd.tee || hd.front || hd.back || hd.mid));
-    const par = (hd && hd.par != null) ? Number(hd.par) : ((pars && pars[h - 1]) || 4);   // v640: prefer the GPS row's own per-hole par -- three-nine base rows have no scorecard, so a default 18x par-4 array demanded fairway targets on real par-3s and never completed
-    const needTarget = par !== 3;
-    const target = !!(hd && Array.isArray(hd.fwc) && hd.fwc.length === 2);
-    res.perHole[h] = { green, target, par, needTarget };
-    if (green) res.greens++;
-    if (needTarget) { res.targetsNeeded++; if (target) res.targetsDone++; }
-  }
+  const _dig = bgGpsDigest(hs);
+  const _c = bgCountGps(_dig, pars, _nH);
+  res.perHole = _c.perHole; res.greens = _c.greens;
+  res.targetsDone = _c.targetsDone; res.targetsNeeded = _c.targetsNeeded;
+  res.dig = _dig;
   return res;
 }
 
@@ -17237,16 +17357,56 @@ async function openCourseDetail(id) {
   const hasRSnow = _isTN || !!(_sc && Array.isArray(_sc.tees) && _sc.tees.some(t => t && t.rating != null && t.slope != null)) || !!(_sc && _sc.rating != null && _sc.slope != null);
   let _gpsDet = null;
   try { _gpsDet = await fetchCourseGpsDetail(id, _pars); } catch (e) {}
-  const greens = _gpsDet ? _gpsDet.greens : (it.holes || 0);
-  const targetsDone = _gpsDet ? _gpsDet.targetsDone : (it.fwcCount || 0);
-  const targetsNeeded = _gpsDet ? _gpsDet.targetsNeeded : 0;
-  const gpsComplete = greens >= libHoles(null, _sc, id);
-  // v825 (Tyler): list card reads a bulk-cached green count; the modal just read FRESH data.
-  // Push the fresh counts into the cache + this worklist row so list and modal ALWAYS agree.
-  try { if (_gpsDet) { var _pc=(_adminMappedCache.get(id)||{}); _adminMappedCache.set(id, { holes: greens, fwc: targetsDone, need: targetsNeeded, center: _pc.center||null }); var _wi=(_adminWork||[]).find(function(x){return x&&x.id===id;}); if(_wi){ _wi.holes=greens; _wi.fwcCount=targetsDone; _wi.hasGPS=gpsComplete; } } } catch(e){}
-  const targetsComplete = (targetsNeeded === 0) || (targetsDone >= targetsNeeded);
+  // v975: the modal used libHoles(null, ...) — passing null for the library row
+  // meant it could never see lib.holes === 9, so a 9-hole course read 9 on the
+  // list and 18 here. And a wired three-nine reads 18 from libHoles while the list
+  // expects 27/36, so every three-nine facility was permanently "incomplete" on
+  // the list and "complete" here. Use the SAME expected count as the list.
+  const _libRow = (COURSE_LIBRARY || []).find(c => c && c.id === id) || null;
+  let _expDet = (typeof libHoles === 'function') ? libHoles(_libRow, _sc, id) : 18;
+  let greens = _gpsDet ? _gpsDet.greens : (it.holes || 0);
+  let targetsDone = _gpsDet ? _gpsDet.targetsDone : (it.fwcCount || 0);
+  let targetsNeeded = _gpsDet ? _gpsDet.targetsNeeded : (it.targetsNeeded != null ? it.targetsNeeded : 0);
+  try {
+    const _nines = (typeof tnNines === 'function') ? tnNines(id) : null;
+    if (_nines && _nines.length) {
+      // Three-nine: sum the PER-NINE rows with the shared counter, same as the list.
+      let g = 0, td = 0, tn = 0, any = false;
+      _nines.forEach(nn => {
+        const m = _adminMappedCache.get(id + '#' + nn.key);
+        if (!m || !m.dig) return;
+        any = true;
+        const c = bgCountGps(m.dig, nn.pars, 9);
+        g += c.greens; td += c.targetsDone; tn += c.targetsNeeded;
+      });
+      _expDet = _nines.length * 9;
+      if (any) { greens = g; targetsDone = td; targetsNeeded = tn; }
+      else if (it) { greens = it.holes || 0; targetsDone = it.fwcCount || 0; targetsNeeded = it.targetsNeeded != null ? it.targetsNeeded : 0; }
+    }
+  } catch (e) {}
+  const _det = bgCourseStatus({ id: id, sc: _sc, expHoles: _expDet, greens: greens, targetsDone: targetsDone, targetsNeeded: targetsNeeded });
+  const gpsComplete = _det.hasGPS;
+  const targetsComplete = _det.targetsComplete;
   const gpsDone = gpsComplete && targetsComplete;          // greens AND every fairway target
-  const completeNow = gpsDone && hasRSnow && parsSet;
+  const completeNow = _det.complete;
+  // v975: the v825 write-back only refreshed holes/fwcCount/hasGPS — NOT `complete`,
+  // `flag`, `targetsNeeded` or `targetsComplete`, which are exactly what the header
+  // tally, the "Incomplete first" sort, the filter chips and the map pin colour read.
+  // So proving a course complete in here never updated the list. Push the WHOLE
+  // result now, and keep the digest so a later rebuild recounts identically.
+  try {
+    var _pc = (_adminMappedCache.get(id) || {});
+    if (_gpsDet) _adminMappedCache.set(id, { holes: greens, fwc: targetsDone, need: targetsNeeded, dig: (_gpsDet.dig || _pc.dig || null), center: _pc.center || null });
+    var _wi = (_adminWork || []).find(function (x) { return x && x.id === id; });
+    if (_wi) {
+      _wi.holes = greens; _wi.fwcCount = targetsDone;
+      _wi.hasGPS = _det.hasGPS; _wi.hasRS = _det.hasRS;
+      _wi.targetsNeeded = _det.targetsNeeded; _wi.targetsComplete = _det.targetsComplete;
+      _wi.needsTargets = _det.hasGPS && !_det.targetsComplete;
+      _wi.expHoles = _expDet;
+      _wi.complete = _det.complete; _wi.flag = _det.flag;
+    }
+  } catch (e) {}
   const step = (n, title, done, act, actLabel) => '<div style="display:flex;align-items:center;gap:10px;padding:11px 12px;margin-top:8px;border-radius:11px;border:1px solid var(--border);background:var(--surface-2,#fff)">'
     + '<span style="flex:0 0 auto;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;background:' + (done ? 'var(--money-pos)' : 'var(--text-muted)') + ';color:#fff">' + (done ? '✓' : n) + '</span>'
     + '<div style="flex:1;min-width:0;font-size:14px;font-weight:600">' + title + '</div>'
@@ -17301,14 +17461,20 @@ async function openCourseDetail(id) {
     + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 6px">' + verPill + (skipped ? '<span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '') + (dupSibs.length ? '<span class="adm-flag" style="background:var(--money-neg)">⚠️ ' + dupSibs.length + ' duplicate' + (dupSibs.length === 1 ? '' : 's') + '</span>' : '') + '</div>'
     + (dupSibs.length ? btn('dedupe', '⚖️ Compare ' + (dupSibs.length + 1) + ' copies — pick which to keep', true) : '')
     + '<div class="small-text" style="color:var(--text-muted);margin:8px 0 2px;text-transform:uppercase;letter-spacing:.04em;font-size:11px">Guided verify — finish each step</div>'
-    + (function(){ var need=[]; if(!parsSet) need.push('scorecard (pars & SI)'); if(!hasRSnow) need.push('rating & slope'); if(!gpsComplete) need.push('greens ('+greens+'/'+libHoles(null,_sc,id)+')'); if(gpsComplete && !targetsComplete) need.push('fairway targets ('+targetsDone+'/'+targetsNeeded+')'); if(!need.length) return '<div style="margin:6px 0 2px;padding:9px 12px;border-radius:10px;background:var(--money-pos);color:#fff;font-weight:700;font-size:13px">&#10003; Complete &mdash; everything is set.</div>'; return '<div style="margin:6px 0 2px;padding:9px 12px;border-radius:10px;background:#fff4e5;border:1px solid #f0c27a;color:#8a5a12;font-weight:600;font-size:13px">&#9203; Still needed: '+need.join(' &middot; ')+'</div>'; })()
+    + (function(){ var need=[]; if(!parsSet) need.push('scorecard (pars & SI)'); if(!hasRSnow) need.push('rating & slope'); if(!gpsComplete) need.push('greens ('+greens+'/'+_expDet+')'); if(gpsComplete && !targetsComplete) need.push('fairway targets ('+targetsDone+'/'+targetsNeeded+')'); if(!need.length) return '<div style="margin:6px 0 2px;padding:9px 12px;border-radius:10px;background:var(--money-pos);color:#fff;font-weight:700;font-size:13px">&#10003; Complete &mdash; everything is set.</div>'; return '<div style="margin:6px 0 2px;padding:9px 12px;border-radius:10px;background:#fff4e5;border:1px solid #f0c27a;color:#8a5a12;font-weight:600;font-size:13px">&#9203; Still needed: '+need.join(' &middot; ')+'</div>'; })()
     + step(1, 'Name / city / state', true, 'edit', 'Edit')
     + step(2, 'Rating, slope &amp; tees', hasRSnow, 'rate', hasRSnow ? 'Edit' : 'Add')
     + step(3, 'Pars &amp; stroke index', parsSet, 'pars', 'Edit')
-    + step(4, 'GPS — greens ' + greens + '/' + libHoles(null, _sc, id) + ' · targets ' + targetsDone + '/' + targetsNeeded, gpsDone, 'viewmap', 'Review')
+    + step(4, 'GPS — greens ' + greens + '/' + _expDet + ' · targets ' + targetsDone + '/' + targetsNeeded, gpsDone, 'viewmap', 'Review')
     + '<button data-act="gpsadmin" style="width:100%;box-sizing:border-box;min-height:48px;padding:12px 14px;margin-top:8px;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;border:1.5px solid var(--accent);background:var(--surface-2,#fff);color:var(--accent)">🛰️ Open GPS admin map — fix a hole</button>'
+    // v975 (Tyler: "why are these showing incomplete but also showing a verified
+    // button"). `verified` and `complete` are INDEPENDENT — the v634 admin
+    // force-verify deliberately lets an admin verify an incomplete course after a
+    // confirm. But this banner said "Saved & complete" while only ever proving
+    // VERIFIED, so a force-verified course claimed completeness it didn't have.
+    // Say which one is actually true.
     + (verified
-        ? '<div style="width:100%;box-sizing:border-box;min-height:48px;padding:12px 14px;margin-top:8px;border-radius:12px;font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;background:var(--money-pos);color:#fff;text-align:center">🔒 Saved &amp; complete — locked</div>'
+        ? '<div style="width:100%;box-sizing:border-box;min-height:48px;padding:12px 14px;margin-top:8px;border-radius:12px;font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;background:' + (completeNow ? 'var(--money-pos)' : '#d98a2b') + ';color:#fff;text-align:center">' + (completeNow ? '🔒 Saved &amp; complete — locked' : '🔒 Verified — locked (still incomplete)') + '</div>'
         : '<button data-act="verify" style="width:100%;box-sizing:border-box;min-height:48px;padding:12px 14px;margin-top:8px;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;border:none;background:' + (completeNow ? 'var(--accent)' : '#d98a2b') + ';color:#fff">💾 Save &amp; complete ›</button>')
     + '<button data-act="codereview" style="width:100%;box-sizing:border-box;min-height:48px;padding:12px 14px;margin-top:8px;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;border:1.5px solid #d98a2b;background:var(--surface-2,#fff);color:#d98a2b">🔎 Send to Code Review</button>'
     + '<button data-act="del" style="width:100%;box-sizing:border-box;min-height:48px;padding:12px 14px;margin-top:8px;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;border:none;background:var(--danger,var(--money-neg));color:#fff">🗑️ Delete course</button>'
