@@ -7649,7 +7649,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.962';
+const BG_BUILD = 'v2026.11.964';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -9431,7 +9431,7 @@ async function renderAdminSpectate() {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
       const { data } = await supa.from('games').select('code,data,updated_at')
-        .not('code', 'like', 'shared:%').order('updated_at', { ascending: false }).limit(60);
+        .not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */.order('updated_at', { ascending: false }).limit(60);
       rows = data || [];
     }
   } catch (e) { console.warn('admin spectate fetch failed', e); }
@@ -9489,8 +9489,11 @@ async function renderAdmin() {
   // is NOT fetched on open. Course data loads the first time a state/search is
   // chosen (ensureAdminData); the user list loads only when expanded. Keeps the
   // Admin screen instant even with a big library.
-  _adminSkipped = new Set(await getCourseSkipped().catch(() => []));
-  _adminVerified = new Set(await getCourseVerifiedFresh().catch(() => []));
+  // v963 PERF: these two overlay reads (~21KB each) ran back-to-back in SERIES.
+  // They are independent, so fetch them together — two round-trips become one.
+  { const _sv = await Promise.all([getCourseSkipped().catch(() => []), getCourseVerifiedFresh().catch(() => [])]);
+    _adminSkipped = new Set(_sv[0]); _adminVerified = new Set(_sv[1]); }
+  let _admLibNeedsRefresh = false;   // v963: set below, acted on AFTER first paint
   // v739: the Admin worklist read the course-DELETE overlay cache-first, so a device
   // with a stale local copy of shared:course-deletes kept showing already-deleted
   // courses — inflating "All / Not mapped / Missing rating / Needs targets" counts
@@ -9508,10 +9511,21 @@ async function renderAdmin() {
         } catch (e) {}
         return false;
       };
-      const _gotDel = await _freshDel(KEY_COURSE_DELETES);
-      await _freshDel(KEY_COURSE_DELETES_LOCKED);
-      try { await loadStateLocks(true); } catch (e) {}   // v880: locks fresh before the picker renders
-      if (_gotDel) { try { invalidateCourseLibraryCache(); if (typeof loadCourseLibrary === 'function') await loadCourseLibrary(true); } catch (e) {} }
+      // v963 PERF: these three fresh reads are independent of one another — run
+      // them in PARALLEL instead of three back-to-back round-trips.
+      const _fd = await Promise.all([
+        _freshDel(KEY_COURSE_DELETES),
+        _freshDel(KEY_COURSE_DELETES_LOCKED),
+        (async () => { try { await loadStateLocks(true); } catch (e) {} return true; })()   // v880: locks fresh before the picker renders
+      ]);
+      // v963 PERF: the forced course-library rebuild re-downloads
+      // shared:course-library-additions (~766KB compressed / 2.8MB of JSON) plus
+      // the override overlays. It used to be AWAITED here, so the Admin screen sat
+      // on "Loading…" for the whole trip before a single pixel was drawn. The data
+      // is only needed for the worklist COUNTS, not the page chrome — so it is now
+      // deferred until after first paint (see _admRefreshLibrary below) and the
+      // worklist re-renders itself when it lands. Same freshness, no blocking.
+      _admLibNeedsRefresh = !!_fd[0];
     }
   } catch (e) {}
   _adminDataReady = false; _adminScopeKey = null; if (typeof _adminMappedCache !== 'undefined') _adminMappedCache.clear();
@@ -9572,9 +9586,37 @@ async function renderAdmin() {
   { const _sr = document.getElementById('adm-spectate-refresh'); if (_sr) _sr.onclick = () => { try { renderAdminSpectate(); } catch (e) {} }; }
   try { renderAdminLockBar(); } catch (e) {}   // v880
   renderAdminWorklist();   // draws the "pick a state" prompt — no data needed yet
+  // v963 PERF: the fresh course-library rebuild now runs HERE — after the Admin
+  // chrome is already on screen — instead of blocking the first paint. Everything
+  // downstream (the worklist counts, the map) is re-rendered once it lands, so the
+  // numbers end up exactly as fresh as before; the user just isn't made to wait on
+  // a ~2.8MB JSON download staring at "Loading…".
+  const _admRefreshLibrary = (async () => {
+    if (!_admLibNeedsRefresh) return;
+    try {
+      invalidateCourseLibraryCache();
+      if (typeof loadCourseLibrary === 'function') await loadCourseLibrary(true);
+      // The state dropdown was built from the pre-refresh library (so it could be
+      // drawn instantly). Rebuild its options now that the fresh library is in,
+      // keeping whatever the user has already selected.
+      try {
+        const _ss = document.getElementById('adm-state');
+        if (_ss) {
+          const _keep = _ss.value;
+          const _st2 = [...new Set((COURSE_LIBRARY || []).map(stCode).filter(Boolean))]
+            .sort((a, b) => (stateNames[a] || a).localeCompare(stateNames[b] || b));
+          _ss.innerHTML = '<option value="">All states</option>'
+            + _st2.map(s => '<option value="' + ea(s) + '">' + (isStateLockedSync(s) ? '🔒 ' : '') + esc(stateNames[s] || s) + '</option>').join('');
+          if (_keep) _ss.value = _keep;
+        }
+      } catch (e) {}
+    } catch (e) { console.warn('admin lib refresh', e); }
+  })();
   // If a state/search is already active (e.g. this is a refresh after an edit),
   // reload the course data so the list comes right back instead of the prompt.
-  if (_adminStateFilter || _adminSearch) { ensureAdminData().then(() => renderAdminWorklist()); }
+  // Waits on the library refresh first so the counts are built from fresh data.
+  if (_adminStateFilter || _adminSearch) { _admRefreshLibrary.then(() => ensureAdminData()).then(() => renderAdminWorklist()); }
+  else { _admRefreshLibrary.then(() => { try { renderAdminWorklist(); } catch (e) {} }); }
 
   // Wire interactions (delegation). Heavy course data loads lazily on first
   // state/search; the user list loads only when its section is expanded.
@@ -39814,7 +39856,7 @@ async function renderHomeLive() {
     if (supa && supaOnline) {
       const { data } = await supa.from('games')
         .select('code,data,updated_at')
-        .not('code', 'like', 'shared:%')
+        .not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */
         .order('updated_at', { ascending: false })
         .limit(40);
       rows = data || [];
@@ -40529,14 +40571,23 @@ async function getMeName() {
       return cached;
     }
     try {
-      const { data } = await supa.from('profiles')
+      // v963 CRITICAL (Tyler locked out of the app after a round at the course):
+      // this destructured ONLY `data` and ignored `error`. supabase-js does NOT throw
+      // on a network/RLS failure — it resolves with { data: null, error }. So a failed
+      // read returned null, which is byte-for-byte the same answer as "this user has
+      // genuinely never set a name". ensureMyNameSet() then hard-locked the app behind
+      // a name prompt whose Cancel button is deliberately disabled. Capture the error
+      // and record whether this answer is TRUSTWORTHY, so the gate can tell "no name"
+      // apart from "couldn't ask".
+      const { data, error } = await supa.from('profiles')
         .select('my_player').eq('id', _authUser.id).maybeSingle();
+      _meNameReadFailed = !!error;
       if (data && data.my_player) {
         try { localStorage.setItem(KEY_ME, data.my_player); } catch (e) {}
         return data.my_player;
       }
-      return null; // signed in but not yet linked → triggers the picker
-    } catch (e) { /* fall through to local cache */ }
+      if (!error) return null; // signed in, read SUCCEEDED, genuinely not linked → picker
+    } catch (e) { _meNameReadFailed = true; /* fall through to local cache */ }
   }
   return await safeGet(KEY_ME, false);
 }
@@ -40554,19 +40605,75 @@ async function setMeName(name) {
 // rosters. Force first name + last initial before they can use the app.
 // Fail-safe: never traps a user who already has a name; any error just returns.
 let _nameRequired = false;
+var _meNameReadFailed = false;   // v963: set by getMeName — was the last name read TRUSTWORTHY?
+var _namePromptSnoozed = false;  // v963: user dismissed the prompt; don't re-fire this session
 async function ensureMyNameSet() {
   try {
     if (typeof isSignedIn !== 'function' || !isSignedIn()) return;
     if (!supa || !_authUser) return;
+    if (_namePromptSnoozed) return;                       // v963: already dismissed once this session
     let me = null; try { me = await getMeName(); } catch (e) { return; }
     if (me && String(me).trim() && !/^player$/i.test(String(me).trim())) return;
+    // ---- v963 LOCKOUT GUARDS -------------------------------------------------
+    // This gate disables its own Cancel button, so firing it wrongly does not
+    // inconvenience the user — it locks them out of the app entirely. Tyler hit
+    // exactly that: he finished a round on a weak connection at the course, the
+    // profile read came back empty, and the app demanded a name he had already
+    // set, with his name visible on the scoreboard behind the modal.
+    // Only ever gate on an answer we are CONFIDENT in.
+    if (_meNameReadFailed) return;                        // the read failed — we did not learn anything
+    if (typeof supaOnline !== 'undefined' && !supaOnline) return;   // offline — cannot confirm
+    // Never trap someone mid-round or on the round-summary screen. Losing access to
+    // the app with a round in progress is the worst possible moment for this prompt.
+    try { if (typeof state !== 'undefined' && state && state.game) return; } catch (e) {}
+    try { const sm = document.getElementById('summary-modal'); if (sm && sm.classList.contains('show')) return; } catch (e) {}
+    // Authoritative re-check: ask the DB one more time and demand a clean, error-free
+    // answer before locking anything. If this second read errors, we stay quiet.
+    try {
+      const r2 = await supa.from('profiles').select('my_player').eq('id', _authUser.id).maybeSingle();
+      if (!r2 || r2.error) return;                        // could not confirm → never gate
+      const mp2 = r2.data && r2.data.my_player;
+      if (mp2 && String(mp2).trim() && !/^player$/i.test(String(mp2).trim())) {
+        try { localStorage.setItem(KEY_ME, mp2); } catch (e) {}
+        return;                                           // they DO have a name — heal the cache and leave
+      }
+    } catch (e) { return; }
+    // -------------------------------------------------------------------------
     const modal = document.getElementById('edit-name-modal');
     if (!modal || modal.classList.contains('show')) return;
     _nameRequired = true;
+    // v963: pre-fill from the best name we already know (roster entry, or the cached
+    // link) instead of two blank boxes. The app usually knows the answer — Tyler's
+    // name was on the scoreboard behind this very modal.
+    let _pf = '';
+    try { _pf = String(me || localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
+    if (/^player$/i.test(_pf)) _pf = '';
+    const _setFields = (val) => {
+      const parts = val ? String(val).trim().split(/\s+/) : [];
+      const f = document.getElementById('edit-name-first');
+      const l = document.getElementById('edit-name-last');
+      if (f && !f.value) f.value = parts[0] || '';
+      if (l && !l.value) l.value = parts.slice(1).join(' ') || '';
+    };
     const fEl = document.getElementById('edit-name-first'); if (fEl) fEl.value = '';
     const lEl = document.getElementById('edit-name-last');  if (lEl) lEl.value = '';
+    _setFields(_pf);
     try { wireEditName(); } catch (e) {}
+    // Show the prompt NOW. The roster lookup below is a nice-to-have that only
+    // improves the pre-filled text — it must never sit between the user and the
+    // dialog. (An earlier draft of this fix awaited getPlayerRoster() here; on the
+    // exact weak connection this whole gate exists to survive, that read can hang
+    // and the prompt would simply never appear.)
     modal.classList.add('show');
+    if (!_pf) {
+      (async () => {
+        try {
+          const _r = await getPlayerRoster();
+          const _m = findMyRosterPlayer(_r, me);
+          if (_m && _m.name && modal.classList.contains('show')) _setFields(_m.name);
+        } catch (e) {}
+      })();
+    }
   } catch (e) {}
 }
 // Resolve the signed-in user's roster player. The cloud `my_player` string can
@@ -40703,7 +40810,27 @@ async function syncMyStatsToCloud(roster, visOverride){
       updated_at: new Date().toISOString()
     }, { onConflict: 'user_id' });
     if (_up && _up.error) console.warn('syncMyStatsToCloud: upsert failed', _up.error);
+    else { try { _bgStatsCacheBust(); } catch (e) {} }   // v963: my backup changed — drop the 30s memo so the next board read sees it
   } catch (e) { console.warn('syncMyStatsToCloud failed', e); }
+}
+
+// v963 PERF: the whole player_stats backup table was being downloaded THREE separate
+// times on a single Crew open — once by the leaderboard, once by the friends list, and
+// once per profile card via fetchPlayerCloudStats — because each call site ran its own
+// raw select. Same table, same instant, three round-trips. One 30s memo behind a shared
+// reader collapses them to one. Mirrors the v935 fetchProfiles/fetchFriendships memo:
+// successes only, never errors, and busted the moment this device writes its own row.
+var _allStatsCache = null, _allStatsCacheAt = 0;
+function _bgStatsCacheBust() { try { _allStatsCacheAt = 0; } catch (e) {} }
+async function fetchAllPlayerStats() {
+  if (!supa) return null;
+  try { if (_allStatsCache && (Date.now() - _allStatsCacheAt) < 30000) return _allStatsCache; } catch (e) {}
+  try {
+    const { data, error } = await supa.from('player_stats').select('stats,player_name');
+    if (error || !Array.isArray(data)) return null;
+    _allStatsCache = data; _allStatsCacheAt = Date.now();   // cache successes only
+    return data;
+  } catch (e) { return null; }
 }
 
 // Read ANOTHER player's round history from the per-user cloud backup (player_stats,
@@ -40714,8 +40841,8 @@ async function fetchPlayerCloudStats(name) {
   try {
     if (!(isSignedIn() && supa && _authUser) || !name) return null;
     const nm = normalizeNameSegment(name);
-    const { data, error } = await supa.from('player_stats').select('stats,player_name');
-    if (error || !Array.isArray(data)) return null;
+    const data = await fetchAllPlayerStats();
+    if (!Array.isArray(data)) return null;
     // A person can have MORE THAN ONE player_stats row whose player_name normalizes the
     // same (a second/old account, or a guest row that later linked). Taking only the
     // FIRST row made the board and card pick DIFFERENT rows for the same person — one
@@ -40895,7 +41022,7 @@ async function renderCrewPlayerStats() {
   const avatarByName = {};
   try {
     if (supa && _authUser) {
-      const { data } = await supa.from('profiles').select('my_player,avatar');
+      const data = await fetchProfiles();   /* v963 PERF: was its own uncached full download of the profiles table (base64 avatars included) on every render — fetchProfiles() returns the same rows behind the shared 60s memo. */
       if (Array.isArray(data)) data.forEach(pr => { if (pr && pr.my_player && pr.avatar) avatarByName[normalizeNameSegment(pr.my_player)] = pr.avatar; });
     }
   } catch (e) {}
@@ -41605,20 +41732,64 @@ function buildStatsInsights(history) {
   if (completeRounds.length >= 3) {
     const series = completeRounds.slice(-12);
     const vals = series.map(s => s.gross);
-    const mx = Math.max(...vals), mn = Math.min(...vals);
-    const span = (mx - mn) || 1;
     const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-    const W = 320, H = 120, pad = 8, bw = (W - pad * 2) / series.length;
+    // v963 CHART REDESIGN (Tyler: "hard to read... it's almost like it is backwards").
+    // The old chart set bar height to (1 - normalized gross) — so the BEST round drew
+    // the TALLEST bar while the number under it was the SMALLEST. Height carried no
+    // readable meaning, it just inverted the label. Now the chart diverges around the
+    // average line: a round UNDER your average rises ABOVE the line, a round OVER it
+    // drops BELOW, and the bar's LENGTH is how many strokes off the average it was.
+    // Lower score = better = up. Colour is freed up to carry the second question Tyler
+    // asked for — which rounds are actually counting toward the index right now.
+    //
+    // Which of these rounds count toward the handicap: recomputed with the SAME rule
+    // the Handicap Rounds card above uses (lowest N differentials of the last 20), then
+    // matched back to this series by round key so the two cards can never disagree.
+    const _rk = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+    const _countingKeys = new Set();
+    let _useCount = 0;
+    try {
+      const _rec = [...history].filter(s => s.differential != null)
+        .sort((a, b) => (b.date || 0) - (a.date || 0)).slice(0, 20);
+      const _n = _rec.length;
+      if      (_n < 3)   _useCount = 0;
+      else if (_n <= 5)  _useCount = 1; else if (_n <= 8)  _useCount = 2;
+      else if (_n <= 10) _useCount = 3; else if (_n <= 12) _useCount = 4;
+      else if (_n <= 14) _useCount = 5; else if (_n <= 16) _useCount = 6;
+      else if (_n <= 18) _useCount = 7; else _useCount = 8;
+      _rec.map((s, i) => ({ i, d: s.differential })).sort((a, b) => a.d - b.d)
+        .slice(0, _useCount).forEach(o => { const k = _rk(_rec[o.i]); if (k) _countingKeys.add(k); });
+    } catch (e) {}
+    // Geometry. Taller box than before so a bar can swing both ways and still leave a
+    // clean row for the score labels; sizes are in viewBox units and the SVG scales to
+    // 100% width, so this stays legible down to a ~320px phone.
+    const W = 320, H = 136, pad = 8;
+    const topY = 10, botY = 112, avgY = (topY + botY) / 2;
+    const halfH = (botY - topY) / 2 - 5;
+    const maxDev = Math.max.apply(null, vals.map(v => Math.abs(v - avg)).concat([1]));
+    const bw = (W - pad * 2) / series.length;
     let bars = '';
     series.forEach((s, i) => {
-      const h = 16 + (1 - (s.gross - mn) / span) * (H - 40);
+      const dev = avg - s.gross;                 // positive = under the average = better
+      const len = Math.max(3, Math.abs(dev) / maxDev * halfH);
       const x = pad + i * bw;
-      const good = s.gross <= avg;
-      bars += '<rect x="' + (x + 2).toFixed(1) + '" y="' + (H - 16 - h).toFixed(1) + '" width="' + (bw - 4).toFixed(1) + '" height="' + h.toFixed(1) + '" rx="3" fill="' + (good ? 'var(--accent)' : 'var(--log-info)') + '"></rect>';
-      bars += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (H - 4) + '" font-size="9" fill="var(--text-muted)" text-anchor="middle">' + s.gross + '</text>';
+      const counting = _countingKeys.has(_rk(s));
+      const y = dev >= 0 ? (avgY - len) : avgY;
+      // Counting rounds are the solid accent (same colour the Handicap Rounds card
+      // marks them with); everything else is pale so the counting ones pop.
+      const fill = counting ? 'var(--chart-bar)' : 'var(--log-info)';
+      bars += '<rect x="' + (x + 2.5).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + (bw - 5).toFixed(1) + '" height="' + len.toFixed(1) + '" rx="3" fill="' + fill + '"'
+        + (counting ? ' opacity="1"' : ' opacity="0.55"') + '></rect>';
+      // ✓ tick above/below the bar end marks a counting round for anyone who can't
+      // rely on colour alone (colour-blind, glare on a phone in the sun).
+      if (counting) {
+        const tickY = dev >= 0 ? (y - 3) : (y + len + 9);
+        bars += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + tickY.toFixed(1) + '" font-size="9" font-weight="700" fill="var(--chart-bar)" text-anchor="middle">✓</text>';
+      }
+      // Score labels stay in one straight row along the bottom — easier to scan twelve
+      // numbers on a line than to chase them up and down with the bars.
+      bars += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (H - 5) + '" font-size="10.5" font-weight="' + (counting ? '700' : '400') + '" fill="' + (counting ? 'var(--chart-bar)' : 'var(--text-muted)') + '" text-anchor="middle">' + s.gross + '</text>';
     });
-    // average line
-    const avgY = (H - 16) - (16 + (1 - (avg - mn) / span) * (H - 40));
     const trendTxt = series.length >= 4
       ? (() => {
           const firstHalf = vals.slice(0, Math.floor(vals.length / 2));
@@ -41628,15 +41799,27 @@ function buildStatsInsights(history) {
           return d < 0 ? '▼ Trending down ' + Math.abs(d).toFixed(1) + ' strokes — nice' : '▲ Up ' + d.toFixed(1) + ' strokes lately';
         })()
       : '';
+    // Legend lives in HTML, not the SVG, so it wraps naturally on a narrow phone
+    // instead of overflowing a fixed viewBox.
+    const _swatch = (c, o, t) => '<span style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap">'
+      + '<span style="width:11px;height:11px;border-radius:3px;background:' + c + ';opacity:' + o + ';flex:0 0 auto"></span>' + t + '</span>';
+    const _legend = '<div class="small-text" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;color:var(--text-muted);line-height:1.5">'
+      + _swatch('var(--chart-bar)', '1', '✓ counting toward your index' + (_useCount ? ' (best ' + _useCount + ')' : ''))
+      + _swatch('var(--log-info)', '0.55', 'not counting')
+      + '</div>';
     cards.push(
       '<div class="card">'
       + '<h3 style="margin-top:0;margin-bottom:2px">📈 Scoring Trend</h3>'
-      + '<div class="small-text" style="color:var(--text-muted);margin-bottom:8px">Last ' + series.length + ' completed rounds. ' + (trendTxt ? '<strong>' + trendTxt + '</strong>' : '') + '</div>'
-      + '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;display:block">'
+      // The average value and the "which way is good" hint are real HTML text, not
+      // SVG labels: they scale with the phone's font size, wrap instead of colliding
+      // with a tall bar, and get read out properly by VoiceOver.
+      + '<div class="small-text" style="color:var(--text-muted);margin-bottom:8px">Last ' + series.length + ' completed rounds · avg <strong>' + avg.toFixed(1) + '</strong>. ' + (trendTxt ? '<strong>' + trendTxt + '</strong>' : '') + '</div>'
+      + '<div class="small-text" style="color:var(--text-muted);margin-bottom:6px"><strong style="color:var(--chart-bar)">Above the line = better</strong> than your average.</div>'
+      + '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;display:block" role="img" aria-label="Scoring trend. Bars above the dashed average line are rounds you shot under your average; bars below it are over. Solid bars marked with a check are the rounds counting toward your handicap index.">'
       + '<line x1="' + pad + '" y1="' + avgY.toFixed(1) + '" x2="' + (W - pad) + '" y2="' + avgY.toFixed(1) + '" stroke="var(--text-muted)" stroke-dasharray="3 3" stroke-width="1"></line>'
-      + '<text x="' + (W - pad) + '" y="' + (avgY - 3).toFixed(1) + '" font-size="9" fill="var(--text-muted)" text-anchor="end">avg ' + avg.toFixed(1) + '</text>'
       + bars
       + '</svg>'
+      + _legend
       + '</div>'
     );
   }
@@ -41811,7 +41994,7 @@ async function renderStackupFriends(show) {
     const avatarByName = {};
     try {
       if (supa && _authUser) {
-        const { data } = await supa.from('profiles').select('my_player,avatar');
+        const data = await fetchProfiles();   /* v963 PERF: was its own uncached full download of the profiles table (base64 avatars included) on every render — fetchProfiles() returns the same rows behind the shared 60s memo. */
         if (Array.isArray(data)) data.forEach(pr => { if (pr && pr.my_player && pr.avatar) avatarByName[normalizeNameSegment(pr.my_player)] = pr.avatar; });
       }
     } catch (e) {}
@@ -42019,7 +42202,32 @@ async function renderStatsForSelectedPlayer() {
   // Self-heal YOUR stats count so the profile number matches the Rounds tab even
   // if you open Stats without visiting Rounds first (drops rounds no longer in
   // your list). Only touches the signed-in user's own history.
-  try { await reconcileMyScoreHistory(); } catch (e) {}
+  //
+  // v963 PERF (Tyler: "the stats page is slow to load"): this heal was AWAITED here,
+  // so every Stats open sat behind a pile of cloud reads before a single number
+  // appeared — and the heal usually changes nothing at all. Same treatment the
+  // Rounds list got in v934: paint from what we already have, run the heal in the
+  // background, and re-render ONCE if it actually changed something. Identical end
+  // state, minus the wait. Guarded so overlapping opens can't stack up heals.
+  if (!window._statsHealRunning) {
+    window._statsHealRunning = true;
+    (async () => {
+      try {
+        let changed = false;
+        try { changed = await reconcileMyScoreHistory(); } catch (e) {}
+        // Only re-render if the heal rewrote history AND the user is still on this
+        // player — otherwise we'd stomp a selection they changed in the meantime.
+        // The flag stays SET across this re-render, so the nested call skips the
+        // heal instead of kicking off another one (no heal/render ping-pong).
+        if (changed) {
+          try {
+            const _sel = $('stats-player-select');
+            if (_sel && _sel.value === name) await renderStatsForSelectedPlayer();
+          } catch (e) {}
+        }
+      } finally { window._statsHealRunning = false; }
+    })();
+  }
   const roster = await getPlayerRoster();
   const player = roster.find(p => p.name === name);
   if (!player) return;
@@ -42116,8 +42324,13 @@ function renderHandicapChart(history, calc, compareHistory, compareName) {
   if (subtitleEl) subtitleEl.textContent = `Lowest ${useCount} of ${n} rounds count · bars = score differential per round`;
 
   // SVG dimensions
+  // v963 (Tyler: "numbers not fitting on the screens"): padR was 8, but the current
+  // handicap value is drawn 6px to the RIGHT of the last trend point — which sits at
+  // the far edge of the plot area. The label ran off the viewBox and got clipped
+  // mid-number ("2." instead of "2.1"). padR now reserves real room for it, and padT
+  // gives the gross-score labels headroom instead of letting them ride the top edge.
   const W = 380, H = 180;
-  const padL = 30, padR = 8, padT = 14, padB = 42;
+  const padL = 30, padR = 32, padT = 18, padB = 42;
   const chartW = W - padL - padR;
   const chartH = H - padT - padB;
 
@@ -42179,10 +42392,16 @@ function renderHandicapChart(history, calc, compareHistory, compareName) {
     barsHTML += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW}" height="${barH.toFixed(1)}" fill="${fill}" fill-opacity="${opacity}" rx="2"/>`;
 
     // #15 Gross score label centered just above each bar's top edge.
-    if (r.gross != null) {
+    // v963: at 20 rounds each slot is only ~16px wide, so a 2-digit label at font-size
+    // 10 practically touches its neighbours — that's the crowding Tyler saw. When the
+    // slots get that tight, label every other bar; the shape of the chart is unchanged
+    // and the numbers become readable again.
+    const _labelEvery = slotW < 20 ? 2 : 1;
+    const _showGross = (i % _labelEvery === 0) || i === n - 1;
+    if (r.gross != null && _showGross) {
       const gx = (x + barW / 2).toFixed(1);
       const gy = Math.max(padT + 7, y - 3).toFixed(1);
-      barsHTML += `<text x="${gx}" y="${gy}" text-anchor="middle" font-size="10" font-weight="700" fill="currentColor" opacity="0.75">${r.gross}</text>`;
+      barsHTML += `<text x="${gx}" y="${gy}" text-anchor="middle" font-size="9.5" font-weight="700" fill="currentColor" opacity="0.75">${r.gross}</text>`;
     }
 
     // Show a month/day label for first bar, last bar, and every ~4th bar.
@@ -42211,11 +42430,16 @@ function renderHandicapChart(history, calc, compareHistory, compareName) {
     trendPts = `<polyline points="${trendCoords.join(' ')}" fill="none" stroke="var(--chart-line)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>`;
     // Dot at the last point
     const last = trendCoords[trendCoords.length - 1].split(',');
-    trendPts += `<circle cx="${last[0]}" cy="${last[1]}" r="4" fill="var(--chart-line)" opacity="0.95"/>`;
+    trendPts += `<circle cx="${last[0]}" cy="${last[1]}" r="3.5" fill="var(--chart-line)" stroke="var(--surface, #fff)" stroke-width="1.5"/>`;   /* v963: slightly smaller, with a halo so it reads as the END OF THE LINE rather than a loose dot floating on the chart */
   }
 
   // Compare line — the friend's index trend, spread across the same x-band (dashed orange).
-  if (cmpVals.length >= 2) {
+  // v963 (Tyler: "extra dots that don't make any sense"): this used to draw whenever
+  // cmpVals had data, but the LEGEND entry for it only renders when compareName is set.
+  // So a leftover compareHistory with no name painted an orange line, an end dot and a
+  // number that nothing on the chart explained. Both now hang off the SAME condition —
+  // if it isn't named in the legend, it isn't drawn.
+  if (cmpVals.length >= 2 && compareName) {
     const x0 = padL + slotW / 2, x1 = padL + (n - 1) * slotW + slotW / 2;
     const cm = cmpVals.length;
     const cc = cmpVals.map((v, i) => { const xi = x0 + (cm > 1 ? (i / (cm - 1)) * (x1 - x0) : 0); return xi.toFixed(1) + ',' + yOf(v).toFixed(1); });
@@ -42229,9 +42453,16 @@ function renderHandicapChart(history, calc, compareHistory, compareName) {
   let hcpLabel = '';
   if (calc && calc.index != null && trendCoords.length > 0) {
     const last = trendCoords[trendCoords.length - 1].split(',');
-    const lx = parseFloat(last[0]) + 6;
     const ly = parseFloat(last[1]);
-    hcpLabel = `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" dominant-baseline="middle" font-size="10" font-weight="700" fill="var(--chart-line)">${calc.index}</text>`;
+    // v963: belt-and-braces on top of the padR fix — if the label still wouldn't fit
+    // (a long value like "+12.4"), flip it to the LEFT of the point and right-align it
+    // rather than letting it run off the edge and get cut in half.
+    const txt = String(calc.index);
+    const approxW = txt.length * 6 + 2;
+    const rx = parseFloat(last[0]) + 6;
+    const fits = (rx + approxW) <= (W - 2);
+    const lx = fits ? rx : (parseFloat(last[0]) - 6);
+    hcpLabel = `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" dominant-baseline="middle" text-anchor="${fits ? 'start' : 'end'}" font-size="10" font-weight="700" fill="var(--chart-line)">${txt}</text>`;
   }
 
   // Legend
@@ -42383,9 +42614,19 @@ async function reconcileMyScoreHistory() {
           const _vals = Array.isArray(snap.holeScores) ? snap.holeScores.filter(v => v != null).length : 0;
           return _vals < (snap.holesScored || 0);
         }).slice(0, 10);
+        // v963 PERF (Tyler: "the stats page is slow to load"): this loop awaited
+        // loadGame ONE ROUND AT A TIME — up to ten back-to-back cloud round-trips,
+        // each pulling a full game blob, all before the Stats page drew anything.
+        // The fetches don't depend on each other, so pull them together (the same
+        // Promise.all treatment step 0b already got); the archive writes still run
+        // in order, since each one mutates the roster.
         let _healed = false;
-        for (const r of _needs) {
-          try { const g = await loadGame(r.code); if (g && g.finishedAt) { await archiveScoresFromRound(g); _healed = true; } } catch (e) {}
+        const _games = await Promise.all(_needs.map(async r => {
+          try { return await loadGame(r.code); } catch (e) { return null; }
+        }));
+        for (const g of _games) {
+          if (!(g && g.finishedAt)) continue;
+          try { await archiveScoresFromRound(g); _healed = true; } catch (e) {}
         }
         if (_healed) { roster = await getPlayerRoster(); entry = findMyRosterPlayer(roster, me); if (!entry || !Array.isArray(entry.scoreHistory)) return; }
       }
@@ -42450,8 +42691,12 @@ async function reconcileMyScoreHistory() {
       }
     } catch (e) {}
     try { entry.scoreHistory = dedupeScoreHistory(entry.scoreHistory); } catch (e) {}
-    if (entry.scoreHistory.length !== before || _myHealed) await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
+    // v963: report whether anything actually changed, so a caller that ran this in
+    // the background knows whether it needs to re-render (see renderStatsForSelectedPlayer).
+    if (entry.scoreHistory.length !== before || _myHealed) { await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false); return true; }
+    return false;
   } catch (e) {}
+  return false;
 }
 
 // Shorten a comma-separated list of full names to "First L" so they fit on one
@@ -43566,7 +43811,7 @@ async function renderCrewLeaderboard() {
   let _cloudStats = null;
   try {
     if (supa) {
-      const { data: _ps } = await supa.from('player_stats').select('stats,player_name');
+      const _ps = await fetchAllPlayerStats();   /* v963 PERF: shared 30s memo — the leaderboard and the friends list were each downloading this whole table separately on the same Crew open. */
       if (Array.isArray(_ps)) {
         _cloudStats = {};
         const _k = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
@@ -43802,7 +44047,7 @@ async function openCrewProfile(name, _skipHeal) {
   if (!p.avatar) {
     try {
       if (supa && _authUser) {
-        const { data } = await supa.from('profiles').select('my_player,avatar');
+        const data = await fetchProfiles();   /* v963 PERF: was its own uncached full download of the profiles table (base64 avatars included) on every render — fetchProfiles() returns the same rows behind the shared 60s memo. */
         if (Array.isArray(data)) {
           const hit = data.find(pr => pr && pr.my_player && pr.avatar && normalizeNameSegment(pr.my_player) === normalizeNameSegment(p.name));
           if (hit) p.avatar = hit.avatar;
@@ -43927,7 +44172,7 @@ async function renderCrewLive() {
     if (supa && supaOnline) {
       const { data } = await supa.from('games')
         .select('code,data,updated_at')
-        .not('code', 'like', 'shared:%')
+        .not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */
         .order('updated_at', { ascending: false })
         .limit(40);
       rows = data || [];
@@ -44141,7 +44386,7 @@ async function checkFriendFinishAlerts() {
     if (!allowed || !allowed.size) return;
     let me = ''; try { me = (localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
     const meNorm = me ? normalizeNameSegment(me) : '';
-    const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', 'shared:%').order('updated_at', { ascending: false }).limit(40);
+    const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */.order('updated_at', { ascending: false }).limit(40);
     const rows = data || [];
     const seen = new Set(_finishSeen());
     const recent = Date.now() - 3 * 60 * 60 * 1000;  // finished within last 3h
@@ -44345,7 +44590,7 @@ async function checkCrewRoundAlerts() {
     if (!allowed || !allowed.size) return;
     let me = ''; try { me = (localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
     const meNorm = me ? normalizeNameSegment(me) : '';
-    const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', 'shared:%').order('updated_at', { ascending: false }).limit(40);
+    const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */.order('updated_at', { ascending: false }).limit(40);
     const rows = data || [];
     const seen = new Set(_crewAlertSeen());
     const recent = Date.now() - 90 * 60 * 1000;  // only alert rounds started in the last 90 min
@@ -44699,8 +44944,21 @@ function wireEditName() {
   _editNameWired = true;
   const modal = document.getElementById('edit-name-modal');
   const cancel = document.getElementById('edit-name-cancel');
-  if (cancel) cancel.onclick = () => { if (_nameRequired) { showToast('Please enter your name to continue'); return; } modal.classList.remove('show'); };
-  if (modal) modal.onclick = (e) => { if (e.target.id === 'edit-name-modal') { if (_nameRequired) return; modal.classList.remove('show'); } };
+  // v963: Cancel used to be a dead button whenever _nameRequired was set — that is
+  // what turned a wrong guess about your name into "the app is bricked" (Tyler:
+  // "I closed the entire app out"). The prompt still asks, and still re-asks on the
+  // next launch, but it can ALWAYS be dismissed. A nag is recoverable; a lockout is not.
+  if (cancel) cancel.onclick = () => {
+    if (_nameRequired) { _namePromptSnoozed = true; showToast('You can set your name any time in Settings'); }
+    _nameRequired = false;
+    modal.classList.remove('show');
+  };
+  if (modal) modal.onclick = (e) => {
+    if (e.target.id === 'edit-name-modal') {
+      if (_nameRequired) { _namePromptSnoozed = true; _nameRequired = false; }
+      modal.classList.remove('show');
+    }
+  };
   const save = document.getElementById('edit-name-save');
   if (save) save.onclick = () => saveMyName();
 }
@@ -44953,7 +45211,7 @@ async function renderCrewFriends() {
   let _cloudByNorm = null;
   try {
     if (supa) {
-      const { data: _ps } = await supa.from('player_stats').select('stats,player_name');
+      const _ps = await fetchAllPlayerStats();   /* v963 PERF: shared 30s memo — the leaderboard and the friends list were each downloading this whole table separately on the same Crew open. */
       if (Array.isArray(_ps)) { _cloudByNorm = {}; _ps.forEach(r => { try { if (r && r.player_name) _cloudByNorm[normalizeNameSegment(r.player_name)] = Array.isArray(r.stats) ? r.stats : []; } catch (e) {} }); }
     }
   } catch (e) { _cloudByNorm = null; }
@@ -46458,7 +46716,7 @@ async function getFriendLiveRounds() {
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
-      const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', 'shared:%').order('updated_at', { ascending: false }).limit(40);
+      const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */.order('updated_at', { ascending: false }).limit(40);
       rows = data || [];
     }
   } catch (e) { console.warn('getFriendLiveRounds fetch', e); }
@@ -46629,7 +46887,7 @@ async function renderWagerLive() {
     if (supa && supaOnline) {
       const { data } = await supa.from('games')
         .select('code,data,updated_at')
-        .not('code', 'like', 'shared:%')
+        .not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */
         .order('updated_at', { ascending: false })
         .limit(40);
       rows = data || [];
@@ -60338,17 +60596,28 @@ async function init() {
         if (changed) await saveTourneys(list);
       } catch (e) { console.warn('scheduled-round complete update failed:', e); }
     }
-    state.game = null;
-    state.editingLiveRound = false;
-    state.viewOnlyMode = false;
-    enableGameTabs(false);
-    await safeSet(KEY_LAST, '', false);
-    // Reset the setup form to empty so the NEXT "Play now" starts a clean round
-    // instead of resuming this finished round's leftover player rows.
-    $('setup-with-game').style.display = 'none';
-    $('setup-no-game').style.display = 'block';
-    { const _pl = $('players-list'); if (_pl) _pl.innerHTML = ''; }
-    $('summary-modal').classList.remove('show');
+    // v963: everything from here down used to be UNGUARDED. If any one of these
+    // steps threw — a failed cloud write in safeSet, a missing element — the handler
+    // died before the line that closes the modal, leaving the user staring at the
+    // summary with no way out and their round apparently unsaved. The round itself is
+    // already saved by this point, so none of this cleanup is worth trapping anyone
+    // over: each step is now individually guarded, and the modal closes in a finally.
+    try {
+      state.game = null;
+      state.editingLiveRound = false;
+      state.viewOnlyMode = false;
+      try { enableGameTabs(false); } catch (e) { console.warn('enableGameTabs on finish failed:', e); }
+      try { await safeSet(KEY_LAST, '', false); } catch (e) { console.warn('clearing last-round pointer failed:', e); }
+      // Reset the setup form to empty so the NEXT "Play now" starts a clean round
+      // instead of resuming this finished round's leftover player rows.
+      try {
+        const _sw = $('setup-with-game'); if (_sw) _sw.style.display = 'none';
+        const _sn = $('setup-no-game');   if (_sn) _sn.style.display = 'block';
+        const _pl = $('players-list');    if (_pl) _pl.innerHTML = '';
+      } catch (e) { console.warn('setup form reset on finish failed:', e); }
+    } finally {
+      try { const _sm = $('summary-modal'); if (_sm) _sm.classList.remove('show'); } catch (e) {}
+    }
     // If this finish came from "Save current round & start new", land the user
     // straight in the fresh new-round setup (QA #2) instead of Home.
     if (state._newRoundAfterSave) {
