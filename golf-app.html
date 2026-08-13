@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.965';
+const BG_BUILD = 'v2026.11.967';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -8449,6 +8449,96 @@ async function crFetchAll() {
     return data || [];
   } catch (e) { console.warn('crFetchAll', e); return []; }
 }
+// v965: there was NO way to close a course request. The only operations on this
+// table in the whole app were one insert and one select — crCreate hard-codes
+// status:'open' and nothing ever changed it. So the Admin dashboard's
+// "awaiting action" tiles were really monotonic all-time counters that could only
+// ever go up, and the only way to clear one was editing rows in the Supabase
+// console. RLS already grants admins UPDATE on this table, so no policy change
+// was needed — just the missing call and somewhere to press it.
+async function crResolveRequest(id, status, note) {
+  if (!supa || !id) return false;
+  try {
+    if (typeof t2EnsureFreshSession === 'function') { try { await t2EnsureFreshSession(); } catch (e) {} }
+    const done = (status === 'resolved' || status === 'rejected');
+    const patch = {
+      status: status || 'resolved',
+      resolved_at: done ? new Date().toISOString() : null,
+      resolved_by: done ? ((_authUser && _authUser.id) || null) : null
+    };
+    if (note != null) patch.resolution_note = String(note).trim() || null;
+    const { error } = await supa.from('course_requests').update(patch).eq('id', id);
+    if (error) { console.warn('crResolveRequest', error); try { showToast(error.message || 'Could not update that request'); } catch (e) {} return false; }
+    return true;
+  } catch (e) { console.warn('crResolveRequest', e); return false; }
+}
+
+// Admin queue for course requests — the missing other half of crCreate.
+// Opened by tapping either request tile on the dashboard.
+async function openCourseRequestQueue() {
+  if (document.getElementById('cr-queue-ov')) return;
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+  const ov = document.createElement('div');
+  ov.id = 'cr-queue-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100010;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch';
+  ov.innerHTML = '<div style="padding:14px 14px 40px;max-width:720px;margin:0 auto">'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'
+    +   '<h2 style="margin:0;flex:1">📩 Course requests</h2>'
+    +   '<button id="cr-q-close" class="small" style="padding:8px 12px">✕ Close</button>'
+    + '</div>'
+    + '<div style="display:flex;gap:8px;margin-bottom:10px">'
+    +   '<button id="cr-q-open" class="small primary" style="flex:1;padding:9px">Open</button>'
+    +   '<button id="cr-q-done" class="small" style="flex:1;padding:9px">Resolved</button>'
+    + '</div>'
+    + '<div id="cr-q-list"></div></div>';
+  document.body.appendChild(ov);
+  let showOpen = true;
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.querySelector('#cr-q-close').onclick = close;
+  const draw = async () => {
+    const list = ov.querySelector('#cr-q-list');
+    list.innerHTML = '<div class="help-text" style="padding:20px 0;text-align:center">Loading…</div>';
+    let all = [];
+    try { all = await crFetchAll(); } catch (e) {}
+    const rows = (all || []).filter(x => showOpen ? ((x.status || 'open') === 'open') : ((x.status || 'open') !== 'open'));
+    if (!rows.length) { list.innerHTML = '<div class="help-text" style="padding:20px 0;text-align:center">Nothing here.</div>'; return; }
+    list.innerHTML = rows.map(x => {
+      const when = x.created_at ? new Date(x.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+      const kind = x.type === 'remap' ? '🛠 Re-map' : '📩 New course';
+      return '<div class="card" style="margin-bottom:8px">'
+        + '<div style="font-weight:700">' + esc(x.course_name || '(no name given)') + '</div>'
+        + '<div class="small-text" style="color:var(--text-muted);margin-top:2px">' + kind
+          + (x.location ? ' · ' + esc(x.location) : '')
+          + (when ? ' · ' + esc(when) : '')
+          + (x.requester_name ? ' · by ' + esc(x.requester_name) : '') + '</div>'
+        + (x.note ? '<div class="small-text" style="margin-top:6px;background:var(--surface-2);border-radius:8px;padding:8px 10px;line-height:1.5">' + esc(x.note) + '</div>' : '')
+        + (x.resolution_note ? '<div class="small-text" style="margin-top:6px;color:var(--text-muted)">Note: ' + esc(x.resolution_note) + '</div>' : '')
+        + '<div style="display:flex;gap:8px;margin-top:10px">'
+        + (showOpen
+            ? '<button class="small primary cr-q-resolve" data-id="' + esc(x.id) + '" style="flex:1;padding:9px">✓ Resolve</button>'
+              + '<button class="small cr-q-reject" data-id="' + esc(x.id) + '" style="flex:1;padding:9px">✕ Reject</button>'
+            : '<button class="small cr-q-reopen" data-id="' + esc(x.id) + '" style="flex:1;padding:9px">↺ Reopen</button>')
+        + '</div></div>';
+    }).join('');
+    const act = async (id, status) => {
+      let note = null;
+      if (status !== 'open') { try { note = await uiPrompt('Add a note? (optional)', { title: status === 'resolved' ? 'Resolve request' : 'Reject request', okLabel: 'Save' }); } catch (e) { note = null; } }
+      if (await crResolveRequest(id, status, note)) {
+        try { showToast(status === 'open' ? 'Reopened' : (status === 'resolved' ? 'Resolved' : 'Rejected')); } catch (e) {}
+        _dashCache = null;                       // dashboard counts are now stale
+        await draw();
+        try { if (document.getElementById('dash-body')) renderDashboard(); } catch (e) {}
+      }
+    };
+    list.querySelectorAll('.cr-q-resolve').forEach(b => b.onclick = () => act(b.dataset.id, 'resolved'));
+    list.querySelectorAll('.cr-q-reject').forEach(b => b.onclick = () => act(b.dataset.id, 'rejected'));
+    list.querySelectorAll('.cr-q-reopen').forEach(b => b.onclick = () => act(b.dataset.id, 'open'));
+  };
+  const tabOpen = ov.querySelector('#cr-q-open'), tabDone = ov.querySelector('#cr-q-done');
+  tabOpen.onclick = () => { showOpen = true; tabOpen.classList.add('primary'); tabDone.classList.remove('primary'); draw(); };
+  tabDone.onclick = () => { showOpen = false; tabDone.classList.add('primary'); tabOpen.classList.remove('primary'); draw(); };
+  draw();
+}
 function openCourseRequestModal(type, prefillName) {
   if (document.getElementById('course-req-ov')) return;
   const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
@@ -8595,6 +8685,8 @@ async function _dashLoadRaw() {
       if (!roundHoles) return;   // nothing actually scored — not a played round
       out.rounds.push({
         date: (g.createdAt || g.updatedAt || Date.parse(row.updated_at) || 0),
+        course: g.course || '',        // v967: needed by the drill-down list
+        code: row.code || '',
         complete: !!g.finishedAt,
         holesScored: roundHoles,
         playerHoles: playerHoles,
@@ -8655,6 +8747,20 @@ async function _dashLoadRaw() {
     // v964: this summed every copy, so three duplicate PAIRS reported 6. What the
     // admin needs is the number of EXTRA copies to merge away.
     out.courses.dupes = Object.keys(nm).filter(k => nm[k] > 1).reduce((a, k) => a + (nm[k] - 1), 0);
+    // v967: keep the actual course records so each tile can open its worklist.
+    const _dupNames = new Set(Object.keys(nm).filter(k => nm[k] > 1));
+    out.courseLists = {
+      all: libScoped.map(c => ({ id: c.id, name: c.name, city: c.city, st: c.st })),
+      complete: work.filter(c => c.complete).map(c => ({ id: c.id, name: c.name, city: c.city, st: c.st })),
+      open: work.filter(c => !c.complete).map(c => ({ id: c.id, name: c.name, city: c.city, st: c.st })),
+      needsGps: work.filter(c => !c.hasGPS).map(c => ({ id: c.id, name: c.name, city: c.city, st: c.st })),
+      needsRs: work.filter(c => !c.hasRS).map(c => ({ id: c.id, name: c.name, city: c.city, st: c.st })),
+      needsTargets: work.filter(c => c.needsTargets).map(c => ({ id: c.id, name: c.name, city: c.city, st: c.st })),
+      verified: libScoped.filter(c => _adminVerified && _adminVerified.has(c.id)).map(c => ({ id: c.id, name: c.name, city: c.city, st: c.st })),
+      dupes: libScoped.filter(c => _dupNames.has((c.name || '').trim().toLowerCase()))
+                      .sort((a, b) => String(a.name||'').localeCompare(String(b.name||'')))
+                      .map(c => ({ id: c.id, name: c.name, city: c.city, st: c.st }))
+    };
   } catch (e) {}
   return out;
 }
@@ -8701,11 +8807,55 @@ function _dashApplyCustom() {
   if (_dashFrom && _dashTo && _dashFrom > _dashTo) { const tmp = _dashFrom; _dashFrom = _dashTo; _dashTo = tmp; }
   renderDashboard();
 }
+// v967 — drill-downs. Every dashboard tile can register the rows behind its
+// number here; tapping the tile opens a searchable list of them, so a figure like
+// "326 needs GPS" becomes an actual worklist instead of a dead number.
+let _dashDrillData = {}, _dashDrillSeq = 0;
+function _dashOpenDrill(key) {
+  const spec = _dashDrillData[key];
+  if (!spec) return;
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
+  const rows = spec.rows || [];
+  const old = document.getElementById('dash-drill-ov'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'dash-drill-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100020;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch';
+  ov.innerHTML = '<div style="padding:14px 14px 40px;max-width:720px;margin:0 auto">'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">'
+    +   '<h2 style="margin:0;flex:1;font-size:18px">' + esc(spec.title) + '</h2>'
+    +   '<button id="dd-close" class="small" style="padding:8px 12px">✕ Close</button></div>'
+    + '<div class="small-text" style="color:var(--text-muted);margin-bottom:10px">' + rows.length + ' item' + (rows.length === 1 ? '' : 's') + (spec.sub ? ' · ' + esc(spec.sub) : '') + '</div>'
+    + (rows.length > 12 ? '<input id="dd-search" type="text" placeholder="Filter…" style="width:100%;padding:11px 12px;font-size:16px;margin-bottom:10px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px">' : '')
+    + '<div id="dd-list"></div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#dd-close').onclick = () => ov.remove();
+  const listEl = ov.querySelector('#dd-list');
+  const draw = (q) => {
+    const term = (q || '').toLowerCase().trim();
+    const shown = term ? rows.filter(x => ((x.t || '') + ' ' + (x.s || '')).toLowerCase().includes(term)) : rows;
+    if (!shown.length) { listEl.innerHTML = '<div class="help-text" style="padding:20px 0;text-align:center">Nothing to show.</div>'; return; }
+    listEl.innerHTML = shown.slice(0, 400).map(x =>
+      '<div style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;background:var(--surface-2);margin-bottom:6px"'
+      + (x.go ? ' onclick="' + x.go + '" role="button" style="cursor:pointer"' : '') + '>'
+      + '<div style="flex:1;min-width:0">'
+      +   '<div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(x.t || '') + '</div>'
+      +   (x.s ? '<div class="small-text" style="color:var(--text-muted);margin-top:1px">' + esc(x.s) + '</div>' : '')
+      + '</div>'
+      + (x.v != null ? '<div style="flex:0 0 auto;font-weight:800;font-size:15px">' + esc(String(x.v)) + '</div>' : '')
+      + '</div>').join('')
+      + (shown.length > 400 ? '<div class="help-text" style="padding:8px 0;text-align:center">Showing the first 400 of ' + shown.length + '.</div>' : '');
+  };
+  draw('');
+  const si = ov.querySelector('#dd-search');
+  if (si) si.oninput = () => draw(si.value);
+}
+
 async function renderDashboard() {
   const body = document.getElementById('dash-body'); if (!body) return;
   body.innerHTML = '<div class="help-text" style="padding:24px 0;text-align:center">Crunching the numbers…</div>';
   if (!_dashCache) { try { _dashCache = await _dashLoadRaw(); } catch (e) { _dashCache = {}; } }
   const d = _dashCache || {};
+  _dashDrillData = {}; _dashDrillSeq = 0;   // v967: rebuilt fresh on every render
   const r = dashRange(_dashRangeKey, _dashFrom, _dashTo);
   // v964: dashRange returns the END of the period, not "now". For "This month" on
   // the 12th that meant the current window held 12 days of data while the comparison
@@ -8745,9 +8895,34 @@ async function renderDashboard() {
   const newAcct = userTimes.filter(t => inR(t, r.from, r.to)).length;
   const newAcctPrev = userTimes.filter(t => inR(t, pr.from, pr.to)).length;
   // --- wagers ---
-  const wTimes = (d.wagers || []).map(w => parseT(w.created_at)).filter(t => !isNaN(t));
-  const wIn = wTimes.filter(t => inR(t, r.from, r.to)).length;
-  const wPrev = wTimes.filter(t => inR(t, pr.from, pr.to)).length;
+  // v965: the wager tiles were counting ROWS, but a row means two different things.
+  // A head-to-head / over-under / match wager is ONE row covering two bettors (the
+  // creator posts it, a taker takes the other side and the row flips to 'matched').
+  // A win-pool creates one row PER PARTICIPANT, grouped by pool_key + round_code.
+  // So "wagers placed" was silently adding five pool entries to one h2h and calling
+  // them six wagers. Count betting EVENTS (a pool is one event) and report the
+  // people involved separately.
+  const wEvents = (list) => {
+    const seen = new Set(); let n = 0;
+    (list || []).forEach(w => {
+      if (!w) return;
+      if (w.bet_type === 'win') {
+        const k = 'pool|' + (w.round_code || '') + '|' + (w.pool_key || w.id);
+        if (seen.has(k)) return; seen.add(k); n++;
+      } else n++;   // one row IS the wager for h2h / ou / team / match
+    });
+    return n;
+  };
+  const wAll = (d.wagers || []).filter(w => w && !isNaN(parseT(w.created_at)));
+  const wInList = wAll.filter(w => inR(parseT(w.created_at), r.from, r.to));
+  const wPrevList = wAll.filter(w => inR(parseT(w.created_at), pr.from, pr.to));
+  const wTimes = wAll.map(w => parseT(w.created_at));
+  const wIn = wEvents(wInList);
+  const wPrev = wEvents(wPrevList);
+  // Distinct people with money in. There is no taker_id column, so this counts
+  // everyone who POSTED a stake — the honest, computable figure.
+  const wBettors = new Set(wInList.map(w => w.creator_id).filter(Boolean)).size;
+  const wStakes = wInList.length;
   // --- requests ---
   const reqs = d.requests || [];
   const openReqs = reqs.filter(x => (x.status || 'open') === 'open');
@@ -8755,73 +8930,148 @@ async function renderDashboard() {
   const reqRemap = openReqs.filter(x => x.type === 'remap').length;
   // --- courses (snapshot) ---
   const c = d.courses || {};
+  const cl = d.courseLists || { all: [], complete: [], open: [], needsGps: [], needsRs: [], needsTargets: [], verified: [], dupes: [] };
   const pctComplete = c.total ? Math.round(c.complete / c.total * 100) : 0;
   // helpers
   const delta = (cur, prev) => { if (!prev) return cur > 0 ? '+100%' : ''; const p = Math.round((cur - prev) / prev * 100); return (p >= 0 ? '+' : '') + p + '%'; };
   const card = (label, val, opts) => {
     opts = opts || {};
-    return '<div style="background:var(--surface-2);border-radius:12px;padding:12px 12px 10px;' + (opts.dim ? 'opacity:0.5;' : '') + '">'
+    // v967 (Tyler: "we need to be able to click all of these and see what they are").
+    // Any tile can hand over the actual rows behind its number; they get parked in a
+    // registry and the tile opens a drill-down list instead of being a dead figure.
+    if (opts.rows) {
+      const key = 'd' + (_dashDrillSeq++);
+      _dashDrillData[key] = { title: label, sub: opts.drillSub || '', rows: opts.rows };
+      opts.click = "_dashOpenDrill('" + key + "')";
+    }
+    return '<div' + (opts.click ? ' onclick="' + opts.click + '" role="button" tabindex="0"' : '') + ' style="background:var(--surface-2);border-radius:12px;padding:12px 12px 10px;' + (opts.dim ? 'opacity:0.5;' : '') + (opts.click ? 'cursor:pointer;border:1px solid var(--border);' : '') + '">'
       + '<div class="small-text" style="text-transform:uppercase;letter-spacing:0.03em;color:var(--text-muted);font-size:10px;font-weight:700">' + label + '</div>'
       + '<div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;margin-top:2px"><div style="font-size:24px;font-weight:800;line-height:1.1">' + val + '</div>'
       + (opts.delta ? '<div style="font-size:12px;font-weight:700;color:' + (/^-/.test(opts.delta) ? 'var(--danger)' : 'var(--money-pos)') + '">' + opts.delta + '</div>' : '') + '</div>'
       + (opts.sub ? '<div class="small-text" style="color:var(--text-muted);font-size:11px;margin-top:1px">' + opts.sub + '</div>' : '')
       + (opts.spark || '')
       + (opts.note ? '<div class="small-text" style="color:var(--text-muted);font-size:10px;margin-top:5px;font-style:italic">' + opts.note + '</div>' : '')
+      + (opts.click ? '<div class="small-text" style="color:var(--accent);font-size:10px;margin-top:5px;font-weight:700">View \u203a</div>' : '')
       + '</div>';
   };
   const grid = cards => '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:4px">' + cards.join('') + '</div>';
   const section = (t, extra) => '<h3 style="margin:18px 0 8px;font-size:15px">' + t + (extra ? ' <span class="small-text" style="font-weight:500;color:var(--text-muted);font-size:11px">' + extra + '</span>' : '') + '</h3>';
+  // v967 drill-down row builders
+  const fmtD = t => { try { return t ? new Date(t).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : ''; } catch(e){ return ''; } };
+  const roundRows = list => (list||[]).slice().sort((a,b)=>(b.date||0)-(a.date||0)).map(x => ({
+    t: (x.course || 'Round') + ' · ' + fmtD(x.date),
+    s: (x.players||[]).join(', ') || 'no players recorded',
+    v: (x.holesScored||0) + 'h' + (x.complete ? '' : ' ·')
+  }));
+  const courseRows = list => (list||[]).map(c => ({ t: c.name || c.id, s: (c.city ? c.city + ', ' : '') + (c.st || ''), go: "openCourseDetail('" + String(c.id).replace(/'/g,"\\'") + "')" }));
   let html = '';
   html += '<div class="small-text" style="color:var(--text-muted);margin:2px 0 4px">Showing: <strong>' + r.label + '</strong>' + (isPartial ? ' <span style="opacity:.8">(so far \u2014 compared against the same length of time before it)</span>' : '') + '</div>';
   // Engagement
   html += section('⛳ Engagement', '· ' + r.label);
   html += grid([
-    card('Rounds played', rIn.length, { delta: delta(rIn.length, rPrev.length), spark: _dashSpark(_dashBuckets(rIn.map(s => s.date), r.from, r.to)) }),
-    card('Rounds completed', completed.length, { sub: unfinished + ' unfinished' }),
-    card('Holes played', holes, { sub: playerHoles ? playerHoles + ' player-holes' : '' }),
-    card('Avg score', avg != null ? avg : '—', { sub: grossArr.length ? 'over ' + grossArr.length + ' full 18-hole cards' : 'no 18-hole cards yet' })
+    card('Rounds played', rIn.length, { delta: delta(rIn.length, rPrev.length), spark: _dashSpark(_dashBuckets(rIn.map(s => s.date), r.from, r.to)), rows: roundRows(rIn) }),
+    card('Rounds completed', completed.length, { sub: unfinished + ' unfinished', rows: roundRows(completed) }),
+    card('Holes played', holes, { sub: playerHoles ? playerHoles + ' player-holes' : '', rows: roundRows(rIn) }),
+    card('Avg score', avg != null ? avg : '—', { sub: grossArr.length ? 'over ' + grossArr.length + ' full 18-hole cards' : 'no 18-hole cards yet',
+      rows: (d.grosses || []).filter(x => inR(x.date, r.from, r.to)).sort((a,b)=>a.gross-b.gross).map(x => ({ t: fmtD(x.date), s: '18-hole card', v: x.gross })) })
   ]);
   // Players
   html += section('👥 Players & accounts');
   html += grid([
-    card('Active players', activeSet.size, { sub: 'played in range' }),
-    card('Live rounds now', d.live || 0, { sub: 'in progress' }),
-    card('Total accounts', totalAcct, {}),
-    card('New signups', hasAcctDates ? newAcct : '—', hasAcctDates ? { delta: delta(newAcct, newAcctPrev) } : { note: 'needs a signup date on profiles' })
+    card('Active players', activeSet.size, { sub: 'played in range', rows: [...activeSet].sort().map(n => ({ t: n })) }),
+    card('Live rounds now', d.live || 0, { sub: 'in progress', rows: roundRows((d.rounds||[]).filter(x => !x.complete && (Date.now() - (x.date||0)) < 3*3600000)) }),
+    card('Total accounts', totalAcct, { rows: (d.users||[]).map(u => ({ t: u.display_name || u.my_player || (u.id||'').slice(0,8), s: [u.email, u.my_player ? '\u2192 ' + u.my_player : '', u.is_pro ? 'PRO' : ''].filter(Boolean).join(' · '), v: u.role && u.role !== 'user' ? u.role : '' })) }),
+    card('New signups', hasAcctDates ? newAcct : '—', hasAcctDates
+      ? { delta: delta(newAcct, newAcctPrev), spark: _dashSpark(_dashBuckets(userTimes, r.from, r.to)),
+          rows: (d.users||[]).filter(u => inR(parseT(u.created_at), r.from, r.to)).sort((a,b)=>parseT(b.created_at)-parseT(a.created_at)).map(u => ({ t: u.display_name || u.my_player || (u.id||'').slice(0,8), s: (u.email||'') , v: fmtD(parseT(u.created_at)) })) }
+      : { note: 'needs a signup date on profiles' })
   ]);
   // Wagers
   html += section('💵 Wagers');
   html += grid([
-    card('Wagers placed', wIn, { delta: delta(wIn, wPrev), spark: _dashSpark(_dashBuckets(wTimes, r.from, r.to)) }),
-    card('Total wagers (all time)', (d.wagers || []).length, {})
+    card('Wagers placed', wIn, { delta: delta(wIn, wPrev), sub: wStakes !== wIn ? wStakes + ' stakes (pools count once)' : '', spark: _dashSpark(_dashBuckets(wTimes, r.from, r.to)),
+      rows: wInList.map(w => ({ t: (w.bet_type || 'wager') + (w.round_code ? ' · ' + w.round_code : ''), s: (w.creator_name || '') + ' · ' + (w.status || ''), v: w.amount != null ? ('$' + w.amount) : '' })) }),
+    card('Bettors', wBettors, { sub: 'placed a stake in range',
+      rows: [...new Map(wInList.filter(w=>w.creator_id).map(w => [w.creator_id, w])).values()].map(w => ({ t: w.creator_name || (w.creator_id||'').slice(0,8), s: 'placed a stake' })) }),
+    card('Total wagers (all time)', wEvents(d.wagers || []), {}),
+    card('Total stakes (all time)', (d.wagers || []).length, { sub: 'one per participant' })
   ]);
   // Course requests
   html += section('📩 Course requests', '· open');
   html += grid([
-    card('New-course requests', reqNew, { sub: 'awaiting action' }),
-    card('Re-map requests', reqRemap, { sub: 'awaiting action' })
+    card('New-course requests', reqNew, { sub: 'tap to work the queue', click: 'openCourseRequestQueue()' }),
+    card('Re-map requests', reqRemap, { sub: 'tap to work the queue', click: 'openCourseRequestQueue()' })
   ]);
   // Course library
   html += section('🗺️ Course library', (c.scopeLabel ? '· ' + escapeHtml(String(c.scopeLabel)) + ' only' : '· current'));
   html += grid([
-    card('Verified', c.verified || 0, {}),
-    card('Complete', c.complete || 0, { sub: pctComplete + '% of library' }),
-    card('Open', c.open || 0, { sub: 'not complete' }),
-    card('Total courses', c.total || 0, {})
+    card('Verified', c.verified || 0, { rows: courseRows(cl.verified) }),
+    card('Complete', c.complete || 0, { sub: pctComplete + '% of library', rows: courseRows(cl.complete) }),
+    card('Open', c.open || 0, { sub: 'not complete', rows: courseRows(cl.open) }),
+    card('Total courses', c.total || 0, { rows: courseRows(cl.all) })
   ]);
   html += grid([
-    card('Needs GPS', c.needsGps || 0, {}),
-    card('Needs ratings', c.needsRs || 0, {}),
-    card('Needs targets', c.needsTargets || 0, {}),
-    card('Duplicates flagged', c.dupes || 0, {})
+    card('Needs GPS', c.needsGps || 0, { rows: courseRows(cl.needsGps) }),
+    card('Needs ratings', c.needsRs || 0, { rows: courseRows(cl.needsRs) }),
+    card('Needs targets', c.needsTargets || 0, { rows: courseRows(cl.needsTargets) }),
+    card('Duplicates flagged', c.dupes || 0, { sub: 'extra copies to merge', rows: courseRows(cl.dupes) })
   ]);
-  // Coming soon
-  html += section('🔌 Coming soon', '· needs outside connections');
+  // ---- Platform & adoption (v967) -------------------------------------------
+  // Real data, from profiles.last_platform / last_build. IMPORTANT: those columns
+  // are only written by builds that carry the telemetry, so the denominator here is
+  // "accounts seen since it shipped", NOT every account. Labelled as such rather
+  // than quietly dividing by 102 and reporting a fake percentage.
+  const seenUsers = (d.users || []).filter(u => u && u.last_platform);
+  const platCount = {};
+  seenUsers.forEach(u => { const k = String(u.last_platform).toLowerCase(); platCount[k] = (platCount[k] || 0) + 1; });
+  const buildCount = {};
+  (d.users || []).forEach(u => { if (u && u.last_build) buildCount[u.last_build] = (buildCount[u.last_build] || 0) + 1; });
+  const buildKeys = Object.keys(buildCount).sort().reverse();
+  const platRows = Object.keys(platCount).sort((a, b) => platCount[b] - platCount[a])
+    .map(k => ({ t: k === 'ios' ? '\ud83c\udf4e iOS' : (k === 'android' ? '\ud83e\udd16 Android' : '\ud83c\udf10 Web'), s: 'last seen on this platform', v: platCount[k] }));
+  html += section('\ud83d\udcf1 Platform & adoption', seenUsers.length ? ('\u00b7 ' + seenUsers.length + ' of ' + totalAcct + ' accounts reporting') : '\u00b7 no devices reporting yet');
   html += grid([
-    card('Downloads & impressions', '—', { dim: true, note: 'App Store Connect' }),
-    card('Revenue / MRR', '—', { dim: true, note: 'needs a payments system' }),
-    card('Crashes by version', '—', { dim: true, note: 'needs crash reporting' }),
-    card('Retention D1/7/14/28', '—', { dim: true, note: 'needs analytics' })
+    card('iOS accounts', platCount.ios || 0, { sub: 'last seen on iOS', rows: (d.users||[]).filter(u=>String(u.last_platform||'').toLowerCase()==='ios').map(u=>({t:u.display_name||u.my_player||'account', s:u.email||'', v:u.last_build||''})) }),
+    card('Android accounts', platCount.android || 0, { sub: 'last seen on Android', rows: (d.users||[]).filter(u=>String(u.last_platform||'').toLowerCase()==='android').map(u=>({t:u.display_name||u.my_player||'account', s:u.email||'', v:u.last_build||''})) }),
+    card('Builds in the wild', buildKeys.length, { sub: buildKeys.length ? ('newest ' + buildKeys[0]) : 'none reporting',
+      rows: buildKeys.map(k => ({ t: k, s: 'accounts on this build', v: buildCount[k] })) }),
+    card('Platform split', platRows.length ? (Object.keys(platCount).length + ' platforms') : '\u2014', { sub: seenUsers.length + ' reporting', rows: platRows })
+  ]);
+  // ---- Retention (v967) -----------------------------------------------------
+  // Computed from data we already hold: profiles.created_at vs the app-wide round
+  // rows. Only accounts LINKED to a player can be observed at all (rounds identify
+  // people by player name), so unlinked accounts are excluded from the denominator
+  // instead of being silently counted as churned.
+  const _rn = x => { try { return typeof normalizeNameSegment === 'function' ? normalizeNameSegment(String(x||'')) : String(x||'').trim().toLowerCase(); } catch (e) { return String(x||'').toLowerCase(); } };
+  const playDates = {};
+  (d.rounds || []).forEach(rd => (rd.players || []).forEach(n => {
+    const k = _rn(n); if (!k) return; (playDates[k] = playDates[k] || []).push(rd.date || 0);
+  }));
+  const linked = (d.users || []).filter(u => u && u.my_player && !isNaN(parseT(u.created_at)));
+  const retAt = (days) => {
+    const win = days * 86400000;
+    const eligible = linked.filter(u => (Date.now() - parseT(u.created_at)) >= win);   // only accounts old enough to judge
+    if (!eligible.length) return null;
+    const kept = eligible.filter(u => {
+      const t0 = parseT(u.created_at), ds = playDates[_rn(u.my_player)] || [];
+      return ds.some(t => t > t0 && (t - t0) <= win);
+    });
+    return { pct: Math.round(kept.length / eligible.length * 100), kept: kept.length, n: eligible.length, list: kept };
+  };
+  const r1 = retAt(1), r7 = retAt(7), r30 = retAt(30);
+  const retCard = (lbl, x) => card(lbl, x ? (x.pct + '%') : '\u2014',
+    x ? { sub: x.kept + ' of ' + x.n + ' linked accounts', rows: x.list.map(u => ({ t: u.display_name || u.my_player, s: u.email || '', v: fmtD(parseT(u.created_at)) })) }
+      : { note: 'no accounts old enough yet' });
+  html += section('\ud83d\udcc8 Retention', '\u00b7 ' + linked.length + ' player-linked accounts');
+  html += grid([ retCard('Retention D1', r1), retCard('Retention D7', r7), retCard('Retention D30', r30),
+    card('Linked accounts', linked.length, { sub: 'of ' + totalAcct + ' total', rows: linked.map(u => ({ t: u.display_name || u.my_player, s: u.email || '', v: fmtD(parseT(u.created_at)) })) }) ]);
+  // ---- Genuinely still needs an outside connection ---------------------------
+  html += section('\ud83d\udd0c Needs an outside connection');
+  html += grid([
+    card('Downloads & impressions', '\u2014', { dim: true, note: 'App Store Connect API: needs an issuer ID, key ID and .p8 key, called from a server (the key cannot ship in the app)' }),
+    card('Revenue / MRR', '\u2014', { dim: true, note: 'no IAP products exist yet \u2014 nothing is gated, so there is nothing to bill for' }),
+    card('Crashes by version', '\u2014', { dim: true, note: 'no crash SDK installed (Crashlytics or Sentry)' }),
+    card('Impressions \u2192 install rate', '\u2014', { dim: true, note: 'same App Store Connect connection as downloads' })
   ]);
   body.innerHTML = html;
 }
@@ -8853,7 +9103,8 @@ function renderAdminUserList() {
       const av = u.avatar
         ? '<div data-avatar="' + ea(u.avatar) + '" style="width:42px;height:42px;border-radius:9px;flex:0 0 auto;background-image:url(\'' + ea(u.avatar) + '\');background-size:cover;background-position:center;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,0.25)"></div>'
         : '<div style="width:46px;height:46px;border-radius:50%;flex:0 0 auto;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800">' + esc((u.display_name || u.my_player || '?').trim().charAt(0).toUpperCase()) + '</div>';
-      const badge = '<span class="adm-flag" style="background:' + (isAdm ? 'var(--accent)' : 'var(--text-muted)') + '">' + (u.role || 'user') + '</span>';
+      const badge = '<span class="adm-flag" style="background:' + (isAdm ? 'var(--accent)' : 'var(--text-muted)') + '">' + (u.role || 'user') + '</span>'
+        + (u.is_pro ? ' <span class="adm-flag" style="background:var(--gold);color:#fff" title="Comped Pro access">PRO</span>' : '');
       return '<div class="adm-card" style="display:block">'
         + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' + av
         + '<div style="flex:1;min-width:0">'
@@ -8864,6 +9115,7 @@ function renderAdminUserList() {
         + '<div class="adm-actions" style="display:flex;flex-wrap:wrap;gap:6px">'
         + actBtn('🔑 Reset password', 'data-resetpw', u.id, '')
         + (isAdm ? actBtn('Revoke admin', 'data-revoke', u.id, '') : actBtn('Make admin', 'data-grant', u.id, 'var(--accent)'))
+        + (u.is_pro ? actBtn('\u2b50 Pro: ON', 'data-prooff', u.id, 'var(--gold)') : actBtn('\u2606 Pro: off', 'data-proon', u.id, ''))
         + actBtn('🔗 Relink player', 'data-relink', u.id, '')
         + actBtn('🗑️ Delete', 'data-deluser', u.id, 'var(--money-neg)')
         + '</div></div>';
@@ -9072,13 +9324,83 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
   return items;
 }
 
+// ---- Pro entitlement (v965) ------------------------------------------------
+// Tyler: "I need the ability to make someone a power user — on the pro version
+// without paying through Apple or Google. Make it a toggle."
+//
+// IMPORTANT CONTEXT: as of this build NOTHING in the app is actually gated. The
+// PRO pills are informational and openProInfo() literally tells users "Pro
+// features — free right now". So this is the ENTITLEMENT LAYER, deliberately
+// built ahead of the paywall: an admin can comp someone today, and whenever a
+// feature does get gated it asks isProUser() and comped accounts already work.
+// When Apple/Google billing lands, its webhook sets this same is_pro flag, so
+// paid and comped users travel the identical code path.
+let _proFlagCache = null, _proFlagCacheAt = 0;
+function _bgProCacheBust() { try { _proFlagCacheAt = 0; } catch (e) {} }
+// Is the SIGNED-IN user entitled to Pro? Cached for 60s. Admins always count.
+async function isProUser() {
+  try {
+    if (typeof isAdmin === 'function' && isAdmin()) return true;   // staff always have it
+    if (!(isSignedIn() && supa && _authUser)) return false;
+    if (_proFlagCache !== null && (Date.now() - _proFlagCacheAt) < 60000) return _proFlagCache;
+    const { data, error } = await supa.from('profiles').select('is_pro').eq('id', _authUser.id).maybeSingle();
+    if (error) return _proFlagCache === null ? false : _proFlagCache;   // never downgrade on a failed read
+    const v = !!(data && data.is_pro);
+    _proFlagCache = v; _proFlagCacheAt = Date.now();
+    try { localStorage.setItem('golf:is-pro', v ? '1' : '0'); } catch (e) {}
+    return v;
+  } catch (e) { return false; }
+}
+// Synchronous best-effort for render paths that can't await (falls back to the
+// last known answer). Prefer isProUser() wherever an await is possible.
+function isProUserSync() {
+  try {
+    if (typeof isAdmin === 'function' && isAdmin()) return true;
+    if (_proFlagCache !== null) return _proFlagCache;
+    return localStorage.getItem('golf:is-pro') === '1';
+  } catch (e) { return false; }
+}
+// Admin action: grant or revoke comped Pro for another account.
+async function setUserPro(userId, on) {
+  if (!supa || !userId) return false;
+  if (!(typeof isAdmin === 'function' && isAdmin())) { try { showToast('Admins only'); } catch (e) {} return false; }
+  try {
+    if (typeof t2EnsureFreshSession === 'function') { try { await t2EnsureFreshSession(); } catch (e) {} }
+    const patch = on
+      ? { is_pro: true,  pro_granted_at: new Date().toISOString(), pro_granted_by: (_authUser && _authUser.id) || null, pro_source: 'admin-comp' }
+      : { is_pro: false, pro_granted_at: null, pro_granted_by: null, pro_source: null };
+    const { error } = await supa.from('profiles').update(patch).eq('id', userId);
+    if (error) { console.warn('setUserPro', error); try { showToast(error.message || 'Could not change Pro access'); } catch (e) {} return false; }
+    // Keep the in-memory admin list in step so the row re-renders correctly.
+    try { (_adminUsers || []).forEach(u => { if (u && u.id === userId) u.is_pro = !!on; }); } catch (e) {}
+    if (_authUser && _authUser.id === userId) _bgProCacheBust();   // changed my own entitlement
+    return true;
+  } catch (e) { console.warn('setUserPro', e); return false; }
+}
+
 async function getAdminUsers() {
   // Try with email (profiles has it) for search + password reset; fall back to the
   // basic columns if the email column isn't present so the list never breaks.
   try {
     if (supa && supaOnline) {
-      let r = await supa.from('profiles').select('id,display_name,my_player,role,email,created_at');
-      if (r.error) r = await supa.from('profiles').select('id,display_name,my_player,role,email');
+      // v967 DATA FIX (Tyler: "make sure all this data is correct and connected").
+      // There is NO `email` column on profiles — emails live in auth.users. Every
+      // fallback here except the last one asked for it, so all three failed and the
+      // list silently degraded to the minimal query, which drops created_at, is_pro
+      // and avatar. That is why "New signups" read "needs a signup date on profiles"
+      // while all 102 profiles had one, why no email or avatar ever showed in the
+      // Users list, and why "Reset password" always said "No email on file".
+      // admin_list_users() is a SECURITY DEFINER function that joins auth.users and
+      // returns nothing unless is_admin() — so emails stay admin-only.
+      try {
+        const rpc = await supa.rpc('admin_list_users');
+        if (rpc && !rpc.error && Array.isArray(rpc.data) && rpc.data.length) return rpc.data;
+      } catch (e) { /* fall through to the direct reads below */ }
+      // Fallback for environments where the function isn't installed yet. Note the
+      // absence of `email` — asking for it is what broke this in the first place.
+      let r = await supa.from('profiles').select('id,display_name,my_player,role,created_at,is_pro,avatar,last_seen_at,last_platform,last_build');
+      if (r.error) r = await supa.from('profiles').select('id,display_name,my_player,role,created_at,is_pro');
+      if (r.error) r = await supa.from('profiles').select('id,display_name,my_player,role,created_at');
       if (r.error) r = await supa.from('profiles').select('id,display_name,my_player,role');
       return r.data || [];
     }
@@ -9844,6 +10166,26 @@ async function renderAdmin() {
         if (error) { showToast('Could not change role (admin RLS may block this)'); }
         else { showToast(t.dataset.grant ? 'Granted admin' : 'Revoked admin'); try { audit('set_role', id, role); } catch (e2) {} renderAdmin(); }
       } catch (e2) { showToast('Role change failed'); }
+      return;
+    }
+    // v965 Pro toggle — comp an account onto Pro without going through Apple/Google.
+    // Re-renders just the user list (not the whole Admin tab) so the toggle feels
+    // instant and doesn't scroll the admin back to the top.
+    if (t.dataset.proon || t.dataset.prooff) {
+      const id = t.dataset.proon || t.dataset.prooff;
+      const on = !!t.dataset.proon;
+      const u = (_adminUsers || []).find(x => x && x.id === id);
+      const who = (u && (u.display_name || u.my_player || u.email)) || 'this user';
+      if (!on) {
+        let ok = true;
+        try { ok = await uiConfirm('Remove comped Pro access for ' + who + '?', { title: 'Revoke Pro', okLabel: 'Revoke', danger: true }); } catch (e) {}
+        if (!ok) return;
+      }
+      if (await setUserPro(id, on)) {
+        showToast(on ? ('⭐ ' + who + ' now has Pro') : ('Pro removed for ' + who));
+        try { audit(on ? 'grant_pro' : 'revoke_pro', id, who); } catch (e2) {}
+        renderAdminUserList();
+      }
       return;
     }
     if (t.dataset.usermore) { _adminUserShow = parseInt(t.dataset.usermore, 10) || 20; renderAdminUserList(); return; }
