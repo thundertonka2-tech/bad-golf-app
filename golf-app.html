@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.968';
+const BG_BUILD = 'v2026.11.969';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -8629,11 +8629,22 @@ function _dashBuckets(times, from, to) {
   return b;
 }
 async function _dashLoadRaw() {
-  const out = { rounds: [], grosses: [], rosterRaw: [], users: [], wagers: [], requests: [], live: 0, roundsSource: 'games',
+  const out = { rounds: [], grosses: [], users: [], wagers: [], requests: [], live: 0, roundsSource: 'games',
     courses: { total: 0, complete: 0, verified: 0, open: 0, needsGps: 0, needsRs: 0, needsTargets: 0, dupes: 0, scopeLabel: '' } };
-  let roster = [];
-  try { roster = await getPlayerRoster(); } catch (e) {}
-  out.rosterRaw = roster || [];
+  // v969 REGRESSION FIX (Tyler: "it just sits there saying crunching numbers").
+  // This used to start with an unbounded `await getPlayerRoster()`. Since v965
+  // replaced the roster-derived engagement numbers with the app-wide game scan,
+  // its result (`rosterRaw`) was assigned and then never read by anything — but the
+  // await still ran, and a roster row is ~178KB of base64 avatars. On a slow or
+  // stalled read the dashboard sat on "Crunching the numbers…" forever, waiting for
+  // data it no longer uses. Removed outright.
+  //
+  // Belt and braces: nothing below is allowed to hang the screen either. Each load
+  // races a timeout, so a stalled network degrades one tile instead of the page.
+  const _cap = (promise, ms, fallback) => Promise.race([
+    Promise.resolve(promise).catch(() => fallback),
+    new Promise(res => setTimeout(() => res(fallback), ms))
+  ]);
   // v964 CRITICAL FIX (Tyler: "these charts don't look like the correct data").
   // Every engagement number on this dashboard was derived from getPlayerRoster(),
   // which reads the row 'roster:<my uid>' — the SIGNED-IN ADMIN'S OWN roster. So
@@ -8645,11 +8656,13 @@ async function _dashLoadRaw() {
   // a game code never contains a colon — same filter the live/spectate views use.
   let gameRows = [];
   try {
-    if (typeof initSupabase === 'function' && !supaReady) await initSupabase();
+    // v969: capped too — a stalled client init would freeze the dashboard exactly
+    // like the roster read did.
+    if (typeof initSupabase === 'function' && !supaReady) await _cap(initSupabase(), 8000, null);
     if (supa && supaOnline) {
-      const gr = await supa.from('games').select('code,data,updated_at')
+      const gr = await _cap(supa.from('games').select('code,data,updated_at')
         .not('code', 'like', '%:%')
-        .order('updated_at', { ascending: false }).limit(1000);
+        .order('updated_at', { ascending: false }).limit(1000), 20000, { data: [], error: null });
       if (gr && !gr.error && Array.isArray(gr.data)) gameRows = gr.data;
     }
   } catch (e) { console.warn('dashboard game scan failed', e); }
@@ -8694,12 +8707,14 @@ async function _dashLoadRaw() {
       });
     } catch (e) {}
   });
-  try { out.users = await getAdminUsers(); } catch (e) {}
+  try { out.users = await _cap(getAdminUsers(), 12000, []); } catch (e) {}
   // v964: `.select('*')` with no status filter counted VOIDED/cancelled wagers.
   // wCancelMine deletes a wager by setting status:'void' — the row stays behind, so
   // a stake someone posted and immediately pulled still showed as activity.
-  try { if (supa) { const r = await supa.from('wagers').select('*').neq('status', 'void'); out.wagers = (r && r.data) || []; } } catch (e) {}
-  try { out.requests = await crFetchAll(); } catch (e) {}
+  // v969: the Wagers section was removed, so this table is no longer fetched on
+  // every dashboard open. Restore this line if the section comes back.
+  out.wagers = [];
+  try { out.requests = await _cap(crFetchAll(), 12000, []); } catch (e) {}
   // v964: "Live rounds now" read getRecent() — again the admin's OWN per-user row —
   // so it showed 0 while other people were mid-round, and only counted the admin's
   // own play. Derive it from the same app-wide game rows, using the live view's own
@@ -8716,7 +8731,16 @@ async function _dashLoadRaw() {
     }).length;
   } catch (e) {}
   try {
-    await ensureAdminData();
+    // v969 REGRESSION FIX (Tyler: "it just sits there saying crunching numbers").
+    // ensureAdminData() -> getMappedCourseIdSet() walks the IN-SCOPE library in
+    // chunks of 40 with a retry/sleep between them. renderAdmin() resets
+    // _adminDataReady on every Admin open, so opening Admin and going straight to
+    // the dashboard asked it to walk the ENTIRE library (13,774 course_gps rows,
+    // hundreds of sequential requests) before drawing a single tile.
+    // The course tiles are a nice-to-have; the rest of the dashboard is not worth
+    // holding hostage to them. Use the worklist ONLY if it is already loaded, and
+    // otherwise offer a button to fetch it on demand.
+    if (!_adminDataReady) { out.courses.notLoaded = true; return out; }
     // v964: ensureAdminData only fetches GPS hole-counts for the courses in the
     // Admin tab's CURRENT state/search scope, but _adminWork is built over the whole
     // library — so every course outside that scope came back with holes=0 and was
@@ -8986,16 +9010,8 @@ async function renderDashboard() {
           rows: (d.users||[]).filter(u => inR(parseT(u.created_at), r.from, r.to)).sort((a,b)=>parseT(b.created_at)-parseT(a.created_at)).map(u => ({ t: u.display_name || u.my_player || (u.id||'').slice(0,8), s: (u.email||'') , v: fmtD(parseT(u.created_at)) })) }
       : { note: 'needs a signup date on profiles' })
   ]);
-  // Wagers
-  html += section('💵 Wagers');
-  html += grid([
-    card('Wagers placed', wIn, { delta: delta(wIn, wPrev), sub: wStakes !== wIn ? wStakes + ' stakes (pools count once)' : '', spark: _dashSpark(_dashBuckets(wTimes, r.from, r.to)),
-      rows: wInList.map(w => ({ t: (w.bet_type || 'wager') + (w.round_code ? ' · ' + w.round_code : ''), s: (w.creator_name || '') + ' · ' + (w.status || ''), v: w.amount != null ? ('$' + w.amount) : '' })) }),
-    card('Bettors', wBettors, { sub: 'placed a stake in range',
-      rows: [...new Map(wInList.filter(w=>w.creator_id).map(w => [w.creator_id, w])).values()].map(w => ({ t: w.creator_name || (w.creator_id||'').slice(0,8), s: 'placed a stake' })) }),
-    card('Total wagers (all time)', wEvents(d.wagers || []), {}),
-    card('Total stakes (all time)', (d.wagers || []).length, { sub: 'one per participant' })
-  ]);
+  // v969: Wagers section removed at Tyler's request — the feature isn't in use.
+  // The underlying wager data/counting is left intact so it can be dropped back in.
   // Course requests
   html += section('📩 Course requests', '· open');
   html += grid([
@@ -9003,7 +9019,16 @@ async function renderDashboard() {
     card('Re-map requests', reqRemap, { sub: 'tap to work the queue', click: 'openCourseRequestQueue()' })
   ]);
   // Course library
-  html += section('🗺️ Course library', (c.scopeLabel ? '· ' + escapeHtml(String(c.scopeLabel)) + ' only' : '· current'));
+  html += section('🗺️ Course library', c.notLoaded ? '· not loaded' : (c.scopeLabel ? '· ' + escapeHtml(String(c.scopeLabel)) + ' only' : '· current'));
+  if (c.notLoaded) {
+    // v969: loading these means walking the course-GPS table, which is slow enough
+    // that it used to freeze the whole dashboard. Make it an explicit choice, and
+    // tell the admin how to make it fast (pick a state first).
+    html += '<div style="background:var(--surface-2);border-radius:12px;padding:14px">'
+      + '<div class="small-text" style="color:var(--text-muted);line-height:1.5;margin-bottom:10px">'
+      + 'Course stats need a pass over the GPS table. Pick a <strong>state</strong> on the Admin tab first and it loads in a second; with no state picked it has to walk the whole library.'
+      + '</div><button id="dash-load-courses" class="full" style="font-weight:700">Load course stats</button></div>';
+  } else {
   html += grid([
     card('Verified', c.verified || 0, { rows: courseRows(cl.verified) }),
     card('Complete', c.complete || 0, { sub: pctComplete + '% of library', rows: courseRows(cl.complete) }),
@@ -9016,6 +9041,7 @@ async function renderDashboard() {
     card('Needs targets', c.needsTargets || 0, { rows: courseRows(cl.needsTargets) }),
     card('Duplicates flagged', c.dupes || 0, { sub: 'extra copies to merge', rows: courseRows(cl.dupes) })
   ]);
+  }
   // ---- Platform & adoption (v967) -------------------------------------------
   // Real data, from profiles.last_platform / last_build. IMPORTANT: those columns
   // are only written by builds that carry the telemetry, so the denominator here is
@@ -9074,6 +9100,15 @@ async function renderDashboard() {
     card('Impressions \u2192 install rate', '\u2014', { dim: true, note: 'same App Store Connect connection as downloads' })
   ]);
   body.innerHTML = html;
+  {
+    const _lc = document.getElementById('dash-load-courses');
+    if (_lc) _lc.onclick = async () => {
+      _lc.disabled = true; _lc.textContent = 'Loading course stats…';
+      try { await ensureAdminData(); } catch (e) { console.warn('course stats load failed', e); }
+      _dashCache = null;
+      try { await renderDashboard(); } catch (e) {}
+    };
+  }
 }
 
 // Render the Users list: matches the search (name, linked player, OR email), each
