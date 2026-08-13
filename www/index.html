@@ -7649,7 +7649,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.969';
+const BG_BUILD = 'v2026.11.970';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -12376,7 +12376,10 @@ async function flushDirtySingletons() {
         if (_m === _MERGE_READ_FAILED) {
           // Still can't read the cloud — for accumulate sets, do NOT blind-overwrite
           // (would shrink/drop entries). Leave it DIRTY and retry on the next tick.
-          if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'tombstones' || _SHARED_MERGE_STRATEGY[key] === 'recentGames') { continue; }
+          // v970: 'objectMap' was MISSING here while writeSharedSingleton guards it —
+          // so a retry with a dead cloud read blind-wrote the local course map over
+          // shared:courses and wiped every other admin's edits. Now symmetric.
+          if (_SHARED_MERGE_STRATEGY[key] === 'stringSet' || _SHARED_MERGE_STRATEGY[key] === 'objectMap' || _SHARED_MERGE_STRATEGY[key] === 'tombstones' || _SHARED_MERGE_STRATEGY[key] === 'recentGames') { continue; }
         } else if (_m !== undefined) { _data = _m; try { localStorage.setItem(key, JSON.stringify(_data)); } catch (e) {} }
       } catch (e) {}
       const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: _data, updated_at: new Date().toISOString() });
@@ -12495,7 +12498,12 @@ async function safeGet(key, shared) {
 
 async function safeSet(key, value, shared, opts) {
   // Always cache locally first — works offline + provides instant local read
-  try { bgLsSet(key, value); } catch (e) {}
+  // v970: bgLsSet SIGNALS failure by returning false (it does not throw), and the
+  // result used to be discarded — so a round that never made it into localStorage
+  // AND never reached the cloud still reported success, and flushDirtyGames later
+  // dropped it (localStorage.getItem -> null -> clearGameDirty). Round lost, silently.
+  let _lsOk = true, _cloudOk = false;
+  try { _lsOk = (bgLsSet(key, value) !== false); } catch (e) { _lsOk = false; }
 
   // Phase 2 (Cloud): when signed in, the roster also writes up to the
   // friends-only cloud row so other devices/friends see the same players and
@@ -12520,20 +12528,20 @@ async function safeSet(key, value, shared, opts) {
         // clobbered by a stale whole-blob write. opts.authoritative lets a caller keep
         // an intentionally-cleared stat array from being re-folded from the cloud.
         try { parsed = await _mergeGameForWrite(parsed, opts); } catch (e) {}
-        try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {} // cache the merged copy
+        try { bgLsSet(key, JSON.stringify(parsed)); } catch (e) {} // cache the merged copy (v970: quota-aware)
         // v939: merge-read failed on a MULTI-SCORER round → don't blind-write the
         // whole blob over the other phone's cells. Queue it instead; flushDirtyGames
         // retries with a proper merge within 15s. Solo rounds (and the Finish tap,
         // which must land immediately) keep the old direct-write path.
-        if (window._bgMergeReadOk === false && parsed && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) {
+        if (parsed && parsed.__bgMergeReadOk === false && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) {
           markGameDirty(code); updateSyncIndicator(false);
-          return true;
+          return _lsOk;
         }
         try {
           const r = await _promiseTimeout(
             supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'saveGame');
           if (r && r.error) { console.warn('Supabase write failed:', r.error); markGameDirty(code); updateSyncIndicator(false); }
-          else { clearGameDirty(code); updateSyncIndicator(true); }
+          else { _cloudOk = true; clearGameDirty(code); updateSyncIndicator(true); }
         } catch (e) {
           // Timeout / dropped signal: keep playing on the local copy and queue the
           // write — flushDirtyGames re-pushes it the moment the connection returns.
@@ -12546,7 +12554,9 @@ async function safeSet(key, value, shared, opts) {
       console.warn('Supabase write error:', e);
       markGameDirty(code); updateSyncIndicator(false);
     }
-    return true;
+    // v970: true only if the round actually landed SOMEWHERE (local cache or cloud).
+    // Offline is still "true" — the local copy is real and flushDirtyGames pushes it.
+    return (_lsOk || _cloudOk);
   }
 
   if (SHARED_SINGLETONS.includes(key)) {
@@ -12888,6 +12898,12 @@ function _unionHoleMap(local, parentKey, subKey, cloud) {
     if (subKey) local[parentKey][subKey] = merged; else local[parentKey] = merged;
   } catch (e) {}
 }
+// v970: per-round stamp of "did the pre-write cloud read succeed" — replaces the
+// shared window._bgMergeReadOk global, which two concurrent writers could race on.
+// Non-enumerable so JSON.stringify (localStorage cache AND the cloud upsert) skips it.
+function _bgStampMergeRead(o, ok) {
+  try { Object.defineProperty(o, '__bgMergeReadOk', { value: !!ok, enumerable: false, configurable: true, writable: true }); } catch (e) {}
+}
 // Build the row to write: local edits union'd over the freshest cloud copy.
 // opts.authoritative (see _mergeGameArrays) lets a caller declare a player's whole
 // stat array as authoritative so a cloud re-read can't undo an intentional clear.
@@ -12896,6 +12912,12 @@ async function _mergeGameForWrite(local, opts) {
     if (!supa || !supaOnline || !local || !local.code) return local;
     let cloud = null;
     window._bgMergeReadOk = true;   // v939: tracks whether the pre-write cloud read worked
+    // v970 RACE FIX: the global above is shared by every concurrent writer. The 15s
+    // flushDirtyGames timer overlapping a live autosave could reset it to true after
+    // the autosave's read had already failed — so the autosave blind-wrote the whole
+    // blob over a co-scorer's cells (the exact v939 clobber). Stamp the result on THIS
+    // round object (non-enumerable, so it never reaches localStorage or the cloud).
+    _bgStampMergeRead(local, true);
     try {
       const r = await _promiseTimeout(
         supa.from('games').select('data').eq('code', local.code).maybeSingle(), 3000, 'mergeRead');
@@ -12911,7 +12933,7 @@ async function _mergeGameForWrite(local, opts) {
           supa.from('games').select('data').eq('code', local.code).maybeSingle(), 5000, 'mergeRead2');
         if (r2 && r2.error) throw r2.error;
         if (r2 && r2.data) cloud = r2.data.data;
-      } catch (e2) { window._bgMergeReadOk = false; return local; }
+      } catch (e2) { window._bgMergeReadOk = false; _bgStampMergeRead(local, false); return local; }
     }
     if (!cloud || typeof cloud !== 'object') return local;
     // v796: CODE-COLLISION guard. A brand-new round can land on a code an OLD,
@@ -13032,7 +13054,7 @@ async function flushDirtyGames() {
       parsed = await _mergeGameForWrite(parsed);
       // v939: merge-read failed on a multi-scorer round → leave it QUEUED for the
       // next 15s pass rather than blind-writing over the other phone's cells.
-      if (window._bgMergeReadOk === false && parsed && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) continue;
+      if (parsed && parsed.__bgMergeReadOk === false && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) continue;
       try { localStorage.setItem('game:' + code, JSON.stringify(parsed)); } catch (e) {}
       const r = await _promiseTimeout(
         supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'flushGame');
@@ -13784,11 +13806,16 @@ function displayFirst(p) {
 }
 function displayFull(p) {
   if (!p) return '';
+  // v970 XSS: displayFull feeds ~5 innerHTML sinks (scorecard, money breakdown, crew
+  // leaderboard, round summary) with names that arrive from OTHER devices via the
+  // shared round blob and cloud profiles. displayFirst already stripped angle
+  // brackets; this one did not, so `<img src=x onerror=...>` as a player name ran in
+  // every co-scorer's app. Same strip, same behaviour for real names.
   if (p.firstName || p.lastName) {
-    return ((p.firstName || '') + ' ' + (p.lastName || '')).trim();
+    return _bgStripAngle(((p.firstName || '') + ' ' + (p.lastName || '')).trim());
   }
   // Legacy fallback
-  return p.name || '';
+  return _bgStripAngle(p.name || '');
 }
 // Compact initials for tight UI (settle-up rows on phone widths). Returns
 // the first letter of firstName + first letter of lastName ("TO", "SM"). If
@@ -14019,7 +14046,7 @@ async function unTombstoneRound(key) {
   if (!key) return;
   try {
     const set = getDeletedRoundKeys();
-    if (set.delete(key)) localStorage.setItem(KEY_DELETED_ROUNDS, JSON.stringify(Array.from(set)));
+    if (set.delete(key)) bgLsSet(KEY_DELETED_ROUNDS, JSON.stringify(Array.from(set)));   // v970: quota-aware
   } catch (e) {}
   try {
     const t = await getSharedTombstones();
@@ -14252,8 +14279,9 @@ async function _mirrorRecentToLegacy(rows) {
     if (!RECENT_DUAL_WRITE_LEGACY) return;
     if (!(supa && supaOnline) || !Array.isArray(rows)) return;
     if (recentRowCode() === LEGACY_RECENT_ROW) return;
-    let legacy = [];
-    try { const { data, error } = await supa.from('games').select('data').eq('code', LEGACY_RECENT_ROW).maybeSingle(); if (!error && data && Array.isArray(data.data)) legacy = data.data; } catch (e) {}
+    let legacy = [], _readOk = false;
+    try { const { data, error } = await supa.from('games').select('data').eq('code', LEGACY_RECENT_ROW).maybeSingle(); if (!error) { _readOk = true; if (data && Array.isArray(data.data)) legacy = data.data; } } catch (e) { _readOk = false; }
+    if (!_readOk) return;   // v970: see _mirrorRosterToLegacy — no read, no mirror
     const byCode = {};
     legacy.forEach(r => { if (r && r.code) byCode[r.code] = r; });
     rows.forEach(r => { if (r && r.code) byCode[r.code] = r; });
@@ -14301,8 +14329,12 @@ async function _mirrorRosterToLegacy(rows) {
     if (!ROSTER_DUAL_WRITE_LEGACY) return;
     if (!(supa && supaOnline) || !Array.isArray(rows)) return;
     if (rosterRowCode() === LEGACY_ROSTER_ROW) return;     // legacy IS the primary (guest) — nothing to mirror
-    let legacy = [];
-    try { const { data, error } = await supa.from('games').select('data').eq('code', LEGACY_ROSTER_ROW).maybeSingle(); if (!error && data && Array.isArray(data.data)) legacy = data.data; } catch (e) {}
+    let legacy = [], _readOk = false;
+    try { const { data, error } = await supa.from('games').select('data').eq('code', LEGACY_ROSTER_ROW).maybeSingle(); if (!error) { _readOk = true; if (data && Array.isArray(data.data)) legacy = data.data; } } catch (e) { _readOk = false; }
+    // v970: a failed/timed-out read used to leave legacy=[] and then upsert MY rows
+    // alone over the shared legacy row — dropping every other user's players for
+    // everyone still on an old build. No read, no mirror.
+    if (!_readOk) return;
     let merged = mergeRosters(legacy, rows);
     try { merged = applyTombstonesToRoster(merged, await getSharedTombstones()); } catch (e) {}
     await supa.from('games').upsert({ code: LEGACY_ROSTER_ROW, data: merged, updated_at: new Date().toISOString() });
@@ -17656,15 +17688,20 @@ async function loadCourseLibrary(force) {
     // Reset to seed, then merge additions (avoids accumulating duplicates if
     // this is called more than once during a session)
     COURSE_LIBRARY = [...COURSE_LIBRARY_SEED];
-    additions.forEach(c => {
-      if (!COURSE_LIBRARY.some(existing => existing.id === c.id)) {
-        COURSE_LIBRARY.push(c);
-      }
-    });
+    // v970 PERF: this was `additions.forEach(c => if (!COURSE_LIBRARY.some(...)))` —
+    // an O(n^2) scan over a list that grows to ~5,800, i.e. ~16.8 MILLION string
+    // compares on the main thread every time the library loads (boot, Setup tab,
+    // Add-past-round, and every cache expiry). A Set makes it O(n).
+    try {
+      const _seen = new Set(COURSE_LIBRARY.map(c => c && c.id));
+      additions.forEach(c => { if (c && !_seen.has(c.id)) { _seen.add(c.id); COURSE_LIBRARY.push(c); } });
+    } catch (e) {
+      additions.forEach(c => { if (!COURSE_LIBRARY.some(existing => existing.id === c.id)) COURSE_LIBRARY.push(c); });
+    }
     // Apply admin name fixes (keeps ids/data; just corrects the displayed name).
     try {
       const overrides = _pfOvr;
-      if (overrides !== _OVERLAY_FAIL) COURSE_LIBRARY.forEach(c => { if (overrides[c.id]) c.name = overrides[c.id]; });
+      if (overrides !== _OVERLAY_FAIL) COURSE_LIBRARY.forEach(c => { if (overrides[c.id]) { c.name = overrides[c.id]; try { delete c.__bgHay; } catch (e2) {} } });   // v970: bust the search haystack cache on rename
     } catch (e) {}
     // Apply admin detail fixes (name/city/state) — for fixing messed-up locations.
     try {
@@ -23483,7 +23520,22 @@ window.BadGolfWatchSync = async function () {
   } catch (e) { /* watch sync is best-effort */ }
 };
 // Fire-and-forget helper used at hole/score/start hooks.
-function _bgWatchSyncSoon() { try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {} }
+// v970 PERF: despite the name this ran SYNCHRONOUSLY on every call, and it is called
+// at the top of renderScoreEntry() — which fires on every hole change, every score tap
+// and every realtime echo. Each run did supa.auth.getSession(), a possible course_gps
+// fetch, a full JSON.stringify of the handoff (including the whole hole/green GPS map)
+// and a Capacitor IPC hop. Now trailing-debounced; an 8s heartbeat already covers the
+// steady state, and hole/round-start hooks still land within 250ms.
+function _bgWatchSyncSoon() {
+  try {
+    clearTimeout(window._bgWatchSyncT);
+    window._bgWatchSyncT = setTimeout(function () {
+      try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
+    }, 250);
+  } catch (e) {
+    try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e2) {}
+  }
+}
 
 // ===== v891: scores entered ON THE WATCH ====================================
 // The watch's old path wrote straight at Supabase with a schema that doesn't
@@ -23684,8 +23736,13 @@ async function setupNewGameForm(prefill) {
 
   // Populate course picker (search-based list, not native select)
   renderCourseList('');
+  // v970 PERF: was un-debounced — every keystroke re-scanned all ~5,800 courses
+  // (plus a localStorage write from the draft-saver on the same keypress) and, being
+  // async, keystrokes could also land out of order. 140ms trailing debounce.
   $('course-search').oninput = (e) => {
-    renderCourseList(e.target.value);
+    const _v = e.target.value;
+    try { clearTimeout(window._bgCourseSearchT); } catch (e2) {}
+    window._bgCourseSearchT = setTimeout(() => { try { renderCourseList(_v); } catch (e3) {} }, 140);
   };
   $('course-search').onfocus = () => {
     $('course-list').style.display = 'block';
@@ -25122,7 +25179,14 @@ function _courseMatchesTerms(c, terms){
   if (!terms || !terms.length) return true;
   var stLabel = (typeof courseStateLabel==='function') ? String(courseStateLabel(c)||'').toLowerCase() : '';
   var stCode = (typeof courseStateCode==='function') ? String(courseStateCode(c)||'').toLowerCase() : '';
-  var hay = String((c && c.name)||'').toLowerCase()+' '+String((c && c.city)||'').toLowerCase()+' '+stLabel+' '+stCode+' '+_courseFacilityHay(c);
+  // v970 PERF: this concatenated + lowercased 4 fields AND ran a for..in over the
+  // facility aliases for all ~5,800 courses on every keystroke. Memoized per course
+  // (non-enumerable so it never gets serialized); busted on admin rename.
+  var hay = (c && c.__bgHay);
+  if (hay === undefined) {
+    hay = String((c && c.name)||'').toLowerCase()+' '+String((c && c.city)||'').toLowerCase()+' '+stLabel+' '+stCode+' '+_courseFacilityHay(c);
+    try { Object.defineProperty(c, '__bgHay', { value: hay, enumerable: false, configurable: true, writable: true }); } catch (e) {}
+  }
   var required = terms.filter(function(t){ return !_COURSE_FILLER_WORDS[t]; });
   var check = required.length ? required : terms;   // all-filler query -> match literally
   return check.every(function(term){ return hay.indexOf(term)!==-1 || stCode===term; });
@@ -25134,12 +25198,22 @@ async function renderCourseList(query) {
 
   // Resolve each nearby GPS hit to a library course when we already have it
   // (most are, post state-import), filtered by the current search text.
-  const nearbyShown = _nearbyResults
-    .filter(n => !q || n.name.toLowerCase().includes(q))
-    .map(n => {
-      const lib = COURSE_LIBRARY.find(c => c.name.toLowerCase() === n.name.toLowerCase());
-      return Object.assign({}, n, { libId: lib ? lib.id : null });
-    });
+  // v970 PERF: was a COURSE_LIBRARY.find() with a toLowerCase() per candidate —
+  // ~5,800 string allocations for EACH nearby hit. One shared index instead.
+  const _nearbyCand = _nearbyResults.filter(n => !q || n.name.toLowerCase().includes(q));
+  let _libByName = null;
+  if (_nearbyCand.length) {
+    _libByName = new Map();
+    for (let _i = 0; _i < COURSE_LIBRARY.length; _i++) {
+      const _c = COURSE_LIBRARY[_i]; if (!_c) continue;
+      const _k = String(_c.name || '').toLowerCase();
+      if (!_libByName.has(_k)) _libByName.set(_k, _c);
+    }
+  }
+  const nearbyShown = _nearbyCand.map(n => {
+    const lib = _libByName ? _libByName.get(String(n.name || '').toLowerCase()) : null;
+    return Object.assign({}, n, { libId: lib ? lib.id : null });
+  });
   const nearbyIds = new Set(nearbyShown.map(n => n.libId).filter(Boolean));
 
   // Search matches course NAME or STATE (code like "TX" or full "Texas").
@@ -35154,10 +35228,13 @@ function _bgPoolStats(g, players, hcpPct) {
   return (players || []).map(p => {
     const sc = (g.scores && g.scores[p.id]) || [];
     let fullHcp = (p.rawHcp != null ? p.rawHcp : (p.hcp != null ? p.hcp : 0));
-    if (_pct != null) {
-      if (g.hcpRules && g.hcpRules.noHandicaps) fullHcp = 0;
-      else if (p.playsGross === true) fullHcp = 0;
-      else fullHcp = Math.round((p.baseHcp != null ? p.baseHcp : fullHcp) * _pct / 100);
+    // v970: the two zeroing checks used to live INSIDE `if (_pct != null)`, so any
+    // round saved before the hcpPct field existed ignored "Plays gross" / "No
+    // handicaps" and handed the pot to the wrong player. Hoisted out.
+    const _gross = !!((g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true);
+    if (_gross) fullHcp = 0;
+    else if (_pct != null) {
+      fullHcp = Math.round((p.baseHcp != null ? p.baseHcp : fullHcp) * _pct / 100);
     }
     let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
     for (let h = 0; h < nHoles; h++) {
@@ -41274,7 +41351,9 @@ function getDeletedRoundKeys() {
 function tombstoneRound(roundOrKey) {
   const k = (typeof roundOrKey === 'string') ? roundOrKey : statsRoundKey(roundOrKey);
   if (!k) return;
-  try { const set = getDeletedRoundKeys(); if (!set.has(k)) { set.add(k); localStorage.setItem(KEY_DELETED_ROUNDS, JSON.stringify(Array.from(set).slice(-1000))); } } catch (e) {}
+  // v970: was raw setItem — a QuotaExceededError was swallowed and the delete never
+  // persisted, so the round reappeared on the next sync. bgLsSet evicts and retries.
+  try { const set = getDeletedRoundKeys(); if (!set.has(k)) { set.add(k); bgLsSet(KEY_DELETED_ROUNDS, JSON.stringify(Array.from(set).slice(-1000))); } } catch (e) {}
   // Mirror to the SHARED tombstones so other devices can't resurrect this round
   // from the roster blob / their stats backup. Include the roster-key variant too.
   try {
@@ -44031,10 +44110,23 @@ function _bgAvatarColor(p) {
     return pal[h % pal.length];
   } catch (e) { return '#185fa5'; }
 }
+// v970 XSS: profiles.avatar is readable+writable per-user and was interpolated RAW
+// into a style="" attribute — a quote in the value breaks out of the attribute and
+// runs script in every user who opens the Crew leaderboard. Now scheme-checked and
+// quote-escaped; anything that isn't a plain image URL falls through to initials.
+function _bgSafeAvatarUrl(u) {
+  try {
+    const s = String(u == null ? '' : u).trim();
+    if (!/^(data:image\/(png|jpe?g|gif|webp);|https:\/\/)/i.test(s)) return '';
+    if (/[\r\n]/.test(s)) return '';
+    return s.replace(/[\\'"()<>]/g, encodeURIComponent);
+  } catch (e) { return ''; }
+}
 function crewAvatarHtml(p, big, opts) {
   const cls = 'crew-avatar' + (big ? ' crew-avatar-lg' : '');
-  if (p && p.avatar) {
-    return '<div class="' + cls + '" style="background-image:url(\'' + p.avatar + '\')"></div>';
+  const _av = (p && p.avatar) ? _bgSafeAvatarUrl(p.avatar) : '';
+  if (_av) {
+    return '<div class="' + cls + '" style="background-image:url(\'' + _av + '\')"></div>';
   }
   const base = '<div class="' + cls + '" style="background:' + _bgAvatarColor(p) + '">' + (p ? displayInitials(p) : '?') + '</div>';
   // v764: a gentle "add your photo" cue on YOUR OWN initials avatar (opts.nudge) — a
@@ -55839,7 +55931,11 @@ function t2ComputeFieldSidePots(rows, cfg) {
       g.players.forEach(p => {
         if (!p || !p.name) return;
         const sc = (g.scores && g.scores[p.id]) || [];
-        const fullHcp = (p.rawHcp != null ? p.rawHcp : (p.hcp != null ? p.hcp : 0));
+        // v970: this was the ONLY net calculation in the app that didn't respect
+        // "Plays gross" / "No handicaps" — a gross player was handed his full raw
+        // handicap and could win the field Low Net pot outright.
+        let fullHcp = (p.rawHcp != null ? p.rawHcp : (p.hcp != null ? p.hcp : 0));
+        try { if ((g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true) fullHcp = 0; } catch (e) {}
         let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
         for (let h = 0; h < 18; h++) {
           const s = sc[h]; if (s == null) continue;
@@ -58015,7 +58111,7 @@ function openTourneyActions(t) {
       let html = '<strong>🎯 Closest to the Pin — all groups</strong>';
       holes.forEach(h => {
         const b = best[h];
-        html += `<br>Hole ${h}: <strong>${b.name}</strong> ${b.dist}`;
+        html += `<br>Hole ${h}: <strong>${escapeHtml(String(b.name == null ? '' : b.name))}</strong> ${escapeHtml(String(b.dist == null ? '' : b.dist))}`;   // v970 XSS: names come from other groups' phones
       });
       ctpDiv.innerHTML = html; ctpDiv.style.display = 'block';
     }).catch(() => {});
@@ -65381,7 +65477,10 @@ const gpsView = (() => {
         var panelShown = !!(panel && panel.style.display !== 'none');
         var active = inMapSession() && panelShown;
   
-        overlay.classList.toggle('map-hud', active);
+        // v970 PERF: this wrote the class attribute every 700ms for the life of the
+        // app even when nothing changed — and the app-wide MutationObserver watches
+        // 'class', so every idle tick queued mutation work. Only write on a real flip.
+        try { if (overlay.classList.contains('map-hud') !== active) overlay.classList.toggle('map-hud', active); } catch (e) { overlay.classList.toggle('map-hud', active); }
         try { if (window._bgSetGpsLandmarks) window._bgSetGpsLandmarks(overlay.classList.contains('map-only')); } catch (e) {}
   
         var dom = buildDom();
@@ -67524,10 +67623,23 @@ function renderMyShots() {
         (root || document).querySelectorAll('input[id], select[id], textarea[id]').forEach(restore);
       } catch (e) {}
     }
-    document.addEventListener('input', function (e) { save(e.target); }, true);
-    document.addEventListener('change', function (e) { save(e.target); }, true);
+    // v970 PERF: this fired a synchronous localStorage.setItem on EVERY character
+    // typed anywhere in the app (including the 5,800-course search box). Debounced
+    // per element; 'change', visibilitychange and pagehide still save immediately,
+    // and switching fields flushes the previous one, so nothing is lost.
+    var _dbT = null, _dbEl = null;
+    function saveDebounced(el) {
+      try {
+        if (_dbEl && _dbEl !== el) { save(_dbEl); }
+        _dbEl = el;
+        clearTimeout(_dbT);
+        _dbT = setTimeout(function () { try { save(_dbEl); } catch (e) {} _dbEl = null; }, 400);
+      } catch (e) { try { save(el); } catch (e2) {} }
+    }
+    document.addEventListener('input', function (e) { saveDebounced(e.target); }, true);
+    document.addEventListener('change', function (e) { try { clearTimeout(_dbT); _dbEl = null; } catch (e2) {} save(e.target); }, true);
     document.addEventListener('focusin', function (e) { restore(e.target); }, true);
-    function flush() { try { var a = document.activeElement; if (a) save(a); } catch (e) {} }
+    function flush() { try { clearTimeout(_dbT); if (_dbEl) { save(_dbEl); _dbEl = null; } } catch (e) {} try { var a = document.activeElement; if (a) save(a); } catch (e) {} }
     document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flush(); });
     window.addEventListener('pagehide', flush);
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { restoreAll(document); });
