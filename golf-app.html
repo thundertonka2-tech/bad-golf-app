@@ -7640,7 +7640,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.972';
+const BG_BUILD = 'v2026.11.973';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -32426,6 +32426,19 @@ function calculateSettlements(money, players) {
     }
   });
   if (list.length === 0) return [];
+  // v973 (Tyler code review): every balance is rounded to cents INDEPENDENTLY, so
+  // a pot that doesn't divide evenly ($10 three ways) can leave the rounded totals
+  // summing to +/-$0.01 and the greedy loop below exits with that penny unassigned
+  // — Tyler sees a settle-up that doesn't zero out. Absorb the residual into the
+  // largest balance so the payments always reconcile exactly.
+  try {
+    const _sum = Math.round(list.reduce((a, x) => a + x.amount, 0) * 100) / 100;
+    if (Math.abs(_sum) >= 0.01) {
+      let _big = list[0];
+      list.forEach(x => { if (Math.abs(x.amount) > Math.abs(_big.amount)) _big = x; });
+      _big.amount = Math.round((_big.amount - _sum) * 100) / 100;
+    }
+  } catch (e) {}
   const payments = [];
   let safety = 100;
   while (safety-- > 0) {
@@ -32885,8 +32898,13 @@ function groupStrokeStandings(g, playerIds, fromHole, toHole, useNet) {
   const allComplete = standings.every(s => s.holesPlayed === totalPossible);
   const minHolesPlayed = standings.reduce((min, s) => Math.min(min, s.holesPlayed), totalPossible);
   // Determine winners (tied for lowest net) — only meaningful when all complete
+  // v973 (Tyler code review): winners were computed ONLY when the segment was
+  // complete, so calcNassau's "round finished early" branch ran with an EMPTY
+  // winners array — no money moved, the carry was neither spent nor advanced,
+  // and the breakdown cell rendered blank. Head-to-head Nassau already settled
+  // this ("N up thru 5"); 3+ player (group) Nassau silently paid $0.
   let winners = [];
-  if (allComplete && standings.length > 0) {
+  if (standings.length > 0 && (allComplete || (g && g.finishedAt && minHolesPlayed > 0))) {
     const lowest = standings[0].net;
     winners = standings.filter(s => s.net === lowest).map(s => s.id);
   }
@@ -33354,7 +33372,13 @@ function calcStroke(g) {
   // nearest whole stroke to set the net used for THIS pot. Gross is unaffected.
   const _sPct = (cfg.hcpPct != null ? cfg.hcpPct : 100) / 100;
   const _netAllow = p => {
-    const hcp = Math.round((p.baseHcp != null ? p.baseHcp : effectiveHcp(p, g.hcpRules)) * _sPct);   // v957: pot% replaces the round allowance (baseHcp), not stacks
+    // v973 (Tyler code review): baseHcp is the RAW course handicap — it ignores
+    // the round's "No handicaps" rule and the per-player "Plays gross" toggle,
+    // both of which must still win. calcSkins (_skHcp) and _bgPoolStats already
+    // gate this (the pools were fixed in v970); the STROKE pot never was, so a
+    // gross player was scored on net and took the whole pot off the real winner.
+    const _sGross = !!(g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true;
+    const hcp = _sGross ? 0 : Math.round((p.baseHcp != null ? p.baseHcp : effectiveHcp(p, g.hcpRules)) * _sPct);   // v957: pot% replaces the round allowance (baseHcp), not stacks
     const arr = g.scores[p.id] || [];
     let net = 0;
     const _nH = roundHoles(g);
@@ -33376,6 +33400,13 @@ function calcStroke(g) {
 function bankerStandingsThrough(g, throughHole) {
   if (!g.games.banker) return null;
   const cfg = g.games.banker;
+  // v973 (Tyler code review): this walked g.players while calcBanker and
+  // computeBankerAutoPress both walk getParticipants(g, cfg). Result: the
+  // "loser picks banker" list ranked and offered "Take bank" to players who
+  // aren't in the Banker game at all (getBankerForHole then rejected the pick
+  // and silently fell back to rotation, so the banner named the wrong banker),
+  // and a NON-participant's birdie could flip the displayed multiplier.
+  const _bParts = (typeof getParticipants === 'function') ? getParticipants(g, cfg) : g.players;
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
   if (!g.bankerData) g.bankerData = { holes: {}, picks: {} };
@@ -33402,7 +33433,7 @@ function bankerStandingsThrough(g, throughHole) {
     // Pre-compute who scored birdie or better on this hole
     const birdiesByPlayer = {};
     let anyoneBirdie = false;
-    g.players.forEach(p => {
+    _bParts.forEach(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return;
       const bBasis = (cfg.net && g.sis) ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
@@ -33413,7 +33444,7 @@ function bankerStandingsThrough(g, throughHole) {
     });
     const bankerBirdied = !!birdiesByPlayer[banker.id];
 
-    g.players.forEach(p => {
+    _bParts.forEach(p => {
       if (p.id === banker.id) return;
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return;
@@ -33632,7 +33663,11 @@ function calcBanker(g) {
       result.matchups.push({ player: p.name, playerId: p.id, wager, outcome, mult, bet: pBet, birdieDoubled, autoPressed });
     });
 
-    if (allScored && result.matchups.length > 0) holeResults.push(result);
+    // v973 (Tyler code review): money was applied for every player who HAD a
+    // score, but the hole was only pushed into the breakdown when EVERY player had
+    // scored. A hole with one blank box moved real money that never appeared in
+    // the itemised rows, so the rows didn't sum to the total. Show it, flagged.
+    if (result.matchups.length > 0) { result.partial = !allScored; holeResults.push(result); }
   }
 
   return { money, holeResults };
@@ -33767,14 +33802,18 @@ function calcVegas(g) {
       // Team A boosts: flip B's score, multiply by tier
       const lo = Math.min(bScores[0], bScores[1]);
       const hi = Math.max(bScores[0], bScores[1]);
-      if (hi < 10) bTeamScore = hi * 10 + lo;
+      // v973 (Tyler code review): the flip was skipped entirely when the opponent
+      // pair contained a 10+, yet flipNote below still said "flipped". pairScores
+      // puts a 10+ FIRST (10 and 6 -> 106), so its flip is low-first: 610.
+      bTeamScore = (hi < 10) ? (hi * 10 + lo) : (lo * 100 + hi);
       if (aTier > 1) multiplier *= aTier;
       flipNote = teamA.map(p => p.name).join(' & ') + (aEagles ? (aEagles >= 2 ? ' eagled multiple — flipped + ' + aTier + 'x' : ' eagled — flipped + 2x') : (aBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
     } else if (bTier > 0 && aTier === 0) {
       // Team B boosts: flip A's score, multiply by tier
       const lo = Math.min(aScores[0], aScores[1]);
       const hi = Math.max(aScores[0], aScores[1]);
-      if (hi < 10) aTeamScore = hi * 10 + lo;
+      // v973: see above — flip must still apply when the pair contains a 10+.
+      aTeamScore = (hi < 10) ? (hi * 10 + lo) : (lo * 100 + hi);
       if (bTier > 1) multiplier *= bTier;
       flipNote = teamB.map(p => p.name).join(' & ') + (bEagles ? (bEagles >= 2 ? ' eagled multiple — flipped + ' + bTier + 'x' : ' eagled — flipped + 2x') : (bBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
     } else if (aTier > 0 && bTier > 0) {
@@ -33967,13 +34006,17 @@ function calcDynamicVegas(g) {
     if (aTier > 0 && bTier === 0) {
       const lo = Math.min(bScores[0], bScores[1]);
       const hi = Math.max(bScores[0], bScores[1]);
-      if (hi < 10) bTeamScore = hi * 10 + lo;
+      // v973 (Tyler code review): the flip was skipped entirely when the opponent
+      // pair contained a 10+, yet flipNote below still said "flipped". pairScores
+      // puts a 10+ FIRST (10 and 6 -> 106), so its flip is low-first: 610.
+      bTeamScore = (hi < 10) ? (hi * 10 + lo) : (lo * 100 + hi);
       if (aTier > 1) multiplier *= aTier;
       flipNote = teamA.map(p => p.name).join(' & ') + (aEagles ? (aEagles >= 2 ? ' eagled multiple — flipped + ' + aTier + 'x' : ' eagled — flipped + 2x') : (aBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
     } else if (bTier > 0 && aTier === 0) {
       const lo = Math.min(aScores[0], aScores[1]);
       const hi = Math.max(aScores[0], aScores[1]);
-      if (hi < 10) aTeamScore = hi * 10 + lo;
+      // v973: see above — flip must still apply when the pair contains a 10+.
+      aTeamScore = (hi < 10) ? (hi * 10 + lo) : (lo * 100 + hi);
       if (bTier > 1) multiplier *= bTier;
       flipNote = teamB.map(p => p.name).join(' & ') + (bEagles ? (bEagles >= 2 ? ' eagled multiple — flipped + ' + bTier + 'x' : ' eagled — flipped + 2x') : (bBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
     } else if (aTier > 0 && bTier > 0) {
@@ -34379,7 +34422,14 @@ function quotaTargetFor(g, cfg, p) {
   if (cfg.basis === 'manual' && cfg.quotas && cfg.quotas[p.id] != null) {
     return Number(cfg.quotas[p.id]) || 0;
   }
-  return 36 - effectiveHcp(p, g.hcpRules);
+  // v973 (Tyler code review): the target was hard-coded to 36 (an 18-hole quota)
+  // even on a 9-hole round, while the FULL 18-hole handicap was still subtracted.
+  // A 18-handicap playing 9 got a free 9-point head start and collected from a
+  // scratch player who shot exactly to their handicap. Scale both halves.
+  const _qh = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+  const _qPar = (_qh === 9) ? 18 : 36;
+  const _qAllow = effectiveHcp(p, g.hcpRules) * ((_qh === 9) ? 0.5 : 1);
+  return _qPar - Math.round(_qAllow);
 }
 
 // Earn each player's quota points (total + per-hole array). Shared by the
@@ -34532,6 +34582,16 @@ function calcTeamQuota(g) {
   const mode = cfg.mode || 'perpoint';
 
   if (mode === 'pool') {
+    // v973 (Tyler code review): unlike calcQuota / calcStableford / calcNiners,
+    // this pool had NO completion gate — it awarded the entire pot after a single
+    // hole and swung on the Board all round. Match the other pools: points only
+    // until the round is finished or every hole is in.
+    const _tqDone = !!(g && g.finishedAt) || (typeof allHolesScored === 'function' && allHolesScored(g));
+    if (!_tqDone) {
+      all.forEach(p => money[p.id] = 0);
+      return { points, quotas, result, holePoints, money, aTotal, bTotal,
+               teamAIds: teamA.map(p => p.id), teamBIds: teamB.map(p => p.id), mode, pending: true };
+    }
     // Team Quota is team-vs-team: the WINNING team splits the whole pot. (No
     // 1st/2nd payout split — there are only two teams.)
     const buyin = cfg.buyin != null ? cfg.buyin : 0;
@@ -34697,7 +34757,12 @@ function calcScramble(g) {
     holeResults.push({ hole: h, aScore, bScore, result });
   }
 
-  const allComplete = holesComplete === 18;
+  // v973 (Tyler code review): match-play scramble required EXACTLY 18 complete
+  // holes, so a 9-hole scramble — or any 18 finished early — paid $0 to everyone,
+  // silently. Every other team game (teamMatch, teamLowball, highLow, umbrella)
+  // already had the "finished early still settles" fallback; scramble was missed.
+  let allComplete = holesComplete === ((g && g.holes === 9) ? 9 : 18);
+  if (!allComplete && g && g.finishedAt && holesComplete > 0) allComplete = true;
 
   if (cfg.scoring === 'match') {
     if (allComplete) {
@@ -34834,6 +34899,9 @@ function calcMatch(g) {
     let closedHole = null;
     let closedScore = null;
     const holes = [];
+    // v973: holes remaining must come from the ROUND length and the hole index,
+    // not from how many holes have been scored (see the closeout note below).
+    const _mHoles = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
 
     for (let h = 0; h < 18; h++) {
       const aRaw = (g.scores[a.id] && g.scores[a.id][h] != null) ? g.scores[a.id][h] : null;
@@ -34847,10 +34915,14 @@ function calcMatch(g) {
       else if (bSc < aSc) { aUp--; res = 'b'; }
       holes.push({ hole: h + 1, aSc, bSc, res, aUpAfter: aUp });
 
-      const remaining = 18 - played;
+      // v973 (Tyler code review): `remaining` used 18 - played, so on the final
+      // hole it was 0 and a 1-up win rendered as "1&0" instead of "1 up"; and if
+      // any hole was left blank, `played` under-counted and a 2-up win at 18 read
+      // "2&1". Count what's actually LEFT in the round after this hole.
+      const remaining = _mHoles - (h + 1);
       if (Math.abs(aUp) > remaining) {
         closedHole = h + 1;
-        closedScore = Math.abs(aUp) + '&' + remaining;
+        closedScore = (remaining > 0) ? (Math.abs(aUp) + '&' + remaining) : (Math.abs(aUp) + ' up');
         break;
       }
     }
@@ -35213,9 +35285,14 @@ function calcBirdiePool(g) {
       const basis = _useNetBP ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], par, g.hcpRules) : raw;
       let kind = null;
       let amount = 0;
-      if (raw === 1) {
+      // v973 (Tyler code review): a hole-in-one claimed the score and then bailed
+      // at the `amount === 0` guard below if the HIO box was left blank — so an ACE
+      // paid $0 while a 2 on the same par 3 paid the eagle/birdie rate. If no HIO
+      // amount is configured the ace now falls through and settles as the eagle it
+      // also is. Explicit hio > 0 still wins.
+      if (raw === 1 && (Number(cfg.hio) || 0) > 0) {
         kind = 'HIO';
-        amount = cfg.hio || 0;
+        amount = Number(cfg.hio) || 0;
       } else if (basis - par <= -2) {
         kind = 'Eagle';
         amount = cfg.eagle || 0;
@@ -35259,7 +35336,10 @@ function calcLongPutt(g) {
     if (w) {
       const per = cfg.value || 0;
       participants.forEach(p => { if (p.id === w.id) return; money[p.id] -= per; money[w.id] += per; });
-      events.push({ kind: 'longputt', playerId: w.id, name: w.name + (hd.ft != null ? ' (' + ctpFmtDist(hd) + ')' : ''), amt: per * (g.players.length - 1) });
+      // v973: amt is what the user SEES. It used g.players (everyone in the round)
+      // instead of the pool's participants, so a 3-player pool in a 4-player round
+      // displayed $30 on a $20 win. money[] was always right.
+      events.push({ kind: 'longputt', playerId: w.id, name: w.name + (hd.ft != null ? ' (' + ctpFmtDist(hd) + ')' : ''), amt: per * (participants.length - 1) });
     }
   }
   if (events.length === 0) return null;
@@ -35284,7 +35364,8 @@ function calcLongDrive(g) {
     if (w) {
       const per = cfg.value || 0;
       participants.forEach(p => { if (p.id === w.id) return; money[p.id] -= per; money[w.id] += per; });
-      events.push({ kind: 'longdrive', playerId: w.id, name: w.name + (hd.yds != null ? ' (' + hd.yds + ' yd)' : ''), amt: per * (g.players.length - 1) });
+      // v973: see calcLongPutt — display figure must use the pool's participants.
+      events.push({ kind: 'longdrive', playerId: w.id, name: w.name + (hd.yds != null ? ' (' + hd.yds + ' yd)' : ''), amt: per * (participants.length - 1) });
     }
   }
   if (events.length === 0) return null;
@@ -35881,7 +35962,44 @@ function calcPotOfGold(g) {
       carry = 0;
     }
   }
-  return { results, money, carry, pending: pendingHoles };
+  // v973 (Tyler code review): a tie on the LAST scored hole stranded the whole
+  // accumulated carry — it was returned in `carry` and nothing ever paid it out.
+  // On an SI-weighted game that can be more money than everything else combined
+  // ($153 on a $1 base in testing). On a FINISHED round the leftover now settles
+  // on low total over the holes that actually counted; still tied -> void/refund.
+  let carryNote = null;
+  if (carry > 0 && g && g.finishedAt) {
+    try {
+      const _tot = participants.map(p => {
+        let t = 0, cnt = 0;
+        for (let hh = 0; hh < 18; hh++) {
+          const rw = (g.scores[p.id] && g.scores[p.id][hh] != null) ? g.scores[p.id][hh] : null;
+          if (rw == null) continue;
+          const si2 = g.sis ? g.sis[hh] : 0;
+          t += useNet ? netHoleScore(rw, effectiveHcp(p, g.hcpRules), si2, g.pars[hh], g.hcpRules) : rw;
+          cnt++;
+        }
+        return { pid: p.id, name: p.name, tot: t, n: cnt };
+      }).filter(x => x.n > 0);
+      if (_tot.length > 1) {
+        const _lo = Math.min.apply(null, _tot.map(x => x.tot));
+        const _win = _tot.filter(x => x.tot === _lo);
+        if (_win.length === 1) {
+          const _w = _win[0];
+          const _los = _tot.filter(x => x.pid !== _w.pid);
+          money[_w.pid] += carry * _los.length;
+          _los.forEach(l => money[l.pid] -= carry);
+          carryNote = _w.name + ' took the $' + carry + ' carry-over on low total';
+          results.push({ hole: null, value: carry, base: 0, carried: carry, winner: _w.name, winnerId: _w.pid, carryPayout: true });
+          carry = 0;
+        } else {
+          carryNote = 'Carry-over of $' + carry + ' void — tied on total';
+          results.push({ hole: null, value: carry, base: 0, carried: carry, winner: 'Tied on total — carry void', tied: true, voided: true, carryPayout: true });
+        }
+      }
+    } catch (e) { try { console.warn('potofgold carry settle failed', e); } catch (e2) {} }
+  }
+  return { results, money, carry, pending: pendingHoles, carryNote };
 }
 
 // ANIMALS (Zoo) — individual side game. Penalty animals PASS to the last player
@@ -36008,15 +36126,28 @@ function calcHotPotato(g) {
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
   if (!g.potatoData) g.potatoData = {};
-  let holder = null, val = 0, passes = 0;
+  // v973 (Tyler code review): two real money bugs here.
+  //  1. ONE HOLE could double the pot more than once. Tapping two names on the
+  //     same hole moved the token twice — but the potato can only be in one
+  //     place, so a hole may move it AT MOST once. Last tap on the hole wins.
+  //  2. The doubling was UNCAPPED. 12 passes on a $1 game (entirely normal over
+  //     18 holes in a foursome) left the final holder owing $2,048. cfg.maxDoubles
+  //     (default 6) caps the pot at base x 2^6 = 64x. Set it higher per-game if
+  //     the crew actually wants the old runaway behaviour.
+  const _maxDbl = (cfg.maxDoubles != null && !isNaN(Number(cfg.maxDoubles))) ? Math.max(0, Number(cfg.maxDoubles)) : 6;
+  let holder = null, val = 0, passes = 0, doubles = 0;
   for (let h = 1; h <= 18; h++) {
     let e = (g.potatoData[h] || {}).holder;
     if (typeof e === 'string') e = [e];
     if (!Array.isArray(e)) continue;
-    e.filter(id => partIds.has(id)).forEach(id => {
-      if (holder === null) { holder = id; val = base; passes = 1; }
-      else if (id !== holder) { holder = id; val = val * 2; passes++; }
-    });
+    const onHole = e.filter(id => partIds.has(id));
+    if (!onHole.length) continue;
+    const id = onHole[onHole.length - 1];        // one move per hole
+    if (holder === null) { holder = id; val = base; passes = 1; }
+    else if (id !== holder) {
+      holder = id; passes++;
+      if (doubles < _maxDbl) { val = val * 2; doubles++; }
+    }
   }
   if (holder != null && val > 0) {
     const nonHolders = participants.filter(p => p.id !== holder);
@@ -36026,7 +36157,7 @@ function calcHotPotato(g) {
       nonHolders.forEach(nh => money[nh.id] += share);
     }
   }
-  return { money, holder, val, passes };
+  return { money, holder, val, passes, doubles, maxDoubles: _maxDbl, capped: doubles >= _maxDbl };
 }
 
 // Show/hide Niners mode-specific inputs when the mode selector changes.
@@ -36195,8 +36326,13 @@ function calcHammer(g) {
       const amt = base * potMult;
       const winners = (winnerSide === 'A') ? sides.a : sides.b;
       const losers  = (winnerSide === 'A') ? sides.b : sides.a;
-      losers.forEach(lid => { money[lid] -= amt / losers.length; });
-      winners.forEach(wid => { money[wid] += amt / winners.length; });
+      // v973 (Tyler code review): this split the hole's stake ACROSS the side, so a
+      // 2v2 hammer paid HALF what 1v1 paid at the same setting ($5/player on a $10
+      // game) while the header still read "$10/hole base". Every other team game
+      // (teamMatch, teamLowball, scramble) pays cfg.value PER PLAYER. Hammer now
+      // matches: each loser pays the full stake, winners split what was collected.
+      losers.forEach(lid => { money[lid] -= amt; });
+      winners.forEach(wid => { money[wid] += amt * losers.length / winners.length; });
       holeResults.push({ hole: h, winner: (winnerSide === 'A') ? sides.aNames : sides.bNames, amt: amt, stake: stake });
     }
     return { money: money, holeResults: holeResults };
@@ -36385,6 +36521,12 @@ function renderHammerEntry() {
 }
 
 function computeAllGameMoney(g) {
+  // v973 (Tyler code review): strokesOnHole falls back to g.hcpRules.holes when a
+  // caller doesn't pass the hole count, but that field is only stamped as a SIDE
+  // EFFECT of roundHoles(). buildRoundSummary calls calcSkins BEFORE calcNassau,
+  // so on a 9-hole round skins could allocate strokes over 18 while Nassau used 9
+  // — two different answers for the same hole in the same round. Stamp it first.
+  try { if (typeof roundHoles === 'function') roundHoles(g); } catch (e) {}
   const results = {
     skins: calcSkins(g),
     nassau: calcNassau(g),
@@ -36447,6 +36589,8 @@ function computeAllGameMoney(g) {
     teamQuota: 'Team Quota',
     p3greenie: 'P3/Greenie',
     ctp: 'Closest to Pin',
+    longPutt: 'Long Putt',      // v973: were missing, so the board rendered the
+    longDrive: 'Long Drive',    //       raw keys "longPutt" / "longDrive"
     junk: 'Junk',
     birdiePool: 'Birdie Bump',
     lowNetPool: 'Low Net Pool',
@@ -36489,14 +36633,24 @@ function computeAllGameMoney(g) {
     if (!r) return;
     const moneyForGame = {};
     let anyMoney = false;
+    let anyBad = false;
     g.players.forEach(p => {
-      const v = (r.money && r.money[p.id]) || 0;
+      // v973 (Tyler code review): this was `|| 0`. NaN is falsy, so a game whose
+      // money went NaN contributed $0 for EVERY player and — because anyMoney
+      // stayed false — was dropped from byGame entirely. The game just vanished
+      // from the board with no error anywhere. Zero it, but flag it loudly.
+      let v = (r.money && r.money[p.id] != null) ? r.money[p.id] : 0;
+      if (typeof v !== 'number' || !isFinite(v)) {
+        anyBad = true;
+        try { console.warn('[BadGolf] non-numeric money in game "' + key + '" for player ' + p.id + ':', v); } catch (e) {}
+        v = 0;
+      }
       moneyForGame[p.id] = v;
       if (v !== 0) anyMoney = true;
       combined[p.id] += v;
     });
-    if (anyMoney) {
-      byGame.push({ key, label: labels[key] || key, money: moneyForGame });
+    if (anyMoney || anyBad) {
+      byGame.push({ key, label: labels[key] || key, money: moneyForGame, calcError: anyBad || undefined });
     }
   });
   // ── GROUP SIDE GAMES (tournament foursomes) ────────────────────────────────
