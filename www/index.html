@@ -7649,7 +7649,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.971';
+const BG_BUILD = 'v2026.11.972';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -12622,6 +12622,24 @@ function maybeAutoCloseFinishedRound(prevFinished) {
         else if (typeof renderBoard === 'function') renderBoard();
       } catch (e) {}
     }
+    // v972: the scorer tapping Finish should CLOSE THE ROUND OUT on every phone —
+    // straight to the payout screen, the same view the scorer gets. Before this we
+    // only flipped the round read-only and toasted, so everyone else was left on
+    // the score sheet with no idea what they won or owed until they went looking.
+    // (Tyler, Aug 2026: "it should finish the round on everyone's phone and close
+    // it out with payout screen.") Guarded and deferred a tick so the read-only
+    // re-render above lands first; never fires for spectators (returned earlier).
+    try {
+      setTimeout(function () {
+        try {
+          const _sm = document.getElementById('summary-modal');
+          if (_sm && _sm.classList.contains('show')) return;      // already open
+          if (!state.game || !state.game.finishedAt) return;      // round changed under us
+          const _fb = document.getElementById('btn-finish-round');
+          if (_fb) _fb.click();     // builds + shows the payout summary (gates skip: round already finished)
+        } catch (e) {}
+      }, 400);
+    } catch (e) {}
     // Bet history is built from each round's ARCHIVED money. A round that just
     // finished on ANY phone should appear immediately if the Stats page is open —
     // archive it, then re-render Stats so Lifetime Bets / Bet history update live.
@@ -23493,6 +23511,39 @@ window.BadGolfWatchSync = async function () {
     const arr = (g.scores && myPid && g.scores[myPid]) || [];
     const scores = {};
     try { arr.forEach((v, i) => { if (v != null) scores[String(i + 1)] = { strokes: v }; }); } catch (e) {}
+    // v972: the handoff never carried PAR, so the watch had nothing to seed a
+    // hole with and started every hole at zero — forcing a tap per stroke.
+    // Send the card's pars (and stroke index) so the watch can open each hole at
+    // par like the phone does. (Tyler, Aug 2026.) Falls back to the GPS layout's
+    // per-hole par when the card has none, so a mapped course still works.
+    const pars = {};
+    const sis = {};
+    try {
+      const _cp = Array.isArray(g.pars) ? g.pars : null;
+      const _cs = Array.isArray(g.sis) ? g.sis : null;
+      for (let i = 0; i < 18; i++) {
+        let _p = _cp && _cp[i] != null ? _cp[i] : null;
+        if (_p == null && holes && holes[String(i + 1)] && holes[String(i + 1)].par != null) _p = holes[String(i + 1)].par;
+        if (_p != null) pars[String(i + 1)] = _p;
+        if (_cs && _cs[i] != null) sis[String(i + 1)] = _cs[i];
+      }
+    } catch (e) {}
+    // v972: also hand over EVERY player's running scores, not just the wearer's.
+    // With one player on a watch and another on a phone, the watch could never
+    // show the group — so the two devices looked out of sync even when the round
+    // was current. Small payload (names + 18 ints) and read-only on the watch.
+    const groupScores = [];
+    try {
+      (g.players || []).forEach(p => {
+        if (!p || !p.id) return;
+        groupScores.push({
+          id: p.id,
+          name: (typeof displayFirst === 'function') ? displayFirst(p) : (p.name || ''),
+          me: p.id === myPid,
+          scores: ((g.scores && g.scores[p.id]) || []).slice(0, 18)
+        });
+      });
+    } catch (e) {}
     const handoff = {
       token: token,
       playerId: playerId,
@@ -23502,7 +23553,11 @@ window.BadGolfWatchSync = async function () {
         course_name: g.course || '',
         user_id: playerId || '',
         current_hole: (typeof state !== 'undefined' && state && state.currentHole) ? state.currentHole : (g.startHole || 1),
-        scores: scores
+        scores: scores,
+        pars: pars,                 // v972: lets the watch open each hole at par
+        sis: sis,                   // v972: stroke index, for net display on the wrist
+        players: groupScores,       // v972: the whole group's scores, read-only
+        updatedAt: g.updatedAt || Date.now()
       },
       course: {
         course_id: g.courseId || '',
@@ -23576,6 +23631,11 @@ window.__onWatchScore = async function (u) {
     });
     if (!changed) return;
     await saveGame(g);
+    // v972: a score tapped on the watch is now pushed to the OTHER phones the
+    // moment it lands, instead of waiting on the next render's debounced sync.
+    // saveGame already wrote the cloud row, so this only nudges the local UI —
+    // but it also re-broadcasts so a co-scorer sees the stroke straight away.
+    try { if (typeof renderGameBanners === 'function') renderGameBanners(); } catch (e) {}
     // Refresh the score screen if it's what's on screen, and confirm on-phone.
     try { const _at = document.querySelector('.tab.active'); if (_at && _at.dataset.tab === 'score' && typeof renderScoreEntry === 'function') renderScoreEntry(); } catch (e) {}
     try { showToast('⌚ Score from your watch saved'); } catch (e) {}
@@ -29867,11 +29927,37 @@ function renderGameBanners() {
           const pts = sp6Res.points[p.id] || 0;
           return `<b>${escapeHtml(p.name)}</b>: ${pts}pts`;
         }).join(' · ');
+        // v972: per-hole line — who won what on the last scored hole. Every other
+        // game shows this on the scoring screen; Splix 6's only ever showed the
+        // running total, so you couldn't tell where the points came from.
+        // (Tyler, Aug 2026: "make it just like we do for the other games.")
+        let lastStr = '';
+        try {
+          let li = -1;
+          for (let i = sp6Res.holePoints.length - 1; i >= 0; i--) {
+            if (sp6Res.holePoints[i]) { li = i; break; }
+          }
+          if (li >= 0) {
+            const hp = sp6Res.holePoints[li];
+            const perPt = (sp6Cfg.mode === 'perpoint') ? (sp6Cfg.value || 0) : 0;
+            const line = [...sp6Parts]
+              .sort((a, b) => (hp[b.id] || 0) - (hp[a.id] || 0))
+              .map(p => {
+                const pts = hp[p.id] || 0;
+                if (!perPt) return `${escapeHtml(p.name)} ${pts}`;
+                const amt = (pts - 2) * perPt;      // 2 pts/hole is dead even
+                const aStr = amt > 0 ? ` +$${amt.toFixed(2)}` : (amt < 0 ? ` -$${Math.abs(amt).toFixed(2)}` : '');
+                return `${escapeHtml(p.name)} ${pts}${aStr}`;
+              }).join(' · ');
+            lastStr = `<div class="sub" style="font-size:11px;margin-top:3px">H${li + 1}: ${line}</div>`;
+          }
+        } catch (e) {}
         const div = document.createElement('div');
         div.className = 'turn-banner';
         div.innerHTML = `
           <div style="font-weight:600;font-size:13px;margin-bottom:4px">6️⃣ Splix 6's — thru ${holesScored} holes${modeLabel}</div>
           <div style="font-size:12px;line-height:1.6">${ptsStr}</div>
+          ${lastStr}
         `;
         banners.appendChild(div);
       }
@@ -61004,10 +61090,15 @@ async function init() {
       showToast('No active round to finish');
       return;
     }
+    // v972: when the round is ALREADY finished, this button is just "show me the
+    // payout" — the scorer answered the Wolf / blank-holes questions when they
+    // finished. Re-asking every other phone (which is what the auto-close would
+    // do) would put a confirm dialog in front of people who can't act on it.
+    const _alreadyFinished = !!g.finishedAt;
     // Wolf gate: scan all 18 holes for missing picks before opening summary.
     // If any are missing, warn so the user can go back and fix them — otherwise
     // the saved round will have wrong Wolf totals.
-    const missingWolf = wolfHolesMissingPicks(g);
+    const missingWolf = _alreadyFinished ? [] : wolfHolesMissingPicks(g);
     if (missingWolf.length > 0) {
       const holeList = missingWolf.join(', ');
       if (!(await uiConfirm(
@@ -61020,7 +61111,7 @@ async function init() {
     // can leave holes blank. Don't hard-block — warn and let the scorer finish with
     // the holes that ARE scored. (Tyler, Jul 2026)
     try {
-      if (typeof allHolesScored === 'function' && !allHolesScored(g)) {
+      if (!_alreadyFinished && typeof allHolesScored === 'function' && !allHolesScored(g)) {
         if (!(await uiConfirm('Some players have blank holes. Finish the round with the scores entered so far? Blank holes won\u2019t count.', { title: 'Finish round?', okLabel: 'Finish', cancelLabel: 'Go back', danger: false }))) return;
       }
     } catch (e) {}
@@ -61162,6 +61253,45 @@ async function init() {
   { const _gh = $('summary-ghin'); if (_gh) _gh.onclick = () => { try { window.openPostToGhin(); } catch (e) { try { window.open('https://www.ghin.com/', '_blank'); } catch (e2) {} } }; }
   { const _wh = $('summary-whs'); if (_wh) _wh.onclick = () => { try { window.open('https://www.whs.com/', '_blank'); } catch (e) {} }; }
 
+  // v972: releases the summary UI the instant the round is durably finished —
+  // closes the payout modal, clears the live-round state and lands the user home
+  // (or in a fresh setup form). Idempotent: the tail of summary-confirm calls the
+  // same routine, so whichever runs first wins and the second is a no-op.
+  function _bgReleaseSummaryUI(g) {
+    try {
+      if (state._summaryReleased === (g && g.code)) return;   // already released this round
+      state._summaryReleased = (g && g.code) || true;
+      state.game = null;
+      state.editingLiveRound = false;
+      state.viewOnlyMode = false;
+      try { enableGameTabs(false); } catch (e) {}
+      try { safeSet(KEY_LAST, '', false); } catch (e) {}      // not awaited — cannot block the UI
+      try {
+        const _sw = $('setup-with-game'); if (_sw) _sw.style.display = 'none';
+        const _sn = $('setup-no-game');   if (_sn) _sn.style.display = 'block';
+        const _pl = $('players-list');    if (_pl) _pl.innerHTML = '';
+      } catch (e) {}
+    } catch (e) {
+    } finally {
+      try { const _sm = $('summary-modal'); if (_sm) _sm.classList.remove('show'); } catch (e) {}
+    }
+    try {
+      if (state._newRoundAfterSave) {
+        state._newRoundAfterSave = false;
+        if (state._afterActiveResolve) {
+          const _fn = state._afterActiveResolve; state._afterActiveResolve = null;
+          showToast('Round saved'); try { _fn(); } catch (e) {}
+        } else {
+          showToast('Round saved — set up your new round');
+          openFreshSetupForm();
+        }
+      } else {
+        switchTab('home');
+        showToast('Round saved');
+      }
+    } catch (e) {}
+  }
+
   // Summary modal: "Save & return home" — archive the round and go home
   $('summary-confirm').onclick = async () => {
     const g = state.game;
@@ -61171,7 +61301,21 @@ async function init() {
       g.finishedAt = Date.now();
       try { if (typeof playSwingSound === 'function') playSwingSound(); } catch (e) {}   // v696: club-swing sound on round finish
       try { if (typeof liveActivity !== 'undefined') liveActivity.end(); } catch (e) {}
-      try { await saveGame(g); } catch (e) { console.warn('saveGame on finish failed:', e); }
+      // v972: bound the save so a dead/slow connection can't freeze the button.
+      // The round is already stamped finishedAt locally and the dirty queue will
+      // re-push it, so a timeout here is safe. (Tyler, Aug 2026: "stuck on the
+      // payout screen" — every await below used to run BEFORE the modal closed.)
+      try {
+        const _sp = saveGame(g);
+        if (typeof _promiseTimeout === 'function') await _promiseTimeout(_sp, 6000, 'saveGame-finish');
+        else await _sp;
+      } catch (e) { console.warn('saveGame on finish failed/slow:', e); }
+      // v972: release the UI HERE. Everything after this point is bookkeeping the
+      // user must never wait on — wager settlement, push notifications, archiving,
+      // tourney status — each of which is a network round trip that can hang on
+      // course wifi. Close the summary, go home, then finish the chores in the
+      // background. _bgFinishCleanup is fire-and-forget and fully self-guarded.
+      try { _bgReleaseSummaryUI(g); } catch (e) { console.warn('summary release failed:', e); }
       // v940: retire any invites still outstanding for this round — nobody should
       // be invited to a round that just ended.
       try { expireInvitesForRound(g.code); } catch (e) {}
@@ -61240,21 +61384,9 @@ async function init() {
     } finally {
       try { const _sm = $('summary-modal'); if (_sm) _sm.classList.remove('show'); } catch (e) {}
     }
-    // If this finish came from "Save current round & start new", land the user
-    // straight in the fresh new-round setup (QA #2) instead of Home.
-    if (state._newRoundAfterSave) {
-      state._newRoundAfterSave = false;
-      if (state._afterActiveResolve) {
-        const _fn = state._afterActiveResolve; state._afterActiveResolve = null;
-        showToast('Round saved'); try { _fn(); } catch (e) {}
-      } else {
-        showToast('Round saved — set up your new round');
-        openFreshSetupForm();
-      }
-    } else {
-      switchTab('home');
-      showToast('Round saved');
-    }
+    // v972: normally already done by _bgReleaseSummaryUI above; this is the
+    // backstop for the no-game path and is a no-op when it already ran.
+    try { _bgReleaseSummaryUI(g); } catch (e) {}
   };
 
   // Tap outside the summary modal to close (treats as "back to board")
@@ -62859,9 +62991,43 @@ const gpsView = (() => {
       // Anchor is the player's OWN frozen tee fix, so it reads ~0 while standing at
       // the tee and counts up as they move down the hole (Tyler, Jul 2026: "set to
       // zero at the tee box" + "stop displaying once you get past 450 yds").
-      const _driveAnchor = _holeStartPos;
+      let _driveAnchor = _holeStartPos;
+      // v972: if the zero point still ended up behind the mapped tee (a GPS fix
+      // that landed there before the guard could reject it, or a hole whose tee
+      // was mapped short), fall back to the mapped tee so the number stays sane.
+      try {
+        if (hd && Array.isArray(hd.tee) && Array.isArray(hd.mid)) {
+          const _teeLeft = ydsBetween(hd.tee, hd.mid);
+          if (ydsBetween(_driveAnchor, hd.mid) > _teeLeft + 20) _driveAnchor = hd.tee;
+        }
+      } catch (e) {}
       let yds = ydsBetween(_driveAnchor, ball);
       if (yds < 0) yds = 0;                             // never negative — baseline is 0 at the tee
+      // v972: the mapped tee is the TIPS. A player off the blues/whites started
+      // 20-60y further up, so measuring from the tips overstates every drive.
+      // Scale the tee->green length by this player's tee yardage vs the longest
+      // tee on the card and shift the anchor down the tee->green line by the
+      // difference. Only applies when we actually fell back to the mapped tee.
+      try {
+        if (_driveAnchor === (hd && hd.tee) && Array.isArray(hd.mid)) {
+          const _tees = (state.game && Array.isArray(state.game.tees) && state.game.tees.length) ? state.game.tees : null;
+          let _myLbl = '';
+          try {
+            const _me = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(state.game) : null;
+            const _mp = _me && state.game.players ? state.game.players.find(x => x.id === _me) : null;
+            _myLbl = (_mp && state.playerTees) ? (state.playerTees[_mp.name] || '') : '';
+          } catch (e) {}
+          if (_tees && _myLbl) {
+            const _mine = _tees.find(t => t && String(t.label || '') === String(_myLbl));
+            const _long = _tees.reduce((a, t) => (t && t.yards > (a ? a.yards : 0)) ? t : a, null);
+            if (_mine && _long && _mine.yards > 0 && _long.yards > 0 && _mine.yards < _long.yards) {
+              const _ratio = Math.max(0.8, Math.min(1, _mine.yards / _long.yards));
+              const _drop = ydsBetween(hd.tee, hd.mid) * (1 - _ratio);
+              if (_drop > 5) yds = Math.max(0, yds - Math.round(_drop));
+            }
+          }
+        }
+      } catch (e) {}
       if (yds > 450) return hide();                     // past 450y — stop displaying (Tyler, Jul 2026)
       const v = b.querySelector('.val'); if (v) v.textContent = yds + 'y';
       b.dataset.yds = yds;
@@ -63930,7 +64096,19 @@ const gpsView = (() => {
         // the back tee), so it reads ~0 when parked at the tee and counts up as they
         // drive. (Tyler, Jul 2026: "reset to zero once the carts are at the tee box and
         // parked — that is our starting distance always.")
-        const _nearTee = !hd || !Array.isArray(hd.tee) || ydsBetween(hd.tee, p) <= 90;
+        // v972: "near the tee" must also mean NOT BEHIND IT. The 90y radius is
+        // symmetric, so a fix on the cart path / by the previous green up to 90y
+        // BEHIND the mapped tee satisfied it and became the zero point — which is
+        // exactly how Est. Drive read 365y on Buffalo Creek 15, a 462y par 4 with
+        // 168 still to the middle (a 533y "par 4"). Forward of the mapped tee is
+        // legitimate (real forward tees); behind it never is. (Tyler, Aug 2026.)
+        let _behindTee = false;
+        try {
+          if (hd && Array.isArray(hd.tee) && Array.isArray(hd.mid)) {
+            _behindTee = ydsBetween(p, hd.mid) > ydsBetween(hd.tee, hd.mid) + 15;
+          }
+        } catch (e) {}
+        const _nearTee = !hd || !Array.isArray(hd.tee) || (ydsBetween(hd.tee, p) <= 90 && !_behindTee);
         const _step = _driveLastPos ? ydsBetween(_driveLastPos, p) : 0;   // movement since the last GPS fix
         if (!_holeStartPos) {
           if (_nearTee) { _holeStartPos = p.slice(); _driveLastPos = p.slice(); _drvStillPos = p.slice(); _drvStillAt = _now; }
