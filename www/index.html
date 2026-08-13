@@ -7798,7 +7798,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.977';
+const BG_BUILD = 'v2026.11.978';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -7812,6 +7812,29 @@ const WAGER_ENABLED = false;
 // toast, throttled to at most once per 60s. Purely observational: never calls
 // preventDefault, never alters default behavior, and can never throw itself.
 let _bgLastErrToastAt = 0;
+// v978 (Tyler code review): www/index.html <link rel=preload>s lib/maplibre-gl.js at
+// HIGH priority — and NOTHING in the file ever referenced lib/. Both loaders
+// hard-coded the jsdelivr CDN. So on iOS ~800 KB was fetched at boot and never used,
+// the map was then downloaded AGAIN over the network on first use, and on a course
+// with no signal the GPS map failed WITH THE FILE SITTING ON THE DEVICE.
+// Prefer the local copy when we're running from the native shell; the web build has
+// no lib/ directory, so it keeps using the CDN.
+function _bgMapLibreUrl(kind) {
+  var cdn = (kind === 'css')
+    ? 'https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css'
+    : 'https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js';
+  try {
+    var native = !!(window.Capacitor && (window.Capacitor.isNativePlatform ? window.Capacitor.isNativePlatform() : window.Capacitor.isNative));
+    if (!native) {
+      // Belt and braces: the native shell serves the app from capacitor:// or
+      // https://localhost, never from the Pages origin.
+      var p = String(location.protocol || ''), h = String(location.hostname || '');
+      native = (p.indexOf('capacitor') === 0) || (p === 'ionic:') || (h === 'localhost' && p === 'https:');
+    }
+    if (native) return (kind === 'css') ? 'lib/maplibre-gl.css' : 'lib/maplibre-gl.js';
+  } catch (e) {}
+  return cdn;
+}
 function _bgSoftErrorNotice(kind, reason) {
   try {
     try { console.warn('[bg ' + kind + ']', reason); } catch (e) {}
@@ -8204,9 +8227,32 @@ function resetSessionIdentity() {
   ['golf:me-name', 'golf:my-clubs', 'golf:my-shots', 'golf:stats-visibility'].forEach(function (k) {
     try { localStorage.removeItem(k); } catch (e) {}
   });
+  // v978 (Tyler code review) — THE SHARED-PHONE LEAK. This cleared four keys but
+  // NOT the per-user data caches. roster/recent/hidden/deleted are per-USER rows
+  // (roster:<uid>, recent:<uid>) but their localStorage caches are not namespaced,
+  // so after account A signed out and B signed in, the very first savePlayerRoster
+  // merged A's players AND A's scoreHistory into roster:<B> — permanently, because
+  // mergeRosters is additive. Same shape for the recent-rounds list.
+  // Worse, any of those keys left DIRTY would be flushed by flushDirtySingletons
+  // straight into B's row. signOutUser() now flushes A's pending writes BEFORE
+  // calling this, so clearing the flags here can't lose A's edits.
+  ['golf:player-roster', 'golf:recent-games', 'golf:hidden-rounds',
+   'golf:deleted-rounds', 'golf:my-round-tombstones', 'golf:roster-tombstones',
+   'golf:last-hcp-snap'].forEach(function (k) {
+    try { localStorage.removeItem(k); } catch (e) {}
+    try { if (typeof _singletonDirty !== 'undefined') _singletonDirty[k] = false; } catch (e) {}
+  });
+  try { if (typeof _persistDirty === 'function') _persistDirty(); } catch (e) {}
+  try { _tombCache = null; } catch (e) {}
+  try { if (typeof _recentCache !== 'undefined') _recentCache = null; } catch (e) {}
 }
 
 async function signOutUser() {
+  // v978: push any of THIS account's unsaved edits before we drop its caches —
+  // resetSessionIdentity now clears the per-user blobs and their dirty flags, and
+  // doing that with a write still queued would either lose the edit or (worse)
+  // flush it into the NEXT account's row.
+  try { await flushDirtySingletons(); } catch (e) {}
   try { await supa.auth.signOut(); } catch (e) {}
   _authUser = null; _authRole = 'guest';
   try { resetSessionIdentity(); } catch (e) {}
@@ -9745,11 +9791,11 @@ function ensureMapLibre() {
       if (!document.querySelector('link[data-maplibre]')) {
         const css = document.createElement('link');
         css.rel = 'stylesheet'; css.setAttribute('data-maplibre', '1');
-        css.href = 'https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css';
+        css.href = _bgMapLibreUrl('css');
         document.head.appendChild(css);
       }
       const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js';
+      s.src = _bgMapLibreUrl('js');
       s.onload = () => resolve();
       s.onerror = () => reject(new Error('Could not load map library'));
       document.head.appendChild(s);
@@ -12737,16 +12783,31 @@ async function writeSharedSingleton(key, value) {
 // Retry any UNSAVED shared edits (writes that never confirmed in the cloud) so a
 // network blip during an admin mapping session can't quietly drop the work. Runs
 // on a timer and whenever the tab comes back online.
+// v978 (Tyler code review): a 15s interval, a boot call and an 'online' listener all
+// fire this with NO in-flight guard, so two passes could run the same key
+// concurrently — each doing its own read-merge-write and the slower one landing last
+// with the staler merge. One at a time.
+let _flushingSingletons = false;
 async function flushDirtySingletons() {
+  if (_flushingSingletons) return;
   const dirtyKeys = Object.keys(_singletonDirty).filter(k => _singletonDirty[k]);
   if (!dirtyKeys.length) return;
+  _flushingSingletons = true;
+  try { return await _flushDirtySingletonsInner(dirtyKeys); }
+  finally { _flushingSingletons = false; }
+}
+async function _flushDirtySingletonsInner(dirtyKeys) {
   try { if (!supaReady) await initSupabase(); } catch (e) {}
   if (!supa || !supaOnline) return;
   for (const key of dirtyKeys) {
     // The roster has its own hardened merge-on-write; re-run it so a queued retry
     // re-reads the cloud and UNIONS rather than blind-overwriting a stale blob (v284).
     if (key === KEY_PLAYER_ROSTER) {
-      try { const _lr = JSON.parse(localStorage.getItem(key) || '[]'); if (Array.isArray(_lr)) { _singletonDirty[key] = false; _persistDirty(); await savePlayerRoster(_lr); } } catch (e) {}
+      // v978 (Tyler code review): this marked the roster CLEAN *before* calling the
+      // writer. If savePlayerRoster threw before reaching its own flag handling, the
+      // edit was dropped from the retry queue and lost. savePlayerRoster owns this
+      // flag on both the success and failure paths — let it.
+      try { const _lr = JSON.parse(localStorage.getItem(key) || '[]'); if (Array.isArray(_lr)) { await savePlayerRoster(_lr); } } catch (e) { _singletonDirty[key] = true; _persistDirty(); }
       continue;
     }
     let v = null; try { v = localStorage.getItem(key); } catch (e) {}
@@ -14872,7 +14933,11 @@ async function savePlayerRoster(roster, opts) {
     console.warn('savePlayerRoster merge-write failed', e);
     _singletonDirty[KEY_PLAYER_ROSTER] = true; _persistDirty(); // re-merged + re-pushed by flushDirtySingletons
   }
-  return true;
+  // v978 (Tyler code review): this returned a hard-coded `true` on every path, so no
+  // caller could ever tell a saved roster from a queued one and no UI could say
+  // "not saved". Report what actually happened — still truthy when the write is
+  // safely queued offline, false only when it genuinely failed and is pending retry.
+  try { return !_singletonDirty[KEY_PLAYER_ROSTER]; } catch (e) { return true; }
 }
 
 // Add or update a player in the roster. Matches on firstName+lastName
@@ -15412,7 +15477,17 @@ async function archiveScoresFromRound(g) {
     const _agg = (typeof computeAllGameMoney === 'function') ? computeAllGameMoney(g) : null;
     moneyTotals = (_agg && _agg.combined) ? _agg.combined : {};
     g.players.forEach(p => { if (moneyTotals[p.id] == null) moneyTotals[p.id] = 0; });
-  } catch (e) { console.warn('archive: money calc failed', e); moneyTotals = {}; g.players.forEach(p => moneyTotals[p.id] = 0); }
+  } catch (e) {
+    // v978 (Tyler code review): this swallowed the failure and archived $0 for EVERY
+    // player, so the round's money vanished from Lifetime Bets with nothing shown to
+    // anyone. Zeroes are still written (the round itself must archive), but the
+    // failure is now recorded on the round and surfaced, so a wrong total is
+    // traceable instead of looking like a genuine $0 day.
+    console.warn('archive: money calc failed', e);
+    moneyTotals = {}; g.players.forEach(p => moneyTotals[p.id] = 0);
+    try { g._moneyArchiveError = String((e && e.message) || e); } catch (e2) {}
+    try { if (typeof showToast === 'function') showToast("Couldn't total the bets for this round — scores saved, money shows $0"); } catch (e2) {}
+  }
 
   const roster = await getPlayerRoster();
   let changed = false;
@@ -15859,11 +15934,25 @@ async function saveCourseSaves(saves) {
     if (!shardKeys.length) return true;
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
-      var rows = shardKeys.map(function (sh) {
-        var obj = {};
-        for (var i2 in saves) { if (_courseShard(i2) === sh) obj[i2] = saves[i2]; }
-        return { code: 'shared:courses:' + sh, data: obj, updated_at: new Date().toISOString() };
-      });
+      // v978 (Tyler code review): this rebuilt each changed shard PURELY from the
+      // in-memory `saves` map and upserted it — a blind whole-shard replace. ~90
+      // courses share a shard, so two admins editing DIFFERENT courses in the same
+      // shard silently lost one of the edits (and a partial/stale `saves` map could
+      // drop a shard's worth of cards outright). Read the shard first, keep every
+      // card we aren't touching, overlay ours, and honour explicit removals only.
+      var _rmSet = {}; _removedIds.forEach(function (rid) { _rmSet[rid] = 1; });
+      var rows = [];
+      for (var si = 0; si < shardKeys.length; si++) {
+        var sh = shardKeys[si];
+        var base = {};
+        try {
+          var _sr = await supa.from('games').select('data').eq('code', 'shared:courses:' + sh).maybeSingle();
+          if (!_sr.error && _sr.data && _sr.data.data && typeof _sr.data.data === 'object') base = Object.assign({}, _sr.data.data);
+        } catch (_se) { console.warn('shard merge-read failed for', sh, _se); }
+        for (var i2 in saves) { if (_courseShard(i2) === sh) base[i2] = saves[i2]; }
+        for (var rk in _rmSet) { if (_courseShard(rk) === sh) delete base[rk]; }
+        rows.push({ code: 'shared:courses:' + sh, data: base, updated_at: new Date().toISOString() });
+      }
       for (var i = 0; i < rows.length; i += 20) { var e = (await supa.from('games').upsert(rows.slice(i, i + 20))).error; if (e) { console.warn('saveCourseSaves shard write error', e); return false; } }
       // v948 SINGLE SOURCE OF TRUTH. A course card lived in three places: the legacy
       // 'shared:courses' blob, the 64 'shared:courses:XX' shards, and the per-course
@@ -62882,7 +62971,15 @@ const gpsView = (() => {
   // Returns true if the change is safely persisted (cloud write OK, or offline so the
   // local cache is the best we can do), false if a cloud write was attempted and FAILED
   // — callers surface that so a "saved ✓" is never shown for a write that didn't land.
-  async function saveCourseRow(cid) {
+  // v978 (Tyler code review) — `opts.remove` is a list of PHYSICAL hole numbers this
+  // save is deleting. THE BUG: clearHole() deleted the hole from the local object and
+  // called this, but the merge below starts from the CLOUD row and only overlays keys
+  // that are present LOCALLY — so a deleted hole simply wasn't overlaid, the cloud
+  // copy survived, and it was written straight back into memory. GPS hole deletion was
+  // literally unrepresentable: an admin could clear a bad hole, re-map it, and the old
+  // tee/green could still win the next merge. Removals are now explicit.
+  async function saveCourseRow(cid, opts) {
+    opts = opts || {};
     if (!cid || !courseGps[cid]) return false;
     // v880 STATE LOCK: GPS greens/targets are course data too. Checked before the
     // three-nine fan-out below so a combo id can't sneak a write past the lock.
@@ -62899,7 +62996,10 @@ const gpsView = (() => {
           const fH = {};
           for (let i = 1; i <= 9; i++) { if (H[i]) fH[i] = H[i]; }
           courseGps[fId] = { holes: Object.assign({}, (courseGps[fId] && courseGps[fId].holes), fH), source: 'manual', updatedAt: Date.now() };
-          return await saveCourseRow(fId);
+          // v978: carry the removals into the per-nine row (single nine = same index).
+          const _rmF = (opts.remove || []).filter(h => h >= 1 && h <= 9);
+          _rmF.forEach(h => { try { delete courseGps[fId].holes[h]; delete courseGps[fId].holes[String(h)]; } catch (e) {} });
+          return await saveCourseRow(fId, { remove: _rmF });
         }
         const fId = _csv.base + '#' + _csv.front, bId = _csv.base + '#' + _csv.back;
         const H = (courseGps[cid] && courseGps[cid].holes) || {};
@@ -62908,7 +63008,14 @@ const gpsView = (() => {
         for (let i = 1; i <= 9; i++) { if (H[9 + i]) bH[i] = H[9 + i]; }
         courseGps[fId] = { holes: Object.assign({}, (courseGps[fId] && courseGps[fId].holes), fH), source: 'manual', updatedAt: Date.now() };
         courseGps[bId] = { holes: Object.assign({}, (courseGps[bId] && courseGps[bId].holes), bH), source: 'manual', updatedAt: Date.now() };
-        const r1 = await saveCourseRow(fId), r2 = await saveCourseRow(bId);
+        // v978: split the removals across the two per-nine rows (back nine holes
+        // 10..18 are stored as 1..9 on their own row, so the index shifts by 9).
+        const _rmAll = opts.remove || [];
+        const _rmF2 = _rmAll.filter(h => h >= 1 && h <= 9);
+        const _rmB2 = _rmAll.filter(h => h >= 10 && h <= 18).map(h => h - 9);
+        _rmF2.forEach(h => { try { delete courseGps[fId].holes[h]; delete courseGps[fId].holes[String(h)]; } catch (e) {} });
+        _rmB2.forEach(h => { try { delete courseGps[bId].holes[h]; delete courseGps[bId].holes[String(h)]; } catch (e) {} });
+        const r1 = await saveCourseRow(fId, { remove: _rmF2 }), r2 = await saveCourseRow(bId, { remove: _rmB2 });
         return r1 && r2;
       }
     }
@@ -62929,9 +63036,15 @@ const gpsView = (() => {
             _m[_k] = Object.assign({}, _cloudRow.holes[_k] || {}, _local[_k] || {});
           }
           _mergedHoles = _m;
-          if (courseGps[cid]) courseGps[cid].holes = _m; // keep local in sync with the merged set
         }
       } catch (e) { console.warn('course_gps merge-read failed, writing local-only:', e); }
+      // v978: apply the explicit removals AFTER the union — this is the whole point.
+      // Without it the merge above hands the cloud's copy of a just-cleared hole
+      // straight back and the delete is silently undone.
+      try {
+        (opts.remove || []).forEach(function (h) { delete _mergedHoles[h]; delete _mergedHoles[String(h)]; });
+      } catch (e) {}
+      if (courseGps[cid]) courseGps[cid].holes = _mergedHoles;   // keep local in sync with what we're about to write
       const payload = {
         course_id: cid,
         name: lib ? lib.name : cid,
@@ -62957,7 +63070,7 @@ const gpsView = (() => {
   }
   // Aliases used throughout this module (always scoped to the open course)
   async function loadStore() { await loadCourse(courseId); }
-  async function saveStore() { return await saveCourseRow(courseId); }
+  async function saveStore(opts) { return await saveCourseRow(courseId, opts); }
   // Admin: wipe ALL GPS for just the CURRENT hole (tee/green/fairway target) so one
   // bad hole can be re-mapped without redoing the whole course. Persists to the
   // shared cloud row; the rest of the course is untouched.
@@ -62970,7 +63083,8 @@ const gpsView = (() => {
     }
     delete holes[ph];
     courseGps[courseId].updatedAt = Date.now();
-    try { await saveStore(); } catch (e) {}
+    // v978: tell the writer this hole is REMOVED, not merely absent locally.
+    try { await saveStore({ remove: [ph] }); } catch (e) {}
     try { audit('clear_hole_gps', courseId, 'hole ' + hole); } catch (e) {}
     gToast('Hole ' + hole + ' GPS cleared — re-map it with the 3 taps');
     hd = holeData(hole);   // now null
@@ -63027,10 +63141,10 @@ const gpsView = (() => {
     return new Promise((resolve, reject) => {
       const css = document.createElement('link');
       css.rel = 'stylesheet';
-      css.href = 'https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css';
+      css.href = _bgMapLibreUrl('css');
       document.head.appendChild(css);
       const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js';
+      s.src = _bgMapLibreUrl('js');
       s.onload = () => { libLoaded = true; resolve(); };
       s.onerror = () => reject(new Error('Could not load map library'));
       document.head.appendChild(s);
