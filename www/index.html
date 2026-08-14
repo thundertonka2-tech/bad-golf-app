@@ -7997,7 +7997,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1016';
+const BG_BUILD = 'v2026.11.1017';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -13542,6 +13542,9 @@ function maybeAutoCloseFinishedRound(prevFinished) {
     return true;
   } catch (e) { return false; }
 }
+// v1017: round codes this device deleted, so the realtime DELETE echo doesn't
+// tell the deleter that their own round "was deleted by the host".
+const _bgSelfDeleted = {};
 // Subscribe to realtime updates for a specific game code. When another phone
 // edits the game, our local state.game refreshes and the visible screen redraws.
 function subscribeToGame(code) {
@@ -13553,6 +13556,33 @@ function subscribeToGame(code) {
     .on('postgres_changes',
       { event: '*', schema: 'public', table: 'games', filter: 'code=eq.' + code },
       async (payload) => {
+        // v1017 (Tyler): "when I delete the round on one device for all users it
+        // should close it out on all devices instead of leaving the others open."
+        // The DELETE was always delivered here — `event: '*'`, and the code=eq.
+        // filter works on deletes because `code` is the table's primary key (and
+        // so its replica identity). It just died on the `!payload.new` line below,
+        // since a DELETE carries only `old`. Handle it the way
+        // maybeAutoCloseFinishedRound handles a finish, minus the results screen.
+        if (payload && payload.eventType === 'DELETE') {
+          try {
+            if (!state.game || state.game.code !== code) return;
+            // Don't announce my own delete back to me.
+            let _mine = false;
+            try { _mine = !!(_bgSelfDeleted[code] && (Date.now() - _bgSelfDeleted[code]) < 60000); } catch (e) {}
+            try { tombstoneRound(code); } catch (e) {}            // can't resurrect from a stale blob
+            try { const h = getHiddenRounds(); if (h.indexOf(code) < 0) { h.push(code); setHiddenRounds(h); } } catch (e) {}
+            try { localStorage.removeItem('game:' + code); } catch (e) {}
+            // Defer: discardActiveRound calls enableGameTabs(false), which tears
+            // down THIS very channel. Doing that inside its own callback is asking
+            // for trouble, so let the current event finish first.
+            setTimeout(async () => {
+              try { if (typeof window.discardActiveRound === 'function') await window.discardActiveRound(); } catch (e) {}
+              try { if (!_mine) showToast('This round was deleted by the host'); } catch (e) {}
+              try { if (!_mine && typeof switchTab === 'function') switchTab('home'); } catch (e) {}
+            }, 0);
+          } catch (e) {}
+          return;
+        }
         if (!payload.new || !payload.new.data) return;
         // Don't overwrite if we're currently editing locally — avoid input flicker
         const incoming = payload.new.data;
@@ -46414,6 +46444,10 @@ async function restoreScheduledRoundForCode(code) {
 
 // Helper: remove a game from recent list AND from storage
 async function deleteRecentGame(code) {
+  // v1017: remember that THIS device did the deleting. The realtime DELETE echoes
+  // back to us too, and without this the deleter gets told their own round "was
+  // deleted by the host" a second later.
+  try { _bgSelfDeleted[code] = Date.now(); } catch (e) {}
   // v1013: a deleted round must not leave its setup behind for the next one.
   // (Round START and the scheduled-save path already did this; delete did not.)
   try { clearSetupDraft(); } catch (e) {}
@@ -62871,6 +62905,11 @@ async function init() {
     $('setup-no-game').style.display = 'block';
     { const _pl = $('players-list'); if (_pl) _pl.innerHTML = ''; }
   }
+
+  // v1017: the round realtime handler (subscribeToGame, top-level) needs this to
+  // tear a round down when another device deletes it for everyone. Exposed the
+  // same way openFreshSetupForm already is.
+  window.discardActiveRound = discardActiveRound;
 
   // Helper: detach the current round from THIS device's active slot WITHOUT
   // ending or deleting it. The round stays in the cloud + Rounds list and can be
