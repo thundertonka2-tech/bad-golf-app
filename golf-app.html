@@ -591,7 +591,7 @@
   button.small { padding: 6px 10px; font-size: 12px; }
   /* v977: the Home refresh icons measured 32x28. They stay visually small — a
      refresh glyph shouldn't be a slab — but get a real 44px touch box. */
-  #home-crew-refresh, #home-live-refresh { min-width: 44px; min-height: 44px; }
+  #home-live-refresh { min-width: 44px; min-height: 44px; }   /* v1012: #home-crew-refresh removed — the board is live */
   button.warn {
     background: var(--bg-brand-tint);
     color: var(--bg-brand-dark);
@@ -3321,12 +3321,12 @@
       <div class="card" id="home-crew-card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
           <h2 style="margin:0">Crew</h2>
-          <div style="display:flex;gap:6px;align-items:center;flex:0 0 auto">
-            <!-- v901 (Tyler): the Friends only / Everyone selector is GONE. The whole
-                 Crew card (message board, highlights) and Live now are friends-only,
-                 full stop — there was nothing left to choose between. -->
-            <button class="small" id="home-crew-refresh" title="Refresh">&#8635;</button>
-          </div>
+          <!-- v901 (Tyler): the Friends only / Everyone selector is GONE. The whole
+               Crew card (message board, highlights) and Live now are friends-only,
+               full stop — there was nothing left to choose between.
+               v1012 (Tyler): "remove the refresh button, that is very old school."
+               The board is a realtime subscription now (crewBoardSubscribe), so
+               there is nothing left for a manual refresh to do. -->
         </div>
         <div id="home-board"></div>
         <div id="home-highlights"></div>
@@ -6674,7 +6674,7 @@
   <div class="modal" style="max-width:460px">
     <h2>Add a friend</h2>
     <p class="help-text" style="margin-bottom:8px">Pick someone from the crew to send a friend request. Once they accept, you can invite each other to live rounds.</p>
-    <input type="text" id="add-friend-search" placeholder="Search…" style="width:100%;margin-bottom:10px">
+    <input type="text" id="add-friend-search" placeholder="Search…" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="search" style="width:100%;margin-bottom:10px">
     <div id="add-friend-list" style="max-height:320px;overflow-y:auto"></div>
     <div class="actions" style="margin-top:12px"><button class="primary full" id="add-friend-close">Done</button></div>
   </div>
@@ -7994,7 +7994,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1011';
+const BG_BUILD = 'v2026.11.1012';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -12752,6 +12752,12 @@ async function _readSharedSingletonNow(key) {
                       if (_activeTab && _activeTab.dataset && _activeTab.dataset.tab === 'home' && typeof renderHome === 'function') renderHome();
                     } catch (e) {}
                     try { if (typeof renderAccountUI === 'function') renderAccountUI(); } catch (e) {}
+                  }
+                  // v1012: the crew board needs the same "the background refresh
+                  // actually changed something — redraw" treatment, as the safety
+                  // net for when the realtime socket isn't connected.
+                  if (key === KEY_CREW_BOARD && _nextJson !== cached) {
+                    try { if (typeof renderHomeBoard === 'function') renderHomeBoard(); } catch (e) {}
                   }
                 } catch (e) {}
               }
@@ -42419,6 +42425,34 @@ function _boardPrune(msgs) {
   });
 }
 
+// v1012 (Tyler): "on the crew messages, the refresh doesn't work, it only shows
+// the new message if you do a refresh of the app. These should be live messages."
+// The board lives in ONE row (games / 'shared:crew-board'), and `games` is already
+// in the supabase_realtime publication — the same channel shape the tournament
+// chat uses. Subscribe to that row and paint the payload straight into the local
+// cache, which also sidesteps the cache-first read that made the button useless.
+let _crewBoardSub = null;
+function crewBoardUnsubscribe() {
+  try { if (_crewBoardSub && supa) supa.removeChannel(_crewBoardSub); } catch (e) {}
+  _crewBoardSub = null;
+}
+function crewBoardSubscribe() {
+  try {
+    if (!supa || !_authUser || _crewBoardSub) return;
+    const rowCode = (typeof singletonRowCode === 'function') ? singletonRowCode(KEY_CREW_BOARD) : 'shared:crew-board';
+    _crewBoardSub = supa.channel('crew-board')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'games', filter: 'code=eq.' + rowCode }, payload => {
+        try {
+          const d = payload && payload.new ? payload.new.data : null;
+          // Seed the SAME localStorage slot readSharedSingleton reads, so the
+          // re-render below picks the new messages up without a round trip.
+          if (d != null) { try { bgLsSet(KEY_CREW_BOARD, JSON.stringify(d)); } catch (e) {} }
+        } catch (e) {}
+        try { renderHomeBoard(); } catch (e) {}
+      })
+      .subscribe();
+  } catch (e) {}
+}
 async function loadCrewBoard() {
   try {
     const raw = await readSharedSingleton(KEY_CREW_BOARD);
@@ -42579,6 +42613,7 @@ async function deleteCrewBoardMessage(id) {
 async function renderHomeBoard() {
   const el = document.getElementById('home-board');
   if (!el) return;
+  try { crewBoardSubscribe(); } catch (e) {}   // v1012: idempotent — no-ops once subscribed
   let msgs = [];
   try { msgs = await loadCrewBoard(); } catch (e) {}
   let _meName = '';
@@ -42740,8 +42775,6 @@ async function renderHomeBoard() {
       b.onclick = (e) => { e.stopPropagation(); const bid = b.dataset.id; repOpen[bid] = !repOpen[bid]; renderHomeBoard(); };
     });
   } catch (e) {}
-  const rf = document.getElementById('home-crew-refresh');
-  if (rf) rf.onclick = () => { try { renderHomeLive(); } catch (e) {} renderHomeBoard(); };
 }
 
 async function renderHomeLive() {
@@ -42751,9 +42784,6 @@ async function renderHomeLive() {
   // v901: the scope selector is gone. Left guarded (not deleted) so a future
   // re-add just works; with no #home-feed-scope in the DOM this is a no-op.
   { const _sel = $('home-feed-scope'); if (_sel) { try { _sel.value = _scope; } catch (e) {} _sel.onchange = () => { renderHomeLive(); try { renderHomeBoard(); } catch (e) {} }; } }
-  // The refresh button used to be wired only by renderHomeBoard; keep it wired
-  // here too so a render order where the board bails out can't leave it dead.
-  { const _rf = $('home-crew-refresh'); if (_rf) _rf.onclick = () => { renderHomeLive(); try { renderHomeBoard(); } catch (e) {} }; }
   let rows = [];
   try {
     if (!supaReady) await initSupabase();
@@ -47840,27 +47870,45 @@ let _pendingInvite = null;
 let _profilesCache = null, _profilesCacheAt = 0;
 let _friendshipsCache = null, _friendshipsCacheAt = 0;
 function _bgSocialCacheBust() { try { _profilesCacheAt = 0; _friendshipsCacheAt = 0; } catch (e) {} }
+// v1012 (Tyler: "I went to add a new friend from the crew page and it is buggy as
+// crazy, screen flickering"): both of these cached for 60 s but had NO in-flight
+// guard, so N callers inside the same second fired N round trips instead of
+// sharing one. The Add-friend search re-rendered on every keystroke, so typing a
+// five-letter name put ten requests in the air and each one repainted the list
+// when it happened to land. Coalesce, the same way refreshBgUserNames and
+// _singletonInFlight already do.
+let _profilesInflight = null, _friendshipsInflight = null;
 async function fetchProfiles() {
   if (!supa || !_authUser) return [];
   try { if (_profilesCache && (Date.now() - _profilesCacheAt) < 60000) return _profilesCache; } catch (e) {}
-  try {
-    const { data } = await supa.rpc('bg_profiles_public');   // v991
-    try { bgIngestSharedHcp(data); } catch (e) {}   // v1010: shared handicap index rides along
-    const out = (data || []).filter(p => { try { return friendFullName(p) !== 'Player'; } catch (e) { return true; } });   // v757: hide nameless "Player" placeholder profiles (junk/test accounts) from every crew/friend list
-    if (data) { _profilesCache = out; _profilesCacheAt = Date.now(); }   // cache successes only
-    return out;
-  }
-  catch (e) { console.warn('fetchProfiles failed', e); return []; }
+  if (_profilesInflight) return _profilesInflight;
+  _profilesInflight = (async () => {
+    try {
+      const { data } = await supa.rpc('bg_profiles_public');   // v991
+      try { bgIngestSharedHcp(data); } catch (e) {}   // v1010: shared handicap index rides along
+      const out = (data || []).filter(p => { try { return friendFullName(p) !== 'Player'; } catch (e) { return true; } });   // v757: hide nameless "Player" placeholder profiles (junk/test accounts) from every crew/friend list
+      if (data) { _profilesCache = out; _profilesCacheAt = Date.now(); }   // cache successes only
+      return out;
+    }
+    catch (e) { console.warn('fetchProfiles failed', e); return []; }
+    finally { _profilesInflight = null; }
+  })();
+  return _profilesInflight;
 }
 async function fetchFriendships() {
   if (!supa || !_authUser) return [];
   try { if (_friendshipsCache && (Date.now() - _friendshipsCacheAt) < 60000) return _friendshipsCache; } catch (e) {}
-  try {
-    const { data } = await supa.from('friendships').select('*');
-    if (data) { _friendshipsCache = data; _friendshipsCacheAt = Date.now(); }   // cache successes only
-    return data || [];
-  }
-  catch (e) { console.warn('fetchFriendships failed', e); return []; }
+  if (_friendshipsInflight) return _friendshipsInflight;
+  _friendshipsInflight = (async () => {
+    try {
+      const { data } = await supa.from('friendships').select('*');
+      if (data) { _friendshipsCache = data; _friendshipsCacheAt = Date.now(); }   // cache successes only
+      return data || [];
+    }
+    catch (e) { console.warn('fetchFriendships failed', e); return []; }
+    finally { _friendshipsInflight = null; }
+  })();
+  return _friendshipsInflight;
 }
 // Display a friend as "First L." — never the raw email or anything derived
 // from it. Prefers the linked player name (my_player), then display_name.
@@ -48318,13 +48366,27 @@ async function openAddFriend() {
   wireFriendsModals();
   const s = document.getElementById('add-friend-search');
   if (s) s.value = '';
+  // v1012: the paint cache is keyed on markup, so clear it on open or a reopen
+  // after adding someone would think "same html" and skip the refresh.
+  try { const _l = document.getElementById('add-friend-list'); if (_l) _l._afHtml = null; } catch (e) {}
   await renderAddFriendList('');
   document.getElementById('add-friend-modal').classList.add('show');
 }
+let _afRenderSeq = 0;
 async function renderAddFriendList(filter) {
   const el = document.getElementById('add-friend-list');
   if (!el) return;
-  if (!_authUser) { el.innerHTML = '<div class="help-text">Sign in to add friends.</div>'; return; }
+  // v1012: renders are async, so without a sequence token an EARLIER keystroke's
+  // response could land after a later one and repaint the list with results for a
+  // filter the user has already typed past. Only the newest render may write.
+  const _seq = ++_afRenderSeq;
+  const _paint = (html) => {
+    if (_seq !== _afRenderSeq) return false;          // superseded — drop it
+    if (el._afHtml === html) return false;            // identical — don't touch the DOM
+    el._afHtml = html; el.innerHTML = html;
+    return true;
+  };
+  if (!_authUser) { _paint('<div class="help-text">Sign in to add friends.</div>'); return; }
   const meId = _authUser.id;
   const [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]);
   // Map each other person to my relationship with them: 'friend' or 'pending'.
@@ -48354,11 +48416,11 @@ async function renderAddFriendList(filter) {
     .filter(p => !f || friendFullName(p).toLowerCase().includes(f))
     .sort((a, b) => friendFullName(a).localeCompare(friendFullName(b)));
   if (people.length === 0) {
-    el.innerHTML = '<div class="help-text">' + (f ? 'No matches.' : 'No other players have signed up yet — invite your crew to create an account.') + '</div>';
+    _paint('<div class="help-text">' + (f ? 'No matches.' : 'No other players have signed up yet — invite your crew to create an account.') + '</div>');
     return;
   }
   const badge = (txt, col) => '<span style="font-size:12px;font-weight:600;flex:0 0 auto;white-space:nowrap;margin-left:8px;color:' + col + '">' + txt + '</span>';
-  el.innerHTML = people.map(p => {
+  const _html = people.map(p => {
     const nm = friendFullName(p);
     const nmH = '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + nm + guestPillHtml(nm) + testPillHtml(nm) + '</span>';
     const st = status[p.id];
@@ -48366,6 +48428,10 @@ async function renderAddFriendList(filter) {
     if (st === 'pending') return '<div class="af-static" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;margin-bottom:6px;border:1px solid var(--border);border-radius:8px;opacity:0.7">' + nmH + badge('Pending', 'var(--text-muted)') + '</div>';
     return '<button class="full af-row" data-id="' + p.id + '" style="display:flex;justify-content:space-between;align-items:center;text-align:left;margin-bottom:6px">' + nmH + badge('+ Add', 'var(--accent)') + '</button>';
   }).join('');
+  // Nothing changed (the common case while typing, since the same people match)
+  // → leave the DOM completely alone. Replacing innerHTML under an open keyboard
+  // is what made the list strobe and the page jump on iOS.
+  if (!_paint(_html)) return;
   // v976 (Tyler code review): the button was never disabled and sendFriendRequest
   // does a plain INSERT (not an upsert), so a double-tap wrote two pending rows and
   // fired two push notifications — or, with a unique constraint, showed the
@@ -49104,7 +49170,15 @@ function wireFriendsModals() {
   const afClose = document.getElementById('add-friend-close');
   if (afClose) afClose.onclick = () => document.getElementById('add-friend-modal').classList.remove('show');
   const afSearch = document.getElementById('add-friend-search');
-  if (afSearch) afSearch.oninput = () => renderAddFriendList(afSearch.value);
+  // v1012: was a bare oninput -> one full async re-render per keystroke. Debounce
+  // so a burst of typing costs ONE render, and let the last keystroke win.
+  if (afSearch) {
+    let _afT = null;
+    afSearch.oninput = () => {
+      try { if (_afT) clearTimeout(_afT); } catch (e) {}
+      _afT = setTimeout(() => { _afT = null; renderAddFriendList(afSearch.value); }, 180);
+    };
+  }
   const afm = document.getElementById('add-friend-modal');
   if (afm) afm.onclick = (e) => { if (e.target.id === 'add-friend-modal') afm.classList.remove('show'); };
   const invBtn = document.getElementById('btn-invite-friends');
