@@ -1609,6 +1609,13 @@
     justify-content: center;
     z-index: 6000;
     padding: 16px;
+    /* v1008: last-resort escape hatch — if a modal still overflows (very small
+       screen, very tall form), the OVERLAY scrolls. `margin:auto` on .modal
+       above is what keeps centring working while this is scrollable; with plain
+       align-items:center an overflowing child has its top clipped and
+       unreachable. */
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .modal-overlay.show { display: flex; }
   /* Join-game + friend-request popups must sit ABOVE the GPS overlay (z 5000)
@@ -1624,7 +1631,16 @@
     max-width: 460px;
     width: 100%;
     max-height: 90vh;
+    /* v1008 (Tyler, Share feedback): `vh` is the LARGEST viewport and does NOT
+       shrink when the on-screen keyboard opens, so a tall form could measure as
+       "fitting" in 90vh while its bottom half sat underneath the keyboard — with
+       nothing to scroll, because the modal itself was not overflowing. `dvh` is
+       the dynamic viewport and does shrink. Declared second so browsers without
+       dvh keep the vh value; browsers with it get the correct one. */
+    max-height: 90dvh;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: auto;              /* keeps it centred once the overlay can scroll */
     color: var(--bg-text);
   }
   /* Keyboard-open (native): anchor modals to the top and shrink them to the space
@@ -7953,7 +7969,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1007';
+const BG_BUILD = 'v2026.11.1008';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -70567,16 +70583,33 @@ function openContactModal(prefTopic, prefCourse) {
 // Run Feedback_Improve_Setup.sql once in Supabase (adds the column + bucket).
 // ============================================================
 let _improveFiles = []; // pending screenshots: { file, url(objectURL), id }
+// v1008 (Tyler): is there anything in the form worth protecting?
+function improveHasDraft() {
+  try {
+    const ta = document.getElementById('improve-message');
+    const cc = document.getElementById('improve-contact');
+    return !!((ta && ta.value.trim()) || (cc && cc.value.trim()) || _improveFiles.length);
+  } catch (e) { return false; }
+}
 function openImproveModal() {
   const m = document.getElementById('improve-modal');
   if (!m) return;
-  try { _improveFiles.forEach(x => { if (x.url) URL.revokeObjectURL(x.url); }); } catch (e) {}
-  _improveFiles = [];
-  const ta = document.getElementById('improve-message'); if (ta) ta.value = '';
-  const cc = document.getElementById('improve-contact'); if (cc) cc.value = '';
+  // v1008 (Tyler: "I add the screenshot but after clicking to get out the screen
+  // it did not save it"). This used to WIPE the message, the contact box and every
+  // pending screenshot on EVERY open. Re-opening after an accidental dismiss — or
+  // after Android tore the WebView down behind the image picker — silently binned
+  // the lot. Keep whatever is there; only a successful send clears it (see below).
+  if (!improveHasDraft()) {
+    try { _improveFiles.forEach(x => { if (x.url) URL.revokeObjectURL(x.url); }); } catch (e) {}
+    _improveFiles = [];
+    const ta = document.getElementById('improve-message'); if (ta) ta.value = '';
+    const cc = document.getElementById('improve-contact'); if (cc) cc.value = '';
+  }
   const err = document.getElementById('improve-err'); if (err) err.style.display = 'none';
   improveRenderThumbs();
   m.classList.add('show');
+  // Keep the focused field above the on-screen keyboard (same helper uiPrompt uses).
+  try { const card = m.querySelector('.modal'); if (card && typeof bgKeyboardSafe === 'function') bgKeyboardSafe(card); } catch (e) {}
 }
 function improveAddFiles(fileList) {
   const files = Array.prototype.slice.call(fileList || []);
@@ -70622,8 +70655,28 @@ async function improveUploadOne(item, uid) {
   const m = document.getElementById('improve-modal');
   if (!m) return;
   const cancel = document.getElementById('improve-cancel');
-  if (cancel) cancel.onclick = () => m.classList.remove('show');
-  m.onclick = (e) => { if (e.target && e.target.id === 'improve-modal') m.classList.remove('show'); };
+  // v1008: Cancel and a backdrop tap both used to bin a filled-in report instantly.
+  // A backdrop tap is usually a mis-tap, so it now just closes (the draft survives
+  // and is still there on re-open); Cancel is deliberate, so it confirms first.
+  if (cancel) cancel.onclick = async () => {
+    if (improveHasDraft()) {
+      let ok = true;
+      try { if (typeof uiConfirm === 'function') ok = await uiConfirm('Discard this feedback and the screenshots you added?', { title: 'Discard feedback?', okLabel: 'Discard', cancelLabel: 'Keep editing', danger: true }); } catch (e) {}
+      if (!ok) return;
+      try { _improveFiles.forEach(x => { if (x.url) URL.revokeObjectURL(x.url); }); } catch (e) {}
+      _improveFiles = [];
+      const ta = document.getElementById('improve-message'); if (ta) ta.value = '';
+      const cc = document.getElementById('improve-contact'); if (cc) cc.value = '';
+      improveRenderThumbs();
+    }
+    m.classList.remove('show');
+  };
+  m.onclick = (e) => {
+    if (e.target && e.target.id === 'improve-modal') {
+      m.classList.remove('show');
+      if (improveHasDraft()) { try { showToast('Draft kept — tap Share feedback to finish it'); } catch (e2) {} }
+    }
+  };
   const send = document.getElementById('improve-send');
   if (send) send.onclick = async () => {
     const msgEl = document.getElementById('improve-message');
@@ -70674,6 +70727,10 @@ async function improveUploadOne(item, uid) {
       m.classList.remove('show');
       try { _improveFiles.forEach(x => { if (x.url) URL.revokeObjectURL(x.url); }); } catch (e) {}
       _improveFiles = [];
+      // v1008: a SUCCESSFUL send is the only thing that clears the form now — the
+      // draft-preserving openImproveModal above would otherwise hand the next
+      // report back the text that was just submitted.
+      try { if (msgEl) msgEl.value = ''; const _cc = document.getElementById('improve-contact'); if (_cc) _cc.value = ''; improveRenderThumbs(); } catch (e) {}
       showToast(shotFails ? 'Sent — thanks! (some images didn’t upload)' : 'Sent — thanks! The crew will take a look 🙏');
     } else {
       const body = encodeURIComponent('[improve] ' + msg + '\n\nFrom: ' + baseRow.from_name + (baseRow.contact ? ' (' + baseRow.contact + ')' : ''));
