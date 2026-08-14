@@ -7994,7 +7994,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1014';
+const BG_BUILD = 'v2026.11.1015';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -17428,7 +17428,20 @@ const CR_CATS = [['missing','Missing course'],['wrong-pars','Wrong pars'],['shou
 function crEsc(x){ return (typeof escapeHtml==='function')?escapeHtml(x==null?'':String(x)):String(x==null?'':x); }
 function crEa(x){ return (typeof escAttr==='function')?escAttr(x==null?'':String(x)):String(x==null?'':x); }
 function crNewId(){ return 'cr-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7); }
-function crCompressImg(file){ return new Promise(function(resolve){ try{ var fr=new FileReader(); fr.onload=function(){ var img=new Image(); img.onload=function(){ try{ var mx=1100,w=img.width,h=img.height; if(w>mx||h>mx){ if(w>=h){ h=Math.round(h*mx/w); w=mx; } else { w=Math.round(w*mx/h); h=mx; } } var cv=document.createElement('canvas'); cv.width=w; cv.height=h; cv.getContext('2d').drawImage(img,0,0,w,h); resolve(cv.toDataURL('image/jpeg',0.6)); }catch(e){ resolve(''); } }; img.onerror=function(){ resolve(''); }; img.src=fr.result; }; fr.onerror=function(){ resolve(''); }; fr.readAsDataURL(file); }catch(e){ resolve(''); } }); }
+async function crCompressImg(file){
+  // v1015: same decode path as the avatar/banner croppers — no base64 copy of the
+  // original, and the decoded pixels are released as soon as the canvas has them.
+  try {
+    const d = await _bgDecodeImage(file);
+    try {
+      var mx = 1100, w = d.w, h = d.h;
+      if (w > mx || h > mx) { if (w >= h) { h = Math.round(h * mx / w); w = mx; } else { w = Math.round(w * mx / h); h = mx; } }
+      var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(d.img, 0, 0, w, h);
+      return cv.toDataURL('image/jpeg', 0.6);
+    } finally { d.done(); }
+  } catch (e) { return ''; }
+}
 function crSnapshotLine(c){ if(!c) return ''; var pp=(Array.isArray(c.pars)&&c.pars.some(function(p){return p;}))?'pars set':'no pars'; var h=c.holes||18; return h+' holes · '+pp+' · '+(c.ratingTees||0)+' rated tee'+((c.ratingTees===1)?'':'s')+' · GPS '+(c.gpsGreens!=null?c.gpsGreens:'?')+'/'+h+' · targets '+(c.gpsTargets!=null?c.gpsTargets:0)+'/'+(c.gpsTargetsNeeded!=null?c.gpsTargetsNeeded:0); }
 // v715 — review ATTACHMENTS. Admins can attach a photo (scorecard, signage, the
 // issue) to a course from the admin worklist; it's stored per-course in the shared
@@ -47835,57 +47848,64 @@ async function handleCrewPhoto(e) {
   }
 }
 
-function downscaleImageToDataUrl(file, size, quality) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = size; canvas.height = size;
-          const ctx = canvas.getContext('2d');
-          const min = Math.min(img.width, img.height);
-          const sx = (img.width - min) / 2;
-          const sy = (img.height - min) / 2;
-          ctx.drawImage(img, sx, sy, min, min, 0, 0, size, size);
-          resolve(canvas.toDataURL('image/jpeg', quality));
-        } catch (err) { reject(err); }
-      };
-      img.onerror = reject;
-      img.src = reader.result;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+// v1015 — Play Console advisory: "Improve your app's performance with bitmap
+// downsampling". Every image picker here did the same thing: FileReader ->
+// readAsDataURL -> img.src = <base64>. For a phone photo that is brutal — a 12 MP
+// JPEG becomes a ~16 MB base64 STRING held in JS, which is then decoded to a
+// full-resolution bitmap (~48 MB as ARGB) purely to draw a 96 px avatar.
+// createImageBitmap takes the File directly: no base64 intermediate, decoding
+// happens off the main thread, and close() frees the pixels immediately instead
+// of waiting for GC. Falls back to an object URL (still no base64), and only
+// then to the original FileReader path, so nothing regresses on an old WebView.
+// Output is byte-identical — this is purely how the source is decoded.
+async function _bgDecodeImage(file) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bmp = await createImageBitmap(file);
+      if (bmp && bmp.width) return { img: bmp, w: bmp.width, h: bmp.height, done: () => { try { bmp.close(); } catch (e) {} } };
+    } catch (e) { /* HEIC or an unsupported type — fall through */ }
+  }
+  const url = (typeof URL !== 'undefined' && URL.createObjectURL) ? URL.createObjectURL(file) : null;
+  if (url) {
+    try {
+      const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+      return { img: im, w: im.naturalWidth || im.width, h: im.naturalHeight || im.height, done: () => { try { URL.revokeObjectURL(url); } catch (e) {} } };
+    } catch (e) { try { URL.revokeObjectURL(url); } catch (e2) {} }
+  }
+  const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); });
+  const im2 = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = dataUrl; });
+  return { img: im2, w: im2.naturalWidth || im2.width, h: im2.naturalHeight || im2.height, done: () => {} };
+}
+
+async function downscaleImageToDataUrl(file, size, quality) {
+  const d = await _bgDecodeImage(file);
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const min = Math.min(d.w, d.h);
+    const sx = (d.w - min) / 2;
+    const sy = (d.h - min) / 2;
+    ctx.drawImage(d.img, sx, sy, min, min, 0, 0, size, size);
+    return canvas.toDataURL('image/jpeg', quality);
+  } finally { d.done(); }
 }
 
 // Cover-crop an uploaded image to a wide banner (for event cards) and return a
 // JPEG data-URL. Centre-crops to the target aspect so nothing is squished.
-function downscaleImageToBanner(file, w, h, quality) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = w; canvas.height = h;
-          const ctx = canvas.getContext('2d');
-          const ar = w / h, iar = img.width / img.height;
-          let sw, sh, sx, sy;
-          if (iar > ar) { sh = img.height; sw = sh * ar; sx = (img.width - sw) / 2; sy = 0; }
-          else { sw = img.width; sh = sw / ar; sx = 0; sy = (img.height - sh) / 2; }
-          ctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
-          resolve(canvas.toDataURL('image/jpeg', quality || 0.82));
-        } catch (err) { reject(err); }
-      };
-      img.onerror = reject;
-      img.src = reader.result;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+async function downscaleImageToBanner(file, w, h, quality) {
+  const d = await _bgDecodeImage(file);
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const ar = w / h, iar = d.w / d.h;
+    let sw, sh, sx, sy;
+    if (iar > ar) { sh = d.h; sw = sh * ar; sx = (d.w - sw) / 2; sy = 0; }
+    else { sw = d.w; sh = sw / ar; sx = 0; sy = (d.h - sh) / 2; }
+    ctx.drawImage(d.img, sx, sy, sw, sh, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', quality || 0.82);
+  } finally { d.done(); }
 }
 
 // ============================================================
