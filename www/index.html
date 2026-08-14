@@ -7972,7 +7972,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1008';
+const BG_BUILD = 'v2026.11.1009';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -27708,7 +27708,7 @@ async function renderRosterList() {
     const _pl = (p.lastName || (p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
     const key = (_pf + '|' + _pl).toLowerCase();
     // v664: tournament mode — "already added" means on the EVENT, not the round setup
-    const _t2key = combineName(_pf, _pl).trim().toLowerCase();
+    const _t2key = _t2NameKey(combineName(_pf, _pl));   // v1009: was .trim().toLowerCase() — diverged from the row key
     const already = _rosterT2Tid ? _rosterT2InSet.has(_t2key) : inSetup.has(key);
     row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--border);' + (already ? '' : 'cursor:pointer;');
     // Calculated handicap from score history (if 3+ rounds)
@@ -49422,7 +49422,24 @@ async function t2AddPlayer(tid, p) {
       team: p.team || null, handicap: (p.handicap != null ? p.handicap : null),
       user_id: p.userId || null, claimed: !!p.userId
     }).select().single();
-    if (error) { console.warn('t2AddPlayer', error); return null; }
+    if (error) {
+      console.warn('t2AddPlayer', error);
+      // v1009: `.insert().select()` needs BOTH privileges — when the read half is
+      // refused (42501 / "permission denied"), Postgres fails the WHOLE statement
+      // and nothing is written at all. Retry the bare insert so the add still
+      // lands, then hand back what we know about the row.
+      const _denied = String(error.code || '') === '42501' || /permission denied/i.test(String(error.message || ''));
+      if (_denied) {
+        try {
+          const _row = { tournament_id: tid, display_name: p.displayName, team: p.team || null,
+            handicap: (p.handicap != null ? p.handicap : null), user_id: p.userId || null, claimed: !!p.userId };
+          const { error: _e2 } = await supa.from('tournament_players').insert(_row);
+          if (!_e2) { try { await _t2NotifyAdded(tid, p.userId); } catch (e) {} return Object.assign({ id: '_pending' }, _row); }
+          console.warn('t2AddPlayer retry', _e2);
+        } catch (e) {}
+      }
+      return null;
+    }
     try { await _t2NotifyAdded(tid, p.userId); } catch (e) {}
     return data;
   } catch (e) { return null; }
@@ -49435,7 +49452,17 @@ async function t2FillOrAddPlayer(tid, p) {
   if (p && p.force) return await t2AddPlayer(tid, p);
   try {
     const ex = await t2GetPlayers(tid);
-    const dup = (ex || []).find(x => !t2IsOpenSlot(x) && _t2NameKey(x.display_name) === _t2NameKey(p.displayName));
+    let dup = (ex || []).find(x => !t2IsOpenSlot(x) && _t2NameKey(x.display_name) === _t2NameKey(p.displayName));
+    // v1009: a dedupe hit used to return the existing row WITHOUT rewriting
+    // display_name, so a row stored as "Tyler  OConnor" kept answering to the
+    // key "tyler oconnor" and every raw-key comparison elsewhere disagreed.
+    // Normalise on match so the stored name and the picker's key can't drift.
+    try {
+      if (dup && dup.display_name !== p.displayName) {
+        const { error: _e } = await supa.from('tournament_players').update({ display_name: p.displayName }).eq('id', dup.id);
+        if (!_e) dup = Object.assign({}, dup, { display_name: p.displayName });
+      }
+    } catch (e) {}
     if (dup) { if (p.userId && !dup.user_id) { await t2AdoptSlot(dup.id, p.userId); try { await _t2NotifyAdded(tid, p.userId); } catch (e) {} return Object.assign({}, dup, { user_id: p.userId, claimed: true }); } return dup; }
     const slots = (ex || []).filter(t2IsOpenSlot).sort((a, b) => (a.display_name || '').localeCompare(b.display_name || '', undefined, { numeric: true }));
     const slot = slots.length ? ((p.team ? slots.find(s => s.team === p.team) : null) || slots[0]) : null;
@@ -49455,9 +49482,21 @@ async function t2FillSlotPrompt(pid) {
   showToast('Seat filled ✓');
   try { await renderT2Home(); } catch (e) {}
 }
-async function t2GetPlayers(tid) {
-  try { const { data } = await supa.from('tournament_players').select('*').eq('tournament_id', tid).order('created_at'); return data || []; }
-  catch (e) { return []; }
+// v1009: this swallowed EVERY failure into `[]`, so a denied read was
+// indistinguishable from an empty event. That is exactly how the roster picker
+// broke: `tournament_players` was missing its table-level SELECT grant, every
+// read came back "permission denied", `_rosterT2InSet` stayed empty forever and
+// the "already added" tick never lit — while the toast still said "added \u2713".
+// Callers that need to KNOW (the picker) pass { strict: true } and handle the
+// throw; everyone else keeps the old fail-soft [] but now leaves a console trail.
+async function t2GetPlayers(tid, opts) {
+  const _strict = !!(opts && opts.strict);
+  try {
+    const { data, error } = await supa.from('tournament_players').select('*').eq('tournament_id', tid).order('created_at');
+    if (error) { try { console.warn('t2GetPlayers', error); } catch (e2) {} if (_strict) throw error; return []; }
+    return data || [];
+  }
+  catch (e) { try { console.warn('t2GetPlayers', e); } catch (e2) {} if (_strict) throw e; return []; }
 }
 async function t2SetPlayerTeam(playerId, team) {
   try { const { error } = await supa.from('tournament_players').update({ team }).eq('id', playerId); return !error; }
@@ -52938,16 +52977,29 @@ async function t2ResolveUserIdByName(name) {
 // on multi-add). openT2RosterPicker puts the shared modal into tournament mode:
 // a tap adds/removes the player on the EVENT, Done re-renders the screen once.
 let _rosterT2Tid = null, _rosterT2InSet = new Set(), _rosterT2ById = {}, _rosterT2Busy = false;
+let _rosterT2Err = false;   // v1009: true when the last read FAILED (vs. genuinely empty)
+// v1009: one identity, one key. This built its keys with a raw
+// `display_name.trim().toLowerCase()` while the row check used
+// `combineName(first,last).trim().toLowerCase()` and the dedupe used
+// `_t2NameKey()` (which also collapses internal whitespace). Three functions for
+// one name meant a row could be ON the event and still read as "not added".
+// Everything now goes through _t2NameKey.
 async function _rosterT2Refresh() {
   try {
-    const ps = await t2GetPlayers(_rosterT2Tid);
-    _rosterT2InSet = new Set(); _rosterT2ById = {};
+    const ps = await t2GetPlayers(_rosterT2Tid, { strict: true });
+    _rosterT2InSet = new Set(); _rosterT2ById = {}; _rosterT2Err = false;
     ps.forEach(p => {
       if (typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p)) return;
-      const k = (p.display_name || '').trim().toLowerCase();
+      const k = _t2NameKey(p.display_name);
       if (k) { _rosterT2InSet.add(k); _rosterT2ById[k] = p.id; }
     });
-  } catch (e) { _rosterT2InSet = new Set(); _rosterT2ById = {}; }
+  } catch (e) {
+    // Do NOT pretend the event is empty — that is what made every tap look like
+    // a fresh add and left the tick permanently off.
+    _rosterT2InSet = new Set(); _rosterT2ById = {}; _rosterT2Err = true;
+    try { console.warn('_rosterT2Refresh', e); } catch (e2) {}
+    try { showToast("Couldn't load who's already in this event \u2014 check your connection"); } catch (e2) {}
+  }
 }
 async function openT2RosterPicker(tid) {
   _rosterT2Tid = tid;
@@ -52967,8 +53019,12 @@ async function _rosterT2Add(name, hcp) {
         _team = (_a <= _b) ? 'A' : 'B';
       }
     } catch (e) {}
-    await t2FillOrAddPlayer(_rosterT2Tid, { displayName: name, team: _team, handicap: (hcp != null && hcp !== '') ? parseFloat(hcp) : null, userId: _uid || null });
+    // v1009: this toasted "added \u2713" unconditionally — t2FillOrAddPlayer
+    // returns null when the insert is refused, so Tyler got a tick-less "added".
+    // Only claim success when a row actually came back.
+    const _row = await t2FillOrAddPlayer(_rosterT2Tid, { displayName: name, team: _team, handicap: (hcp != null && hcp !== '') ? parseFloat(hcp) : null, userId: _uid || null });
     await _rosterT2Refresh();
+    if (!_row || !_row.id) { try { showToast("Couldn't add " + name + ' \u2014 try again'); } catch (e) {} return false; }
     try { showToast(name + ' added \u2713'); } catch (e) {}
     return true;
   } catch (e) { try { showToast('Could not add \u2014 try again'); } catch (e2) {} return false; }
@@ -52977,7 +53033,7 @@ async function _rosterT2Add(name, hcp) {
 async function _rosterT2Remove(name) {
   if (_rosterT2Busy || !_rosterT2Tid) return false; _rosterT2Busy = true;
   try {
-    const pid = _rosterT2ById[(name || '').trim().toLowerCase()];
+    const pid = _rosterT2ById[_t2NameKey(name)];   // v1009: same key everywhere
     if (pid) { await t2RemovePlayer(pid); await _rosterT2Refresh(); try { showToast(name + ' removed'); } catch (e) {} }
     return true;
   } catch (e) { return false; }
