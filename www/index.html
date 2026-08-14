@@ -653,6 +653,24 @@
     color: var(--bg-text-muted);
     margin: 0;
   }
+  /* "TEMP" badge — shown beside a handicap that's a manually-entered stand-in
+     rather than an official established index (see isHcpTemp()). Small pill,
+     reusable anywhere a handicap number is displayed. RESTORED v1004 — this
+     whole feature shipped in commit 2c795eb (v842) and was wiped 3m37s later by
+     a stale-base overwrite (2a1cb17); it never reached a released build. */
+  .hcp-temp-badge {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    vertical-align: 1px;
+    line-height: 1.5;
+  }
   /* Remove (×) button — upper-right of each player row. Red text + border
      so it clearly reads as a destructive action, distinct from the gray
      reorder arrows on the left. Fixed 32px wide to fit alongside the name
@@ -6143,6 +6161,16 @@
             <p>If a player doesn't pick a tee for a round, that round won't count toward their handicap (the round still works for betting).</p>
           </div>
         </details>
+
+        <details class="bet-explainer">
+          <summary>🏷️ The "TEMP" badge</summary>
+          <div class="bet-body">
+            <p>Brand-new players don't have an official handicap index yet — that only kicks in once they've posted 3 rounds (or 54+ holes total) with a rated tee. Until then, Bad Golf needs <em>some</em> number to use for betting math, so it holds onto whatever handicap was entered for them by hand: either typed in for them at round setup, or answered when they first signed up.</p>
+            <p>Anywhere that stand-in number shows up — round setup, your Stats/profile page, the Times picker — you'll see a small <strong><span class="hcp-temp-badge" style="position:relative">TEMP</span></strong> tag next to it. That's your cue it's a placeholder, not the real thing yet.</p>
+            <p>It keeps working exactly the same way, round after round, until enough history builds up for a real index — at that point the TEMP tag disappears automatically and the official calculated index takes over everywhere. No one needs to re-enter anything.</p>
+            <p><strong>Note:</strong> the crew leaderboard's ranked handicap column is the one place this never appears — it always shows the real computed index or "N/A," never a self-reported number, so the ranking stays fair.</p>
+          </div>
+        </details>
       </details>
 
       <!-- Good to know — moved here (below How handicaps work) and collapsed -->
@@ -7923,7 +7951,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.999';
+const BG_BUILD = 'v2026.11.1004';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -8262,7 +8290,9 @@ async function initAuth() {
         if (_event === 'SIGNED_IN' || _event === 'INITIAL_SESSION') {
           try { migrateRosterToPerUser(); } catch (e) {}   // v603: seed the per-user roster row promptly on sign-in
           try { stampBuildTelemetry(); } catch (e) {}   // v949: stamp the running build so P3 adoption is measurable
-          autoLinkMyPlayer();
+          // v1000: chain, don't race — ensureMyNameSet() used to run a few lines
+          // below while autoLinkMyPlayer() was still prompting for the name.
+          autoLinkMyPlayer().then(function () { try { ensureMyNameSet(); } catch (e) {} });
           // Repopulate THIS account's stats backup + saved shots (idempotent) so the
           // new user's own data shows immediately instead of the cleared/old caches.
           try { if (typeof healMyRoundsFromCloud === 'function') healMyRoundsFromCloud(); } catch (e) {}
@@ -8272,7 +8302,7 @@ async function initAuth() {
           try { subscribeToFriendRequests(); } catch (e) {}
           try { checkPendingInvites(); } catch (e) {}
           try { checkPendingFriendRequests(); } catch (e) {}
-          try { ensureMyNameSet(); } catch (e) {}
+          // (v1000: ensureMyNameSet now runs chained off autoLinkMyPlayer above.)
           // Offer to rejoin a live round you're already a player in (e.g. you closed
           // the app mid-round). Delay so any auto-restore can set state.game first.
           try { setTimeout(() => { try { checkLiveRoundRejoin(); } catch (e) {} }, 1500); } catch (e) {}
@@ -12328,8 +12358,15 @@ async function autoLinkMyPlayer() {
     if (existing) return; // already tied/claimed
     // #16 Identity is now tied to the login email — never show the
     // claim-player ("is this you?") prompt. Always create from the account.
+    // v1000 (Tyler, brand-new signup): raise the in-flight flag BEFORE prompting.
+    // ensureMyNameSet() also runs on sign-in and again every 25s; for a new account
+    // getMeName() legitimately returns null, so it would fire its blank name gate
+    // while the user was still typing their name into these very prompts — Tyler
+    // entered first + last, then got an empty "Edit your name" screen on top.
+    window._autoLinkInFlight = true;
     await createMyPlayerFromAccount();
   } catch (e) { console.warn('autoLinkMyPlayer failed:', e); }
+  finally { try { window._autoLinkInFlight = false; } catch (e) {} }
 }
 
 // Best-guess display name from the signed-in account. Uses the real name
@@ -12366,7 +12403,22 @@ async function createMyPlayerFromAccount() {
     const cap = w => w ? w.charAt(0).toUpperCase() + w.slice(1) : w;
     first = cap(first); last = cap(last);
   }
-  await upsertPlayerInRoster(first, last, 0); // dedups by name if it exists
+  // Ask every new player for a handicap (Google/Apple sign-ins included — they
+  // skip the name prompts above entirely, so this is otherwise the only chance
+  // to ask). Fully optional — Skip leaves it at 0 and we never auto-re-ask;
+  // they can add one anytime from Edit Profile, or it fills in on its own once
+  // they've played enough rounds for an established index. Whatever they enter
+  // here is stored as their roster handicap and shown with a TEMP badge (see
+  // isHcpTemp) everywhere a handicap displays, until that real index exists.
+  let hcp = 0;
+  try {
+    const hcpStr = await uiPrompt(
+      'If you already know it, enter your handicap and Bad Golf will use it for your rounds until it can calculate your official one (after 3+ rounds). Totally optional \u2014 skip it and add one later if you\u2019d rather.',
+      { title: 'Your handicap', okLabel: 'Save', cancelLabel: 'Skip', placeholder: 'e.g. 18 or +2' }
+    );
+    if (hcpStr && hcpStr.trim()) hcp = (typeof parseHcpInput === 'function') ? parseHcpInput(hcpStr) : (parseFloat(hcpStr) || 0);
+  } catch (e) {}
+  await upsertPlayerInRoster(first, last, hcp); // dedups by name if it exists
   await setMeName(combineName(first, last));
   try { renderAccountUI(); } catch (e) {}
   try {
@@ -14233,12 +14285,15 @@ function uiPrompt(message, opts) {
       var inp = card.querySelector('.uip-input');
       if (opts.placeholder) inp.placeholder = opts.placeholder;
       if (opts.value != null) inp.value = opts.value;
-      var done = function (val) { try { ov.remove(); } catch (e) {} resolve(val); };
+      var done = function (val) { try { window._uiPromptOpen = Math.max(0, (window._uiPromptOpen || 0) - 1); } catch (e) {} try { ov.remove(); } catch (e) {} resolve(val); };
       card.querySelector('.uip-ok').onclick = function () { done(inp.value); };
       card.querySelector('.uip-cancel').onclick = function () { done(null); };
       ov.onclick = function () { done(null); };
       inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') done(inp.value); });
       ov.appendChild(card); document.body.appendChild(ov);
+      // v1000: a live counter of open prompts. ensureMyNameSet() must never slam its
+      // (Cancel-disabled) name gate on top of a prompt the user is still answering.
+      try { window._uiPromptOpen = (window._uiPromptOpen || 0) + 1; } catch (e) {}
       try { if (typeof bgKeyboardSafe === 'function') bgKeyboardSafe(ov); } catch (e) {}
       setTimeout(function () { try { inp.focus(); } catch (e) {} }, 50);
     } catch (e) { try { resolve(window.prompt(message, opts.value || '')); } catch (_) { resolve(null); } }
@@ -24570,6 +24625,30 @@ function calcHandicapIndex(scoreHistory) {
   return { index, n, holes, basis };
 }
 
+// TEMP HANDICAP BADGE — a player's roster entry keeps a manually-entered
+// handicap (entry.hcp) as a stand-in until they've posted enough rounds for a
+// real established index (calcHandicapIndex returns a non-null index once
+// they hit 3 rounds / 54 holes — see above). That carry-over already worked
+// (upsertPlayerInRoster persists whatever was typed at round setup / sign-up),
+// but there was no visual cue that a shown number was a placeholder. This
+// flags that case so the UI can badge it "TEMP" wherever it's displayed —
+// round setup, the Stats/profile hero, Share Handicap, and the Times picker.
+// Deliberately NOT applied to the Crew leaderboard's ranked handicap column —
+// that was intentionally changed (v758) to show only the real computed index
+// or N/A, never a self-reported number, to keep the ranking fair. (Tyler, Jul 2026.)
+function isHcpTemp(entry) {
+  try {
+    if (!entry) return false;
+    const calc = calcHandicapIndex(entry.scoreHistory || []);
+    if (calc && calc.index != null) return false; // established — never temp
+    return !!entry.hcp; // a nonzero saved value someone actually entered
+  } catch (e) { return false; }
+}
+const HCP_TEMP_BADGE_TITLE = 'Temporary handicap — entered manually, not yet an official index. Play 3+ rounds (54+ holes total) on a rated tee and this becomes your real handicap automatically.';
+function hcpTempBadgeHtml(show) {
+  return show ? (' <span class="hcp-temp-badge" title="' + HCP_TEMP_BADGE_TITLE + '">TEMP</span>') : '';
+}
+
 // Re-derive every saved round's differential from each course's CURRENT rating/slope.
 // Use after correcting bad imported ratings: a round's differential is frozen at save
 // time, so fixing the course later doesn't update old rounds — this does. Skips
@@ -25483,7 +25562,7 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
     </div>
     <button type="button" class="remove player-remove-top" title="Remove player">×</button>
     <div class="hcp-row">
-      <label>HCP</label>
+      <label>HCP<span class="hcp-temp-badge" style="display:none" title="${HCP_TEMP_BADGE_TITLE}">TEMP</span></label>
       <input type="text" inputmode="text" class="player-hcp" placeholder="0" value="${fmtHcp(hcp)}" title="Handicap index — plus handicaps show with a + (e.g. +1.1)">
     </div>
   `;
@@ -25538,7 +25617,11 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
   // their saved (manually-entered) handicap. Never overwrites a HCP the user
   // typed on this row (tracked via data-userSet).
   if (hcpInp) {
-    hcpInp.addEventListener('input', () => { hcpInp.dataset.userSet = '1'; });
+    hcpInp.addEventListener('input', () => {
+      hcpInp.dataset.userSet = '1';
+      delete hcpInp.dataset.fromIndex; // typing over it means it's no longer the auto-filled established index
+      applyHcpTempBadgeState(row);
+    });
     // A `quiet` restore (editing a live round, or loading a saved config) carries
     // the player's SAVED handicap — which may be an override the user typed. Lock
     // it as user-set so the roster autofill below can't replace it with the
@@ -25567,7 +25650,54 @@ function addPlayerRow(firstName = '', lastNameOrHcp = '', hcpMaybe = 0, playsGro
   // never touches a row the user has typed into (override always wins). Skipped
   // for `quiet` restores (saved configs / scheduled rounds keep their snapshot).
   if (firstName && !quiet) { try { autofillHcpForRow(row); } catch (e) {} }
+  // TEMP badge: whether or not this row got here via autofillHcpForRow (which
+  // sets it directly), do one more pass so rows built from a prefill/mePlayer
+  // snapshot (which set the input value directly, bypassing autofill) still
+  // get the badge evaluated against the roster. Non-blocking, non-fatal.
+  try { refreshHcpTempBadge(row); } catch (e) {}
   return row;
+}
+
+// Sync, cheap badge toggle — used on every keystroke. Shows "TEMP" whenever the
+// row's HCP box holds a nonzero value that ISN'T tagged as the auto-filled
+// established index (hcpInp.dataset.fromIndex).
+function applyHcpTempBadgeState(row) {
+  try {
+    if (!row) return;
+    const hcpInp = row.querySelector('.player-hcp');
+    const badge = row.querySelector('.hcp-row .hcp-temp-badge');
+    if (!hcpInp || !badge) return;
+    const established = !!hcpInp.dataset.fromIndex;
+    const val = (typeof parseHcpInput === 'function') ? parseHcpInput(hcpInp.value) : parseFloat(hcpInp.value);
+    badge.style.display = (!established && val) ? 'inline-block' : 'none';
+  } catch (e) {}
+}
+
+// Async pass: looks the row's name up in the roster to decide TEMP-ness from
+// scratch (used right after a row is built, when we don't yet know whether its
+// starting value came from an established index or a manual/temp one).
+async function refreshHcpTempBadge(row) {
+  try {
+    if (!row) return;
+    const hcpInp = row.querySelector('.player-hcp');
+    if (!hcpInp) return;
+    const fn = row.querySelector('.first-name');
+    const ln = row.querySelector('.last-name');
+    const first = fn ? fn.value.trim() : '';
+    const last = ln ? ln.value.trim() : '';
+    if (!first) { applyHcpTempBadgeState(row); return; }
+    const roster = await getPlayerRoster();
+    const fNorm = normalizeNameSegment(first), lNorm = normalizeNameSegment(last);
+    let entry = roster.find(p => normalizeNameSegment(p.firstName) === fNorm && normalizeNameSegment(p.lastName) === lNorm);
+    if (!entry && !last) {
+      const cands = roster.filter(p => normalizeNameSegment(p.firstName) === fNorm);
+      if (cands.length === 1) entry = cands[0];
+    }
+    const calc = entry ? calcHandicapIndex(entry.scoreHistory || []) : null;
+    if (calc && calc.index != null) hcpInp.dataset.fromIndex = String(calc.index);
+    else delete hcpInp.dataset.fromIndex;
+    applyHcpTempBadgeState(row);
+  } catch (e) { /* non-fatal */ }
 }
 
 // Auto-fill a player row's handicap from the saved roster when a recognized
@@ -25639,7 +25769,9 @@ async function autofillHcpForRow(row) {
       hcpInp.dataset.fromIndex = String(calc.index);
     } else {
       hcpInp.value = fmtHcp(entry.hcp || 0);
+      delete hcpInp.dataset.fromIndex; // not an established index — TEMP badge may apply
     }
+    try { applyHcpTempBadgeState(row); } catch (e) {}
   } catch (e) { /* non-fatal */ }
 }
 
@@ -26931,7 +27063,37 @@ function collapseScorecardSummary(pars, sis, tees) {
       const titleT = $('tees-summary-title');
       const detailT = $('tees-summary-detail');
       if (titleT) titleT.textContent = `${teeList.length} ${teeList.length === 1 ? 'tee' : 'tees'} saved`;
-      if (detailT) detailT.textContent = teeList.map(t => t.label).join(', ');
+      // v1002 (Tyler): once a course is picked, show rating / slope / yardage for
+      // EVERY tee right here in the top section — was just "Blue, White, Red, Gold",
+      // which meant picking a tee was guesswork unless you opened the editor.
+      // Library coverage: ~96% of tees carry rating+slope, ~89% carry yards, so the
+      // per-field "—" fallbacks below are the exception, not the rule.
+      if (detailT) {
+        try {
+          // A 0 or non-numeric rating/slope is bad data (a handful exist in the
+          // library) — treat it as missing rather than printing "72.1 / 0".
+          const _num = v => { const n = parseFloat(v); return (v == null || v === '' || !isFinite(n) || n <= 0) ? null : v; };
+          const _yds = v => { const n = parseInt(v, 10); return (n && isFinite(n) && n > 0) ? n.toLocaleString() : null; };
+          detailT.innerHTML = teeList.map(t => {
+            let _cols = []; try { _cols = teeSwatchColors(t) || []; } catch (e) {}
+            const _dot = (t.color || _cols[0] || 'var(--border-strong)');
+            // Fall back to the women's rating/slope when a tee carries only those,
+            // and mark it (W) so a men's number is never implied.
+            const _wOnly = (_num(t.rating) == null && _num(t.ratingW) != null);
+            const _r = _num(t.rating) != null ? t.rating : _num(t.ratingW);
+            const _s = _num(t.slope) != null ? t.slope : _num(t.slopeW);
+            const _rs = (_r != null && _s != null) ? (_r + ' / ' + _s + (_wOnly ? ' (W)' : ''))
+                      : (_r != null ? String(_r) : (_s != null ? ('slope ' + _s) : '—'));
+            const _y = _yds(t.yards);
+            return '<div style="display:flex;align-items:center;gap:8px;padding:2px 0;line-height:1.35">' +
+              '<span style="flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:' + escAttr(_dot) + ';border:1px solid var(--border)"></span>' +
+              '<span style="flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--bg-text);font-weight:600">' + escapeHtml(t.label) + '</span>' +
+              '<span style="flex:0 0 auto;white-space:nowrap">' + escapeHtml(_rs) + '</span>' +
+              '<span style="flex:0 0 auto;white-space:nowrap;min-width:68px;text-align:right">' + (_y ? (escapeHtml(_y) + ' yds') : '—') + '</span>' +
+            '</div>';
+          }).join('');
+        } catch (e) { detailT.textContent = teeList.map(t => t.label).join(', '); }
+      }
       teesSummary.style.display = 'flex';
       teesEditor.style.display = 'none';
     } else {
@@ -27395,14 +27557,27 @@ async function renderRosterList() {
     const n = (p.name || '').toLowerCase();
     return f.includes(search) || l.includes(search) || n.includes(search);
   });
-  // v618: most RECENTLY PLAYED-WITH first (lastUsed desc — set every time a
-  // player is in a started round), then alphabetical for the rest.
+  // v1003 (Tyler): "recent players first looks right, but there is nothing
+  // alphabetical about the rest — it's just random."
+  // The v618 sort intended "recency first, then A-Z", but `lastUsed` is stamped on
+  // EVERY roster write (upsertPlayerInRoster, add-to-setup, the merge tools), not
+  // only when someone actually plays. So nearly every entry carried its own distinct
+  // timestamp, the `if (lu) return lu` branch always won, and the alphabetical
+  // tiebreak below it was unreachable dead code — the tail came out in an order that
+  // looked arbitrary. Fix: pin only the handful of genuinely-recent names, then sort
+  // EVERYTHING else strictly A-Z.
+  const _RECENT_PIN = 5;
+  const _recentRank = new Map();
+  filtered.filter(p => (p.lastUsed || 0) > 0)
+    .sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))
+    .slice(0, _RECENT_PIN)
+    .forEach((p, i) => _recentRank.set(p, i));
+  const _nameKey = p => (((p.firstName || '') + ' ' + (p.lastName || '')).trim() || p.name || '').toLowerCase();
   filtered.sort((a, b) => {
-    const lu = (b.lastUsed || 0) - (a.lastUsed || 0);
-    if (lu) return lu;
-    const an = (((a.firstName || '') + ' ' + (a.lastName || '')).trim() || a.name || '').toLowerCase();
-    const bn = (((b.firstName || '') + ' ' + (b.lastName || '')).trim() || b.name || '').toLowerCase();
-    return an.localeCompare(bn);
+    const ra = _recentRank.has(a) ? _recentRank.get(a) : Infinity;
+    const rb = _recentRank.has(b) ? _recentRank.get(b) : Infinity;
+    if (ra !== rb) return ra - rb;          // the pinned recents, newest first
+    return _nameKey(a).localeCompare(_nameKey(b));   // everyone else: strict A-Z
   });
   const _keepTop = container.scrollTop || 0;   // v664: keep your place while multi-adding
   container.innerHTML = '';
@@ -27847,7 +28022,14 @@ function renderPlayerTeeSelects() {
       <select class="tee-select" style="width:100%;font-size:12px">
         <option value="" style="background:#ffffff;color:#1a1a1a">— pick tee —</option>
         ${curMissing ? `<option value="${escAttr(currentVal)}" selected style="background:#ffffff;color:#1a1a1a">${escapeHtml(currentVal)}</option>` : ''}
-        ${validTees.map(t => { const _oc = teeSwatchColors(t); const _ob = _oc.length ? _oc[0] : '#ffffff'; const _ol = _hexLuma(_ob); const _ot = (_ol != null && _ol > 0.6) ? '#1a1a1a' : '#ffffff'; return `<option value="${escAttr(t.label)}" style="background:${_ob};color:${_ot}" ${t.label === currentVal ? 'selected' : ''}>${escapeHtml(t.label)}</option>`; }).join('')}
+        ${validTees.map(t => { const _oc = teeSwatchColors(t); const _ob = _oc.length ? _oc[0] : '#ffffff'; const _ol = _hexLuma(_ob); const _ot = (_ol != null && _ol > 0.6) ? '#1a1a1a' : '#ffffff';
+          // v1002 (Tyler): show the yardage beside each tee so picking the right one
+          // is obvious. The option keeps its colour fill; `value` stays the bare label,
+          // so every downstream read (state.playerTees, saved rounds, handicap math)
+          // is untouched.
+          let _ty = null; try { const _n = parseInt(t.yards, 10); if (_n && isFinite(_n)) _ty = _n.toLocaleString(); } catch (e) {}
+          const _txt = t.label + (_ty ? (' \u00b7 ' + _ty + ' yds') : '');
+          return `<option value="${escAttr(t.label)}" style="background:${_ob};color:${_ot}" ${t.label === currentVal ? 'selected' : ''}>${escapeHtml(_txt)}</option>`; }).join('')}
       </select>
     `;
     shadeTeeSelect(teeBox.querySelector('.tee-select'), validTees);
@@ -33656,10 +33838,30 @@ async function openPaySetup(opts){
 // v764: open the shared photo picker for MY profile (wired to handleCrewPhoto, which
 // downscales, saves locally + to my cloud account, and re-renders every avatar). Falls
 // back to the Edit-profile modal if the hidden input isn't in the DOM.
-function pickMyProfilePhoto(){
+// v1004 (Tyler: "I selected a new photo on the phone but it is not taking it").
+// #crew-photo-input's onchange was ONLY ever bound inside pickMyProfilePhoto().
+// The Edit-profile "Add / change photo" button clicked the input DIRECTLY, so
+// unless you had already gone through the avatar camera-badge in that same page
+// session, the input had no change handler at all — you picked a photo and
+// nothing happened, silently, with no error. v981 deleted wireProfileBox() on the
+// reasoning that "the onchange is self-wired on demand by pickMyProfilePhoto()";
+// that was true for that one entry point but not for the Edit-profile button.
+// Bind it centrally so EVERY path that opens the picker is safe.
+function wireCrewPhotoInput(){
   try {
     var inp = document.getElementById('crew-photo-input');
-    if (inp) { if (!inp.onchange) inp.onchange = function(e){ handleCrewPhoto(e); }; inp.click(); }
+    if (inp && !inp._bgPhotoWired) {
+      inp._bgPhotoWired = true;
+      inp.onchange = function(e){ try { handleCrewPhoto(e); } catch (err) { console.warn('crew photo handler failed', err); } };
+    }
+    return inp;
+  } catch (e) { return null; }
+}
+window.wireCrewPhotoInput = wireCrewPhotoInput;
+function pickMyProfilePhoto(){
+  try {
+    var inp = wireCrewPhotoInput();
+    if (inp) { inp.click(); }
     else { try { openEditProfile(); } catch (e) {} }
   } catch (e) { try { openEditProfile(); } catch (e2) {} }
 }
@@ -40966,7 +41168,10 @@ function buildHomeKpiHtml(player, isMe) {
   // Bubble: the player's profile photo when they have one (set in Crew tab),
   // otherwise the classic blue circle with the index inside. When the photo
   // is shown, the index moves up beside the "Handicap Index" title.
-  const idxTxt = fmtHcp(calc.index);
+  // No established index yet? Show their manually-entered TEMP handicap (from
+  // round setup or the sign-up prompt) instead of a bare "—", badged TEMP.
+  const _isTemp = isHcpTemp(player);
+  const idxTxt = (calc.index != null) ? fmtHcp(calc.index) : (_isTemp ? fmtHcp(player.hcp) : fmtHcp(null));
   // The player's OWN picture (isMe) opens the full profile editor; everyone else's
   // photo opens the zoom viewer. The blue (no-photo) bubble is tappable too for
   // "me" so a photoless user can still open their profile.
@@ -40978,9 +41183,9 @@ function buildHomeKpiHtml(player, isMe) {
       '<div style="font-size:30px;font-weight:800;color:#fff;line-height:1">' + idxTxt + '</div>' +
       (isMe ? '<span style="position:absolute;right:-2px;bottom:-2px;width:22px;height:22px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,0.3)"><svg viewBox="0 0 24 24" style="width:12px;height:12px;fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></span>' : '') +
       '</div>';
-  const titleHtml = player.avatar
+  const titleHtml = (player.avatar
     ? 'Handicap Index <span style="color:var(--accent);font-size:22px;font-weight:800;margin-left:4px">' + idxTxt + '</span>'
-    : 'Handicap Index';
+    : 'Handicap Index') + hcpTempBadgeHtml(_isTemp);
   return '<div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">' +
       bubble +
       '<div style="min-width:0">' +
@@ -43038,6 +43243,10 @@ async function ensureMyNameSet() {
     if (typeof isSignedIn !== 'function' || !isSignedIn()) return;
     if (!supa || !_authUser) return;
     if (_namePromptSnoozed) return;                       // v963: already dismissed once this session
+    // v1000: the first-run name prompt owns this question while it is on screen.
+    // Checked BEFORE and AFTER the awaits below — the user can take a minute to type.
+    if (window._autoLinkInFlight) return;
+    if (window._uiPromptOpen > 0) return;
     let me = null; try { me = await getMeName(); } catch (e) { return; }
     if (me && String(me).trim() && !/^player$/i.test(String(me).trim())) return;
     // ---- v963 LOCKOUT GUARDS -------------------------------------------------
@@ -43065,6 +43274,9 @@ async function ensureMyNameSet() {
       }
     } catch (e) { return; }
     // -------------------------------------------------------------------------
+    // v1000: re-check after the awaits — createMyPlayerFromAccount may have started
+    // (or finished) prompting while the reads above were in flight.
+    if (window._autoLinkInFlight || window._uiPromptOpen > 0) return;
     const modal = document.getElementById('edit-name-modal');
     if (!modal || modal.classList.contains('show')) return;
     _nameRequired = true;
@@ -43450,7 +43662,9 @@ async function renderCrewPlayerStats() {
   let meName = null; try { meName = await getMeName(); } catch (e) {}
   const roster = await getPlayerRoster();
   try { await refreshBgUserNames(); } catch (e) {}   // v636: guest-badge name set
-  const sorted = [...roster].sort((a, b) => { if (meName) { if (a.name === meName) return -1; if (b.name === meName) return 1; } return (b.lastUsed || 0) - (a.lastUsed || 0); });
+  // v1001 (Tyler): alphabetical, not most-recently-played. You stay pinned at the
+  // top — it's the pick you make most — everything below you is a straight A-Z.
+  const sorted = [...roster].sort((a, b) => { if (meName) { if (a.name === meName) return -1; if (b.name === meName) return 1; } return (a.name || '').localeCompare(b.name || ''); });
   const visible = await visiblePlayersForStats(sorted, meName);
   if (!visible.length) { sel.innerHTML = ''; box.innerHTML = '<div class="help-text">No players to show yet.</div>'; return; }
   const meNorm = meName ? normalizeNameSegment(meName) : '';
@@ -43520,14 +43734,14 @@ async function renderStats(forceMe) {
   // roster every time the Stats tab is rendered. No-op when the admin
   // gate is off (function returns early).
   try { await renderDeletePlayerPicker(); } catch (e) { /* non-fatal */ }
-  // Sort roster: "me" first, then by lastUsed desc
+  // Sort roster: "me" first, then A-Z (v1001 — was lastUsed desc).
   const meName = await getMeName();
   const sorted = [...roster].sort((a, b) => {
     if (meName) {
       if (a.name === meName) return -1;
       if (b.name === meName) return 1;
     }
-    return (b.lastUsed || 0) - (a.lastUsed || 0);
+    return (a.name || '').localeCompare(b.name || '');
   });
 
   // Friends-only (#10): the picker shows YOU and your accepted friends' linked
@@ -43601,7 +43815,7 @@ async function shareHandicap() {
     if (!p) { showToast('Player not found'); return; }
     const calc = calcHandicapIndex(p.scoreHistory || []);
     const idxTxt = (calc && calc.index != null) ? fmtHcp(calc.index)
-                 : (p.hcp != null ? fmtHcp(p.hcp) : 'N/A');
+                 : (p.hcp != null ? (fmtHcp(p.hcp) + (isHcpTemp(p) ? ' (TEMP)' : '')) : 'N/A');
     const complete = (p.scoreHistory || []).filter(s => s.gross != null);
     const rounds = complete.length;
     const avg = rounds ? (complete.reduce((a, b) => a + b.gross, 0) / rounds).toFixed(1) : '—';
@@ -46061,7 +46275,10 @@ function wireEditProfile() {
   if (modal) modal.onclick = (e) => { if (e.target.id === 'edit-profile-modal') modal.classList.remove('show'); };
   // Avatar: reuse the existing photo pick/downscale via the shared file input.
   const photo = document.getElementById('edit-profile-photo');
-  if (photo) photo.onclick = () => { const inp = document.getElementById('crew-photo-input'); if (inp) inp.click(); };
+  // v1004: was `inp.click()` on the RAW input, which fired the OS picker with no
+  // change handler attached. Route through pickMyProfilePhoto so the input is
+  // always wired first (see wireCrewPhotoInput).
+  if (photo) photo.onclick = () => { try { pickMyProfilePhoto(); } catch (e) { const inp = wireCrewPhotoInput(); if (inp) inp.click(); } };
   // Name: reuse the existing edit-name modal.
   const nameBtn = document.getElementById('edit-profile-editname');
   if (nameBtn) nameBtn.onclick = () => { if (modal) modal.classList.remove('show'); openEditMyName(); };
@@ -47837,8 +48054,19 @@ async function renderAddFriendList(filter) {
     if (status[other] !== 'friend') status[other] = st;
   });
   const f = (filter || '').trim().toLowerCase();
+  // v1000 (Tyler): two accounts can claim the SAME player name — his own retired
+  // tyler@simplisticfishing.com login still read "Tyler OConnor", so the picker
+  // showed two identical rows with nothing to tell them apart (bg_profiles_public
+  // deliberately withholds emails). Hide the never-used twin: a profile is dropped
+  // only when it is dormant (no stats, no sign-in in 60d — is_dormant from the RPC)
+  // AND some OTHER account is actively using that exact name. A unique name is
+  // never hidden, however dormant, and an older client without is_dormant on the
+  // payload simply hides nothing.
+  const _activeNames = new Set();
+  profiles.forEach(p => { if (!p.is_dormant) { try { _activeNames.add(friendFullName(p).toLowerCase()); } catch (e) {} } });
   const people = profiles
     .filter(p => p.id !== meId)
+    .filter(p => { try { return !(p.is_dormant && _activeNames.has(friendFullName(p).toLowerCase())); } catch (e) { return true; } })
     .filter(p => !f || friendFullName(p).toLowerCase().includes(f))
     .sort((a, b) => friendFullName(a).localeCompare(friendFullName(b)));
   if (people.length === 0) {
@@ -69554,7 +69782,8 @@ async function timesAddPlayerPrompt(id){
   var pool=[]; try{ pool=_timesBuildNamePool(roster, friends); }catch(e){}
   var seated={}; try{ var items=await timesGetItems(); var t=(items||[]).find(function(x){return String(x.id)===String(id);}); (t?_timesPlayers(t):[]).forEach(function(p){ if(p&&p.name) seated[normalizeNameSegment(p.name)]=1; }); }catch(e){}
   pool=(pool||[]).filter(function(pr){ return pr && !seated[normalizeNameSegment(pr.name)]; });
-  pool.sort(function(a,b){ if((b.crew?1:0)!==(a.crew?1:0)) return (b.crew?1:0)-(a.crew?1:0); if((b.lastPlayed||0)!==(a.lastPlayed||0)) return (b.lastPlayed||0)-(a.lastPlayed||0); return (a.name||'').localeCompare(b.name||''); });
+  // v1001 (Tyler): straight A-Z. Was crew-first, then most-recently-played.
+  pool.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
   window._timesAddPool=pool; window._timesAddId=id;
   _timesSheet('<div class="times-sheet-h"><b>Add a player</b><button class="times-x" onclick="timesCloseSheet()">✕</button></div>'+
     '<div class="times-hint">They’re added right away — no need to accept. Crew members also get a notification.</div>'+
@@ -69746,9 +69975,10 @@ function _timesHcpLine(sh, rawHcp){
     var calc=calcHandicapIndex(sh||[]);
     if(calc&&calc.index!=null) return 'HCP '+fmtHcp(calc.index)+' · GHIN-calc, '+calc.n+' round'+(calc.n>1?'s':'');
     var n=(sh||[]).length;
-    if(n>0){ var _h=(calc&&typeof calc.holes==='number')?calc.holes:0; return _h+'/54 holes for GHIN handicap'; }
+    var _tempTxt = rawHcp ? (' (HCP '+fmtHcp(rawHcp)+' TEMP)') : '';
+    if(n>0){ var _h=(calc&&typeof calc.holes==='number')?calc.holes:0; return _h+'/54 holes for GHIN handicap'+_tempTxt; }
   }catch(e){}
-  return 'HCP '+((rawHcp!=null)?fmtHcp(rawHcp):0);
+  return 'HCP '+((rawHcp!=null)?fmtHcp(rawHcp):0)+(rawHcp?' (TEMP)':'');
 }
 function _timesBuildNamePool(roster, friends){
   var pool=[];
@@ -69869,11 +70099,9 @@ async function _timesEnrichAddForm(defCourse, editing){
   var roster=[]; try{ roster=await getPlayerRoster(); }catch(e){ roster=[]; }
   var friends=[]; try{ friends=await _timesEnsureFriends(); }catch(e){}
   try{ window._timesRosterPool=_timesBuildNamePool(roster, friends); }catch(e){}
-  // build the player-picker pool (crew first, then past players) and render the searchable list
-  // Rank so the likely pick floats up: crew first, then most-recently played, then A–Z.
+  // build the player-picker pool and render the searchable list.
+  // v1001 (Tyler): straight A-Z. Was crew-first, then most-recently-played, then A–Z.
   try{ window._timesSeatPool = (window._timesRosterPool||[]).slice().sort(function(a,b){
-    if((b.crew?1:0)!==(a.crew?1:0)) return (b.crew?1:0)-(a.crew?1:0);
-    if((b.lastPlayed||0)!==(a.lastPlayed||0)) return (b.lastPlayed||0)-(a.lastPlayed||0);
     return (a.name||'').localeCompare(b.name||'');
   }); timesUserFilter(); }catch(e){}
   // auto-fill handicaps on any pre-filled rows (esp. the "me" row) now that the roster is loaded
