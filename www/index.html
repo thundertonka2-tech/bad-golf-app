@@ -8000,7 +8000,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1024';
+const BG_BUILD = 'v2026.11.1026';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -38796,6 +38796,21 @@ function gpsResolveMyId(g) {
   try {
     if (!g || !Array.isArray(g.players) || !g.players.length) return null;
     const code = g.code || '';
+    // v1026 (Tyler): "I get a board bubble on the phone but on my iPad nothing
+    // shows up" — two devices, two accounts. Everything below this matches the
+    // DEVICE's localStorage "me" name against the round's player names, so a
+    // device that never set one (or set a different one) resolves to nobody and
+    // the caller hides the bubble. A tournament round already stamps each player
+    // row with `uid`, the real auth user id, so when we're signed in the answer
+    // is exact and needs no local state at all. Name matching stays underneath
+    // for guest rounds and any row without a uid.
+    try {
+      const _uid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) || null;
+      if (_uid) {
+        const _byUid = g.players.find(p => p && p.uid && p.uid === _uid);
+        if (_byUid) { if (code) _gpsMyIdCache[code] = _byUid.id; return _byUid.id; }
+      }
+    } catch (e) {}
     let me = '';
     try { me = (localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
     // Name not known yet → DON'T guess players[0] (that showed the creator's score
@@ -49724,6 +49739,15 @@ async function t2Get(id) {
   try { const { data } = await supa.from('tournaments').select('*').eq('id', id).maybeSingle(); return data; }
   catch (e) { return null; }
 }
+// v1025: PostgREST reports success for an UPDATE or DELETE that matched ZERO
+// rows — under RLS the row is filtered out of the statement rather than the
+// statement being rejected. Pair every user-visible write with .select() and run
+// the result through here, so a refusal reads as a refusal.
+function _bgWrote(res) {
+  if (!res || res.error) return false;
+  const d = res.data;
+  return Array.isArray(d) ? d.length > 0 : !!d;
+}
 async function t2Update(id, fields) {
   try {
     // v1023 (Tyler): "I clicked delete, it said it deleted it, but the screen
@@ -49971,14 +49995,14 @@ async function t2GetPlayers(tid, opts) {
   catch (e) { try { console.warn('t2GetPlayers', e); } catch (e2) {} if (_strict) throw e; return []; }
 }
 async function t2SetPlayerTeam(playerId, team) {
-  try { const { error } = await supa.from('tournament_players').update({ team }).eq('id', playerId); return !error; }
+  try { return _bgWrote(await supa.from('tournament_players').update({ team }).eq('id', playerId).select('id')); }   // v1025
   catch (e) { return false; }
 }
 // Per-CART-GROUP team (2 v 2 within a foursome). Seeded from the event team
 // when groups are built, but the commissioner can re-pair each foursome on its
 // group card. This drives every 2-man team game for that group at launch.
 async function t2SetMemberTeam(memberId, team) {
-  try { const { error } = await supa.from('tournament_group_members').update({ team }).eq('id', memberId); return !error; }
+  try { return _bgWrote(await supa.from('tournament_group_members').update({ team }).eq('id', memberId).select('id')); }   // v1025
   catch (e) { return false; }
 }
 // v986 (T42): the handicap input carries min="-9" max="54", but a browser only
@@ -49995,7 +50019,9 @@ function t2ClampHcp(v) {
 }
 async function t2SetPlayerHcp(playerId, hcp) {
   const _h = t2ClampHcp(hcp);
-  try { const { error } = await supa.from('tournament_players').update({ handicap: _h }).eq('id', playerId); return !error; }
+  // v1025: this one matters most of the lot — "handicaps were gone again" is a
+  // recurring report, and a blocked write here reported saved and then wasn't.
+  try { return _bgWrote(await supa.from('tournament_players').update({ handicap: _h }).eq('id', playerId).select('id')); }
   catch (e) { return false; }
 }
 // Safety net for the recurring "handicaps were gone again": write EVERY handicap
@@ -51499,13 +51525,15 @@ async function t2SetGroupCode(groupId, code, opts) {
 // Release a claim we made but could not back with a saved round, so the group
 // can be launched again instead of being stuck "started" with no scorecard.
 async function t2ReleaseGroupCode(groupId, code) {
-  try { const { error } = await supa.from('tournament_groups').update({ game_code: null }).eq('id', groupId).eq('game_code', code); return !error; }
+  // v1025: the .eq('game_code', code) makes this a compare-and-swap — if it
+  // matched nothing, the release genuinely did not happen, and false says so.
+  try { return _bgWrote(await supa.from('tournament_groups').update({ game_code: null }).eq('id', groupId).eq('game_code', code).select('id')); }
   catch (e) { return false; }
 }
 // Per-group staggered tee time (needs the tee_time column — Add_group_tee_time.sql).
 // Guarded so a missing column can NEVER break group creation/start.
 async function t2SetGroupTeeTime(groupId, time) {
-  try { const { error } = await supa.from('tournament_groups').update({ tee_time: time || null }).eq('id', groupId); return !error; }
+  try { return _bgWrote(await supa.from('tournament_groups').update({ tee_time: time || null }).eq('id', groupId).select('id')); }   // v1025
   catch (e) { return false; }
 }
 // "8:00 AM" / "8:00" / "13:05" -> minutes since midnight (null if unparseable).
@@ -51744,7 +51772,7 @@ function showCaptainReminder(t, g) {
   } catch (e) {}
 }
 async function t2SetDayStatus(dayId, status) {
-  try { const { error } = await supa.from('tournament_days').update({ status: status }).eq('id', dayId); return !error; }
+  try { return _bgWrote(await supa.from('tournament_days').update({ status: status }).eq('id', dayId).select('id')); }   // v1025
   catch (e) { return false; }
 }
 
@@ -52919,8 +52947,8 @@ async function t2GetTemplates() {
 async function t2SaveTemplates(list) {
   if (!supa || !_authUser) return false;
   try {
-    const { error } = await supa.from('profiles').update({ t2_templates: list.slice(0, T2_TEMPLATE_LIMIT) }).eq('id', _authUser.id);
-    return !error;
+    // v1025
+    return _bgWrote(await supa.from('profiles').update({ t2_templates: list.slice(0, T2_TEMPLATE_LIMIT) }).eq('id', _authUser.id).select('id'));
   } catch (e) { return false; }
 }
 
@@ -57422,7 +57450,15 @@ async function openT2ClaimScreen(tid) {
 // ADOPT an existing unclaimed slot whose name matches instead of inserting a twin.
 function _t2NameKey(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, ' '); }
 async function t2AdoptSlot(playerId, userId) {
-  try { const { error } = await supa.from('tournament_players').update({ user_id: userId, claimed: true }).eq('id', playerId); return !error; }
+  // v1025: tournament_players' only UPDATE policies are commissioner/admin
+  // (tp_write_commish, bg_tp_manage_update) — nothing lets a player write their
+  // OWN row. So when someone taps their name to claim a slot, this has always
+  // matched zero rows, returned no error, and told the app the slot was claimed.
+  // The caller now falls through to t2AddPlayer, whose duplicate guard returns
+  // the existing row rather than creating a twin. The real repair is a policy
+  // that lets a user claim an UNCLAIMED slot — flagged separately; this at least
+  // stops the app asserting something that didn't happen.
+  try { return _bgWrote(await supa.from('tournament_players').update({ user_id: userId, claimed: true }).eq('id', playerId).select('id')); }
   catch (e) { return false; }
 }
 async function t2AddOrAdoptPlayer(tid, p, existingPlayers) {
@@ -71540,8 +71576,7 @@ async function saveMyClubs(clubs) {
   let ok = false;
   try {
     if (isSignedIn() && supa && _authUser) {
-      const { error } = await supa.from('profiles').update({ clubs: clubs }).eq('id', _authUser.id);
-      ok = !error;
+      ok = _bgWrote(await supa.from('profiles').update({ clubs: clubs }).eq('id', _authUser.id).select('id'));   // v1025
     }
   } catch (e) {}
   try { localStorage.setItem(KEY_MY_CLUBS, JSON.stringify(clubs)); if (!isSignedIn()) ok = true; } catch (e) {}
