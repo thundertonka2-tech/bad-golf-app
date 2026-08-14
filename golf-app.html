@@ -7994,7 +7994,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1015';
+const BG_BUILD = 'v2026.11.1016';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -41982,6 +41982,7 @@ async function renderHomeInvites() {
       for (const inv of (data || [])) {
         const code = String(inv.game_code || '');
         if (!code || code.indexOf('T2:') === 0 || code.indexOf('W:') === 0 || code.indexOf('WB:') === 0) continue;
+        try { if (await _bgRetireStaleInvite(inv)) continue; } catch (e) {}   // v1016
         if (seenCodes.has(code)) continue;
         seenCodes.add(code);
         let g0 = null; try { g0 = await loadGame(code); } catch (e) {}
@@ -48797,6 +48798,24 @@ async function expireInvitesForRound(code) {
 }
 window.expireInvitesForRound = expireInvitesForRound;
 
+// v1016: nothing in the app ever aged an invite out, so a pending row lived
+// forever — the oldest in Tyler's account was six weeks old and pointed at a
+// round that had long since been deleted. Cleanup previously only happened on the
+// RECIPIENT's device, and only if they happened to open the app while the round
+// still resolved. A flat age cap sweeps every type (round, tournament, open
+// round, wager) and stops the backlog rebuilding. Two weeks is far longer than
+// any real invite stays interesting.
+const BG_INVITE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+async function _bgRetireStaleInvite(inv) {
+  try {
+    if (!inv || !inv.id || !inv.created_at) return false;
+    const age = Date.now() - Date.parse(inv.created_at);
+    if (!isFinite(age) || age <= BG_INVITE_MAX_AGE_MS) return false;
+    try { await supa.from('game_invites').update({ status: 'expired' }).eq('id', inv.id); } catch (e) {}
+    return true;
+  } catch (e) { return false; }
+}
+
 // Queued delivery: on launch / sign-in, show the newest pending invite.
 async function checkPendingInvites() {
   if (!supa || !_authUser) return;
@@ -48990,6 +49009,9 @@ async function checkPendingFriendRequests() {
 
 async function showIncomingInvite(inv) {
   if (!inv) return false;
+  // v1016: retire-and-skip anything past the age cap before we even look at what
+  // kind of invite it is. This is the single funnel every popup goes through.
+  try { if (await _bgRetireStaleInvite(inv)) return false; } catch (e) {}
   // Don't stack: if a forcing invite modal is already up, it nags until answered.
   { const _m = document.getElementById('incoming-invite-modal'); if (_m && _m.classList.contains('show')) return false; }
   const code0 = String(inv.game_code || '');
@@ -49668,6 +49690,18 @@ async function t2Delete(id) {
     for (const tbl of ['tournament_groups', 'tournament_players', 'tournament_days', 'tournament_matches', 'tournament_standings']) {
       try { await supa.from(tbl).delete().eq('tournament_id', id); } catch (e) {}
     }
+    // v1016 (Tyler): "I am still getting game invites even though the round is
+    // deleted and over." Deleting a tournament tore down every child table but
+    // left its `T2:<id>` invites pending forever — and the recipient's app had no
+    // way to tell a deleted event from one it simply isn't allowed to read yet
+    // (tournaments_select is gated on tourney_is_member, so a not-yet-added
+    // invitee sees nothing either way). The commissioner IS the sender, and
+    // invites_update_sender permits exactly this, so retire them here at the
+    // source — it fixes every recipient at once instead of per-device.
+    try {
+      await supa.from('game_invites').update({ status: 'expired' })
+        .in('status', ['pending', 'seen']).eq('game_code', 'T2:' + id);
+    } catch (e) {}
     const { error } = await supa.from('tournaments').delete().eq('id', id);
     if (error) console.warn('t2Delete tournaments row', error);
     // The real success signal: confirm the row is actually gone (catches RLS / soft fails).
