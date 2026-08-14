@@ -7997,7 +7997,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1021';
+const BG_BUILD = 'v2026.11.1024';
 // v922 (Tyler): "remove/hide the wager tab completely, keep it in the code but
 // comment it out." The tab button and the whole #panel-wager markup are disabled
 // in the HTML; this flag disables the JS half — every entry point, the bottom-nav
@@ -30793,6 +30793,7 @@ function renderScoreEntry() {
   renderP3GreenieEntry();
   // Closest to the Pin entry (only renders on qualifying holes)
   renderCtpEntry();
+  try { bgEnsureFieldLongPutt(); } catch (e) {}   // v1022 — fire-and-forget; re-renders itself if it adds the entry
   try { renderLongPuttEntry(); } catch (e) {}
   try { renderLongDriveEntry(); } catch (e) {}
   try { renderHammerEntry(); } catch (e) {}
@@ -32681,6 +32682,33 @@ async function _t2RefreshFieldLead(tid) {
     const _sig = o => o ? JSON.stringify(o) : '';
     if (_sig(prev.lp) !== _sig(lp) || _sig(prev.ld) !== _sig(ld)) { try { renderLongPuttEntry(); } catch (e) {} }
   } catch (e) { try { if (window._t2FieldLead && window._t2FieldLead[tid]) window._t2FieldLead[tid]._inflight = false; } catch (e2) {} }
+}
+// v1022: rounds launched before edit 1 above have no g.games.longPutt, so their
+// scorekeeper has no way to log the putt and the group isn't counted in the pot.
+// openT2Round backfills it, but only for whoever enters through "Join now" — the
+// score screen is the one funnel EVERY device that could log a putt must pass
+// through, so the repair belongs here. One cloud read per round per session.
+const _bgLpChecked = {};
+async function bgEnsureFieldLongPutt() {
+  try {
+    const g = state.game;
+    if (!g || !g.code || g.finishedAt) return;              // never touch a settled round
+    if (!g.t2 || !g.t2.tournamentId) return;                // not a tournament round
+    if (g.games && g.games.longPutt) return;                // already there
+    if (_bgLpChecked[g.code]) return;
+    _bgLpChecked[g.code] = 1;
+    let t = null; try { t = await t2Get(g.t2.tournamentId); } catch (e) { return; }
+    if (!(t && t.settings && t.settings.tourneyLongPutt && t.settings.tourneyLongPutt.on)) return;
+    // Re-check after the await: the user may have switched rounds, or a realtime
+    // update may have brought the entry in while we were asking.
+    const cur = state.game;
+    if (!cur || cur.code !== g.code || cur.finishedAt) return;
+    if (cur.games && cur.games.longPutt) return;
+    cur.games = cur.games || {};
+    cur.games.longPutt = { value: 0, fieldOnly: true };
+    try { await saveGame(cur); } catch (e) { return; }
+    try { renderLongPuttEntry(); } catch (e) {}
+  } catch (e) {}
 }
 // Long Putt — single round-level winner. The group logs whoever currently has the
 // longest putt MADE (any hole) + the distance; longest at round end wins the pot.
@@ -41078,6 +41106,42 @@ function fieldSkinWinnersByHole(rawRounds, holeResults) {
 
 // Phone-friendly stacked scorecard: front nine table on top, back nine below,
 // so it reads without horizontal scrolling. Used by the GPS mini-scorecard.
+// v1024: one row per player across the WHOLE event, merged from every group's
+// round. Lifted verbatim out of openEventLeaderboard's render closure (where it
+// draws "Full scorecard") so the GPS scorecard sheet can use the same thing.
+// Players are keyed by normalized name because a player's row id differs per
+// group round; when the same name appears twice, the copy with more holes
+// entered wins. Every registered player gets a row, blank if they haven't teed
+// off. Returns null when there's nothing to draw.
+function bgBuildFieldScorecard(rawRounds, evPlayers) {
+  try {
+    const _nmF = s => normalizeNameSegment(String(s || ''));
+    let _fPars = null, _fSis = null; const _byNm = {};
+    (rawRounds || []).forEach(row => {
+      const g = row && row.data ? row.data : row; if (!g || !Array.isArray(g.players)) return;
+      if (!_fPars && Array.isArray(g.pars)) _fPars = g.pars.slice(0, 18);
+      if (!_fSis && Array.isArray(g.sis)) _fSis = g.sis.slice(0, 18);
+      g.players.forEach(p => {
+        if (!p || !p.name) return;
+        const k = _nmF(p.name);
+        const sc = (g.scores && g.scores[p.id]) || [];
+        let thru = 0; for (let h = 0; h < 18; h++) if (sc[h] != null) thru++;
+        if (!_byNm[k]) _byNm[k] = { id: k, name: p.name, firstName: (p.firstName || p.name), scores: new Array(18).fill(null), thru: -1 };
+        if (thru > _byNm[k].thru) { _byNm[k].thru = thru; _byNm[k].scores = sc.slice(0, 18); if (p.firstName) _byNm[k].firstName = p.firstName; }
+      });
+    });
+    (evPlayers || []).forEach(p => { const dn = p && p.display_name; if (!dn) return; const k = _nmF(dn); if (!_byNm[k]) _byNm[k] = { id: k, name: dn, firstName: String(dn).split(/\s+/)[0], scores: new Array(18).fill(null), thru: 0 }; });
+    const _pl = Object.values(_byNm);
+    if (!_pl.length || !_fPars) return null;
+    return {
+      pars: _fPars, sis: _fSis || [],
+      players: _pl.map(p => ({ id: p.id, name: p.name, firstName: p.firstName })),
+      scores: _pl.reduce((m, p) => { m[p.id] = p.scores; return m; }, {}),
+      games: {},   // no group bets on a field-wide card — keeps skinWinnersByHole a no-op
+    };
+  } catch (e) { return null; }
+}
+
 function buildStackedScorecardHtml(g, fieldSkinMap) {
   if (!g || !Array.isArray(g.pars)) return '<div style="padding:16px;text-align:center;color:var(--text-muted)">No scorecard yet.</div>';
   const players = Array.isArray(g.players) ? g.players : [];
@@ -49658,8 +49722,20 @@ async function t2Get(id) {
   catch (e) { return null; }
 }
 async function t2Update(id, fields) {
-  try { const { error } = await supa.from('tournaments').update(fields).eq('id', id); return !error; }
-  catch (e) { return false; }
+  try {
+    // v1023 (Tyler): "I clicked delete, it said it deleted it, but the screen
+    // stayed on it." A write that matches ZERO rows is NOT an error -- RLS makes
+    // the row invisible to the statement and PostgREST returns success with
+    // nothing changed. tournaments_update is USING (commissioner_id = auth.uid()),
+    // so every edit attempted by anyone else came back true here: the app patched
+    // its local copy, said "Saved", and the server never moved. Ask for the
+    // affected rows back and require at least one, so "did it write" is answered
+    // by what was actually written. (SELECT is safe to demand: tournaments_select
+    // is tourney_is_member(id), which the commissioner always satisfies.)
+    const { data, error } = await supa.from('tournaments').update(fields).eq('id', id).select('id');
+    if (error) return false;
+    return Array.isArray(data) ? data.length > 0 : !!data;
+  } catch (e) { return false; }
 }
 // Add another day to an existing tournament (days are created at setup time;
 // this lets the commissioner extend a multi-day event afterward). Bumps num_days
@@ -49715,8 +49791,13 @@ async function t2RemoveDay(dayNumber) {
     await renderT2Home();
   } catch (e) { showToast('Could not remove the day'); }
 }
+// v1023: how the last t2Delete actually landed — 'everyone' (the row is gone or
+// soft-deleted for the whole field) or 'me' (RLS said no; hidden on this device
+// only). Read by the delete buttons so the toast matches reality.
+let _t2LastDeleteScope = 'everyone';
 async function t2Delete(id) {
   if (!id) return false;
+  _t2LastDeleteScope = 'everyone';
   try {
     // Delete child rows FIRST so a foreign-key constraint can never silently block the
     // tournament delete. The old one-line delete failed whenever children lingered,
@@ -49739,8 +49820,11 @@ async function t2Delete(id) {
       await supa.from('game_invites').update({ status: 'expired' })
         .in('status', ['pending', 'seen']).eq('game_code', 'T2:' + id);
     } catch (e) {}
-    const { error } = await supa.from('tournaments').delete().eq('id', id);
+    // v1023: .select() so a zero-row delete (RLS: only the commissioner may
+    // delete) is distinguishable from one that really removed the row.
+    const { data: _delRows, error } = await supa.from('tournaments').delete().eq('id', id).select('id');
     if (error) console.warn('t2Delete tournaments row', error);
+    if (!error && Array.isArray(_delRows) && _delRows.length) _t2LastDeleteScope = 'everyone';
     // The real success signal: confirm the row is actually gone (catches RLS / soft fails).
     // v663: if the row is STILL there, fall back to a SOFT delete — settings.deleted —
     // so it never renders or counts anywhere again (Tyler: "Show 2 past events but
@@ -49753,9 +49837,16 @@ async function t2Delete(id) {
         // v726: RLS only lets the ORIGINAL commissioner mutate the row, so a soft
         // delete by anyone else returns false and the event would keep showing. Hide
         // it on this device so "delete" always makes it disappear.
-        if (!soft) { try { hideT2(id); } catch (e) {} }
+        // v1023: before this build t2Update returned true for that blocked write,
+        // so `soft` was true, this hide never ran, and the card came straight back
+        // on the re-render. It runs now -- and the caller is told the difference,
+        // because "gone from your list" is not the same promise as the confirm
+        // dialog's "removes the tournament for everyone".
+        if (!soft) { try { hideT2(id); } catch (e) {} _t2LastDeleteScope = 'me'; }
+        else _t2LastDeleteScope = 'everyone';
         return true;
       }
+      _t2LastDeleteScope = 'everyone';   // row is gone
     } catch (e) {}
     return true;
   } catch (e) { console.warn('t2Delete', e); return false; }
@@ -52343,7 +52434,12 @@ async function renderT2List() {
   document.querySelectorAll('#t2-list .t2-row-del').forEach(b => b.onclick = async () => {
     if (!(await uiConfirm('Delete "' + b.dataset.name + '"? This removes the tournament for everyone — can\'t be undone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
     const ok = await t2Delete(b.dataset.id);
-    showToast(ok ? 'Deleted' : 'Could not delete');
+    // v1023: "it said it deleted it but the screen stayed on it." Only the
+    // organizer can remove an event for everyone; for anyone else this hides it
+    // on their own device, and saying "Deleted" for that was the lie that made
+    // the card look stuck.
+    showToast(!ok ? 'Could not delete'
+      : (_t2LastDeleteScope === 'me' ? 'Removed from your list — only the organizer can delete it for everyone' : 'Deleted'));
     renderT2List();
   });
   // Scorer "Configure side games": if the round is live, open it directly; if the
@@ -55228,14 +55324,31 @@ async function t2ResyncLaunchedGroupsForDay(t, dayId, dayNumber, kind, onlyGroup
       const Bids = gp.filter(p => p._team === 'B').map(p => p.id);
       let changed = false;
       if (kind === 'day') {
-        // Only resync a round that was actually launched FROM a day-games config
-        // (dayGameKeys stamped then) — a legacy per-format fallback round never
-        // had one, so a day-games edit made afterward has nothing to reattach to.
-        if (_dayGamesCfg && g.t2 && Array.isArray(g.t2.dayGameKeys) && g.t2.dayGameKeys.length) {
+        // Only resync a round that was actually launched by t2StartDay (which
+        // stamps dayGameKeys) — a legacy per-format fallback round predates the
+        // field and has nothing to reattach to.
+        // v1022 (Tyler): "does not allow me to log Closest to the pin whenever it
+        // is added to the tournament." This used to also require
+        // `g.t2.dayGameKeys.length`, but t2StartDay stamps
+        // `Object.keys(games || {})` — which is [] for any day launched with no
+        // games configured, normal since v649 made games optional. A truly legacy
+        // round has dayGameKeys UNDEFINED, not empty, so every no-games round was
+        // misfiled as legacy and skipped forever: adding CTP afterwards reached
+        // nobody, permanently, for that whole event.
+        if (_dayGamesCfg && g.t2 && Array.isArray(g.t2.dayGameKeys)) {
           const remapped = t2RemapGamesToGroup(_dayGamesCfg, gp, Aids, Bids);
           if (remapped.stableford) { remapped.stableford._t2field = true; remapped.stableford._t2fieldCount = (players || []).length; }
           if (remapped.ctp) { remapped.ctp.fieldOnly = true; }
           if (remapped.quota) { remapped.quota._t2field = true; remapped.quota._t2fieldCount = (players || []).length; }
+          // v1022: this replaces g.games wholesale, which would drop the field
+          // long-putt stub — it lives in tourneyLongPutt, not in dayGames, so the
+          // remap can't know about it. Carry the auto-added stub (fieldOnly, value
+          // 0) across; a group's own real long-putt game has a value and is a
+          // dayGames entry, so it round-trips normally.
+          try {
+            const _lpKeep = g.games && g.games.longPutt;
+            if (_lpKeep && _lpKeep.fieldOnly && !_lpKeep.value && remapped.longPutt === undefined) remapped.longPutt = _lpKeep;
+          } catch (e) {}
           g.games = remapped;
           g.t2 = g.t2 || {}; g.t2.dayGameKeys = Object.keys(remapped || {});
           changed = true;
@@ -55489,6 +55602,20 @@ async function t2LaunchDayRounds(courseId) {
         games.teamQuota = { mode: 'perpoint', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids };
       } // 'stroke' = leaderboard-only day: no game pre-configured
     }
+    // v1022 (Tyler): "it allows me to log a long putt on one user but on my other
+    // user it does not give me the option." The field-wide Tournament Long Putt
+    // needs a per-group entry here purely so the log control renders on THIS
+    // group's score screen — value 0 + fieldOnly means no group ante, the pot
+    // settles across the field. Nothing stamped it at launch; the only writers
+    // were openT2Round (i.e. whoever happened to enter via "Join now") and the
+    // commissioner re-saving the pots screen. t2ComputeFieldLongPutt also treats
+    // this entry as its roster of who is IN the pot, so a group that missed it
+    // wasn't just unable to log — it wasn't in the buy-in either.
+    try {
+      if (t.settings && t.settings.tourneyLongPutt && t.settings.tourneyLongPutt.on && !games.longPutt) {
+        games.longPutt = { value: 0, fieldOnly: true };
+      }
+    } catch (e) {}
     // The scorer's PRE-LAUNCH group games (set while the event was scheduled) go into
     // a SEPARATE g.groupGames namespace — NOT merged into g.games — so a group can run
     // the SAME game TYPE as the tournament (e.g. field Team Quota + this group's own
@@ -61001,6 +61128,61 @@ async function _t2RepaintScorecardForScope(g, scope) {
 // param at all. Guards on the panel still being OPEN (not just the round still
 // being current) since this popup can be closed while the fetch is in flight.
 let _t2MiniFieldSkinToken = 0;
+// v1024 (Tyler): "in a tournament if I click the scoreboard icon on the GPS
+// screen, I should see the full scoreboard not just my group." In a tournament
+// the sheet now opens on the whole field and keeps a switch back to the four
+// people in the cart. Outside a tournament nothing changes — there is no field.
+let _bgGpsScScope = 'field';       // 'field' | 'group'
+let _bgGpsScToken = 0;             // a newer open/switch supersedes an in-flight fetch
+function _bgGpsScToggleHtml(isT2) {
+  if (!isT2) return '';
+  const btn = (k, label) => '<button type="button" data-scope="' + k + '" class="small" style="flex:1;padding:8px 6px'
+    + (_bgGpsScScope === k ? ';background:var(--accent);color:#fff;border-color:var(--accent);font-weight:700' : '') + '">' + label + '</button>';
+  return '<div id="gps-sc-scope" style="display:flex;gap:6px;margin-bottom:8px">' + btn('field', '🏆 Full field') + btn('group', '👥 My group') + '</div>';
+}
+function _bgGpsScWire() {
+  const w = document.getElementById('gps-sc-scope');
+  if (!w) return;
+  w.querySelectorAll('button').forEach(b => b.onclick = () => { _bgGpsScScope = b.dataset.scope || 'group'; try { bgPaintGpsScorecard(); } catch (e) {} });
+}
+async function bgPaintGpsScorecard() {
+  const body = document.getElementById('gps-scorecard-body');
+  const panel = document.getElementById('gps-scorecard-panel');
+  if (!body) return;
+  const g = state.game;
+  if (!g) { body.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-muted)">No scorecard yet.</div>'; return; }
+  const tid = (g.t2 && g.t2.tournamentId) || null;
+  const isT2 = !!tid;
+  const myToken = ++_bgGpsScToken;
+  const tog = _bgGpsScToggleHtml(isT2);
+
+  if (!isT2 || _bgGpsScScope === 'group') {
+    body.innerHTML = tog + buildStackedScorecardHtml(g);
+    _bgGpsScWire();
+    // field skins repaint in once the cross-group fetch lands (v851)
+    if (isT2) { try { _t2PaintFieldSkinsOnMiniScorecard(g); } catch (e) {} }
+    return;
+  }
+
+  // Full field. Draw the group card straight away so the sheet is never blank,
+  // then swap in the field once the cross-group read lands.
+  body.innerHTML = tog + '<div class="help-text" style="padding:2px 0 8px">Loading the full field…</div>' + buildStackedScorecardHtml(g);
+  _bgGpsScWire();
+  let t = null, rows = [], evp = [];
+  try { t = await t2Get(tid); } catch (e) {}
+  if (t) {
+    try { rows = await loadTourneyRawRounds(t); } catch (e) { rows = []; }
+    try { evp = await t2GetPlayers(t.id); } catch (e) { evp = []; }
+  }
+  // Everything below is only valid if this is still the sheet the user is looking at.
+  if (myToken !== _bgGpsScToken) return;
+  if (!state.game || state.game.code !== g.code) return;
+  if (panel && panel.style.display !== 'block') return;
+  let field = null; try { field = bgBuildFieldScorecard(rows, evp); } catch (e) { field = null; }
+  if (!field) { body.innerHTML = tog + buildStackedScorecardHtml(g); _bgGpsScWire(); return; }
+  body.innerHTML = tog + buildStackedScorecardHtml(field);
+  _bgGpsScWire();
+}
 async function _t2PaintFieldSkinsOnMiniScorecard(g) {
   try {
     const tid = g && g.t2 && g.t2.tournamentId;
@@ -61013,7 +61195,12 @@ async function _t2PaintFieldSkinsOnMiniScorecard(g) {
     const body = document.getElementById('gps-scorecard-body');
     if (!panel || panel.style.display !== 'block' || !body) return;
     if (myToken !== _t2MiniFieldSkinToken) return;
-    body.innerHTML = buildStackedScorecardHtml(g, fieldSkinMap);
+    // v1024: this repaints the GROUP card with gold skin markers. In the full-field
+    // view that would silently swap the whole field back to four names, so leave it
+    // alone — and keep the field/group switch when it does repaint.
+    if (_bgGpsScScope !== 'group') return;
+    body.innerHTML = _bgGpsScToggleHtml(true) + buildStackedScorecardHtml(g, fieldSkinMap);
+    _bgGpsScWire();
   } catch (e) {}
 }
 
@@ -61162,32 +61349,12 @@ async function openEventLeaderboard(t) {
         html += '</div>';
       });
     }
-    // Build the field scorecard object from the raw tournament rounds. (This was
-    // referenced as `field` but never constructed here — an undefined-variable
-    // ReferenceError that made the WHOLE leaderboard fail with "Could not load".)
+    // The field scorecard object, built from the raw tournament rounds.
+    // v1024: moved to bgBuildFieldScorecard (next to buildStackedScorecardHtml)
+    // so the GPS scorecard sheet draws the identical field from the identical
+    // merge. Behaviour here is unchanged.
     let field = null;
-    try {
-      const _nmF = s => normalizeNameSegment(String(s || ''));
-      let _fPars = null, _fSis = null; const _byNm = {};
-      (_rawRounds || []).forEach(row => {
-        const g = row && row.data; if (!g || !Array.isArray(g.players)) return;
-        if (!_fPars && Array.isArray(g.pars)) _fPars = g.pars.slice(0, 18);
-        if (!_fSis && Array.isArray(g.sis)) _fSis = g.sis.slice(0, 18);
-        g.players.forEach(p => {
-          if (!p || !p.name) return;
-          const k = _nmF(p.name);
-          const sc = (g.scores && g.scores[p.id]) || [];
-          let thru = 0; for (let h = 0; h < 18; h++) if (sc[h] != null) thru++;
-          if (!_byNm[k]) _byNm[k] = { id: k, name: p.name, firstName: (p.firstName || p.name), scores: new Array(18).fill(null), thru: -1 };
-          if (thru > _byNm[k].thru) { _byNm[k].thru = thru; _byNm[k].scores = sc.slice(0, 18); if (p.firstName) _byNm[k].firstName = p.firstName; }
-        });
-      });
-      // Include EVERY registered tournament player so the scorecard shows the whole
-      // field — blank row for anyone who hasn't started.
-      (evPlayers || []).forEach(p => { const dn = p && p.display_name; if (!dn) return; const k = _nmF(dn); if (!_byNm[k]) _byNm[k] = { id: k, name: dn, firstName: String(dn).split(/\s+/)[0], scores: new Array(18).fill(null), thru: 0 }; });
-      const _pl = Object.values(_byNm);
-      if (_pl.length && _fPars) field = { pars: _fPars, sis: _fSis || [], players: _pl.map(p => ({ id: p.id, name: p.name, firstName: p.firstName })), scores: _pl.reduce((m, p) => { m[p.id] = p.scores; return m; }, {}) };
-    } catch (e) { field = null; }
+    try { field = bgBuildFieldScorecard(_rawRounds, evPlayers); } catch (e) { field = null; }
     if (field && field.players && field.players.length && Array.isArray(field.pars)) {
       // v894 (Tyler): mark the Full scorecard — blue circles for birdies, gold
       // circles for skins won (tournament-wide field skins AND any group's own
@@ -61259,6 +61426,34 @@ async function openEventLeaderboard(t) {
       });
       html += '<div class="small-text" style="color:var(--text-muted)">The winner takes the per-player ante from everyone else in the field.</div></div>';
     }
+    // Long Putt — v1022 (Tyler): "I stored a long putt for Lucia on hole one but
+    // when we got to hole 2 and looked at the tourney leaderboard, it is not
+    // logged anywhere." It was stored fine; this screen only ever read the long
+    // putt's MONEY, and v989 rightly stopped that settling until every group on
+    // the day has finished (otherwise the first putt logged books the whole pot
+    // while other groups can still beat it). So mid-round there was nothing to
+    // draw. The leader has always been computed — just never shown.
+    try {
+      const _lpCfg2 = t.settings && t.settings.tourneyLongPutt;
+      if (_lpCfg2 && _lpCfg2.on) {
+        let _lpRes = null; try { _lpRes = t2ComputeFieldLongPutt(_rawRounds, _lpCfg2); } catch (e) {}
+        html += '<h3 style="margin:14px 0 4px">🎯 Long Putt</h3><div style="font-size:13px">';
+        const _lpDays = (_lpRes && Array.isArray(_lpRes.perDay)) ? _lpRes.perDay : [];
+        if (_lpDays.length) {
+          _lpDays.forEach(d => {
+            html += '<div style="padding:3px 0">' + (((t.num_days || 1) > 1) ? 'Day ' + d.day + ' · ' : '') +
+              '<strong>' + escapeHtml(String(d.winnerFirst || '')) + '</strong> ' + escapeHtml(String(d.dist || '')) +
+              (d.complete
+                ? ' — wins $' + d.pot
+                : ' <span style="color:var(--text-muted)">· leading, ' + d.finished + ' of ' + d.total + ' group' + (d.total === 1 ? '' : 's') + ' finished</span>') +
+              '</div>';
+          });
+        } else {
+          html += '<div style="padding:3px 0;color:var(--text-muted)">No putt logged yet.</div>';
+        }
+        html += '<div class="small-text" style="color:var(--text-muted)">Longest made putt across every group — scorekeepers log it on the score screen. The pot settles once every group that day has finished.</div></div>';
+      }
+    } catch (e) {}
     // v639: commissioner "Event pots" row — the Skins/Nassau/LongPutt config modals
     // existed but their buttons were never emitted anywhere (dead wiring). This row
     // is the always-visible entry point, plus the new Side Pots config.
@@ -69132,15 +69327,12 @@ const gpsView = (() => {
     const _applyScZoom = () => { const b = el('gps-scorecard-body'); if (b) b.style.zoom = _scZoom; };
     { const _sc = el('gps-scorecard'); if (_sc) _sc.onclick = () => {
       try {
-        const body = el('gps-scorecard-body');
-        if (body) body.innerHTML = buildStackedScorecardHtml(state.game);
         _scZoom = 1; _applyScZoom();
         el('gps-scorecard-panel').style.display = 'block';
-        // v851 follow-up (Tyler): "build this as well" — tournament-wide field
-        // skins on the mini-scorecard too. Local group skins already show in
-        // the synchronous build above; this repaints gold markers in once the
-        // cross-group fetch lands (same pattern as the Board tab's scorecard).
-        try { const _g = state.game; if (_g && _g.t2 && _g.t2.tournamentId) _t2PaintFieldSkinsOnMiniScorecard(_g); } catch (e) {}
+        // v1024: bgPaintGpsScorecard draws the group card synchronously and, in a
+        // tournament, swaps in the whole field once the cross-group read lands.
+        // It also owns the v851 field-skins repaint for the group view.
+        try { bgPaintGpsScorecard(); } catch (e) {}
         // If an admin saved a photo of the real scorecard, offer to view it.
         try { const _cid = resolveCourseId(); if (_cid && typeof getScorecardImg === 'function') getScorecardImg(_cid).then(u => { if (u && body && !body.querySelector('#gps-real-sc')) { const rb = document.createElement('button'); rb.id = 'gps-real-sc'; rb.textContent = '🖼 View real scorecard'; rb.style.cssText = 'width:100%;padding:10px;margin-bottom:8px;border-radius:8px;border:none;background:var(--accent,var(--accent));color:#fff;font-weight:700'; rb.onclick = () => showScorecardImageFor(_cid, (state.game && state.game.course) || 'Scorecard'); body.insertBefore(rb, body.firstChild); } }).catch(() => {}); } catch (e) {}
       } catch (e) {}
