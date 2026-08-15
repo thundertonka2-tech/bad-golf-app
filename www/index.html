@@ -8002,7 +8002,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1030';
+const BG_BUILD = 'v2026.11.1033';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -13933,6 +13933,12 @@ async function _mergeGameForWrite(local, opts) {
   _unionHoleMap(local, 'hammerData', 'holes', cloud);
     _unionHoleMap(local, 'junkData', null, cloud);
     _unionHoleMap(local, 'sipManual', null, cloud);
+    // v1033 (Tyler, 8/15): these three were missing from the recovery whitelist, so a
+    // client that locally blanked them (see the off-reset bug fixed in
+    // applyLiveEditMerge) pushed the blank straight to the cloud with nothing to heal
+    // it — which is why the Greenie loss was permanent while Banker/Wolf were not.
+    _unionHoleMap(local, 'p3greenieData', null, cloud);
+    _unionHoleMap(local, 'ctpData', null, cloud);
     // players + config: the cloud wins UNLESS this device edited settings in the last
     // 60s (set in applyLiveEditMerge). This is what stops a plain scoring save from
     // reverting a handicap/bet change made on another phone.
@@ -28640,7 +28646,12 @@ function updateGameVisibilityForPlayerCount() {
     cb.disabled = !allowed;
     if (!allowed) {
       if (opts) { opts.classList.remove('show'); opts.style.display = 'none'; }   // keep collapsed
-      if (cb.checked) { cb.checked = false; cb.dispatchEvent(new Event('change')); }
+      // v1033 (Tyler, 8/15): the synthetic change event bubbled to the live-edit
+      // autosave listener, so a game unchecked purely because the player count
+      // momentarily read low (the roster list is empty for a beat while the setup
+      // form rebuilds) got PERSISTED as off. Uncheck the box for display, but never
+      // let a programmatic uncheck queue a save.
+      if (cb.checked) { cb.checked = false; try { cb.dataset.bgAutoOff = '1'; } catch (e) {} }
     } else if (opts && !cb.checked) {
       opts.style.display = '';
     }
@@ -29061,7 +29072,11 @@ function renderNassauInstances() {
 }
 
 function renderParticipantPickers() {
-  updateGameVisibilityForPlayerCount();
+  // v1033: see updateGameVisibilityForPlayerCount — skip the whole gate while the
+  // setup form is mid-rebuild and the roster momentarily reads as empty.
+  try {
+    if (!(state.editingLiveRound && (getCurrentSetupPlayers() || []).length === 0)) updateGameVisibilityForPlayerCount();
+  } catch (e) { updateGameVisibilityForPlayerCount(); }
   let players = getCurrentSetupPlayers();
   // v1030 (Tyler, 8/15): "I added Brian and Mitch mid-round and they were not
   // available to be selected at all." The picker read ONLY the setup-form rows
@@ -54896,7 +54911,15 @@ function t2FilterDayConfigGames(hide) {
     }
     if (card) { if (doHide) card.style.display = 'none'; else card.style.removeProperty('display'); }
     if (opts) { if (doHide) opts.style.display = 'none'; else opts.style.removeProperty('display'); }
-    if (doHide && cb.checked) cb.checked = false;
+    if (doHide && cb.checked) {
+      // v1033 (Tyler, 8/15): a display filter must never silently delete a saved bet.
+      // Remember every game this filter is force-unchecking so applyLiveEditMerge can
+      // put it back (gatherSetup only sees ticked boxes, so without this the game is
+      // simply gone from the round on the next save).
+      try { state._bgHiddenOn = state._bgHiddenOn || new Set(); state._bgHiddenOn.add(key); } catch (e) {}
+      cb.checked = false;
+    }
+    if (!doHide) { try { if (state._bgHiddenOn) state._bgHiddenOn.delete(key); } catch (e) {} }
   });
   const note = document.getElementById('t2-dayconfig-gamenote');
   if (note && !hide) note.remove();
@@ -54941,7 +54964,15 @@ function t2FilterGroupConfigGames(hide) {
     }
     if (card) { if (doHide) card.style.display = 'none'; else card.style.removeProperty('display'); }
     if (opts) { if (doHide) opts.style.display = 'none'; else opts.style.removeProperty('display'); }
-    if (doHide && cb.checked) cb.checked = false;
+    if (doHide && cb.checked) {
+      // v1033 (Tyler, 8/15): a display filter must never silently delete a saved bet.
+      // Remember every game this filter is force-unchecking so applyLiveEditMerge can
+      // put it back (gatherSetup only sees ticked boxes, so without this the game is
+      // simply gone from the round on the next save).
+      try { state._bgHiddenOn = state._bgHiddenOn || new Set(); state._bgHiddenOn.add(key); } catch (e) {}
+      cb.checked = false;
+    }
+    if (!doHide) { try { if (state._bgHiddenOn) state._bgHiddenOn.delete(key); } catch (e) {} }
   });
   // Explanatory note removed (Tyler) — saves vertical space; the "Betting games"
   // heading already tells the scorer what this screen is for.
@@ -59544,6 +59575,19 @@ function t2ComputeFieldNassau(rows, cfg) {
     const players = Object.values(byDay[day].parts); const Nall = players.length;
     if (Nall < 2) return;
     const segOut = [];
+    // v1032 (Tyler, 8/15): "There is only one way to play it -- you play for a
+    // value for each segment, Front/Back/Overall, lowest net wins each segment.
+    // Regardless of tourney or regular games it should always pay the same way."
+    // He was right: for an OUTRIGHT winner these two engines were already
+    // identical (winner nets value x (N-1), every loser pays value). They only
+    // diverged on a TIE -- the in-round group Nassau (calcNassau, GROUP MODE)
+    // CARRIES a tied segment onto the next one, while this field pot SPLIT it.
+    // His Saturday round tied both the Front and the Back, so the same scores
+    // paid Steve +120 one way and +70 the other. Carry here too.
+    // Only when a single place is paid (<= 10 players, i.e. "lowest net wins the
+    // segment"). A bigger field pays 2-3 places, where a shared podium is the
+    // point of the format and carrying would be wrong -- that keeps splitting.
+    let _carry = 0;
     segs.forEach(seg => {
       const rng = segHoles[seg], from = rng[0], to = rng[1];
       const started = players.filter(p => { for (let h = from; h <= to; h++) if (p.net[h] != null) return true; return false; });
@@ -59554,20 +59598,36 @@ function t2ComputeFieldNassau(rows, cfg) {
         return { key: nmk(p.name), name: p.name, first: p.first, net: net, thru: thru, pay: 0 };
       }).sort((a, b) => a.net - b.net || b.thru - a.thru);
       let pot = 0, places = 0;
+      const _carriedIn = _carry;      // units rolled in from earlier tied segments
+      let _tiedCarry = false;
       if (complete && value > 0) {
-        const N = rowsSeg.length; pot = N * value; places = Math.min(nassauFieldPlaces(N), N);
-        const placeMoney = nassauFieldSplit(places, split).map(x => x * pot);
-        rowsSeg.forEach(r => r.pay = -value);                       // every finisher antes
-        let i = 0;
-        while (i < rowsSeg.length) {
-          let j = i; while (j < rowsSeg.length && rowsSeg[j].net === rowsSeg[i].net) j++;
-          let sum = 0; for (let k = i; k < j; k++) if (k < places) sum += (placeMoney[k] || 0);
-          if (sum > 0) { const share = sum / (j - i); for (let k = i; k < j; k++) rowsSeg[k].pay += share; }
-          i = j;
+        const N = rowsSeg.length;
+        const _units = 1 + _carry;                 // this segment plays for itself + anything carried
+        const _ante = value * _units;
+        places = Math.min(nassauFieldPlaces(N), N);
+        // v1032: single-place segment with a tied lead -> nothing settles, the whole
+        // thing (ante included) rolls onto the next segment. Leftover carry after the
+        // last segment is forfeited, exactly like calcNassau's GROUP MODE.
+        _tiedCarry = (places === 1 && rowsSeg.length > 1 && rowsSeg[0].net === rowsSeg[1].net);
+        if (_tiedCarry) {
+          _carry = _units;                          // stack it, charge nobody yet
+        } else {
+          _carry = 0;
+          pot = N * _ante;
+          const placeMoney = nassauFieldSplit(places, split).map(x => x * pot);
+          rowsSeg.forEach(r => r.pay = -_ante);                     // every finisher antes
+          let i = 0;
+          while (i < rowsSeg.length) {
+            let j = i; while (j < rowsSeg.length && rowsSeg[j].net === rowsSeg[i].net) j++;
+            let sum = 0; for (let k = i; k < j; k++) if (k < places) sum += (placeMoney[k] || 0);
+            if (sum > 0) { const share = sum / (j - i); for (let k = i; k < j; k++) rowsSeg[k].pay += share; }
+            i = j;
+          }
+          rowsSeg.forEach(r => { totalsByName[r.key] = totalsByName[r.key] || { first: r.first, net: 0 }; totalsByName[r.key].net += r.pay; });
         }
-        rowsSeg.forEach(r => { totalsByName[r.key] = totalsByName[r.key] || { first: r.first, net: 0 }; totalsByName[r.key].net += r.pay; });
       }
-      segOut.push({ seg: seg, pot: pot, places: places, complete: complete, value: value, finished: fin.length, started: started.length, total: Nall, rows: rowsSeg });
+      segOut.push({ seg: seg, pot: pot, places: places, complete: complete, value: value, finished: fin.length, started: started.length, total: Nall, rows: rowsSeg,
+                    carriedIn: _carriedIn, carried: _tiedCarry, units: 1 + _carriedIn });
     });
     perDay.push({ day: Number(day), N: Nall, segments: segOut });
   });
@@ -59723,7 +59783,11 @@ function t2ComputeFieldLongPutt(rows, cfg) {
     // entire pot the moment the first putt was logged - while other groups were
     // still on the course and could still beat it. Show the leader live, settle
     // the money only once every group on the day is in.
-    const _dComplete = byDay[day].rounds > 0 && byDay[day].finished === byDay[day].rounds;
+    // v1032 (Tyler, 8/15): same one-group rule v1030 gave Skins. The v989 gate
+    // exists because another group could still beat the logged putt -- with a
+    // single group there is no other group, so show and settle it live. It
+    // recomputes if a longer putt is logged later in the round.
+    const _dComplete = (byDay[day].rounds === 1) || (byDay[day].rounds > 0 && byDay[day].finished === byDay[day].rounds);
     const out = players.map(p => {
       const isW = nmk(p.name) === nmk(best.name);
       const net = _dComplete ? ((isW ? pot : 0) - contribution) : 0;
@@ -59787,7 +59851,9 @@ function t2ComputeFieldCtp(rows) {
     if (N < 2 || !val) return;
     const holeList = Object.keys(d.holes).filter(h => d.holeSet[h]).sort((a, b) => a - b);
     if (!holeList.length) return;
-    const _dComplete = d.rounds > 0 && d.finished === d.rounds;
+    // v1032 (Tyler, 8/15): same one-group rule as Skins / Long Putt. A CTP hole is
+    // decided the moment the only group on the course plays it.
+    const _dComplete = (d.rounds === 1) || (d.rounds > 0 && d.finished === d.rounds);
     const holeRows = [];
     holeList.forEach(h => {
       const best = d.holes[h]; if (!best) return;
@@ -60097,21 +60163,31 @@ async function loadTourneyMoney(t) {
             });
           }
         });
+        // v1030 (Tyler, 8/15 audit): Nassau was PAID TWICE. He set Nassau $10 in
+        // the day's games AND turned on Tournament Nassau $10 in Event Pots, and
+        // BOTH settled -- the field pot on the event side, and the same bet again
+        // here as a "group bet" ($190 of Nassau money moved instead of $70).
+        //
+        // Drop a day game from this GROUP pool only when an actual field engine is
+        // switched on for it, because that engine is what pays it. Deliberately
+        // NOT a blanket "is it in dayGameKeys" test: a Nassau set up as a day game
+        // with NO Event-Pot Nassau has no field engine at all, and stripping it
+        // would silently delete the bet instead of de-duplicating it.
+        // g.groupGames (the group's own separate bets) is never touched.
+        if (src === g.games) {
+          try {
+            const _st = (t && t.settings) || {};
+            if (_st.tourneySkins && _st.tourneySkins.on) delete gi.skins;         // -> t2ComputeFieldSkins
+            if (_st.tourneyNassau && _st.tourneyNassau.on) delete gi.nassau;      // -> t2ComputeFieldNassau
+            if (_st.tourneyLongPutt && _st.tourneyLongPutt.on) delete gi.longPutt; // -> t2ComputeFieldLongPutt
+            // fieldOnly configs (CTP, Long Putt) already self-suppress in their own
+            // calc*, but drop them here too so the intent is explicit.
+            Object.keys(gi).forEach(k => { if (gi[k] && gi[k].fieldOnly) delete gi[k]; });
+          } catch (e) {}
+          if (!Object.keys(gi).length) return;
+        }
         let res = null;
-        try {
-          const _vg = buildVg([g], gi, gpl, g);
-          // v1030 (Tyler, 8/15 audit): Nassau was PAID TWICE. He set Nassau $10 in
-          // the day's games AND turned on Tournament Nassau $10 in Event Pots, and
-          // both settled -- the field pot on the event side, and the same bet again
-          // here as a "group bet" ($190 of Nassau money moved instead of $70).
-          // computeAllGameMoney already refuses to settle tournament-owned games,
-          // but only when the round carries its g.t2 stamp -- and buildVg never
-          // copied it, so the guard was dead on this path and the group Board
-          // disagreed with the Event total. Stamp it for the DAY-GAMES source only;
-          // g.groupGames is the group's own separate bets and must NOT be stripped.
-          if (src === g.games && g && g.t2 && g.t2.tournamentId) _vg.t2 = g.t2;
-          res = computeAllGameMoney(_vg);
-        } catch (e) {}
+        try { res = computeAllGameMoney(buildVg([g], gi, gpl, g)); } catch (e) {}
         addCombined(res, groupNet, groupLabels, groupNetByGame, map);    // ← GROUP pool
       });
     });
@@ -61994,6 +62070,25 @@ async function openEventPotsMenu(t) {
     // Without this the SAME pot read PRO in Games and free here.
     btn('sp', '🏅', 'Side Pots <span class="pro-pill inline" onclick="event.preventDefault();event.stopPropagation();if(window.openProInfo)openProInfo(true);">PRO</span>', spBits.length ? spBits.join(' · ') : 'Low Net · Most GIRs · Fewest Putts · Long Putt', spOn) +
     btn('nassau', '🏆', 'Nassau', 'Best net F9 / B9 / 18 — places paid', s.tourneyNassau && s.tourneyNassau.on) +
+    // v1030 (Tyler, 8/15): he turned Nassau on HERE and again in the day's Games
+    // grid, and before the v1030 fix both settled -- his Saturday event moved $190
+    // of Nassau instead of $70. The event pot is now authoritative and the day
+    // game no longer double-pays, but the duplicate setting is still confusing, so
+    // say so out loud. Same check for Skins / Long Putt.
+    (function () {
+      try {
+        const _dg = (s.dayGames && typeof s.dayGames === 'object') ? s.dayGames : {};
+        const _onSomeDay = k => Object.keys(_dg).some(d => _dg[d] && _dg[d][k]);
+        const _dupes = [];
+        if (s.tourneyNassau && s.tourneyNassau.on && _onSomeDay('nassau')) _dupes.push('Nassau');
+        if (s.tourneySkins && s.tourneySkins.on && _onSomeDay('skins')) _dupes.push('Skins');
+        if (s.tourneyLongPutt && s.tourneyLongPutt.on && (_onSomeDay('longPutt') || _onSomeDay('longputt'))) _dupes.push('Long Putt');
+        if (!_dupes.length) return '';
+        return '<div class="help-text" style="margin:8px 0 2px;padding:8px 10px;border-radius:8px;background:var(--surface-2);border-left:3px solid var(--bg-brand)">' +
+          '⚠️ <b>' + _dupes.join(' and ') + '</b> ' + (_dupes.length === 1 ? 'is' : 'are') + ' also switched on in a day\u2019s <b>Games</b>. ' +
+          'The event pot here is what pays \u2014 the day game won\u2019t settle separately. Turn it off in Games if you\u2019d rather run it as a per-group bet.</div>';
+      } catch (e) { return ''; }
+    })() +
     '<div class="help-text" style="margin:8px 0 10px">🎯 Closest to the Pin: turn on CTP in <b>Games</b> and tap the hole (e.g. #17) — it settles field-wide automatically. 💪 Long Drive: also in Games; the commissioner picks the winner on the Event Leaderboard.</div>' +
     '<div class="actions"><button id="epm-close" class="primary full">Done</button></div></div>';
   document.body.appendChild(ov);
@@ -62986,6 +63081,18 @@ async function enterEditLiveRoundMode() {
   // (applyLiveEditMerge) writes them back to g.groupGames instead of permanently
   // merging them into g.games.
   state._t2GroupOwnedGames = null;
+  // v1033 (Tyler, 8/15): snapshot what the round ACTUALLY has configured before the
+  // setup form is built. gatherSetup rebuilds `games` from scratch out of whatever
+  // checkboxes are ticked, so anything a display filter hides (scramble restriction,
+  // player-count gate, side-bet allow-list) vanishes on save. This snapshot is what
+  // applyLiveEditMerge restores those from.
+  try {
+    state._bgHiddenOn = new Set();
+    state._bgPreEditGames = {
+      games: JSON.parse(JSON.stringify(g.games || {})),
+      groupGames: JSON.parse(JSON.stringify(g.groupGames || {}))
+    };
+  } catch (e) { state._bgPreEditGames = null; }
   try {
     if (g.t2 && g.t2.tournamentId && g.groupGames && Object.keys(g.groupGames).length) {
       const gok = new Set(Object.keys(g.groupGames).filter(k => !(g.games && g.games[k])));
@@ -63126,6 +63233,17 @@ function exitEditLiveRoundMode() {
   state._t2GroupOwnedGames = null;  // v863
   state._t2DayGameKeys = null;      // v670
   state._t2FieldRoster = null;      // v675: don't leak the cross-group roster into a later non-tournament edit
+  // v1033 (Tyler, 8/15): these two were set in openT2GroupGamesConfig and cleared
+  // ONLY on its happy path, so backing out of a scramble day (or any group whose
+  // config threw) left _t2GroupScramble true / _t2GroupCount stale for the rest of
+  // the session. The next NORMAL group's bets screen then ran the scramble filter,
+  // which hides — and force-unchecks — every game outside the 7-key scramble
+  // allow-list, and gatherSetup dropped them all on the next save. This is the other
+  // half of "stuff I turned on turns itself off".
+  state._t2GroupScramble = false;
+  state._t2GroupCount = null;
+  state._bgHiddenOn = null;         // v1033
+  state._bgPreEditGames = null;     // v1033
   try { document.body.classList.remove('t2-group-config'); } catch (e) {}   // v670
   try { document.body.classList.remove('editing-live'); const _pc = document.getElementById('setup-card-players'); if (_pc) _pc.classList.remove('players-collapsed'); } catch (e) {}
   try { const _bkb = document.getElementById('btn-setup-back'); if (_bkb) _bkb.style.display = 'none'; } catch (e) {}
@@ -63155,6 +63273,26 @@ function applyLiveEditMerge(g, setup) {
   g.sis = setup.sis;
   g.tees = Array.isArray(setup.tees) ? setup.tees : [];
   g.games = setup.games;
+  // v1033 (Tyler, 8/15): "something in the setting is turning stuff off after I had
+  // it on." A game hidden by a DISPLAY filter is force-unchecked, gatherSetup only
+  // reads ticked boxes, and the unticked state was then written back as gospel —
+  // permanently deleting a bet the user never touched. Put back anything that (a) the
+  // round had configured when this edit started and (b) a filter hid during it.
+  try {
+    const _pre = state._bgPreEditGames;
+    if (_pre && state._bgHiddenOn && state._bgHiddenOn.size) {
+      const _dom2game = { 'team-match': 'teamMatch', 'team-quota': 'teamQuota', 'ryder-cup': 'ryderCup', 'longputt': 'longPutt', 'team-lowball': 'teamLowball', 'lownet': 'lowNetPool', 'girpool': 'girPool', 'puttspool': 'puttsPool', 'splix-sixes': 'splixSixes', 'high-low': 'highLow', 'hot-potato': 'hotPotato', 'team-match': 'teamMatch' };
+      state._bgHiddenOn.forEach(domKey => {
+        const k = _dom2game[domKey] || domKey;
+        if (g.games[k] !== undefined) return;                       // still there, nothing to do
+        if (_pre.games && _pre.games[k] !== undefined) { g.games[k] = _pre.games[k]; return; }
+        if (_pre.groupGames && _pre.groupGames[k] !== undefined) {
+          g.groupGames = g.groupGames || {};
+          if (g.groupGames[k] === undefined) g.groupGames[k] = _pre.groupGames[k];
+        }
+      });
+    }
+  } catch (e) {}
   // v670: tournament-owned games (stripped from the group-config form) come back
   // untouched — a group save can never edit or drop the event's games.
   try { if (state._t2PreservedGames) Object.keys(state._t2PreservedGames).forEach(k => { g.games[k] = state._t2PreservedGames[k]; }); } catch (e) {}
@@ -63224,10 +63362,25 @@ function applyLiveEditMerge(g, setup) {
       }
     }
   } catch (e) {}
-  if (!g.games.banker && g.bankerData) g.bankerData = { holes: {}, picks: {} };
-  if (!g.games.wolf && g.wolfData) g.wolfData = { picks: {} };
-  if (!g.games.nassau && g.huckleData) g.huckleData = { huckles: [] };
-  if (!g.games.p3greenie && g.p3greenieData) g.p3greenieData = {};
+  // v1033 (Tyler, 8/15 — CONFIRMED IN PRODUCTION): these four "the bet is off, so
+  // bin its per-hole data" resets read ONLY g.games. But ~55 lines above, this same
+  // function MOVES every group-owned key out of g.games and into g.groupGames:
+  //     if (g.games[k] !== undefined) { g.groupGames[k] = g.games[k]; delete g.games[k]; }
+  // So for a tournament GROUP bet the key is guaranteed absent from g.games by the
+  // time we get here, `!g.games.p3greenie` is always true, and the data is wiped
+  // while the bet itself is still switched on. That is exactly what happened to
+  // Tyler's Saturday round: groupGames.p3greenie intact and enabled, p3greenieData
+  // emptied — three logged greenies (#8, #12, #17) destroyed by re-saving the games
+  // screen. bankerData/wolfData quietly self-heal via _unionHoleMap on the next
+  // save, which is why only the Greenie loss was ever visible.
+  // Check BOTH buckets, the way bgSideCfg() already does.
+  const _gameOn = k => !!((g.games && g.games[k]) || (g.groupGames && g.groupGames[k]));
+  if (!_gameOn('banker') && g.bankerData) g.bankerData = { holes: {}, picks: {} };
+  // v1033: was { picks: {} } — every reader/writer uses { holes: {}, picks: {} }, so
+  // the off-reset wrote a shape nothing reads.
+  if (!_gameOn('wolf') && g.wolfData) g.wolfData = { holes: {}, picks: {} };
+  if (!_gameOn('nassau') && g.huckleData) g.huckleData = { huckles: [] };
+  if (!_gameOn('p3greenie') && g.p3greenieData) g.p3greenieData = {};
 }
 
 // Debounced silent auto-save while editing a live round's settings. Runs gatherSetup
@@ -63248,6 +63401,21 @@ function liveEditAutoSaveNow() {
   try { setup = gatherSetup(); } catch (e) { setup = null; } finally { window._suppressToasts = false; }
   if (!setup) return;                 // not valid right now — wait for a valid state, drop nothing
   const g = state.game;
+  // v1033 (Tyler, 8/15): "something in the setting is turning stuff off after I had
+  // it on." gatherSetup builds `games` from scratch out of whatever checkboxes are
+  // currently ticked, and returns {} for a form that momentarily reads as fewer than
+  // 2 players (mid-rebuild, or a name box cleared while retyping). The 900ms
+  // autosaver then persisted that empty object over a round full of live bets — and
+  // the off-resets above then binned the per-hole data too. An auto-save is never
+  // allowed to be destructive; the explicit "Save changes" button still is.
+  try {
+    if (!setup.players || setup.players.length < 2) return;
+    const _had = Object.keys(g.games || {}).length + Object.keys(g.groupGames || {}).length;
+    if (_had > 0 && !Object.keys(setup.games || {}).length) {
+      console.warn('[BadGolf] auto-save skipped: refused to clear ' + _had + ' configured game(s)');
+      return;
+    }
+  } catch (e) {}
   try { applyLiveEditMerge(g, setup); } catch (e) { return; }
   (async () => { try { await saveGame(g); } catch (e) { console.warn('auto-save failed', e); } })();
   flashAutoSaved();
