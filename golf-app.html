@@ -8014,7 +8014,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1041';
+const BG_BUILD = 'v2026.11.1042';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -9752,7 +9752,11 @@ function bgGpsDigest(holes) {
       out.push({
         g: !!(hd && (hd.tee || hd.front || hd.back || hd.mid)),
         t: !!(hd && Array.isArray(hd.fwc) && hd.fwc.length === 2),
-        p: (hd && hd.par != null && isFinite(Number(hd.par))) ? Number(hd.par) : null
+        p: (hd && hd.par != null && isFinite(Number(hd.par))) ? Number(hd.par) : null,
+        // v1042: keep the green centre so completeness can tell whether these pins
+        // are 18 DIFFERENT greens, and whether they sit on this course at all.
+        m: (hd && Array.isArray(hd.mid) && hd.mid.length === 2 &&
+            isFinite(Number(hd.mid[0])) && isFinite(Number(hd.mid[1]))) ? hd.mid : null
       });
     }
   } catch (e) {}
@@ -9762,9 +9766,12 @@ function bgGpsDigest(holes) {
 // target when its par is not 3 — GPS row's own par first, scorecard second,
 // 4 last (identical to what fetchCourseGpsDetail has always done).
 function bgCountGps(dig, pars, nH) {
-  const res = { perHole: {}, greens: 0, targetsDone: 0, targetsNeeded: 0 };
+  const res = { perHole: {}, greens: 0, targetsDone: 0, targetsNeeded: 0,
+                distinctGreens: null, cLat: null, cLng: null };
   try {
     dig = dig || []; nH = (nH === 9) ? 9 : 18;
+    // v1042: distinct green positions + mapping centroid, for the sanity checks below.
+    const _seen = {}; let _n = 0, _sLat = 0, _sLng = 0, _cnt = 0;
     for (let h = 1; h <= nH; h++) {
       const d = dig[h - 1] || { g: false, t: false, p: null };
       const par = (d.p != null) ? d.p : ((pars && pars[h - 1] != null) ? Number(pars[h - 1]) : 4);
@@ -9772,7 +9779,13 @@ function bgCountGps(dig, pars, nH) {
       res.perHole[h] = { green: !!d.g, target: !!d.t, par: par, needTarget: needTarget };
       if (d.g) res.greens++;
       if (needTarget) { res.targetsNeeded++; if (d.t) res.targetsDone++; }
+      if (d.m) {
+        const key = Number(d.m[0]).toFixed(5) + ',' + Number(d.m[1]).toFixed(5);
+        if (!_seen[key]) { _seen[key] = 1; _n++; }
+        _sLng += Number(d.m[0]); _sLat += Number(d.m[1]); _cnt++;
+      }
     }
+    if (_cnt > 0) { res.distinctGreens = _n; res.cLat = _sLat / _cnt; res.cLng = _sLng / _cnt; }
   } catch (e) {}
   return res;
 }
@@ -9794,10 +9807,33 @@ function bgCourseStatus(o) {
       : (parArr ? parArr.filter(p => Number(p) !== 3).length : 18);
     const targetsDone = o.targetsDone || 0;
     const targetsComplete = (targetsNeeded === 0) || (targetsDone >= targetsNeeded);
-    const complete = hasGPS && hasRS && hasCard && targetsComplete;
+    // v1042 mapping-sanity gates. Both are OPTIONAL: a caller that supplies neither
+    // distinctGreens nor coordinates gets exactly the pre-v1042 behaviour.
+    // 1) duplicate pins - an 18 whose back nine repeats the front nine's greens.
+    const distinctGreens = (o.distinctGreens != null) ? o.distinctGreens : null;
+    const pinsDistinct = (distinctGreens == null) || (distinctGreens >= expHoles);
+    // 2) misplaced - the mapping centroid is nowhere near this course's own coordinates.
+    let mapKm = null;
+    try {
+      if (o.cLat != null && o.cLng != null && o.libLat != null && o.libLng != null) {
+        const R = 6371, rad = Math.PI / 180;
+        const p1 = Number(o.libLat) * rad, p2 = Number(o.cLat) * rad;
+        const dLat = p2 - p1, dLng = (Number(o.cLng) - Number(o.libLng)) * rad;
+        mapKm = R * 2 * Math.asin(Math.sqrt(
+          Math.pow(Math.sin(dLat / 2), 2) +
+          Math.cos(p1) * Math.cos(p2) * Math.pow(Math.sin(dLng / 2), 2)));
+      }
+    } catch (e) { mapKm = null; }
+    const MAPPING_MAX_KM = 5;
+    const onSite = (mapKm == null) || (mapKm <= MAPPING_MAX_KM);
+    const complete = hasGPS && hasRS && hasCard && targetsComplete && pinsDistinct && onSite;
     const flag = complete ? 'done'
-      : (!hasGPS ? (hasRS ? 'gps' : 'both') : (!hasCard ? 'card' : (!hasRS ? 'rs' : 'targets')));
-    return { hasGPS, hasRS, hasCard, greens, expHoles, targetsNeeded, targetsDone, targetsComplete, complete, flag };
+      : (!hasGPS ? (hasRS ? 'gps' : 'both')
+      : (!pinsDistinct ? 'duppins'
+      : (!onSite ? 'misplaced'
+      : (!hasCard ? 'card' : (!hasRS ? 'rs' : 'targets')))));
+    return { hasGPS, hasRS, hasCard, greens, expHoles, targetsNeeded, targetsDone, targetsComplete,
+             distinctGreens, pinsDistinct, mapKm, onSite, complete, flag };
   } catch (e) {
     return { hasGPS: false, hasRS: false, hasCard: false, greens: 0, expHoles: 18,
              targetsNeeded: 0, targetsDone: 0, targetsComplete: false, complete: false, flag: 'both' };
