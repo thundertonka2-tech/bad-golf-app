@@ -8014,7 +8014,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1040';
+const BG_BUILD = 'v2026.11.1041';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -8367,7 +8367,25 @@ async function initAuth() {
           try { stampBuildTelemetry(); } catch (e) {}   // v949: stamp the running build so P3 adoption is measurable
           // v1000: chain, don't race — ensureMyNameSet() used to run a few lines
           // below while autoLinkMyPlayer() was still prompting for the name.
-          autoLinkMyPlayer().then(function () { try { ensureMyNameSet(); } catch (e) {} });
+          // v1041: a ?join= invite must resolve its player slot BEFORE
+          // autoLinkMyPlayer() invents a player from the Apple/Google account name.
+          // Otherwise the brand-new user is prompted for a name and a handicap the
+          // host already typed at the tee box, and the two only line up by
+          // name-string luck. Same for a ?claim= link. Strictly sequential -
+          // v1000 already had to repair this exact race once.
+          (async function () {
+            try { await maybeClaimBoundSlot(); } catch (e) {}
+            try { await maybeClaimPlayerRecord(); } catch (e) {}
+            try { await autoLinkMyPlayer(); } catch (e) {}
+            try { await ensureMyNameSet(); } catch (e) {}
+            // v1041: finish the ?join= hand-off HERE, last, instead of a few
+            // statements below. Down there it ran while the "Is this you?" dialog was
+            // still open, so joinRoundByCode() read getMeName() before the slot claim
+            // had linked the account and recorded no acceptance for the joiner.
+            let _j = (typeof _pendingJoin !== 'undefined') ? _pendingJoin : null;
+            if (!_j) { try { _j = localStorage.getItem('golf:pending-join-link'); } catch (e) {} }
+            if (_j) { _pendingJoin = null; try { await processPendingJoin(_j); } catch (e) {} }
+          })();
           // Repopulate THIS account's stats backup + saved shots (idempotent) so the
           // new user's own data shows immediately instead of the cleared/old caches.
           try { if (typeof healMyRoundsFromCloud === 'function') healMyRoundsFromCloud(); } catch (e) {}
@@ -8390,11 +8408,11 @@ async function initAuth() {
           // Same for the general ?tclaim=<id> "tap your name" tournament link.
           let _tck = null; try { _tck = localStorage.getItem('golf:pending-tclaim'); } catch (e) {}
           if (_tck && !_tjk) { processPendingTclaim(_tck); }
-          // Same for a ?join=CODE round link opened before sign-in → drop them
-          // straight into the round's GPS now that they're authenticated.
+          // A ?join=CODE round link opened before sign-in is completed by the
+          // identity chain above (v1041) — this only still needs to know WHETHER one
+          // is pending, so the first-run Get Started guide below stays out of the way.
           let _jk = (typeof _pendingJoin !== 'undefined') ? _pendingJoin : null;
-          if (!_jk) { try { _jk = localStorage.getItem('golf:pending-join'); } catch (e) {} }
-          if (_jk) { _pendingJoin = null; processPendingJoin(_jk); }
+          if (!_jk) { try { _jk = localStorage.getItem('golf:pending-join-link'); } catch (e) {} }
           // v738: first-time-login walkthrough. Show the Get Started guide the FIRST
           // time a user actually signs in — not on INITIAL_SESSION (returning users
           // with a saved session) and not while following a join / tournament deep
@@ -12510,8 +12528,28 @@ async function createMyPlayerFromAccount() {
     );
     if (hcpStr && hcpStr.trim()) hcp = (typeof parseHcpInput === 'function') ? parseHcpInput(hcpStr) : (parseFloat(hcpStr) || 0);
   } catch (e) {}
-  await upsertPlayerInRoster(first, last, hcp); // dedups by name if it exists
+  // v1041 (Tyler, 8/15): "how is it going to know who to send the invite to if we
+  // don't prompt for phone # on the setup of a new user." Nothing could -- the guest
+  // ADD form has had an optional phone since v640, but a real signup was never asked,
+  // so the app had no number to text a round invite to. Optional, and the reason is
+  // on screen. Saved in BOTH places it is read from: profiles.phone (the Edit Profile
+  // field) and the roster entry (where maybeOfferGuestInvites looks).
+  let phone = '';
+  try {
+    const phStr = await uiPrompt(
+      'Optional — this is how the guys you play with text you a round invite that opens straight into the app. Only people you play with ever see it, and you can add or change it anytime in Edit Profile.',
+      { title: 'Your mobile number', okLabel: 'Save', cancelLabel: 'Skip', placeholder: '(555) 123-4567' }
+    );
+    if (phStr && phStr.trim()) {
+      phone = (typeof formatPhoneDisplay === 'function') ? formatPhoneDisplay(phStr.trim()) : phStr.trim();
+    }
+  } catch (e) {}
+  await upsertPlayerInRoster(first, last, hcp, phone ? { phone: phone } : undefined); // dedups by name if it exists
   await setMeName(combineName(first, last));
+  if (phone) {
+    try { await supa.from('profiles').update({ phone: phone }).eq('id', _authUser.id); }
+    catch (e) { /* phone column may not exist yet - run Profile_Phone.sql; roster copy still saved */ }
+  }
   try { renderAccountUI(); } catch (e) {}
   try {
     const panel = document.getElementById('panel-stats');
@@ -47667,6 +47705,24 @@ async function openCrewProfile(name, _skipHeal) {
     var _profBadges = ((typeof isGuestName === 'function' && isGuestName(p.name)) ? ' <span class="guest-pill">GUEST</span>' : '') + ((typeof isTestUserName === 'function' && isTestUserName(p.name)) ? ' <span class="test-pill">TEST</span>' : '');
     if (_profBadges) html = '<div style="font-weight:700;font-size:16px;margin:0 0 8px">' + escapeHtml(displayFull(p) || p.name || '') + _profBadges + '</div>' + html;
   } catch (e) {}   // v636 + TEST badge
+  // v1041 — HOST-INITIATED CLAIM. A guest's rounds live only inside MY roster blob
+  // (roster:<uid>, RLS-scoped), so they can never find them by signing up. This is
+  // the one place I'm looking at exactly that person and their whole history, so
+  // this is where the offer belongs. Guests only, never me, never a registered user.
+  let _bgCanInviteClaim = false;
+  try {
+    _bgCanInviteClaim = !!(p && p.name) &&
+      (typeof isGuestName === 'function' && isGuestName(p.name)) &&
+      !(p.email && String(p.email).trim()) &&
+      (typeof isSignedIn === 'function' && isSignedIn());
+    if (_bgCanInviteClaim) {
+      html += '<button type="button" class="full" id="bg-invite-claim" data-name="' +
+        escapeHtml(p.name) + '" style="margin:14px 0 0;font-weight:600">' +
+        '\u{1F4E4} Invite ' + escapeHtml((p.firstName || String(p.name).split(/\s+/)[0] || 'them')) +
+        ' to claim these rounds</button>' +
+        '<div class="help-text" style="margin:6px 0 0">Sends a link that moves these rounds, this handicap and these winnings onto their own account.</div>';
+    }
+  } catch (e) {}
   html += '<div style="font-weight:600;margin:16px 0 4px">Recent rounds</div>';
   if (hist.length === 0) {
     html += '<div class="help-text">No rounds yet.</div>';
@@ -47700,6 +47756,10 @@ async function openCrewProfile(name, _skipHeal) {
     }).join('');
   }
   document.getElementById('crew-profile-body').innerHTML = html;
+  try {
+    const _ic = document.getElementById('bg-invite-claim');
+    if (_ic) _ic.onclick = () => { try { inviteGuestToClaim(_ic.dataset.name); } catch (e) {} };
+  } catch (e) {}
   // Wire the close controls here too — this modal opens from Home and the
   // leaderboard, but wireCrewControls() only runs on the Crew tab, so opening
   // from elsewhere used to leave a dead Close button (no handler).
@@ -72341,10 +72401,17 @@ async function maybeOfferGuestInvites(tourneyId) {
   } catch (e) {}
 }
 
-function buildJoinLink(code) {
+function buildJoinLink(code, tok) {
   // Always the PUBLIC url (not location.origin, which is https://localhost in the
   // native app) so the link works for recipients and Universal-Links into the app.
-  return BG_PUBLIC_URL + (code ? '?join=' + encodeURIComponent(code) : '');
+  // v1041: the optional 2nd arg appends &p=<slot token>, binding the link to ONE
+  // player. Nothing sends a bound link today - the group "Invite players" button is
+  // one link for everybody, and a token would bind it to whoever opened it first, so
+  // the joiner taps their own name instead (see maybeClaimBoundSlot). The parameter
+  // is honoured on the way IN so a per-person sender can be added later without
+  // touching the receive path.
+  if (!code) return BG_PUBLIC_URL;
+  return BG_PUBLIC_URL + '?join=' + encodeURIComponent(code) + (tok ? '&p=' + encodeURIComponent(tok) : '');
 }
 // Share the free TestFlight beta invite (home "Beta Invite" button). Native share
 // sheet first, clipboard as a fallback.
@@ -72422,21 +72489,283 @@ async function shareGameInvite(name) {
 // ?cal=<uid> share-link: stash it and open the Times calendar after boot / sign-in.
 (function handleCalLink(){ try { var c = new URLSearchParams(location.search || '').get('cal'); if (c == null) return; try { localStorage.setItem('golf:pending-cal', String(c) || '1'); } catch (e) {} if (!(typeof isSignedIn === 'function' && isSignedIn())) { try { var m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); } catch (e) {} } } catch (e) {} })();
 let _pendingJoin = null;
+let _pendingJoinTok = null;
 (function handleJoinLink() {
-  let code = null;
-  try { code = new URLSearchParams(location.search || '').get('join'); } catch (e) {}
+  let code = null, tok = null;
+  try { const q = new URLSearchParams(location.search || ''); code = q.get('join'); tok = q.get('p'); } catch (e) {}
   if (!code) return;
   code = String(code).trim().toUpperCase();
   _pendingJoin = code;
-  try { localStorage.setItem('golf:pending-join', code); } catch (e) {}
+  _pendingJoinTok = tok ? String(tok).trim() : null;
+  // v1041 KEY COLLISION FIX. This used to stash the RAW code under
+  // 'golf:pending-join' -- the SAME key setPendingJoinCodes() stores a JSON ARRAY
+  // under for the invited-but-not-joined tracker. getPendingJoinCodes() therefore
+  // JSON.parse'd a bare code, threw, and silently returned [] for every caller
+  // (isInvitedNotJoined always false), and a markInvitedNotJoined() write could
+  // clobber the stashed deep link -- which bites on exactly the one path that reads
+  // it back from storage, the Google/Apple OAuth redirect. Separate keys now.
+  try { localStorage.setItem('golf:pending-join-link', code); } catch (e) {}
+  try {
+    if (_pendingJoinTok) localStorage.setItem('golf:pending-join-tok', _pendingJoinTok);
+    else localStorage.removeItem('golf:pending-join-tok');
+  } catch (e) {}
   if (!(typeof isSignedIn === 'function' && isSignedIn())) {
     try { const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); } catch (e) {}
     showToast('Sign in to join the round');
   }
 })();
+// ?claim=<token>: a host-issued link that hands a guest's whole record (rounds,
+// handicap, winnings) to whoever signs in with it. Same stash-then-finish-after-auth
+// shape as ?join= and ?tclaim=.
+(function handleClaimLink() {
+  let tok = null;
+  try { tok = new URLSearchParams(location.search || '').get('claim'); } catch (e) {}
+  if (!tok) return;
+  tok = String(tok).trim();
+  if (!tok) return;
+  window._pendingClaim = tok;
+  try { localStorage.setItem('golf:pending-claim', tok); } catch (e) {}
+  if (!(typeof isSignedIn === 'function' && isSignedIn())) {
+    try { const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); } catch (e) {}
+    showToast('Sign in to claim your rounds');
+  }
+})();
+// v1041 - claim the bound slot BEFORE the app invents a player for this account.
+// Runs on sign-in whenever a ?join= link is pending. On success the account is tied
+// to the exact row the host built at the tee box (name + handicap), so
+// autoLinkMyPlayer()'s name and handicap prompts never fire: the new user goes from
+// tapping the text to standing on the scorecard, typing nothing.
+// Returns true if it linked the account (caller then skips the normal signup path).
+async function maybeClaimBoundSlot() {
+  let code = null, tok = null;
+  try {
+    code = _pendingJoin || localStorage.getItem('golf:pending-join-link') || null;
+    tok = _pendingJoinTok || localStorage.getItem('golf:pending-join-tok') || null;
+  } catch (e) {}
+  if (!code) return false;
+  try { localStorage.removeItem('golf:pending-join-tok'); } catch (e) {}
+  _pendingJoinTok = null;
+  try {
+    // An account that ALREADY has a player is never renamed by a link. A returning
+    // user tapping a friend's invite just joins the round the normal way.
+    let existing = null;
+    try { existing = await getMeName(); } catch (e) { return false; }
+    if (existing && String(existing).trim() && !/^player$/i.test(String(existing).trim())) return false;
+    const g = await loadGame(String(code).trim().toUpperCase());
+    if (!g || !Array.isArray(g.players) || !g.players.length) return false;
+    const myEmail = String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').toLowerCase();
+    let p = tok ? g.players.find(x => x && x.inviteTok && x.inviteTok === tok) : null;
+    // Token already burned by somebody else -> fall through to the picker rather
+    // than silently handing this account another person's slot.
+    if (p && p.tokUsedBy && String(p.tokUsedBy).toLowerCase() !== myEmail) p = null;
+    if (p) {
+      const hcpTxt = (typeof fmtHcp === 'function') ? fmtHcp(p.hcp || 0) : String(p.hcp || 0);
+      const ok = await uiConfirm(
+        (g.course ? 'Round at ' + g.course + '.\n\n' : '') +
+        'You are set up as ' + (p.name || 'this player') + ', handicap ' + hcpTxt +
+        '. Tap yes and you are in \u2014 nothing else to fill out.',
+        { title: 'Is this you?', okLabel: 'Yes, that is me', cancelLabel: 'I am someone else', danger: false });
+      if (!ok) p = await pickSlotFromRound(g, 'Which player are you?');
+    } else {
+      // No token (the group "Invite players" link), or a spent one. Same "tap your
+      // name" screen the tournament ?tclaim= links use - one extra tap, and the new
+      // user still never types a name or a handicap.
+      p = await pickSlotFromRound(g, tok ? 'That invite was already used. Which player are you?' : 'Which player are you?');
+    }
+    if (!p) return false;   // "None of these - I'm new" -> normal signup runs
+    return await bindAccountToSlot(g, p);
+  } catch (e) { console.warn('maybeClaimBoundSlot failed', e); return false; }
+}
+// The "I'm someone else" / no-token path. Slots already tied to a DIFFERENT account
+// are shown greyed and unpickable, so this can never be used to take over a
+// registered player's scorecard. Self-contained DOM (same pattern as uiPrompt).
+function pickSlotFromRound(g, headline) {
+  return new Promise(resolve => {
+    try {
+      const mine = String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').toLowerCase();
+      const players = (g && Array.isArray(g.players)) ? g.players : [];
+      if (!players.length) { resolve(null); return; }
+      const ov = document.createElement('div');
+      ov.className = 'modal-overlay show';
+      ov.style.zIndex = '10050';
+      const rows = players.map((p, i) => {
+        const taken = !!(p && p.tokUsedBy && String(p.tokUsedBy).toLowerCase() !== mine);
+        const hcp = (typeof fmtHcp === 'function') ? fmtHcp((p && p.hcp) || 0) : String((p && p.hcp) || 0);
+        return '<button type="button" class="full bg-slot-pick" data-i="' + i + '"' + (taken ? ' disabled' : '') +
+          ' style="text-align:left;margin-bottom:6px;' + (taken ? 'opacity:0.45;' : '') + '">' +
+          '<strong>' + escapeHtml((p && p.name) || ('Player ' + (i + 1))) + '</strong>' +
+          ' <span class="small-text" style="color:var(--text-muted)">HCP ' + escapeHtml(hcp) +
+          (taken ? ' \u00b7 already claimed' : '') + '</span></button>';
+      }).join('');
+      ov.innerHTML = '<div class="modal" style="max-width:420px">' +
+        '<h2 style="margin-top:0">' + escapeHtml(headline || 'Which player are you?') + '</h2>' +
+        '<p class="help-text" style="margin-bottom:12px">Tap your name \u2014 your handicap, tee and bets are already set up.</p>' +
+        rows +
+        '<button type="button" class="full" id="bg-slot-none" style="margin-top:10px">None of these \u2014 I am new</button>' +
+        '</div>';
+      document.body.appendChild(ov);
+      const done = (val) => { try { ov.remove(); } catch (e) {} resolve(val); };
+      ov.querySelectorAll('.bg-slot-pick').forEach(b => {
+        b.onclick = () => done(players[parseInt(b.dataset.i, 10)] || null);
+      });
+      const none = ov.querySelector('#bg-slot-none'); if (none) none.onclick = () => done(null);
+      ov.onclick = (e) => { if (e.target === ov) done(null); };
+    } catch (e) { resolve(null); }
+  });
+}
+// Tie this account to a round slot: adopt the host's name + handicap, stamp the
+// account's EMAIL on the roster entry (findMyRosterPlayer resolves by email first
+// since v943, so this is what actually makes the identity stick), and burn the token.
+async function bindAccountToSlot(g, p) {
+  try {
+    const nm = String((p && p.name) || '').trim();
+    if (!nm) return false;
+    const parts = nm.split(/\s+/);
+    const first = (p.firstName || parts[0] || nm);
+    const last = (p.lastName != null && p.lastName !== '') ? p.lastName : parts.slice(1).join(' ');
+    const email = (typeof currentUserEmail === 'function' && currentUserEmail()) || '';
+    // v1000 race guard: ensureMyNameSet()'s blank-name gate and autoLinkMyPlayer()'s
+    // prompts must BOTH stay quiet while this owns the screen.
+    window._autoLinkInFlight = true;
+    try {
+      await upsertPlayerInRoster(first, last, p.hcp || 0);
+      await setMeName(combineName(first, last));
+      if (email) {
+        try {
+          const roster = await getPlayerRoster();
+          const key = normalizeNameSegment(combineName(first, last));
+          const mineRow = (roster || []).find(x => x && normalizeNameSegment(x.name || '') === key);
+          if (mineRow && !mineRow.email) {
+            mineRow.email = email; mineRow.lastUsed = Date.now();
+            await savePlayerRoster(roster);
+          }
+        } catch (e) {}
+      }
+    } finally { try { window._autoLinkInFlight = false; } catch (e) {} }
+    try {
+      p.tokUsedBy = email || 'claimed';
+      p.tokUsedAt = Date.now();
+      await saveGame(g);
+    } catch (e) {}
+    try { renderAccountUI(); } catch (e) {}
+    showToast('You are in as ' + nm + ' \u26f3', 3500);
+    return true;
+  } catch (e) { console.warn('bindAccountToSlot failed', e); return false; }
+}
+// v1041 - HOST-INITIATED GUEST CLAIM. Finishes a ?claim=<token> link: the host tapped
+// "Invite them to claim this player" on a guest's profile, which minted a one-time
+// token server-side. The RPC returns that guest's roster entry (the claimer cannot
+// read the host's roster row directly - RLS scopes it to the owner), and we union its
+// rounds, handicap and MONEY into this account. Tyler, 8/15: money rides along.
+async function maybeClaimPlayerRecord() {
+  let tok = null;
+  try { tok = window._pendingClaim || localStorage.getItem('golf:pending-claim') || null; } catch (e) {}
+  if (!tok) return false;
+  try { localStorage.removeItem('golf:pending-claim'); } catch (e) {}
+  window._pendingClaim = null;
+  try {
+    if (!supa || !_authUser) return false;
+    const { data, error } = await supa.rpc('bg_claim_player', { p_token: String(tok) });
+    if (error || !data || data.ok !== true) {
+      const reason = (data && data.reason) || '';
+      showToast(reason === 'used' ? 'That claim link has already been used.'
+        : reason === 'self' ? 'That is already your own player.'
+        : 'That claim link is no longer valid \u2014 ask them to send a new one.', 5000);
+      return false;
+    }
+    const entry = data.entry || {};
+    const nm = String(entry.name || data.player_name || '').trim();
+    if (!nm) return false;
+    const hist = Array.isArray(entry.scoreHistory) ? entry.scoreHistory : [];
+    const rounds = hist.length;
+    let money = 0;
+    try { hist.forEach(r => { if (r && typeof r.money === 'number') money += r.money; }); } catch (e) {}
+    const ok = await uiConfirm(
+      nm + ' \u2014 ' + rounds + ' round' + (rounds === 1 ? '' : 's') +
+      (money ? (', ' + (money >= 0 ? '+$' : '-$') + Math.abs(money).toFixed(0) + ' lifetime') : '') +
+      '.\n\nClaiming moves those rounds, that handicap and those winnings onto your account. Only do this if that player is you.',
+      { title: 'Claim ' + nm + '?', okLabel: 'Yes, that is me', cancelLabel: 'Not me', danger: false });
+    if (!ok) return false;
+    window._autoLinkInFlight = true;
+    try {
+      const parts = nm.split(/\s+/);
+      const first = entry.firstName || parts[0] || nm;
+      const last = (entry.lastName != null && entry.lastName !== '') ? entry.lastName : parts.slice(1).join(' ');
+      await upsertPlayerInRoster(first, last, entry.hcp || 0, entry.phone ? { phone: entry.phone } : undefined);
+      const roster = await getPlayerRoster();
+      const key = normalizeNameSegment(combineName(first, last));
+      const mineRow = (roster || []).find(x => x && normalizeNameSegment(x.name || '') === key);
+      if (mineRow) {
+        if (!Array.isArray(mineRow.scoreHistory)) mineRow.scoreHistory = [];
+        // Same dedupe key the v944 merge branch uses: gameCode, else date|course.
+        const seen = new Set(mineRow.scoreHistory.map(r => (r && r.gameCode) || (String(r && r.date) + '|' + ((r && r.course) || ''))));
+        hist.forEach(r => {
+          if (!r) return;
+          const k = r.gameCode || (String(r.date) + '|' + (r.course || ''));
+          if (seen.has(k)) return;
+          seen.add(k); mineRow.scoreHistory.push(r);
+        });
+        mineRow.scoreHistory.sort((a, b) => (b.date || 0) - (a.date || 0));
+        try { mineRow.scoreHistory = dedupeScoreHistory(mineRow.scoreHistory); } catch (e) {}
+        if ((mineRow.hcp == null || mineRow.hcp === 0) && entry.hcp) mineRow.hcp = entry.hcp;
+        if (!mineRow.avatar && entry.avatar) mineRow.avatar = entry.avatar;
+        mineRow.email = (currentUserEmail() || mineRow.email || '');
+        mineRow.claimedBy = currentUserEmail() || '';
+        mineRow.claimedAt = Date.now();
+        mineRow.lastUsed = Date.now();
+        await savePlayerRoster(roster);
+      }
+      await setMeName(combineName(first, last));
+      try { await syncMyStatsToCloud(); } catch (e) {}
+    } finally { try { window._autoLinkInFlight = false; } catch (e) {} }
+    try { renderAccountUI(); } catch (e) {}
+    try { renderHome(); } catch (e) {}
+    showToast('Claimed \u2014 ' + rounds + ' round' + (rounds === 1 ? '' : 's') + ' now count on your account \u26f3', 4500);
+    return true;
+  } catch (e) { console.warn('maybeClaimPlayerRecord failed', e); return false; }
+}
+// Host side: mint a claim link for one guest in MY roster and send it.
+async function inviteGuestToClaim(playerName) {
+  try {
+    if (!supa || !_authUser) { showToast('Sign in first'); return; }
+    const nm = String(playerName || '').trim();
+    if (!nm) return;
+    // player_key must be computed IDENTICALLY here and in bg_claim_player's SQL.
+    const key = nm.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!key) return;
+    const { data, error } = await supa.rpc('bg_create_player_claim', { p_player_key: key, p_player_name: nm });
+    if (error || !data) { showToast("Couldn't create the claim link \u2014 try again in a moment"); return; }
+    const link = BG_PUBLIC_URL + '?claim=' + encodeURIComponent(String(data));
+    let me = null; try { me = await getMeName(); } catch (e) {}
+    const who = me ? me.split(/\s+/)[0] : 'Your buddy';
+    const first = nm.split(/\s+/)[0] || nm;
+    const text = who + ' has been keeping your scores in Bad Golf!\n\n' + first +
+      ', open this and every round, your handicap and your winnings move onto your own account:\n' + link +
+      '\n\n\ud83d\udcf1 Get the free app:\niPhone: ' + BG_APPSTORE_URL + '\nAndroid: ' + BG_PLAYSTORE_URL;
+    let phone = '';
+    try {
+      const roster = await getPlayerRoster();
+      const k2 = normalizeNameSegment(nm);
+      const rp = (roster || []).find(x => x && normalizeNameSegment(x.name || '') === k2);
+      phone = (rp && rp.phone) ? String(rp.phone).replace(/[^0-9+]/g, '') : '';
+    } catch (e) {}
+    if (phone) {
+      try {
+        const sep = /iP(hone|ad|od)|Mac/i.test(navigator.userAgent || '') ? '&' : '?';
+        window.location.href = 'sms:' + phone + sep + 'body=' + encodeURIComponent(text);
+        return;
+      } catch (e) {}
+    }
+    try { if (navigator.share) { await navigator.share({ text: text }); return; } }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(text); showToast('Claim link for ' + first + ' copied \ud83d\udccb'); }
+    catch (e) { showToast(text, 6000); }
+  } catch (e) { showToast("Couldn't create the claim link"); }
+}
 async function processPendingJoin(code) {
-  try { localStorage.removeItem('golf:pending-join'); } catch (e) {}
-  _pendingJoin = null;
+  try { localStorage.removeItem('golf:pending-join-link'); } catch (e) {}
+  try { localStorage.removeItem('golf:pending-join-tok'); } catch (e) {}
+  _pendingJoin = null; _pendingJoinTok = null;
   try { history.replaceState({}, '', location.pathname); } catch (e) {}
   try { await window.joinRoundByCode(code); } catch (e) {}
 }
@@ -72464,7 +72793,7 @@ async function processPendingJoin(code) {
         } else {
           // Login is mandatory — stash the code and finish after auth (same as ?join=).
           _pendingJoin = code;
-          try { localStorage.setItem('golf:pending-join', code); } catch (e) {}
+          try { localStorage.setItem('golf:pending-join-link', code); } catch (e) {}   // v1041: not the invited-not-joined array key
           try { const mm = document.getElementById('auth-modal'); if (mm) mm.classList.add('show'); } catch (e) {}
           try { showToast('Sign in to open the round'); } catch (e) {}
         }
