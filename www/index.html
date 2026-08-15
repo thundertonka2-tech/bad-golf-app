@@ -8006,7 +8006,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1035';
+const BG_BUILD = 'v2026.11.1036';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -16152,6 +16152,8 @@ async function archiveScoresFromRound(g) {
   // drifted between the round and the event roster must not be tagged authoritative just
   // because everyone ELSE in the group matched.
   let _moneySrcById = {};
+  // p.id -> the gameCode of the round that carries THIS player's whole event net.
+  let _moneyDesigById = {};
   try {
     const _t2id = (g.t2 && g.t2.tournamentId) || null;
     // Only a FINISHED round is worth the round-trips, and _bgEventMoney caches per event.
@@ -16175,6 +16177,7 @@ async function archiveScoresFromRound(g) {
           // every other round of theirs carries 0, so lifetime money sums correctly.
           moneyTotals[p.id] = (_mine === _code) ? _res.net[k] : 0;
           _moneySrcById[p.id] = _res.source;
+          _moneyDesigById[p.id] = _mine;
         });
       }
     }
@@ -16579,6 +16582,39 @@ async function archiveScoresFromRound(g) {
       entry.scoreHistory.push(record);
       changed = true;
     }
+
+    // v1036 (Tyler, 8/15) — JOB B follow-up: THE MULTI-DAY DOUBLE-COUNT.
+    // v1035 stamps a player's whole event net on their LAST finished round of the
+    // event and 0 on the others — but it only ever writes the round being archived.
+    // On a two-day event day 1 archives while it is the ONLY finished round, so day 1
+    // is designated and takes the full net. Day 2 then finishes, becomes the new
+    // designated round, and takes the full net too — and nothing ever goes back to
+    // correct day 1. Lifetime Bets showed DOUBLE the event net, and no amount of
+    // re-archiving day 2 fixed it. (The steady-state simulation missed this because it
+    // assumed every round already existed; the bug only appears archiving over time.)
+    //
+    // So whenever we know the designated round, bring this player's OTHER entries in
+    // the same event into line: everything that is not the designated round is 0. This
+    // is self-healing — it repairs entries written by earlier builds too — and it is
+    // direction-safe: archiving a NON-designated round zeroes its own entry and leaves
+    // the designated one alone, because the designated code is skipped explicitly.
+    try {
+      const _src = _moneySrcById[p.id], _desig = _moneyDesigById[p.id];
+      const _t2 = (g.t2 && g.t2.tournamentId) || null;
+      if (_src && _desig && _t2 && Array.isArray(entry.scoreHistory)) {
+        entry.scoreHistory.forEach(s => {
+          if (!s || s === record) return;
+          if (s.t2Id !== _t2) return;                       // different event entirely
+          if (s.gameCode && s.gameCode === _desig) return;   // THE designated entry — keep its net
+          if (g.code && s.gameCode === g.code) return;       // this round, already written above
+          if (s.moneySource === 'manual') return;            // a hand correction always wins
+          if (s.money === 0) return;                         // already zeroed, no write needed
+          s.money = 0;
+          s.moneySource = _src;
+          changed = true;
+        });
+      }
+    } catch (e) {}
     // Keep most recent 200 rounds per player (was 50 — too low; it silently
     // truncated tail rounds, including old-dated manually-added past rounds).
     entry.scoreHistory.sort((a, b) => (b.date || 0) - (a.date || 0));
@@ -28707,16 +28743,25 @@ function fillT2OneTeam(elId) {
   const chips = n
     ? names.map(nm => '<span style="display:inline-block;background:rgba(43,108,184,0.10);border:1px solid var(--border);border-radius:999px;padding:2px 9px;margin:2px;font-size:12px">' + escapeHtml(nm) + '</span>').join('')
     : '<span class="small-text">Add players to see the teams.</span>';
+  // v1036 (Tyler, 8/15): cart groups and "the field" only exist inside a TOURNAMENT.
+  // On a plain round this claimed "2 teams — 3 v 2 (each cart group)" and promised a
+  // settlement against cart groups that do not exist — and gatherSetup's 4-man scramble
+  // puts everyone on ONE team there anyway (teamA = every player, teamB = []). Harmless
+  // when the cap was 5 and this rarely showed; with the cap at 8 it is on screen
+  // constantly. Split the copy by context and say what actually happens.
+  let _inTourney = false;
+  try { _inTourney = !!(state && (state._t2DayConfig || state._t2GroupConfig || state._t2FieldRoster || (state.game && state.game.t2 && state.game.t2.tournamentId))); } catch (e) {}
+  const _multi = _inTourney && teams > 1;
   const smallSolo = (teams <= 1 && n && n < 4);
-  const headline = (teams > 1)
+  const headline = _multi
     ? ('🏌️ ' + teams + ' teams — ' + _sizes.join(' v ') + ' (each cart group)')
-    : ('🏌️ One team of ' + (n || 4) + (smallSolo ? ' — tracking only' : ' — vs the field'));
-  const _unevenNote = (teams > 1 && _uneven) ? (' ⚠️ ' + n + ' players don\'t make even foursomes — your cart groups will be ' + _sizes.join(' & ') + '. Add or drop players for even teams of 4.') : '';
-  const note = ((teams > 1)
+    : ('🏌️ One team of ' + (n || 4) + ((_inTourney && !smallSolo) ? ' — vs the field' : ' — tracking only'));
+  const _unevenNote = (_multi && _uneven) ? (' ⚠️ ' + n + ' players don\'t make even foursomes — your cart groups will be ' + _sizes.join(' & ') + '. Add or drop players for even teams of 4.') : '';
+  const note = (_multi
     ? ('Your ' + n + ' players split into ' + teams + ' cart groups (' + _sizes.join(' & ') + ') — each foursome is its own team and they settle against each other (the field). Team quota = each foursome\'s quotas combined.')
-    : (smallSolo
-        ? ('All ' + n + ' of you play as ONE scramble team — everyone hits, take the best shot, one team score per hole. With no other team there is no bet; this just tracks your scramble round.')
-        : 'These four play as one team and settle against the other cart groups in the event (the field). Team quota = the foursome\'s quotas combined.')) + _unevenNote;
+    : (_inTourney && !smallSolo
+        ? ('These ' + (n || 4) + ' play as one team and settle against the other cart groups in the event (the field). Team quota = the foursome\'s quotas combined.')
+        : ('All ' + (n || 0) + ' of you play as ONE scramble team — everyone hits, take the best shot, one team score per hole. With no other team there is no bet; this just tracks your scramble round.'))) + _unevenNote;
   el.innerHTML = '<div style="opacity:0.85;border:1px dashed var(--border);border-radius:10px;padding:9px;margin-top:6px">' +
     '<div style="font-weight:600;margin-bottom:4px">' + headline + '</div>' +
     '<div>' + chips + '</div>' +
@@ -59459,10 +59504,12 @@ function _t2SettleCrossPair(A, B, net) {
   const lead = Math.abs(aWon - bWon), decided = lead > remaining;
   const bothIn = (played >= nH) || !!(A.fin && B.fin);
   const settled = decided || bothIn;
-  if (aWon === bWon) return { winnerFirst: null, status: 'All square (thru ' + played + ')', played: played, push: true, decided: decided, settled: settled, remaining: remaining };
+  if (aWon === bWon) return { winnerFirst: null, winnerKey: null, loserKey: null, status: 'All square (thru ' + played + ')', played: played, push: true, decided: decided, settled: settled, remaining: remaining };
   const winnerIsA = aWon > bWon;
   const status = lead + ((decided && remaining > 0) ? '&' + remaining : ' up') + ' (thru ' + played + ')' + (settled ? '' : ' - in progress');
-  return { winnerFirst: (winnerIsA ? A.first : B.first), loserFirst: (winnerIsA ? B.first : A.first), status: status, played: played, push: false, decided: decided, settled: settled, remaining: remaining };
+  // v1036: winnerKey/loserKey are the normalized FULL names. winnerFirst/loserFirst stay
+  // for display only — money must never be attributed from a first name again.
+  return { winnerFirst: (winnerIsA ? A.first : B.first), loserFirst: (winnerIsA ? B.first : A.first), winnerKey: (winnerIsA ? A.key : B.key), loserKey: (winnerIsA ? B.key : A.key), status: status, played: played, push: false, decided: decided, settled: settled, remaining: remaining };
 }
 // Settle ONE Nassau segment (hole range from..to, 0-indexed inclusive) between two
 // net/gross arrays, as match or stroke. Returns { winner:'A'|'B'|null, status, played }.
@@ -59505,10 +59552,11 @@ function _t2SettleCrossNassau(A, B, value, format, net) {
     }
     const settled = r.complete || bothFin;
     if (settled) { if (r.winner === 'A') aNet += value; else if (r.winner === 'B') aNet -= value; }
-    out.push({ name: seg[0], winnerFirst: r.winner === 'A' ? A.first : (r.winner === 'B' ? B.first : null), status: r.status + (settled ? '' : ' - in progress'), settled: settled });
+    out.push({ name: seg[0], winnerFirst: r.winner === 'A' ? A.first : (r.winner === 'B' ? B.first : null), winnerKey: r.winner === 'A' ? A.key : (r.winner === 'B' ? B.key : null), status: r.status + (settled ? '' : ' - in progress'), settled: settled });
   });
   if (!out.length) return null;
-  return { segments: out, aFirst: A.first, bFirst: B.first, aNet: aNet, bNet: -aNet };
+  // v1036: aKey/bKey are the normalized FULL names — see _t2SettleCrossPair.
+  return { segments: out, aFirst: A.first, bFirst: B.first, aKey: A.key, bKey: B.key, aNet: aNet, bNet: -aNet };
 }
 // Settle EVERY cross-group match + Nassau configured across all groups (deduped).
 // `rows` = loadTourneyRawRounds(t). Returns { matches:[...], nassaus:[...] }.
@@ -59540,7 +59588,11 @@ function t2ComputeCrossGroupMatches(t, rows) {
       if (!thru) return;
       const k = nmk(p.name);
       if (!D.pdata[k] || thru > D.pdata[k].thru) {
-        D.pdata[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), net: netA, gross: grossA, thru: thru, holes: _nH, fin: !!g.finishedAt, day: day };
+        // v1036: `key` (the normalized FULL name) travels with the player from here on.
+        // The cross-group settlers used to emit only the display FIRST name, which the
+        // payout builders then had to reverse-engineer back into a full key — collapsing
+        // two players who share a first name onto whichever one was seen first.
+        D.pdata[k] = { key: k, name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), net: netA, gross: grossA, thru: thru, holes: _nH, fin: !!g.finishedAt, day: day };
         D.playerRound[k] = rid;
       }
     });
@@ -59566,7 +59618,7 @@ function t2ComputeCrossGroupMatches(t, rows) {
       const key = day + '|' + [a, b].sort().join('|'); if (seen.has(key)) return; seen.add(key);
       const net = inst.net !== false;
       const r = _t2SettleCrossPair(pdata[a], pdata[b], net);
-      if (r) results.push(Object.assign({ day: day, aFirst: pdata[a].first, bFirst: pdata[b].first, value: Number(inst.value) || 0, net: net }, r));
+      if (r) results.push(Object.assign({ day: day, aFirst: pdata[a].first, bFirst: pdata[b].first, aKey: a, bKey: b, value: Number(inst.value) || 0, net: net }, r));
     });
     nCands.forEach(inst => {
       const pr = inst.pair || inst.participantNames || [];
@@ -60726,23 +60778,29 @@ async function t2ComputeCombinedPayouts(t) {
     const firstToKey = {};
     const rebuildFirstToKey = () => { Object.keys(display).forEach(k => { const f = display[k] && display[k].first; if (f) { const fk = nm(f); if (!firstToKey[fk]) firstToKey[fk] = k; } }); };
     rebuildFirstToKey();
+    // v1036: first-name resolution is now a LAST RESORT, used only for legacy shapes
+    // that predate winnerKey/aKey. Two players sharing a first name used to collapse
+    // onto one key here — which merely mis-drew a screen before, but since v1035 this
+    // money is written into scoreHistory, so a collision would misattribute somebody's
+    // lifetime earnings permanently. Prefer the exact key wherever it is present.
     const keyForFirst = (first) => { const fk = nm(first); return firstToKey[fk] || fk; };
+    const keyOf = (exact, first) => exact || keyForFirst(first);
 
     if (cross) {
       (cross.matches || []).forEach(m => {
         // v985 (T4): both payout paths paid the full match value unconditionally.
         if (!m || m.push || !m.winnerFirst || m.settled === false) return;
-        const wk = keyForFirst(m.winnerFirst); bump(wk, m.value || 0, null, m.winnerFirst); bumpGame('Cross-group bets', wk, m.value || 0);
-        if (m.loserFirst) { const lk = keyForFirst(m.loserFirst); bump(lk, -(m.value || 0), null, m.loserFirst); bumpGame('Cross-group bets', lk, -(m.value || 0)); }
+        const wk = keyOf(m.winnerKey, m.winnerFirst); bump(wk, m.value || 0, null, m.winnerFirst); bumpGame('Cross-group bets', wk, m.value || 0);
+        if (m.loserFirst) { const lk = keyOf(m.loserKey, m.loserFirst); bump(lk, -(m.value || 0), null, m.loserFirst); bumpGame('Cross-group bets', lk, -(m.value || 0)); }
         // v868 (Tyler): "it was for zero dollars as well but we still need to
         // know who won." m.winnerFirst IS set here even for a $0 friendly
         // match -- stamp the outcome so the cell shows W/L instead of a bare
         // dash once the dollar amount comes back to exactly $0.
-        if (!m.value) { markGame('Cross-group bets', wk, 'W'); if (m.loserFirst) markGame('Cross-group bets', keyForFirst(m.loserFirst), 'L'); }
+        if (!m.value) { markGame('Cross-group bets', wk, 'W'); if (m.loserFirst) markGame('Cross-group bets', keyOf(m.loserKey, m.loserFirst), 'L'); }
       });
       (cross.nassaus || []).forEach(n => {
         if (!n) return;
-        const ak = keyForFirst(n.aFirst), bk = keyForFirst(n.bFirst);
+        const ak = keyOf(n.aKey, n.aFirst), bk = keyOf(n.bKey, n.bFirst);
         bump(ak, n.aNet || 0, null, n.aFirst); bumpGame('Cross-group bets', ak, n.aNet || 0);
         bump(bk, n.bNet || 0, null, n.bFirst); bumpGame('Cross-group bets', bk, n.bNet || 0);
         if (!n.value) {
@@ -61000,23 +61058,29 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     const firstToKey = {};
     const rebuildFirstToKey = () => { Object.keys(display).forEach(k => { const f = display[k] && display[k].first; if (f) { const fk = nm(f); if (!firstToKey[fk]) firstToKey[fk] = k; } }); };
     rebuildFirstToKey();
+    // v1036: first-name resolution is now a LAST RESORT, used only for legacy shapes
+    // that predate winnerKey/aKey. Two players sharing a first name used to collapse
+    // onto one key here — which merely mis-drew a screen before, but since v1035 this
+    // money is written into scoreHistory, so a collision would misattribute somebody's
+    // lifetime earnings permanently. Prefer the exact key wherever it is present.
     const keyForFirst = (first) => { const fk = nm(first); return firstToKey[fk] || fk; };
+    const keyOf = (exact, first) => exact || keyForFirst(first);
 
     if (cross) {
       (cross.matches || []).forEach(m => {
         // v985 (T4): both payout paths paid the full match value unconditionally.
         if (!m || m.push || !m.winnerFirst || m.settled === false) return;
-        const wk = keyForFirst(m.winnerFirst); bump(wk, m.value || 0, null, m.winnerFirst); bumpGame('Cross-group bets', wk, m.value || 0);
-        if (m.loserFirst) { const lk = keyForFirst(m.loserFirst); bump(lk, -(m.value || 0), null, m.loserFirst); bumpGame('Cross-group bets', lk, -(m.value || 0)); }
+        const wk = keyOf(m.winnerKey, m.winnerFirst); bump(wk, m.value || 0, null, m.winnerFirst); bumpGame('Cross-group bets', wk, m.value || 0);
+        if (m.loserFirst) { const lk = keyOf(m.loserKey, m.loserFirst); bump(lk, -(m.value || 0), null, m.loserFirst); bumpGame('Cross-group bets', lk, -(m.value || 0)); }
         // v868 (Tyler): "it was for zero dollars as well but we still need to
         // know who won." m.winnerFirst IS set here even for a $0 friendly
         // match -- stamp the outcome so the cell shows W/L instead of a bare
         // dash once the dollar amount comes back to exactly $0.
-        if (!m.value) { markGame('Cross-group bets', wk, 'W'); if (m.loserFirst) markGame('Cross-group bets', keyForFirst(m.loserFirst), 'L'); }
+        if (!m.value) { markGame('Cross-group bets', wk, 'W'); if (m.loserFirst) markGame('Cross-group bets', keyOf(m.loserKey, m.loserFirst), 'L'); }
       });
       (cross.nassaus || []).forEach(n => {
         if (!n) return;
-        const ak = keyForFirst(n.aFirst), bk = keyForFirst(n.bFirst);
+        const ak = keyOf(n.aKey, n.aFirst), bk = keyOf(n.bKey, n.bFirst);
         bump(ak, n.aNet || 0, null, n.aFirst); bumpGame('Cross-group bets', ak, n.aNet || 0);
         bump(bk, n.bNet || 0, null, n.bFirst); bumpGame('Cross-group bets', bk, n.bNet || 0);
         if (!n.value) {
