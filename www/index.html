@@ -8017,7 +8017,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1038';
+const BG_BUILD = 'v2026.11.1039';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -26470,7 +26470,51 @@ function updateTeamQuotaUI() {
 //   Players (always) → Course (after 1+ named player) → Bets (after 2+ players
 //   AND a course is named or explicitly skipped).
 // Called on every setup input and whenever a fresh setup form opens.
+// v1039 (Tyler, 8/15): "if scramble is selected, make the other games greyed out or go
+// away." In a scramble the team plays ONE ball, so there is no such thing as an individual
+// score — but Skins, Low Net, GIR, Fewest Putts, Nassau, Stroke, Banker and the rest all
+// settle off g.scores[playerId]. Leaving them selectable means they quietly pay out on
+// numbers nobody actually played.
+//
+// The survivors are the games that are decided by a single SHOT rather than a scorecard:
+// closest to the pin, long putt, long drive, greenies, and the birdie pool (a team birdie
+// is still a birdie) — plus the scramble itself.
+const _BG_SCRAMBLE_OK = ['game-scramble','game-ctp','game-longputt','game-longdrive','game-p3greenie'];
+const _BG_SCRAMBLE_BLOCKED = [
+  'game-skins','game-nassau','game-stroke','game-banker','game-wolf','game-hammer',
+  'game-vegas','game-dvegas','game-sixes','game-splix-sixes','game-niners','game-high-low',
+  'game-animals','game-marks','game-hot-potato','game-stableford','game-quota',
+  'game-team-quota','game-team-match','game-team-lowball','game-ryder-cup','game-umbrella',
+  'game-potofgold','game-junk','game-snake','game-bbb','game-lownet','game-girpool',
+  'game-puttspool','game-match'
+];
+function syncScrambleGameGates() {
+  try {
+    const sc = document.getElementById('game-scramble');
+    const on = !!(sc && sc.checked);
+    const why = 'Not available in a scramble — the team plays one ball, so there are no individual scores for this to settle on.';
+    let turnedOff = 0;
+    _BG_SCRAMBLE_BLOCKED.forEach(id => {
+      const inp = document.getElementById(id);
+      if (!inp) return;
+      const lbl = (inp.closest && inp.closest('.game-toggle')) || inp.parentElement;
+      // Switch it OFF as well as disabling it — a game left checked would still be read by
+      // gatherSetup and would settle against scores that were never really played.
+      if (on && inp.checked) { inp.checked = false; turnedOff++; try { inp.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {} }
+      inp.disabled = on;
+      if (lbl) {
+        lbl.style.opacity = on ? '0.4' : '';
+        lbl.style.pointerEvents = on ? 'none' : '';
+        lbl.title = on ? why : '';
+      }
+    });
+    if (on && turnedOff) {
+      try { showToast(turnedOff + ' bet' + (turnedOff === 1 ? '' : 's') + ' switched off — they need individual scores, which a scramble does not have'); } catch (e) {}
+    }
+  } catch (e) {}
+}
 function updateSetupGates() {
+  try { syncScrambleGameGates(); } catch (e) {}
   try { updateSideBetsCollapse(); } catch (e) {}
   try { updateGamesCollapse(); } catch (e) {}
   const courseCard  = document.getElementById('setup-card-course');
@@ -59787,6 +59831,117 @@ function t2ComputeCrossGroupMatches(t, rows) {
 //       false forever, so the pot could never pay. Players who never started are
 //       shown in the standings but are not in the pool.
 //   T18 withdrawn players were still charged an ante in every field pool.
+// v1039 (Tyler, 8/15) — FIELD SCRAMBLE. A 24-team scramble could not pay out at all:
+// calcScramble4man deliberately returns money = 0 for everyone because "the field settles
+// it", but no field engine existed, so the team totals were tracked and nobody was ever
+// paid. This is that engine. Each cart group IS one team; teams are ranked by team total
+// (low wins) and the pot is paid by finish position — the same ante/settle shape
+// _t2ComputeFieldPointsPool uses for Stableford and Quota.
+//
+// Config: t.settings.tourneyScramble = { on, buyin, payout:'winner'|'8020', net }
+// Every player on a team antes `buyin`, so a 4-man team puts in 4x — an 8-man group is not
+// advantaged over a 3-man one. Money is keyed by normalized full name, like every other
+// field pot, so t2ComputeCombinedPayouts can bump it straight in.
+//
+// `net` applies the standard descending scramble allowance to the team's course handicaps
+// (25/20/15/10% of the four lowest, the common club formula). Gross by default.
+function t2ComputeFieldScramble(rows, t) {
+  try {
+    const cfg = t && t.settings && t.settings.tourneyScramble;
+    if (!cfg || !cfg.on || !Array.isArray(rows) || !rows.length) return null;
+    const nmk = s => normalizeNameSegment(String(s || ''));
+    const buyin = Number(cfg.buyin != null ? cfg.buyin : cfg.value) || 0;
+    const payout = cfg.payout || 'winner';
+    const WEIGHTS = [0.25, 0.20, 0.15, 0.10];
+    const byDay = {};
+    rows.forEach(row => {
+      const g = row && row.data ? row.data : row;
+      if (!g || !Array.isArray(g.players) || !g.players.length) return;
+      let total = 0, holes = 0;
+      for (let h = 1; h <= 18; h++) {
+        const hd = (g.scrambleData && g.scrambleData[h]) || {};
+        if (hd.teamA == null) continue;
+        total += Number(hd.teamA) || 0; holes++;
+      }
+      if (!holes) return;                                    // team never posted a score
+      let allow = 0;
+      if (cfg.net) {
+        const hcps = g.players.map(p => Number(p.rawHcp != null ? p.rawHcp : p.hcp) || 0).sort((a, b) => a - b);
+        for (let i = 0; i < Math.min(hcps.length, WEIGHTS.length); i++) allow += hcps[i] * WEIGHTS[i];
+        allow = Math.round(allow * 10) / 10;
+      }
+      const day = Number((g.t2 && g.t2.day) || 1);
+      const D = byDay[day] || (byDay[day] = { teams: [], rounds: 0, finished: 0 });
+      D.rounds++; if (g.finishedAt) D.finished++;
+      D.teams.push({
+        code: String(g.code || ''), gross: total, allow: allow, total: total - allow, holes: holes,
+        finished: !!g.finishedAt,
+        name: g.players.map(p => (typeof displayFirst === 'function' ? displayFirst(p) : p.name)).join(', '),
+        players: g.players.filter(p => p && p.name).map(p => ({
+          key: nmk(p.name), name: p.name,
+          first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name)
+        }))
+      });
+    });
+    const days = Object.keys(byDay).map(Number).sort((a, b) => a - b);
+    if (!days.length) return null;
+    const money = {}, display = {};
+    const perDay = []; let pool = 0, allComplete = true;
+    days.forEach(day => {
+      const D = byDay[day];
+      // Every group must be in before a finish-position pot can pay.
+      const dayComplete = D.rounds > 0 && D.finished === D.rounds && D.teams.length >= 2;
+      if (!dayComplete) allComplete = false;
+      // Ties broken by code so every device ranks identically.
+      const teams = D.teams.slice().sort((a, b) => (a.total - b.total) || a.code.localeCompare(b.code));
+      let heads = 0;
+      teams.forEach(tm => { heads += tm.players.length; tm.players.forEach(p => { if (!display[p.key]) display[p.key] = { name: p.name, first: p.first }; }); });
+      const dayPool = heads * buyin;
+      pool += dayPool;
+      const dayMoney = {};
+      teams.forEach(tm => tm.players.forEach(p => { dayMoney[p.key] = 0; }));
+      if (dayComplete && buyin > 0) {
+        teams.forEach(tm => tm.players.forEach(p => { dayMoney[p.key] -= buyin; }));   // ante
+        const best = teams[0].total;
+        const winners = teams.filter(tm => tm.total === best);
+        const payTeams = (share, list) => {
+          const perTeam = share / list.length;
+          list.forEach(tm => {
+            const per = tm.players.length ? (perTeam / tm.players.length) : 0;
+            tm.players.forEach(p => { dayMoney[p.key] += per; });
+          });
+        };
+        if (payout === '8020' && winners.length === 1 && teams.length >= 2) {
+          const second = teams.filter(tm => tm !== teams[0]).reduce((m, tm) => (m == null || tm.total < m) ? tm.total : m, null);
+          const seconds = teams.filter(tm => tm !== teams[0] && tm.total === second);
+          payTeams(dayPool * 0.8, winners);
+          if (seconds.length) payTeams(dayPool * 0.2, seconds); else payTeams(dayPool * 0.2, winners);
+        } else {
+          payTeams(dayPool, winners);
+        }
+      }
+      Object.keys(dayMoney).forEach(k => { money[k] = (money[k] || 0) + dayMoney[k]; });
+      perDay.push({ day: day, teams: teams, pool: dayPool, buyin: buyin, payout: payout,
+                    complete: dayComplete, rounds: D.rounds, finished: D.finished, money: dayMoney });
+    });
+    // Penny-exact: the same largest-remainder pass the combined board uses, so an odd split
+    // can never leave the field summing to a few cents of money that does not exist.
+    try {
+      const keys = Object.keys(money);
+      if (typeof _t2RoundNets === 'function' && keys.length) {
+        const rounded = _t2RoundNets(keys.map(k => money[k] || 0));
+        keys.forEach((k, i) => { money[k] = rounded[i]; });
+      }
+    } catch (e) {}
+    const standings = [];
+    perDay.forEach(d => d.teams.forEach((tm, i) => standings.push({
+      day: d.day, place: i + 1, name: tm.name, gross: tm.gross, allow: tm.allow,
+      total: tm.total, holes: tm.holes, code: tm.code
+    })));
+    return { standings: standings, perDay: perDay, pool: pool, buyin: buyin, payout: payout,
+             complete: allComplete, money: money, display: display };
+  } catch (e) { return null; }
+}
 function _t2ComputeFieldPointsPool(rows, t, fieldPlayers, kind) {
   try {
     if (!Array.isArray(rows) || !rows.length || !t || !t.settings || !t.settings.dayGames) return null;
@@ -60804,6 +60959,7 @@ async function t2ComputeCombinedPayouts(t) {
     let ctp = null; try { ctp = t2ComputeFieldCtp(raw); } catch (e) {}
     let sidePots = null; try { sidePots = sidePotsCfg ? t2ComputeFieldSidePots(raw, sidePotsCfg) : null; } catch (e) {}
     let fieldStbl = null; try { fieldStbl = t2ComputeFieldStableford(raw, t, evPlayers); } catch (e) {}
+    let fieldScram = null; try { fieldScram = t2ComputeFieldScramble(raw, t); } catch (e) {}   // v1039
     let fieldQuota = null; try { fieldQuota = t2ComputeFieldQuota(raw, t, evPlayers); } catch (e) {}
 
     const nm = s => normalizeNameSegment(String(s || ''));
@@ -60984,6 +61140,14 @@ async function t2ComputeCombinedPayouts(t) {
     if (fieldStbl && fieldStbl.money && fieldStbl.complete) {
       Object.keys(fieldStbl.money).forEach(k => { const s = (fieldStbl.standings || []).find(x => nm(x.name) === k); bump(k, fieldStbl.money[k], s && s.name, s && s.first); bumpGame('Stableford (field)', k, fieldStbl.money[k]); });
     }
+    // v1039: the field scramble pot — one team per cart group, paid by finish position.
+    if (fieldScram && fieldScram.money && fieldScram.complete) {
+      Object.keys(fieldScram.money).forEach(k => {
+        const d = (fieldScram.display || {})[k] || {};
+        bump(k, fieldScram.money[k], d.name, d.first);
+        bumpGame('Scramble (field)', k, fieldScram.money[k]);
+      });
+    }
     if (fieldQuota && fieldQuota.money && fieldQuota.complete) {
       Object.keys(fieldQuota.money).forEach(k => { const s = (fieldQuota.standings || []).find(x => nm(x.name) === k); bump(k, fieldQuota.money[k], s && s.name, s && s.first); bumpGame('Quota (field)', k, fieldQuota.money[k]); });
     }
@@ -61060,7 +61224,23 @@ async function t2ComputeCombinedPayouts(t) {
       // roster (seeded above) gets a row, matching Group payout's behavior.
       .map((k, i) => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: _combNets[i] }))
       .sort((a, b) => b.net - a.net);
-    const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
+    // v1039 (Tyler, 8/15): the tournament settle-up text came out with NO Venmo/Cash App/
+    // PayPal links while an ordinary round's did. These payee objects carried firstName but
+    // no lastName, and resolvePayHandles looks a payee up two ways, BOTH of which that
+    // breaks:
+    //   * rosterPlayerKey() only splits `name` when firstName AND lastName are both empty.
+    //     With firstName set it produced "tyler\x1f" against the roster's "tyler\x1foconnor".
+    //   * the normalized-name fallback uses displayFull(), which returns firstName + ' ' +
+    //     lastName — i.e. just "Tyler" — so it searched the roster for "tyler" and missed.
+    // Every payee resolved to {} and no handles were ever emitted. Splitting the full name
+    // into firstName/lastName here fixes both lookups (and the cloud shared-roster fallback).
+    const players = Object.keys(display).map(k => {
+      const _full = String(display[k].name || display[k].first || '').trim();
+      const _parts = _full.split(/\s+/).filter(Boolean);
+      const _first = display[k].first || _parts[0] || '';
+      const _last = _parts.length > 1 ? _parts.slice(1).join(' ') : '';
+      return { id: k, name: _full, firstName: _first, lastName: _last };
+    });
     const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label], marks: gameMarks[label], pending: _pendingGameLabels.has(label) })).filter(gm => _alwaysShowGameLabels.has(gm.key) || gm.pending || Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
 
     return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame, pendingPots: Array.from(_pendingGameLabels) };
@@ -61102,6 +61282,7 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     let ctp = null; try { ctp = t2ComputeFieldCtp(raw); } catch (e) {}
     let sidePots = null; try { sidePots = sidePotsCfg ? t2ComputeFieldSidePots(raw, sidePotsCfg) : null; } catch (e) {}
     let fieldStbl = null; try { fieldStbl = t2ComputeFieldStableford(raw, t, evPlayers); } catch (e) {}
+    let fieldScram = null; try { fieldScram = t2ComputeFieldScramble(raw, t); } catch (e) {}   // v1039
     let fieldQuota = null; try { fieldQuota = t2ComputeFieldQuota(raw, t, evPlayers); } catch (e) {}
 
     const nm = s => normalizeNameSegment(String(s || ''));
@@ -61264,6 +61445,14 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     if (fieldStbl && fieldStbl.money && fieldStbl.complete) {
       Object.keys(fieldStbl.money).forEach(k => { const s = (fieldStbl.standings || []).find(x => nm(x.name) === k); bump(k, fieldStbl.money[k], s && s.name, s && s.first); bumpGame('Stableford (field)', k, fieldStbl.money[k]); });
     }
+    // v1039: the field scramble pot — one team per cart group, paid by finish position.
+    if (fieldScram && fieldScram.money && fieldScram.complete) {
+      Object.keys(fieldScram.money).forEach(k => {
+        const d = (fieldScram.display || {})[k] || {};
+        bump(k, fieldScram.money[k], d.name, d.first);
+        bumpGame('Scramble (field)', k, fieldScram.money[k]);
+      });
+    }
     if (fieldQuota && fieldQuota.money && fieldQuota.complete) {
       Object.keys(fieldQuota.money).forEach(k => { const s = (fieldQuota.standings || []).find(x => nm(x.name) === k); bump(k, fieldQuota.money[k], s && s.name, s && s.first); bumpGame('Quota (field)', k, fieldQuota.money[k]); });
     }
@@ -61331,7 +61520,23 @@ async function t2ComputeTournamentOnlyPayouts(t) {
       // roster (seeded above) gets a row, matching Group payout's behavior.
       .map((k, i) => ({ id: k, name: (display[k] && (display[k].name || display[k].first)) || k, first: display[k] && display[k].first, net: _combNets[i] }))
       .sort((a, b) => b.net - a.net);
-    const players = Object.keys(display).map(k => ({ id: k, name: display[k].name || display[k].first, firstName: display[k].first }));
+    // v1039 (Tyler, 8/15): the tournament settle-up text came out with NO Venmo/Cash App/
+    // PayPal links while an ordinary round's did. These payee objects carried firstName but
+    // no lastName, and resolvePayHandles looks a payee up two ways, BOTH of which that
+    // breaks:
+    //   * rosterPlayerKey() only splits `name` when firstName AND lastName are both empty.
+    //     With firstName set it produced "tyler\x1f" against the roster's "tyler\x1foconnor".
+    //   * the normalized-name fallback uses displayFull(), which returns firstName + ' ' +
+    //     lastName — i.e. just "Tyler" — so it searched the roster for "tyler" and missed.
+    // Every payee resolved to {} and no handles were ever emitted. Splitting the full name
+    // into firstName/lastName here fixes both lookups (and the cloud shared-roster fallback).
+    const players = Object.keys(display).map(k => {
+      const _full = String(display[k].name || display[k].first || '').trim();
+      const _parts = _full.split(/\s+/).filter(Boolean);
+      const _first = display[k].first || _parts[0] || '';
+      const _last = _parts.length > 1 ? _parts.slice(1).join(' ') : '';
+      return { id: k, name: _full, firstName: _first, lastName: _last };
+    });
     const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label], marks: gameMarks[label], pending: _pendingGameLabels.has(label) })).filter(gm => _alwaysShowGameLabels.has(gm.key) || gm.pending || Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
 
     return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame, pendingPots: Array.from(_pendingGameLabels) };
