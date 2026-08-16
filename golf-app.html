@@ -8014,7 +8014,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1043';
+const BG_BUILD = 'v2026.11.1046';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -39973,12 +39973,58 @@ async function buildCombinedSettleUpText(t, combinedPay) {
 async function shareSettleUpSms() {
   const text = await buildSettleUpText();
   if (!text) { showToast('No round loaded'); return; }
+  // v1045 (Tyler, 8/16): "send an image like the scorecard on the text settle that
+  // has all this information, easy to read, for all bets." This share was text-only
+  // -- a per-game money breakdown never survives a messaging app's proportional
+  // font. Attach the SAME pair the tournament share sends: the hole-by-hole
+  // scorecard and a bets card (every pot + who won it, the final per-player
+  // number, and who pays who). Both are best-effort; text still goes either way.
+  const files = [];
+  try {
+    const g = state.game;
+    if (g) {
+      const sc = await buildScorecardBlob(g);
+      if (sc) files.push(new File([sc], 'bad-golf-scorecard.png', { type: 'image/png' }));
+      let money = {}; try { money = computeAllGameMoney(g).combined || {}; } catch (e) {}
+      let settlements = []; try { settlements = calculateSettlements(money, g.players) || []; } catch (e) {}
+      const nm = id => { const p = g.players.find(pp => pp.id === id); return p ? displayFull(p) : '?'; };
+      const bf = await bgBetsImageFile({
+        title: '⛳ ' + (g.course || 'Round') + ' — settle up',
+        subtitle: new Date(g.finishedAt || g.updatedAt || Date.now()).toLocaleDateString(),
+        potRows: bgPotRowsForRound(g),
+        moneyRows: g.players.map(p => ({ name: displayFull(p), net: money[p.id] || 0 })),
+        settlements: settlements.map(s => ({ from: nm(s.fromId), to: nm(s.toId), amount: s.amount })),
+        footer: g.course || ''
+      });
+      if (bf) files.push(bf);
+    }
+  } catch (e) {}
+  try {
+    if (files.length && navigator.canShare && navigator.canShare({ files: files }) && navigator.share) {
+      await navigator.share({ text: text, files: files }); return;
+    }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
   try {
     if (navigator.share) { await navigator.share({ text }); return; }
   } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { _bgOfferImageDownloads(files); } catch (e) {}
   try { window.location.href = 'sms:?&body=' + encodeURIComponent(text); return; } catch (e) {}
   try { await navigator.clipboard.writeText(text); showToast('Settle-up copied — paste it into a text'); }
   catch (e) { showToast('Could not open Messages'); }
+}
+// Shared fallback for a browser that can't attach files to a share: drop the
+// images in the user's downloads so they can attach them by hand.
+function _bgOfferImageDownloads(files) {
+  if (!files || !files.length) return;
+  files.forEach(f => {
+    try {
+      const url = URL.createObjectURL(f);
+      const a = document.createElement('a'); a.href = url; a.download = f.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    } catch (e) {}
+  });
+  try { showToast('Images saved — attach them, then paste the text', 5000); } catch (e) {}
 }
 
 // Share the tournament-wide COMBINED settle-up (see buildCombinedSettleUpText).
@@ -39991,17 +40037,36 @@ async function shareCombinedSettleUp(t, combinedPay) {
   const text = await buildCombinedSettleUpText(t, combinedPay);
   if (!text) { showToast('Not ready yet'); return; }
   let file = null;
+  const files = [];
   try {
     const raw = await loadTourneyRawRounds(t).catch(() => []);
     const headerG = (raw || []).map(r => (r && r.data) ? r.data : r).find(rg => rg && Array.isArray(rg.pars) && rg.pars.length);
     if (headerG) {
       const blob = await buildFieldScorecardBlob(raw, headerG, t && t.name);
-      if (blob) file = new File([blob], 'bad-golf-tournament-scorecard.png', { type: 'image/png' });
+      if (blob) { file = new File([blob], 'bad-golf-tournament-scorecard.png', { type: 'image/png' }); files.push(file); }
     }
+    // v1045: second image -- every pot and who won it, the final number per
+    // player, and who pays who. Same pair the single-round settle-up now sends.
+    try {
+      const _mDict = {}; (combinedPay.rows || []).forEach(r => { _mDict[r.id] = r.net; });
+      let _st = []; try { _st = calculateSettlements(_mDict, combinedPay.players || []) || []; } catch (e) {}
+      const _nmOf = id => { const p = (combinedPay.players || []).find(pp => pp.id === id); return p ? (p.name || p.firstName || '?') : '?'; };
+      const _pots = bgPotRowsForEvent(t, raw);
+      (raw || []).forEach(row => { const rg = (row && row.data) ? row.data : row; try { bgPotRowsForRound(rg).forEach(pr => { pr.pot = pr.pot + ' — Group ' + ((rg.t2 && rg.t2.group) || '?'); _pots.push(pr); }); } catch (e) {} });
+      const bf = await bgBetsImageFile({
+        title: '🏆 ' + ((t && t.name) || 'Tournament') + ' — settle up',
+        subtitle: new Date(((headerG && (headerG.finishedAt || headerG.updatedAt)) || Date.now())).toLocaleDateString() + '  ·  every bet, every group',
+        potRows: _pots,
+        moneyRows: (combinedPay.rows || []).map(r => ({ name: r.name || r.first, net: r.net || 0 })),
+        settlements: _st.map(s => ({ from: _nmOf(s.fromId), to: _nmOf(s.toId), amount: s.amount })),
+        footer: (t && t.name) || ''
+      });
+      if (bf) files.push(bf);
+    } catch (e) {}
   } catch (e) {}
   try {
-    if (file && navigator.canShare && navigator.canShare({ files: [file] }) && navigator.share) {
-      await navigator.share({ text, files: [file] }); return;
+    if (files.length && navigator.canShare && navigator.canShare({ files: files }) && navigator.share) {
+      await navigator.share({ text, files: files }); return;
     }
   } catch (e) { if (e && e.name === 'AbortError') return; }
   try { if (navigator.share) { await navigator.share({ text }); return; } }
@@ -44052,7 +44117,9 @@ function buildRoundSummary(g) {
     html += '<div id="summary-payout-board"><div class="help-text" style="padding:16px;text-align:center">Loading combined payout…</div></div>';
   } else {
     const _srRows = g.players.map(p => ({ id: p.id, name: displayFull(p), first: displayFirst(p), net: money[p.id] || 0 }));
-    html += '<div id="summary-payout-board">' + _t2PayoutBoardRowsHtml(_srRows) + '</div>';
+    let _potHtml3 = '';
+    try { _potHtml3 = _bgPotTableHtml(bgPotRowsForRound(g)) || ''; } catch (e) {}   // v1045
+    html += '<div id="summary-payout-board">' + _t2PayoutBoardRowsHtml(_srRows) + _potHtml3 + '</div>';
   }
 
   // Wager results land here — filled async by fillSummaryWagers() once the bets
@@ -44166,7 +44233,16 @@ async function fillSummaryPayoutBoard(g) {
       : '';
     let _bdHtml2 = '';
     try { _bdHtml2 = _t2BreakdownTableHtml(pay.byGame, pay.rows) || ''; } catch (e) {}   // v1030 (Tyler): itemize every game here as well
-    el.innerHTML = notice + _t2PayoutBoardRowsHtml(pay.rows) +
+    // v1045: the same one-row-per-pot table the payout modals now show. Event
+    // pots first, then this group's own side bets, so a player finishing their
+    // round sees every bet of the day on one screen.
+    let _potHtml2 = '';
+    try {
+      const _rawP2 = await loadTourneyRawRounds(t).catch(() => []);
+      _potHtml2 = (_bgPotTableHtml(bgPotRowsForEvent(t, _rawP2), 'Event pots — who won what') || '')
+                + (_bgPotTableHtml(bgPotRowsForRound(g), "Your group's bets — who won what") || '');
+    } catch (e) {}
+    el.innerHTML = notice + _t2PayoutBoardRowsHtml(pay.rows) + _potHtml2 +
       (_bdHtml2 ? '<div style="margin-top:14px">' + _bdHtml2 + '</div>' : '') +
       ((pay.rows.length && pay.allFinished) ? '<button type="button" id="summary-text-combined" class="small primary full" style="margin-top:12px;font-weight:600">📲 Text everyone — combined payouts</button>' : '');
     const tb = document.getElementById('summary-text-combined');
@@ -61703,6 +61779,373 @@ async function t2ComputeTournamentOnlyPayouts(t) {
   } catch (e) { return null; }
 }
 
+// ============================================================
+// v1045 — "WHO WON WHAT": ONE ROW PER POT  (Tyler, Aug 2026)
+// ------------------------------------------------------------
+// "I love this layout, can you put something like this on the payout screens
+// and send an image like the scorecard on the text settle that has all this
+// information, easy to read, for all bets."
+//
+// Every bet becomes one row: what it was, who won it, what they win. Rendered
+// as a table on all three payout screens (Tournament payout / Total payout /
+// the round-complete Final payout card) and drawn onto a shareable PNG that
+// rides along with the settle-up text beside the scorecard image.
+//
+// DESIGN RULE: this decides NOTHING. Every winner is derived from money the
+// existing engines have ALREADY settled, so a pot row can never disagree with
+// the totals sitting directly above it on the same screen. Where an engine
+// also exposes a human detail (a CTP distance, a skin count, a winning net)
+// it is shown underneath the name. Purely additive and fully try/catch'd —
+// a failure anywhere here leaves the existing payout board untouched.
+// ============================================================
+function _bgPotMoneyFmt(n) {
+  const v = Math.abs(Number(n) || 0);
+  return '$' + ((Math.round(v * 100) % 100 === 0) ? v.toFixed(0) : v.toFixed(2));
+}
+// The top positive amount in a per-player money map IS that pot's winner(s).
+function _bgPotWinners(money, nameOf) {
+  const ent = Object.keys(money || {}).map(k => ({ k: k, v: Number(money[k]) || 0 }));
+  let top = 0; ent.forEach(e => { if (e.v > top) top = e.v; });
+  if (top <= 0.005) return { names: [], wins: 0 };
+  return { names: ent.filter(e => Math.abs(e.v - top) < 0.005).map(e => nameOf(e.k)).filter(Boolean), wins: top };
+}
+function _bgPotDist(d) {
+  if (!d) return '';
+  const ft = Number(d.ft) || 0, inch = Number(d.in) || 0;
+  if (!ft && !inch) return '';
+  return ft + "' " + inch + '"';
+}
+function _bgPotRow(pot, winner, detail, wins, note) {
+  return { pot: pot || '', winner: winner || '', detail: detail || '', wins: Number(wins) || 0, note: note || '', none: !winner };
+}
+
+// ---- ONE ROUND's own games (a group's private side bets) ----
+function bgPotRowsForRound(g) {
+  const out = [];
+  try {
+    if (!g || !Array.isArray(g.players) || !g.players.length) return out;
+    let agg = null;
+    try { agg = computeAllGameMoney(g); } catch (e) { return out; }
+    if (!agg || !Array.isArray(agg.byGame)) return out;
+    const pById = id => (g.players || []).find(p => p.id === id) || null;
+    const full = id => { const p = pById(id); return p ? displayFull(p) : ''; };
+    const first = id => { const p = pById(id); return p ? displayFirst(p) : ''; };
+    const res = agg.results || {};
+    agg.byGame.forEach(gm => {
+      if (!gm || gm.dropped) return;
+      const w = _bgPotWinners(gm.money, full);
+      let detail = '';
+      try {
+        if (gm.key === 'ctp') {
+          const parts = [];
+          Object.keys(g.ctpData || {}).sort((a, b) => a - b).forEach(h => {
+            const e = (g.ctpData || {})[h]; if (!e || !e.pid) return;
+            const d = _bgPotDist(e); parts.push('#' + h + ' ' + first(e.pid) + (d ? ' ' + d : ''));
+          });
+          detail = parts.join(' · ');
+        } else if (gm.key === 'longPutt') {
+          const d = g.longPuttData; if (d && d.pid) detail = _bgPotDist(d);
+        } else if (gm.key === 'stroke' && res.stroke && res.stroke.complete) {
+          detail = 'pot ' + _bgPotMoneyFmt(res.stroke.pot);
+        } else if (gm.key === 'quota' && res.quota && res.quota.result) {
+          const ids = Object.keys(res.quota.result);
+          if (ids.length) {
+            ids.sort((a, b) => (res.quota.result[b] || 0) - (res.quota.result[a] || 0));
+            const v = Number(res.quota.result[ids[0]]) || 0;
+            detail = (v > 0 ? '+' : '') + v + ' vs quota' + (res.quota.totalPot ? ' · pot ' + _bgPotMoneyFmt(res.quota.totalPot) : '');
+          }
+        } else if (gm.key === 'p3greenie') {
+          const hs = Object.keys(g.p3greenieData || {}).filter(h => (((g.p3greenieData || {})[h] || {}).winners || []).length);
+          if (hs.length) detail = 'holes ' + hs.sort((a, b) => a - b).map(h => '#' + h).join(', ');
+        } else if (gm.key === 'birdiePool' && res.birdiePool && Array.isArray(res.birdiePool.events)) {
+          const cnt = {};
+          res.birdiePool.events.forEach(ev => { const n = String(ev.player || '').split(/\s+/)[0]; if (n) cnt[n] = (cnt[n] || 0) + 1; });
+          detail = Object.keys(cnt).map(n => n + ' ×' + cnt[n]).join(', ');
+        } else if (gm.key === 'nassau' && res.nassau && Array.isArray(res.nassau.matches) && res.nassau.matches[0] && res.nassau.matches[0].groupMode) {
+          const m = res.nassau.matches[0];
+          detail = ['front', 'back', 'overall'].map(sg => m[sg] ? (sg + ': ' + String(m[sg]).replace(/\s*\(.*?\)\s*/g, ' ').trim()) : '').filter(Boolean).join(' · ');
+        }
+      } catch (e) {}
+      out.push(_bgPotRow(gm.label || gm.key, w.names.join(' & '), detail, w.wins, ''));
+    });
+  } catch (e) {}
+  return out;
+}
+
+// ---- A WHOLE EVENT's field-wide pots ----
+function bgPotRowsForEvent(t, raw) {
+  const out = [];
+  try {
+    if (!t || !Array.isArray(raw) || !raw.length) return out;
+    const s = t.settings || {};
+    const live = d => (d && d.complete === false) ? 'still live' : '';
+    // The field engines report winners by FIRST name (that's what the event
+    // leaderboards render). On a shared card that reads oddly next to the group
+    // rows' full names -- and "Tar Heel Boy" collapses to a bare "Tar". Build a
+    // first -> full map off the field so every row reads the same way.
+    const _fullByFirst = {};
+    try {
+      (raw || []).forEach(row => {
+        const rg = (row && row.data) ? row.data : row;
+        ((rg && rg.players) || []).forEach(p => {
+          if (!p || !p.name) return;
+          const f = (typeof displayFirst === 'function') ? displayFirst(p) : String(p.name).split(/\s+/)[0];
+          if (f && !_fullByFirst[f]) _fullByFirst[f] = p.name;
+        });
+      });
+    } catch (e) {}
+    const nm = v => _fullByFirst[v] || v || '';
+    // Skins
+    try {
+      const cfg = s.tourneySkins;
+      if (cfg && cfg.on) {
+        const r = t2ComputeFieldSkins(raw, cfg);
+        ((r && r.perDay) || []).forEach(d => {
+          if (!d.totalSkins) { out.push(_bgPotRow('Skins — whole field', '', 'every hole tied — pot void', 0, live(d))); return; }
+          const won = (d.rows || []).filter(x => x.skins > 0);
+          const holes = (d.holeResults || []).filter(h => h.winnerFirst).map(h => '#' + h.hole + ' ' + nm(h.winnerFirst)).join(' · ');
+          out.push(_bgPotRow('Skins — whole field',
+            won.map(x => (x.name || nm(x.first)) + (x.skins > 1 ? ' ×' + x.skins : '')).join(', '),
+            d.totalSkins + ' skins · pot ' + _bgPotMoneyFmt(d.potIfWon) + (holes ? '\n' + holes : ''),
+            d.skinValue || 0, live(d)));
+        });
+      }
+    } catch (e) {}
+    // Long Putt
+    try {
+      const cfg = s.tourneyLongPutt;
+      if (cfg && cfg.on) {
+        const r = t2ComputeFieldLongPutt(raw, cfg);
+        ((r && r.perDay) || []).forEach(d => out.push(_bgPotRow('Long Putt — whole field', nm(d.winnerFirst), d.dist || '', d.pot || 0, live(d))));
+      }
+    } catch (e) {}
+    // Closest to the pin (field)
+    try {
+      const r = t2ComputeFieldCtp(raw);
+      ((r && r.perDay) || []).forEach(d => (d.holes || []).forEach(h =>
+        out.push(_bgPotRow('Closest to the pin, #' + h.hole + ' — whole field', nm(h.winnerFirst), h.dist || '', h.pot || 0, live(d)))));
+    } catch (e) {}
+    // Side pots — Low Net / Most GIRs / Fewest Putts
+    try {
+      const cfg = s.tourneySidePots;
+      if (cfg) {
+        const PLAIN = { lowNet: 'Low Net', girs: 'Most greens in regulation', putts: 'Fewest putts' };
+        const UNIT = { lowNet: 'net', girs: 'GIRs', putts: 'putts' };
+        const r = t2ComputeFieldSidePots(raw, cfg);
+        ((r && r.perDay) || []).forEach(d => (d.pots || []).forEach(p => {
+          if (!p || !(p.value > 0)) return;
+          const who = (p.winners || []).map(nm).join(' & ');
+          const det = (p.best != null && who) ? (p.best + ' ' + (UNIT[p.key] || '')) : '';
+          const each = (p.winners && p.winners.length > 1) ? (p.pot / p.winners.length) : p.pot;
+          out.push(_bgPotRow((PLAIN[p.key] || p.key) + ' — whole field', who, det.trim(), p.paying ? each : 0, p.paying ? '' : 'not settled yet'));
+        }));
+      }
+    } catch (e) {}
+    // Tournament Nassau (field)
+    try {
+      const cfg = s.tourneyNassau;
+      if (cfg && cfg.on) {
+        const r = t2ComputeFieldNassau(raw, cfg);
+        ((r && r.perDay) || []).forEach(d => (d.segments || []).forEach(sg => {
+          const top = (sg.rows || []).slice().sort((a, b) => (b.pay || 0) - (a.pay || 0))[0];
+          if (!top || !(top.pay > 0.005)) return;
+          out.push(_bgPotRow('Tournament Nassau — ' + String(sg.seg || '').toUpperCase(), nm(top.first || top.key), '', top.pay, sg.complete === false ? 'still live' : ''));
+        }));
+      }
+    } catch (e) {}
+  } catch (e) {}
+  return out;
+}
+
+// ---- HTML: the POT / WINNER / WINS table ----
+function _bgPotTableHtml(rows, heading) {
+  try {
+    const list = (rows || []).filter(r => r && r.pot);
+    if (!list.length) return '';
+    let h = '<h3 style="margin:16px 0 2px">' + escapeHtml(heading || 'Every bet — who won what') + '</h3>';
+    h += '<div class="small-text" style="color:var(--text-muted);margin-bottom:8px">One row per pot. “Wins” is what the winner collects from that pot.</div>';
+    h += '<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">';
+    h += '<div style="display:flex;gap:8px;padding:8px 12px;background:var(--surface-2);font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted)">'
+      + '<span style="flex:1.35;min-width:0">Pot</span><span style="flex:1.35;min-width:0">Winner</span><span style="width:74px;text-align:right">Wins</span></div>';
+    list.forEach((r, i) => {
+      const det = String(r.detail || '').split('\n').filter(Boolean);
+      h += '<div style="display:flex;gap:8px;padding:9px 12px;align-items:flex-start' + (i ? ';border-top:1px solid var(--border)' : '') + '">'
+        + '<span style="flex:1.35;min-width:0;font-size:14px">' + escapeHtml(r.pot)
+          + (r.note ? '<span style="display:block;font-size:11px;color:var(--text-muted)">' + escapeHtml(r.note) + '</span>' : '') + '</span>'
+        + '<span style="flex:1.35;min-width:0;font-size:14px;font-weight:600">' + (r.winner ? escapeHtml(r.winner) : '<span style="font-weight:400;color:var(--text-muted)">no winner</span>')
+          + det.map(d => '<span style="display:block;font-size:11px;font-weight:400;color:var(--text-muted);word-break:break-word">' + escapeHtml(d) + '</span>').join('') + '</span>'
+        + '<span class="money ' + (r.wins > 0.005 ? 'pos' : 'zero') + '" style="width:74px;text-align:right;font-variant-numeric:tabular-nums;font-size:14px">'
+          + (r.wins > 0.005 ? _bgPotMoneyFmt(r.wins) : '—') + '</span></div>';
+    });
+    h += '</div>';
+    return h;
+  } catch (e) { return ''; }
+}
+
+// ---- IMAGE: the whole night's betting on one shareable card ----
+// Same drawing conventions as buildScorecardCanvas / buildFieldScorecardCanvas
+// (DPR-scaled canvas, white ground, SC_FONT) so the two images that go out
+// together on a settle-up look like a matched pair. Three stacked blocks:
+// every pot and who won it, each player's final number, and who pays who.
+function buildBetsCanvas(opts) {
+  try {
+    const o = opts || {};
+    const potRows = (o.potRows || []).filter(r => r && r.pot);
+    const moneyRows = (o.moneyRows || []).filter(r => r && r.name);
+    const settle = o.settlements || [];
+    if (!potRows.length && !moneyRows.length) return null;
+
+    const DPR = Math.min(3, Math.max(2, Math.round((window.devicePixelRatio || 2))));
+    const W = 760, padX = 22;
+    const INK = '#12211a', MUTED = '#5c6f66', LINE = '#dfe7e2', BRAND = '#14532d', GREEN = '#1a7f4b', RED = '#b23b3b';
+    const colPot = 262, colWin = 300;
+    const winsX = W - padX;
+
+    // measure pass — a hidden context so we can wrap before sizing the real canvas
+    const meas = document.createElement('canvas').getContext('2d');
+    const wrap = (txt, font, maxW) => {
+      meas.font = font;
+      const words = String(txt == null ? '' : txt).split(/\s+/).filter(Boolean);
+      const lines = []; let cur = '';
+      words.forEach(w => {
+        const test = cur ? cur + ' ' + w : w;
+        if (meas.measureText(test).width <= maxW || !cur) cur = test;
+        else { lines.push(cur); cur = w; }
+      });
+      if (cur) lines.push(cur);
+      return lines.length ? lines : [''];
+    };
+    const F_POT = '600 15px ' + SC_FONT, F_WIN = '700 15px ' + SC_FONT, F_DET = '400 12px ' + SC_FONT;
+    const F_NAME = '600 16px ' + SC_FONT, F_HEAD = '700 12px ' + SC_FONT, F_SEC = '700 17px ' + SC_FONT;
+
+    // pre-wrap every pot row and record its height
+    const laid = potRows.map(r => {
+      const potL = wrap(r.pot, F_POT, colPot - 12);
+      const winL = r.winner ? wrap(r.winner, F_WIN, colWin - 12) : ['no winner'];
+      const detL = [];
+      String(r.detail || '').split('\n').filter(Boolean).forEach(d => wrap(d, F_DET, colWin - 12).forEach(x => detL.push(x)));
+      if (r.note) detL.push(r.note);
+      const h = Math.max(potL.length * 19, winL.length * 19 + detL.length * 15) + 16;
+      return { r: r, potL: potL, winL: winL, detL: detL, h: h };
+    });
+
+    const headH = 78, secH = 44, tblHeadH = 26;
+    const potsH = laid.length ? (secH + tblHeadH + laid.reduce((a, x) => a + x.h, 0) + 10) : 0;
+    const moneyH = moneyRows.length ? (secH + moneyRows.length * 30 + 20) : 0;
+    const settleH = settle.length ? (secH + settle.length * 26 + 14) : 0;
+    const H = headH + potsH + moneyH + settleH + 46;
+
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    const ctx = cv.getContext('2d');
+    ctx.scale(DPR, DPR);
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+
+    // header
+    ctx.fillStyle = BRAND; ctx.fillRect(0, 0, W, headH - 14);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#ffffff'; ctx.font = '700 22px ' + SC_FONT;
+    ctx.fillText(String(o.title || 'Bad Golf — settle up'), padX, 28);
+    ctx.fillStyle = 'rgba(255,255,255,0.82)'; ctx.font = '500 13px ' + SC_FONT;
+    ctx.fillText(String(o.subtitle || ''), padX, 50);
+
+    let y = headH;
+    const section = (label) => {
+      ctx.textAlign = 'left';
+      ctx.fillStyle = INK; ctx.font = F_SEC;
+      ctx.fillText(label, padX, y + 27);   // generous lead-in so a heading never crowds the block above it
+      y += secH;
+    };
+    const money = (n) => (n > 0.005 ? '+' : (n < -0.005 ? '−' : '')) + '$' + Math.abs(Number(n) || 0).toFixed(2);
+
+    if (laid.length) {
+      section('Every bet — who won what');
+      ctx.font = F_HEAD; ctx.fillStyle = MUTED;
+      ctx.textAlign = 'left';
+      ctx.fillText('POT', padX, y + 12);
+      ctx.fillText('WINNER', padX + colPot, y + 12);
+      ctx.textAlign = 'right'; ctx.fillText('WINS', winsX, y + 12);
+      y += tblHeadH;
+      ctx.strokeStyle = LINE; ctx.lineWidth = 1;
+      laid.forEach((L, i) => {
+        if (i) { ctx.beginPath(); ctx.moveTo(padX, y + 0.5); ctx.lineTo(W - padX, y + 0.5); ctx.stroke(); }
+        let ty = y + 16;
+        ctx.textAlign = 'left';
+        ctx.fillStyle = INK; ctx.font = F_POT;
+        L.potL.forEach((ln, k) => ctx.fillText(ln, padX, ty + k * 19));
+        let wy = y + 16;
+        ctx.font = F_WIN; ctx.fillStyle = L.r.winner ? INK : MUTED;
+        L.winL.forEach((ln, k) => ctx.fillText(ln, padX + colPot, wy + k * 19));
+        wy += L.winL.length * 19;
+        ctx.font = F_DET; ctx.fillStyle = MUTED;
+        L.detL.forEach((ln, k) => ctx.fillText(ln, padX + colPot, wy + k * 15 + 1));
+        ctx.textAlign = 'right';
+        ctx.font = '700 15px ' + SC_FONT;
+        ctx.fillStyle = (L.r.wins > 0.005) ? GREEN : MUTED;
+        ctx.fillText((L.r.wins > 0.005) ? ('$' + Number(L.r.wins).toFixed(2)) : '—', winsX, y + 16);
+        y += L.h;
+      });
+      y += 10;
+    }
+
+    if (moneyRows.length) {
+      section('Final — what everyone owes or collects');
+      const sorted = moneyRows.slice().sort((a, b) => (b.net || 0) - (a.net || 0));
+      sorted.forEach((r, i) => {
+        if (i) { ctx.strokeStyle = LINE; ctx.beginPath(); ctx.moveTo(padX, y + 0.5); ctx.lineTo(W - padX, y + 0.5); ctx.stroke(); }
+        ctx.textAlign = 'left'; ctx.font = F_NAME; ctx.fillStyle = INK;
+        ctx.fillText(String(r.name), padX, y + 15);
+        const v = Number(r.net) || 0;
+        ctx.textAlign = 'right'; ctx.font = '700 16px ' + SC_FONT;
+        ctx.fillStyle = v > 0.005 ? GREEN : (v < -0.005 ? RED : MUTED);
+        ctx.fillText(money(v), winsX, y + 15);
+        y += 30;
+      });
+      // zero-sum proof line
+      const tot = sorted.reduce((a, b) => a + (Number(b.net) || 0), 0);
+      ctx.textAlign = 'left'; ctx.font = '500 11px ' + SC_FONT; ctx.fillStyle = MUTED;
+      ctx.fillText('Adds to ' + (Math.abs(tot) < 0.005 ? '$0.00' : money(tot)) + ' — every dollar accounted for.', padX, y + 11);
+      y += 20;
+    }
+
+    if (settle.length) {
+      section('Settle up — who pays who');
+      settle.forEach((s, i) => {
+        if (i) { ctx.strokeStyle = LINE; ctx.beginPath(); ctx.moveTo(padX, y + 0.5); ctx.lineTo(W - padX, y + 0.5); ctx.stroke(); }
+        ctx.textAlign = 'left'; ctx.font = '500 15px ' + SC_FONT; ctx.fillStyle = INK;
+        ctx.fillText(String(s.from || '?') + '  →  ' + String(s.to || '?'), padX, y + 13);
+        ctx.textAlign = 'right'; ctx.font = '700 15px ' + SC_FONT; ctx.fillStyle = INK;
+        ctx.fillText('$' + (Number(s.amount) || 0).toFixed(2), winsX, y + 13);
+        y += 26;
+      });
+      y += 14;
+    }
+
+    ctx.textAlign = 'center'; ctx.font = '500 11px ' + SC_FONT; ctx.fillStyle = MUTED;
+    ctx.fillText('Bad Golf · ' + (o.footer || ''), W / 2, H - 16);
+    return cv;
+  } catch (e) { return null; }
+}
+function buildBetsBlob(opts) {
+  return new Promise(resolve => {
+    try {
+      const cv = buildBetsCanvas(opts);
+      if (!cv) { resolve(null); return; }
+      if (cv.toBlob) cv.toBlob(b => resolve(b), 'image/png');
+      else resolve(null);
+    } catch (e) { resolve(null); }
+  });
+}
+// Assemble the image payload for a settle-up share. Never throws.
+async function bgBetsImageFile(opts) {
+  try {
+    const blob = await buildBetsBlob(opts);
+    if (!blob) return null;
+    return new File([blob], 'bad-golf-bets.png', { type: 'image/png' });
+  } catch (e) { return null; }
+}
+
 // v839 (Tyler): shared row renderer so Tournament payout / Total payout
 // visually match the group board's .lb-row list exactly (same CSS classes,
 // same layout) — "all three screens should look and feel the same."
@@ -62407,7 +62850,16 @@ async function openT2PayoutBoard(t, scope) {
     // render; it was simply never wired into this modal.
     let _bdHtml = '';
     try { _bdHtml = _t2BreakdownTableHtml(pay.byGame, pay.rows) || ''; } catch (e) {}
+    // v1045 (Tyler, 8/16): "I love this layout, can you put something like this on
+    // the payout screens." One row per pot -- what the bet was, who won it, what
+    // they collect -- above the per-player cross-tab.
+    let _potHtml = '';
+    try {
+      const _rawP = await loadTourneyRawRounds(t).catch(() => []);
+      _potHtml = _bgPotTableHtml(bgPotRowsForEvent(t, _rawP)) || '';
+    } catch (e) {}
     body.innerHTML = notice + '<div id="t2pb-board">' + _t2PayoutBoardRowsHtml(pay.rows) + '</div>' +
+      _potHtml +
       (_bdHtml ? '<div style="margin-top:14px">' + _bdHtml + '</div>' : '') +
       ((scope === 'total' && pay.rows.length && pay.allFinished) ? '<button type="button" id="t2pb-text" class="small primary full" style="margin-top:12px;font-weight:600">📲 Text everyone — combined payouts</button>' : '');
     const tb = body.querySelector('#t2pb-text');
@@ -66429,6 +66881,23 @@ async function init() {
       // Mark the round as finished — this is the durable signal for view-only mode
       // when reopened later from the Rounds tab.
       g.finishedAt = Date.now();
+      // v1044 (Tyler, 8/16): Gregory's Senior Sunday card archived as a 79 while his
+      // scorecard read 77 -- holes 11 and 14 were corrected during a REOPEN, the round
+      // was finished a second time, and the archive kept the pre-edit scores. He then
+      // (correctly) reported holes 11 and 14 as wrong, because his Rounds history is
+      // what he was looking at. archiveScoresFromRound is already idempotent (it
+      // upserts by gameCode), but on the re-finish it runs AFTER _bgReleaseSummaryUI
+      // has torn state down, behind several awaited network calls that can each stall
+      // on course wifi. For a reopened round the archive IS the thing being corrected,
+      // so run it FIRST, while state is fully intact, and only then release the UI.
+      // Bounded so a dead connection still can't freeze the button.
+      if (g.reopenedAt) {
+        try {
+          const _ra = archiveScoresFromRound(g);
+          if (typeof _promiseTimeout === 'function') await _promiseTimeout(_ra, 8000, 'reArchive-finish');
+          else await _ra;
+        } catch (e) { console.warn('re-archive on re-finish failed:', e); }
+      }
       try { t2NotifUnsubscribe(); } catch (e) {}   // v986 (T34): this round is over — stop the event's in-app alerts
       try { if (typeof playSwingSound === 'function') playSwingSound(); } catch (e) {}   // v696: club-swing sound on round finish
       try { if (typeof liveActivity !== 'undefined') liveActivity.end(); } catch (e) {}
