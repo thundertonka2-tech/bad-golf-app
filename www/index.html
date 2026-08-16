@@ -8018,7 +8018,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1052';
+const BG_BUILD = 'v2026.11.1053';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -39842,6 +39842,40 @@ function _t2MyCrossGroupStatuses(g, myId) {
 // just Apple Cash (which iOS auto-detects on the raw "$31.00" and is all it
 // could show before). Returns indented link lines; empty if the payee set no
 // handles. (Tyler, Jul 2026: "clicking the money owed only shows Apple Cash.")
+// v1053 (Tyler, 8/16): "if we have the phone number on file, when we click text
+// settle up it should add those numbers for us automatically."
+// Resolves each player to a saved phone (the round's own player record first, then
+// the per-user roster by stable key, then by normalised name) and returns a
+// comma-separated recipient list for an sms: deep link.
+// IMPORTANT: the native share sheet (navigator.share) has NO recipient API — the OS
+// owns that picker — so numbers can only be pre-filled on the sms: path. See
+// shareSettleUpSms for how the two are ordered.
+async function _bgSettleRecipients(players) {
+  try {
+    if (!Array.isArray(players) || !players.length) return '';
+    let roster = [];
+    try { roster = await getPlayerRoster(); } catch (e) { roster = []; }
+    const nums = [];
+    players.forEach(p => {
+      if (!p) return;
+      let ph = String(p.phone || '').trim();
+      if (!ph && Array.isArray(roster) && roster.length) {
+        try {
+          const key = rosterPlayerKey(p);
+          let rp = roster.find(x => rosterPlayerKey(x) === key);
+          if (!rp) {
+            const nn = normalizeNameSegment(displayFull(p) || p.name || '');
+            if (nn) rp = roster.find(x => x && normalizeNameSegment(x.name || '') === nn);
+          }
+          if (rp) ph = String(rp.phone || '').trim();
+        } catch (e) {}
+      }
+      const tel = ph.replace(/[^0-9+]/g, '');
+      if (tel.length >= 10 && nums.indexOf(tel) < 0) nums.push(tel);
+    });
+    return nums.join(',');
+  } catch (e) { return ''; }
+}
 async function _settlePayLines(creditorPlayer, amount) {
   try {
     const h = await resolvePayHandles(creditorPlayer);
@@ -40078,7 +40112,14 @@ async function shareSettleUpSms() {
     if (navigator.share) { await navigator.share({ text }); return; }
   } catch (e) { if (e && e.name === 'AbortError') return; }
   try { _bgOfferImageDownloads(files); } catch (e) {}
-  try { window.location.href = 'sms:?&body=' + encodeURIComponent(text); return; } catch (e) {}
+  try {
+    let _to = '';
+    try { _to = await _bgSettleRecipients((state.game && state.game.players) || []); } catch (e) {}
+    const _sep = /iP(hone|ad|od)|Mac/i.test(navigator.userAgent || '') ? '&' : '?';
+    window.location.href = 'sms:' + _to + _sep + 'body=' + encodeURIComponent(text);
+    if (_to) { try { showToast('Added ' + _to.split(',').length + ' number(s) from your crew', 4000); } catch (e) {} }
+    return;
+  } catch (e) {}
   try { await navigator.clipboard.writeText(text); showToast('Settle-up copied — paste it into a text'); }
   catch (e) { showToast('Could not open Messages'); }
 }
@@ -40150,7 +40191,14 @@ async function shareCombinedSettleUp(t, combinedPay, opts) {
       showToast('Scorecard image saved — attach it, then paste the text below');
     } catch (e) {}
   }
-  try { window.location.href = 'sms:?&body=' + encodeURIComponent(text); return; } catch (e) {}
+  try {
+    let _to = '';
+    try { _to = await _bgSettleRecipients((combinedPay && combinedPay.players) || []); } catch (e) {}
+    const _sep = /iP(hone|ad|od)|Mac/i.test(navigator.userAgent || '') ? '&' : '?';
+    window.location.href = 'sms:' + _to + _sep + 'body=' + encodeURIComponent(text);
+    if (_to) { try { showToast('Added ' + _to.split(',').length + ' number(s) from your crew', 4000); } catch (e) {} }
+    return;
+  } catch (e) {}
   try { await navigator.clipboard.writeText(text); showToast('Combined settle-up copied — paste it into a text'); }
   catch (e) { showToast('Could not open Messages'); }
 }
@@ -61902,8 +61950,32 @@ function bgPotRowsForRound(g) {
     const pById = id => (g.players || []).find(p => p.id === id) || null;
     const full = id => { const p = pById(id); return p ? displayFull(p) : ''; };
     const first = id => { const p = pById(id); return p ? displayFirst(p) : ''; };
-    const res = agg.results || {};
-    agg.byGame.forEach(gm => {
+    let res = agg.results || {};
+    let byGame = agg.byGame.slice();
+    // v1053 (Tyler, 8/16): "Stroke shows up on the table behind this but I don't
+    // see that payout on this screen."
+    // computeAllGameMoney DELETES every tournament-owned game from `results` before
+    // it builds byGame (_skipFieldGames), so a group's money bubble can't double-count
+    // a field pot. The day's STROKE pot is tagged owned (it lives in g.t2.dayGameKeys)
+    // -- but unlike Skins / CTP / Long Putt / the side pots it has NO field-wide engine
+    // either: it genuinely settles inside each group. So it fell straight through the
+    // gap: stripped from the group pass, computed by no field pass, and therefore
+    // absent from every screen that builds off these rows. (It still reached the
+    // per-game breakdown table, which aggregates separately -- which is exactly why it
+    // showed there and not here.)
+    // Re-run the aggregation with stripping disabled (`_noGroupGames` inverts the
+    // _skipFieldGames test) and fold in ONLY the keys the first pass didn't emit, so
+    // nothing already counted can be counted twice. fieldOnly pools (CTP, Long Putt)
+    // return null from their own calcs, so they cannot sneak in this way.
+    try {
+      const _seen = new Set(byGame.map(x => x && x.key));
+      const _all = computeAllGameMoney(Object.assign({}, g, { _noGroupGames: true }));
+      ((_all && _all.byGame) || []).forEach(gm => {
+        if (gm && !gm.dropped && !_seen.has(gm.key)) byGame.push(gm);
+      });
+      res = Object.assign({}, (_all && _all.results) || {}, res);   // first pass wins on any overlap
+    } catch (e) {}
+    byGame.forEach(gm => {
       if (!gm || gm.dropped) return;
       const w = _bgPotWinners(gm.money, full);
       let detail = '';
