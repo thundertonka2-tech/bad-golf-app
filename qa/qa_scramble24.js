@@ -67,15 +67,19 @@ for(let t=0;t<24;t++){
               '  holesComplete=' + (r&&r.holesComplete));
   console.log('   players paid by the scramble: ' + paid + ' of 4     money moved: $' + tot.toFixed(2));
   check('4-man scramble tracks the team score', !!(r && r.teamTotal > 0));
-  // This is the finding, asserted rather than assumed:
-  check('DOES 4-man scramble pay anybody? (expected NO — nothing settles it)', paid === 0, 'paid='+paid);
+  // The IN-GROUP engine settles team-vs-team inside one cart. A lone 4-man team has no
+  // opponent in its own group, so $0 here is correct — the FIELD engine is what pays it.
+  check('the in-group engine pays nothing for a solo team (correct — no opponent)', paid === 0, 'paid='+paid);
 }
 // Does anything settle it across the 24 teams?
 console.log('\n   Field engines that exist: ' +
-  ['Skins','Nassau','LongPutt','Ctp','SidePots','Stableford','Quota','BirdiePool','PointsPool']
+  ['Skins','Nassau','LongPutt','Ctp','SidePots','Stableford','Quota','BirdiePool','PointsPool','Scramble']
     .filter(n=>typeof qa.fn('t2ComputeField'+n)==='function').join(', '));
-console.log('   t2ComputeFieldScramble exists? ' + (typeof qa.fn('t2ComputeFieldScramble')==='function'));
-check('there is NO field-level scramble settlement engine', typeof qa.fn('t2ComputeFieldScramble') !== 'function');
+// v1039 shipped the whole-field scramble pot: every cart group is one team, ranked on
+// scrambleData[h].teamA, gated on settings.tourneyScramble.on. Before v1039 no such
+// engine existed and this suite asserted its ABSENCE. That assertion outlived the gap it
+// documented, which is why it kept reading as a failure long after the feature shipped.
+check('a field-level scramble settlement engine EXISTS (v1039)', typeof qa.fn('t2ComputeFieldScramble') === 'function');
 
 // Whole-event settlement across all 24 groups
 (async () => {
@@ -101,7 +105,41 @@ check('there is NO field-level scramble settlement engine', typeof qa.fn('t2Comp
     check('event money is zero-sum at 96 players', Math.abs(tot)<0.005, 'total='+tot.toFixed(2));
     check('settlement completes in under 10s', ms < 10000, ms+'ms');
     const scramblePot = (pay.byGame||[]).find(x=>/scramble/i.test(x.key));
-    check('DOES the scramble itself appear on the event board? (expected NO)', !scramblePot);
+    check('with tourneyScramble OFF, no scramble column appears', !scramblePot);
+  }
+
+  // ── A2) the SAME 24 teams with the field pot switched on ───────────────────
+  // This is the case the old suite recorded as impossible. Prove it settles.
+  console.log('\n=== A2. The same 24 teams, tourneyScramble ON — one 24-team competition ===');
+  const T2 = JSON.parse(JSON.stringify(T));
+  T2.settings.tourneyScramble = { on:true, buyin:20, payout:'winner', net:false };
+  // Guarded: a missing/throwing engine must report a FAILED CHECK, never take the whole
+  // suite down with an unhandled TypeError (a crash reads as "no result", not "broken").
+  const _fsFn = qa.fn('t2ComputeFieldScramble');
+  let fieldScram = null;
+  try { fieldScram = (typeof _fsFn === 'function') ? _fsFn(roundsA.map(g=>({data:g})), T2) : null; }
+  catch (e) { console.log('   THREW: ' + e.message); }
+  if (!fieldScram) { check('the field scramble settles 24 teams', false, typeof _fsFn === 'function' ? 'engine returned null' : 'engine missing'); }
+  else {
+    const vals = Object.values(fieldScram.money||{});
+    const sum  = money(vals.reduce((a,b)=>a+(b||0),0));
+    const won  = vals.filter(v=>v>0).length;
+    console.log('   pool: $'+(fieldScram.pool||0)+'   players in the pot: '+vals.length+'   players up: '+won);
+    console.log('   money sums to: $'+sum.toFixed(2));
+    check('the field scramble settles 24 teams', true);
+    check('every one of the 96 players is in the pot', vals.length===96, 'n='+vals.length);
+    check('the field scramble is zero-sum', Math.abs(sum)<0.005, 'sum='+sum.toFixed(2));
+    check('exactly the winning team is paid', won>0 && won<=8, 'up='+won);
+    check('everyone else anted', vals.filter(v=>v<0).length === vals.length - won);
+  }
+  let pay2=null; try { pay2 = await t2ComputeCombinedPayouts(T2); } catch(e){ console.log('   THREW: '+e.message); }
+  if (!pay2) { check('the scramble pot reaches the event board', false, 'no payout'); }
+  else {
+    const col = (pay2.byGame||[]).find(x=>/scramble/i.test(x.key));
+    const tot = money((pay2.rows||[]).reduce((s,r)=>s+(r.net||0),0));
+    console.log('   pots on the board: '+(pay2.byGame||[]).map(x=>x.key).join(', '));
+    check('the scramble pot reaches the event board', !!col, 'columns='+(pay2.byGame||[]).map(x=>x.key).join('|'));
+    check('the event is still zero-sum with the scramble in it', Math.abs(tot)<0.005, 'total='+tot.toFixed(2));
   }
 
   // ── B) 24 TWO-MAN TEAMS: 48 players, 12 groups of 4 (2v2 per group) ────────
@@ -114,17 +152,30 @@ check('there is NO field-level scramble settlement engine', typeof qa.fn('t2Comp
     g.games.scramble = { value:20, scoring:'stroke', teamMode:'2man', teamA:ids.slice(0,2), teamB:ids.slice(2,4) };
     roundsB.push(g);
   }
-  let bSum=0, bPaid=0, bNull=0;
+  let bSum=0, bPaid=0, bNull=0, bSettled=0, bTied=0, bBadZero=0;
   roundsB.forEach(g=>{
     const r = calcScramble(g, g.games.scramble);
     if(!r){ bNull++; return; }
     const vals = Object.values(r.money||{});
     bSum += vals.reduce((a,b)=>a+(b||0),0);
+    if(r.complete && r.holesComplete===18) bSettled++;
     if(vals.some(v=>v!==0)) bPaid++;
+    // A $0 group is only correct when the two teams actually TIED. Any other
+    // reason for nobody being paid is a real defect, so separate the two.
+    else if (r.aTotal === r.bTotal) bTied++;
+    else bBadZero++;
   });
-  console.log('   groups that settled money: '+bPaid+' of 12    groups returning null: '+bNull);
+  console.log('   groups that settled money: '+bPaid+' of 12    tied (correctly $0): '+bTied+
+              '    unexplained $0: '+bBadZero+'    groups returning null: '+bNull);
   console.log('   total money across all 12 groups: $'+money(bSum).toFixed(2));
-  check('2v2 scramble settles inside each cart group', bPaid===12, bPaid+'/12');
+  // The old assertion demanded all 12 groups MOVE money. With randomised scores a tie is
+  // inevitable (G08 finishes 75-75, 6 holes each, 6 halved) and a tied match correctly
+  // pays $0 — so the suite failed on the engine behaving properly. What actually matters
+  // is that every group SETTLES, and that a $0 group is a tie rather than a silent drop.
+  check('2v2 scramble settles inside every cart group', bSettled===12, bSettled+'/12');
+  check('no group is silently dropped (every $0 is a genuine tie)', bBadZero===0 && bNull===0,
+        'unexplained='+bBadZero+' null='+bNull);
+  check('at least one group actually moved money', bPaid>0, 'paid='+bPaid);
   check('2v2 scramble is zero-sum across the whole field', Math.abs(money(bSum))<0.005, 'sum='+money(bSum));
   console.log('   NOTE: this settles 12 separate 2-v-2 matches. It is NOT one 24-team competition —');
   console.log('         team 1 never plays team 7. T2_FORMATS calls it "Scramble (2v2)".');
