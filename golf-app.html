@@ -8014,7 +8014,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1042';
+const BG_BUILD = 'v2026.11.1043';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -24931,6 +24931,38 @@ function effectiveHcp(player, rules) {
   return player.hcp || 0;
 }
 
+// v1043 (Tyler, 8/16 tournament audit) - THE PRE-ALLOWANCE COURSE HANDICAP.
+// A pot that carries its OWN handicap % (field Skins, the Stroke pot, Low Net)
+// must measure that % off the player's full handicap so it REPLACES the round's
+// allowance instead of compounding with it. Those pots read p.rawHcp / p.baseHcp
+// for that "full" number, which is correct in a normal round but WRONG in a
+// tournament round: t2LaunchDayRounds stamps the roster HANDICAP INDEX into
+// hcp/rawHcp/baseHcp, and p.hcp is later replaced by the tee-adjusted COURSE
+// handicap while rawHcp/baseHcp keep the index. At Buffalo Creek's White tees
+// (rating 68.8, par 71) the index sits ~2 strokes ABOVE the course handicap, so
+// every player silently got two extra strokes -- but only in those pots. That is
+// why Kevin's outright net 3 on #9 came back a tie and the skin voided.
+// Resolution order:
+//   1. baseHcp, but only when it is genuinely on the COURSE-handicap scale --
+//      i.e. round(baseHcp x round%) actually reproduces p.hcp. True for every
+//      normal round (gatherSetup sets it that way), false for the tournament
+//      rounds above, which is exactly the case we must reject.
+//   2. otherwise back the round's own allowance out of p.hcp.
+// "Plays gross" and "No handicaps" always win, same as effectiveHcp.
+function bgFullCourseHcp(player, rules) {
+  try {
+    if (!player) return 0;
+    if (rules && rules.noHandicaps) return 0;
+    if (player.playsGross === true) return 0;
+    const _h = (player.hcp != null && !isNaN(Number(player.hcp))) ? Number(player.hcp) : 0;
+    const _pct = (rules && rules.pct != null && rules.pct !== '' && !isNaN(Number(rules.pct))) ? Number(rules.pct) : 100;
+    const _b = (player.baseHcp != null && !isNaN(Number(player.baseHcp))) ? Number(player.baseHcp) : null;
+    if (_b != null && _pct > 0 && Math.round(_b * _pct / 100) === Math.round(_h)) return _b;
+    if (_pct > 0 && _pct !== 100) return Math.round(_h * 100 / _pct);
+    return Math.round(_h);
+  } catch (e) { return (player && player.hcp) || 0; }
+}
+
 // ============================================================
 // GHIN-STYLE HANDICAP MATH (simplified WHS)
 // ============================================================
@@ -35789,7 +35821,10 @@ function calcStroke(g) {
     // gate this (the pools were fixed in v970); the STROKE pot never was, so a
     // gross player was scored on net and took the whole pot off the real winner.
     const _sGross = !!(g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true;
-    const hcp = _sGross ? 0 : Math.round((p.baseHcp != null ? p.baseHcp : effectiveHcp(p, g.hcpRules)) * _sPct);   // v957: pot% replaces the round allowance (baseHcp), not stacks
+    // v1043: baseHcp is the raw handicap INDEX in a tournament round (see
+    // bgFullCourseHcp) -- it handed everyone ~2 extra strokes at Buffalo Creek and
+    // turned Kevin's outright win of the Group 2 stroke pot into a split.
+    const hcp = _sGross ? 0 : Math.round(bgFullCourseHcp(p, g.hcpRules) * _sPct);   // v957: pot% replaces the round allowance, not stacks
     const arr = g.scores[p.id] || [];
     let net = 0;
     const _nH = roundHoles(g);
@@ -37952,15 +37987,15 @@ function _bgPoolStats(g, players, hcpPct) {
   const _pct = (hcpPct != null && hcpPct !== '' && !isNaN(Number(hcpPct))) ? Number(hcpPct) : null;
   return (players || []).map(p => {
     const sc = (g.scores && g.scores[p.id]) || [];
-    let fullHcp = (p.rawHcp != null ? p.rawHcp : (p.hcp != null ? p.hcp : 0));
+    // v1043: rawHcp/baseHcp are the raw handicap INDEX in a tournament round, not
+    // the tee-adjusted COURSE handicap (see bgFullCourseHcp).
+    let fullHcp = bgFullCourseHcp(p, g.hcpRules);
     // v970: the two zeroing checks used to live INSIDE `if (_pct != null)`, so any
     // round saved before the hcpPct field existed ignored "Plays gross" / "No
     // handicaps" and handed the pot to the wrong player. Hoisted out.
     const _gross = !!((g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true);
     if (_gross) fullHcp = 0;
-    else if (_pct != null) {
-      fullHcp = Math.round((p.baseHcp != null ? p.baseHcp : fullHcp) * _pct / 100);
-    }
+    else if (_pct != null) fullHcp = Math.round(fullHcp * _pct / 100);
     let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
     for (let h = 0; h < nHoles; h++) {
       const s = sc[h];
@@ -58115,7 +58150,34 @@ async function processPendingTjoin(token) {
     try { history.replaceState({}, '', location.pathname); } catch (e) {}
     switchTab('tourneys');
     openT2Home(tid);
+    return;
   }
+  // v1043 (Tyler, 8/16: "when I send him an invite it takes him to the home screen
+  // instead of into the game"). A failed claim used to fall off the end of this
+  // function -- no navigation, no explanation, so the tap simply dumped the player
+  // on Home. The overwhelmingly common cause is a SECOND account: the slot is
+  // already claimed by the same person signed in under a different login, and
+  // t2ClaimSlot's generic "claimed by someone else" toast actively misleads them.
+  // Look the slot up, name the account holding it, and still open the event.
+  try {
+    const { data } = await supa.from('tournament_players')
+      .select('tournament_id,display_name,user_id,claimed').eq('invite_token', token).maybeSingle();
+    if (data && data.tournament_id) {
+      const _mine = _authUser && data.user_id === _authUser.id;
+      if (_mine) showToast("You're already in this event \u2713");
+      else if (data.user_id) {
+        const _em = (typeof currentUserEmail === 'function' && currentUserEmail()) || 'this login';
+        showToast('"' + (data.display_name || 'That spot') + '" is already linked to a DIFFERENT Bad Golf login. '
+          + "You're signed in as " + _em + '. Sign out and back in with your other account, or ask your organizer to re-link this spot.', 9000);
+      }
+      try { history.replaceState({}, '', location.pathname); } catch (e) {}
+      switchTab('tourneys');
+      try { openT2Home(data.tournament_id); } catch (e) {}
+      return;
+    }
+  } catch (e) {}
+  try { switchTab('tourneys'); } catch (e) {}
+  showToast("Couldn't open that invite \u2014 ask your organizer for a fresh link", 6000);
 }
 async function processPendingTclaim(tid) {
   try { localStorage.removeItem('golf:pending-tclaim'); } catch (e) {}
@@ -60258,7 +60320,10 @@ function t2ComputeFieldSkins(rows, cfg) {
   // pots stay at 100%). Based on rawHcp (the un-adjusted tournament handicap)
   // so a day-level % can never double-reduce.
   const _skPct = (cfg.hcpPct != null && cfg.hcpPct !== '' && !isNaN(Number(cfg.hcpPct))) ? Number(cfg.hcpPct) : 100;
-  const _skHcp = p => { const b = (p.rawHcp != null ? p.rawHcp : (p.hcp != null ? p.hcp : 0)); return Math.round(b * _skPct / 100); };
+  // v1043: was `p.rawHcp` -- the raw handicap INDEX in a tournament round, not the
+  // tee-adjusted COURSE handicap every other game plays off (see bgFullCourseHcp).
+  // Also now honours "Plays gross" / "No handicaps", which rawHcp ignored outright.
+  const _skHcp = (p, rules) => Math.round(bgFullCourseHcp(p, rules) * _skPct / 100);
   const byDay = {};
   rows.forEach(row => {
     const g = row && row.data ? row.data : row;
@@ -60281,11 +60346,11 @@ function t2ComputeFieldSkins(rows, cfg) {
       for (let h = 0; h < 18; h++) {
         const s = sc[h]; if (s == null) continue;
         const par = pars ? pars[h] : 4;
-        net[h] = netHoleScore(s, _skHcp(p), sis[h], par, rules, _nH); thru++;
+        net[h] = netHoleScore(s, _skHcp(p, rules), sis[h], par, rules, _nH); thru++;
       }
       if (!thru) return;
       const k = nmk(p.name); const cur = byDay[day].parts[k];
-      if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), hcp: _skHcp(p), net: net, thru: thru };
+      if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), hcp: _skHcp(p, rules), net: net, thru: thru };
     });
   });
   const perDay = []; const totalsByName = {};
@@ -60522,7 +60587,9 @@ function t2ComputeFieldSidePots(rows, cfg) {
         // v970: this was the ONLY net calculation in the app that didn't respect
         // "Plays gross" / "No handicaps" — a gross player was handed his full raw
         // handicap and could win the field Low Net pot outright.
-        let fullHcp = (p.rawHcp != null ? p.rawHcp : (p.hcp != null ? p.hcp : 0));
+        // v1043: rawHcp is the raw handicap INDEX in a tournament round (see
+        // bgFullCourseHcp) -- Low Net was scored ~2 strokes light for everyone.
+        let fullHcp = bgFullCourseHcp(p, g.hcpRules);
         try { if ((g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true) fullHcp = 0; } catch (e) {}
         let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
         for (let h = 0; h < 18; h++) {
@@ -66191,6 +66258,13 @@ async function init() {
     delete g.finishedAt;
     g.reopenedAt = Date.now();
     state.viewOnlyMode = false;
+    // v1043 (Tyler, 8/16): _bgReleaseSummaryUI early-returns when it has already
+    // released THIS round's code -- and nothing ever cleared that flag. So after a
+    // reopen, the SECOND "Save & return home" did the release-and-navigate work not
+    // at all: the summary closed (outer finally), the game tabs were disabled, and
+    // the user was left stranded on the now-disabled Score screen with no way out.
+    // The round is live again, so this finish is a brand new one.
+    try { state._summaryReleased = null; } catch (e) {}
     try { await saveGame(g); } catch (e) { console.warn('saveGame on reopen failed:', e); }
     // Reopen should drop the user straight into SCORING, not the Board/settle-up
     // screen. The round is live again now, so mark the resume prompt as already
@@ -66275,9 +66349,33 @@ async function init() {
   // closes the payout modal, clears the live-round state and lands the user home
   // (or in a fresh setup form). Idempotent: the tail of summary-confirm calls the
   // same routine, so whichever runs first wins and the second is a no-op.
-  function _bgReleaseSummaryUI(g) {
+  // v1043: the full-screen GPS map is NOT a .modal-overlay, so closing the summary
+  // never took it down -- finishing from the GPS/scoring view left it covering the
+  // app while the tab bar underneath had just been disabled. Same teardown the
+  // hardware back button uses, so the GPS watch is stopped properly too.
+  function _bgCloseGpsOverlay() {
     try {
-      if (state._summaryReleased === (g && g.code)) return;   // already released this round
+      const _gx = document.getElementById('gps-close');
+      if (_gx && document.body.classList.contains('gps-open')) { _gx.click(); return; }
+    } catch (e) {}
+    try {
+      const _ov = document.getElementById('gps-overlay');
+      if (_ov) _ov.classList.remove('open', 'viewing', 'map-only', 'spectating', 'preview');
+      document.body.classList.remove('gps-open');
+    } catch (e) {}
+  }
+  function _bgReleaseSummaryUI(g) {
+    // v1043: whatever else happens below, finishing a round must never leave the
+    // player on a dead screen. Close the map first and unconditionally.
+    try { _bgCloseGpsOverlay(); } catch (e) {}
+    try {
+      if (state._summaryReleased === (g && g.code)) {
+        // Already released once (a reopen + re-finish). Still make sure we LAND
+        // somewhere usable instead of silently doing nothing.
+        try { const _sm2 = $('summary-modal'); if (_sm2) _sm2.classList.remove('show'); } catch (e) {}
+        try { if (!state._newRoundAfterSave) switchTab('home'); } catch (e) {}
+        return;
+      }
       state._summaryReleased = (g && g.code) || true;
       state.game = null;
       state.editingLiveRound = false;
@@ -69326,8 +69424,27 @@ const gpsView = (() => {
           //     counts up live; past 60y out it LOCKS as the drive's start.
           if (!_drvStillPos || ydsBetween(_drvStillPos, p) > 6) { _drvStillPos = p.slice(); _drvStillAt = _now; }
           const _stationary = (_now - _drvStillAt) >= 3000;
+          // v1043 (Tyler, Aug 2026: "we had just pulled up to the tee box to tee
+          // off - the yardage should have been zero, not 80 something"). _nearTee
+          // accepts a fix up to 90y IN FRONT of the mapped tee (real forward tees
+          // live there), so a fix taken while still ROLLING UP planted the anchor
+          // short of the tee. The cart then covered the remaining ~84y, tripped the
+          // >60y test below, and LOCKED that phantom in as the drive's start -- so
+          // Est. Drive read 84y with the ball still on the peg and nothing could
+          // re-seat it. Two guards:
+          //   (a) until a real PARKED zero exists, the anchor follows the player
+          //       while they are still in the tee area, so rolling up can never
+          //       strand it behind them;
+          //   (b) only a parked (or demonstrably at-the-tee) anchor may LOCK a
+          //       drive -- distance alone no longer promotes a roll-up to a drive.
+          if (!_driveZeroSet && _nearTee) _holeStartPos = p.slice();
           if (_stationary && _nearTee) { _holeStartPos = _drvStillPos.slice(); _driveZeroSet = true; }   // v708: a real parked zero point is now established at the tee
-          if (ydsBetween(_holeStartPos, p) > 60) _driveLocked = true;
+          // Walk-up player who never stands still 3s: once they LEAVE the tee area,
+          // accept the frozen anchor as the zero if it really is on the tee (<=40y).
+          if (!_driveZeroSet && !_nearTee) {
+            try { if (hd && Array.isArray(hd.tee) && ydsBetween(hd.tee, _holeStartPos) <= 40) _driveZeroSet = true; } catch (e) {}
+          }
+          if (_driveZeroSet && ydsBetween(_holeStartPos, p) > 60) _driveLocked = true;
           _driveLastPos = p.slice();
         }
       }
