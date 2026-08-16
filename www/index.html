@@ -8017,7 +8017,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1047';
+const BG_BUILD = 'v2026.11.1049';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -39848,7 +39848,23 @@ async function _settlePayLines(creditorPlayer, amount) {
     const label = { venmo: 'Venmo', cashapp: 'Cash App', paypal: 'PayPal' };
     const order = h.preferred ? [h.preferred].concat(['venmo','cashapp','paypal'].filter(m => m !== h.preferred)) : ['venmo','cashapp','paypal'];
     const out = [];
-    order.forEach(m => { if (!h[m]) return; const link = buildPayLink(m, h[m], amount, 'Bad Golf'); if (link) out.push('   ' + label[m] + ': ' + link); });
+    // v1048 (Tyler: "it sent the links for payments but they are not clickable
+    // anymore" -- confirmed as plain black text, not a link at all). These lines
+    // used to start with THREE SPACES. An indented line is exactly what many
+    // SMS/RCS clients treat as preformatted and refuse to auto-linkify, and the
+    // URL is the entire point of the line. Start at column 0 and leave the URL
+    // last on the line with nothing trailing it.
+    // Also: ONE link per payment now -- the payee's preferred method, or the
+    // first they have. Three links per payment made an 8-player settle-up long
+    // enough to be split into several SMS segments, and a URL broken across a
+    // segment boundary stops working entirely. `order` already puts preferred
+    // first, so this just stops at the first hit.
+    for (let i = 0; i < order.length; i++) {
+      const m = order[i];
+      if (!h[m]) continue;
+      const link = buildPayLink(m, h[m], amount, 'Bad Golf');
+      if (link) { out.push(label[m] + ': ' + link); break; }
+    }
     return out;
   } catch (e) { return []; }
 }
@@ -39925,15 +39941,25 @@ async function buildSettleUpText() {
 // Standings + breakdown now mirror the on-screen Total-payout board exactly
 // (same combinedPay.rows / byGame data, just as text) — the scorecard image
 // is attached separately by shareCombinedSettleUp, below.
-async function buildCombinedSettleUpText(t, combinedPay) {
-  if (!combinedPay || !combinedPay.allFinished) return '';
+async function buildCombinedSettleUpText(t, combinedPay, opts) {
+  // v1048: `opts.allowProvisional` lets the caller send a still-live event on
+  // purpose (the user is asked first). Without it the old rule stands: nothing
+  // goes out until every group has finished.
+  if (!combinedPay) return '';
+  if (!combinedPay.allFinished && !(opts && opts.allowProvisional)) return '';
   const moneyDict = {}; (combinedPay.rows || []).forEach(r => moneyDict[r.id] = r.net);
   const settlements = calculateSettlements(moneyDict, combinedPay.players || []);
   const findPlayer = id => (combinedPay.players || []).find(pp => pp.id === id);
   const nm = id => { const p = findPlayer(id); return p ? displayFull(p) : '?'; };
   const where = t && t.name ? (' — ' + t.name) : '';
   const fmtMoney = m => (m > 0.005 ? '+' : (m < -0.005 ? '−' : '')) + '$' + Math.abs(m).toFixed(2);
-  const lines = ['🏆 Bad Golf — combined tournament payout' + where, ''];
+  const _scopeLbl = (opts && opts.scopeLabel) ? opts.scopeLabel : 'combined tournament payout';
+  const lines = ['🏆 Bad Golf — ' + _scopeLbl + where, ''];
+  if (!combinedPay.allFinished) {
+    lines.push('⚠️ PROVISIONAL — ' + (combinedPay.roundsFinished || 0) + ' of ' + (combinedPay.roundsTotal || 0)
+      + ' groups have finished. These numbers can still change.');
+    lines.push('');
+  }
 
   // Standings — every player's net $ across the WHOLE tournament (group bets,
   // team bets, cross-group 1-on-1s, and every field pot combined) — the same
@@ -39974,6 +40000,46 @@ async function buildCombinedSettleUpText(t, combinedPay) {
 // Share the settle-up via text. Native share sheet first (best on phones —
 // pick Messages + recipients), then an sms: link, then clipboard as a backstop.
 async function shareSettleUpSms() {
+  // v1048 (Tyler, 8/16): "even though I was on total when the text went out, it
+  // only sent out my groups bets not the total tournament."
+  // The Board's 3-way filter (🏆 Tournament / 👥 Group bets / 🤝 Total) repaints
+  // Money standings in place, but THIS button ignored the filter completely and
+  // ran its own private rule inside buildSettleUpText: upgrade to the combined
+  // text only if EVERY group had finished, otherwise silently fall back to this
+  // round's group-only money -- with nothing on screen to say which one you got.
+  // Senior Sunday's DRAW82 was reopened mid-settle, so allFinished was false and
+  // the text quietly downgraded to one group while the screen said Total.
+  // Now: send what the user is actually looking at, and never downgrade in
+  // silence -- a still-live event asks first, a real failure says so out loud.
+  try {
+    const _g = (typeof state !== 'undefined') ? state.game : null;
+    const _tid = _g && _g.t2 && _g.t2.tournamentId;
+    const _scope = _tid ? (_t2BoardFilterScope[_g.code] || 'tournament') : 'group';
+    if (_tid && _scope !== 'group') {
+      const _t = await t2Get(_tid);
+      if (_t) {
+        const _pay = (_scope === 'total') ? await t2ComputeCombinedPayouts(_t)
+                                          : await t2ComputeTournamentOnlyPayouts(_t);
+        if (_pay && Array.isArray(_pay.rows) && _pay.rows.length) {
+          if (!_pay.allFinished) {
+            const _go = await uiConfirm(
+              (_pay.roundsFinished || 0) + ' of ' + (_pay.roundsTotal || 0) + ' groups have finished, so the '
+              + (_scope === 'total' ? 'Total' : 'Tournament') + ' numbers can still change.\n\nSend them anyway?',
+              { title: 'Event still in progress', okLabel: 'Send anyway', cancelLabel: 'Wait' });
+            if (!_go) return;
+          }
+          await shareCombinedSettleUp(_t, _pay, {
+            allowProvisional: true,
+            scopeLabel: (_scope === 'total') ? 'combined tournament payout' : 'tournament payout (event pots only)'
+          });
+          return;
+        }
+        showToast("Couldn't build the event totals — sending this group's bets instead", 6000);
+      } else {
+        showToast("Couldn't load the event — sending this group's bets instead", 6000);
+      }
+    }
+  } catch (e) { try { showToast("Couldn't reach the event — sending this group's bets instead", 6000); } catch (e2) {} }
   const text = await buildSettleUpText();
   if (!text) { showToast('No round loaded'); return; }
   // v1045 (Tyler, 8/16): "send an image like the scorecard on the text settle that
@@ -40036,8 +40102,8 @@ function _bgOfferImageDownloads(files) {
 // attaches a scorecard for a single round. Falls all the way through to a
 // text-only share (with the image offered as a manual download) if the
 // browser/device doesn't support file-attaching share.
-async function shareCombinedSettleUp(t, combinedPay) {
-  const text = await buildCombinedSettleUpText(t, combinedPay);
+async function shareCombinedSettleUp(t, combinedPay, opts) {
+  const text = await buildCombinedSettleUpText(t, combinedPay, opts);
   if (!text) { showToast('Not ready yet'); return; }
   let file = null;
   const files = [];
