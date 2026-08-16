@@ -8014,7 +8014,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1049';
+const BG_BUILD = 'v2026.11.1050';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -40011,24 +40011,24 @@ async function shareSettleUpSms() {
   try {
     const _g = (typeof state !== 'undefined') ? state.game : null;
     const _tid = _g && _g.t2 && _g.t2.tournamentId;
-    const _scope = _tid ? (_t2BoardFilterScope[_g.code] || 'tournament') : 'group';
-    if (_tid && _scope !== 'group') {
+    // v1050 (Tyler): "when the text settle up goes out it should ALWAYS include
+    // the totals for the tourney and bets when sending out who owes who." No
+    // longer keyed to the on-screen filter at all -- a tournament round always
+    // texts the whole-event total (group bets + every event pot) plus the
+    // per-game breakdown. Only a non-tournament round sends its own money.
+    if (_tid) {
       const _t = await t2Get(_tid);
       if (_t) {
-        const _pay = (_scope === 'total') ? await t2ComputeCombinedPayouts(_t)
-                                          : await t2ComputeTournamentOnlyPayouts(_t);
+        const _pay = await t2ComputeCombinedPayouts(_t);
         if (_pay && Array.isArray(_pay.rows) && _pay.rows.length) {
           if (!_pay.allFinished) {
             const _go = await uiConfirm(
-              (_pay.roundsFinished || 0) + ' of ' + (_pay.roundsTotal || 0) + ' groups have finished, so the '
-              + (_scope === 'total' ? 'Total' : 'Tournament') + ' numbers can still change.\n\nSend them anyway?',
+              (_pay.roundsFinished || 0) + ' of ' + (_pay.roundsTotal || 0)
+              + ' groups have finished, so these totals can still change.\n\nSend them anyway?',
               { title: 'Event still in progress', okLabel: 'Send anyway', cancelLabel: 'Wait' });
             if (!_go) return;
           }
-          await shareCombinedSettleUp(_t, _pay, {
-            allowProvisional: true,
-            scopeLabel: (_scope === 'total') ? 'combined tournament payout' : 'tournament payout (event pots only)'
-          });
+          await shareCombinedSettleUp(_t, _pay, { allowProvisional: true, scopeLabel: 'tournament total' });
           return;
         }
         showToast("Couldn't build the event totals — sending this group's bets instead", 6000);
@@ -62329,6 +62329,16 @@ function _t2PayoutBoardRowsHtml(rows) {
 // a payout calculator's `byGame` + `rows` instead of the local g.games results.
 function _t2BreakdownTableHtml(byGame, rows) {
   if (!byGame || !byGame.length || !rows || !rows.length) return '';
+  // v1050 (Tyler): "the table is missing a bunch of the games we played."
+  // They weren't missing -- they were scrolled off. Columns are seeded for every
+  // CONFIGURED pot (so a live pot shows before it settles), and those empty
+  // placeholders sat at the front of a horizontally-scrolling table, pushing the
+  // games that actually paid out off-screen behind a swipe. Order by "has real
+  // money in it" first so the games that moved money are what you see.
+  try {
+    const _hasMoney = gm => Object.values((gm && gm.money) || {}).some(v => Math.abs(Number(v) || 0) >= 0.005);
+    byGame = byGame.slice().sort((a, b) => (_hasMoney(b) ? 1 : 0) - (_hasMoney(a) ? 1 : 0));
+  } catch (e) {}
   const nameOf = k => { const r = rows.find(x => x.id === k); return r ? (r.first || r.name || k) : k; };
   let html = '<h3>Per-game breakdown</h3>';
   html += '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:8px">';
@@ -62384,11 +62394,17 @@ function renderT2PayoutFilterBar(g) {
   if (!bar) return;
   const tid = g && g.t2 && g.t2.tournamentId;
   if (!tid) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
-  const scope = _t2BoardFilterScope[g.code] || 'tournament';  // v863 (Tyler): default to whole-tournament, not just this group
+  // v1050 (Tyler, 8/16): "there should only be two buttons here, tournament
+  // total and group total. The extra total button is not needed." The old
+  // 🏆 Tournament (event pots only) vs 🤝 Total (everything) split was a
+  // distinction nobody wanted and the source of the out-of-sync screens --
+  // three buttons, but the Settle-up card below only ever tracked one of them.
+  // Now: TOURNAMENT TOTAL = everything combined, GROUP TOTAL = this group's bets.
+  let scope = _t2BoardFilterScope[g.code] || 'total';
+  if (scope === 'tournament') { scope = 'total'; _t2BoardFilterScope[g.code] = 'total'; }   // migrate the retired third option
   const opts = [
-    { key: 'tournament', label: '🏆 Tournament' },
-    { key: 'group', label: '👥 Group bets' },
-    { key: 'total', label: '🤝 Total' }
+    { key: 'total', label: '🏆 Tournament total' },
+    { key: 'group', label: '👥 Group total' }
   ];
   bar.style.cssText = 'display:flex;gap:6px;margin-bottom:10px';
   bar.innerHTML = opts.map(o => {
@@ -62516,7 +62532,7 @@ async function _t2PaintFieldSkinsOnScorecard(g) {
     // this same gold field-skin marker, already folded into that build. Painting
     // the LOCAL-only version here after that would silently stomp the full-field
     // table back down to one group. No-op in that case; the field repaint owns it.
-    if ((_t2BoardFilterScope[g.code] || 'tournament') !== 'group') return;
+    if ((_t2BoardFilterScope[g.code] || 'total') !== 'group') return;
     const myToken = ++_t2FieldSkinToken;
     const fieldSkinMap = await _t2FetchFieldSkinMap(g);
     if (myToken !== _t2FieldSkinToken || !fieldSkinMap) return;
@@ -62830,7 +62846,7 @@ async function _t2RepaintScorecardForScope(g, scope) {
     // A fast tap to another round (or a scope flip back to Group) while this
     // fetch was in flight must not paint over it.
     if (!(state && state.game && state.game.code === g.code)) return;
-    if ((_t2BoardFilterScope[g.code] || 'tournament') === 'group') return;
+    if ((_t2BoardFilterScope[g.code] || 'total') === 'group') return;
     const tbl = document.getElementById('scorecard');
     if (!tbl) return;
     let fieldSkinMap = null; try { fieldSkinMap = await _t2FetchFieldSkinMap(g); } catch (e) {}
@@ -62838,7 +62854,7 @@ async function _t2RepaintScorecardForScope(g, scope) {
     let fieldPlayers = []; try { fieldPlayers = await t2GetPlayers(tid); } catch (e) { fieldPlayers = []; }
     if (myToken !== _t2ScorecardRepaintToken) return;
     if (!(state && state.game && state.game.code === g.code)) return;
-    if ((_t2BoardFilterScope[g.code] || 'tournament') === 'group') return;
+    if ((_t2BoardFilterScope[g.code] || 'total') === 'group') return;
     tbl.innerHTML = _t2BuildFieldScorecardHtml(raw, g, fieldSkinMap, fieldPlayers);
   } catch (e) {}
 }
@@ -62926,6 +62942,55 @@ async function _t2PaintFieldSkinsOnMiniScorecard(g) {
 }
 
 let _t2RepaintToken = 0;
+// v1050 (Tyler): "I have total selected but the payout only shows my group...
+// I need everything to be in sync." The filter repainted #money-board and
+// #money-breakdown but NEVER #settle-up-list -- so the who-pays-who card (and
+// therefore the texted settle-up, which reads the same round money) stayed on
+// this group's bets while the board above it showed the whole tournament. Two
+// different answers, stacked on one screen. This repaints the settle-up card
+// from the SAME pay.rows the board is showing.
+function _t2RepaintSettleUpForScope(pay) {
+  const sl = document.getElementById('settle-up-list');
+  if (!sl) return;
+  try {
+    const rows = (pay && pay.rows) || [];
+    const players = (pay && pay.players) || [];
+    const dict = {}; rows.forEach(r => { dict[r.id] = r.net || 0; });
+    let settlements = [];
+    try { settlements = calculateSettlements(dict, players) || []; } catch (e) { settlements = []; }
+    const pOf = id => players.find(x => x && x.id === id) || null;
+    const fullOf = id => { const p = pOf(id); return p ? (p.name || p.firstName || '?') : '?'; };
+    const initOf = id => { const p = pOf(id); try { return p ? displayInitials(p) : '?'; } catch (e) { return '?'; } };
+    sl.innerHTML = '';
+    const note = document.createElement('div');
+    note.className = 'small-text';
+    note.style.cssText = 'color:var(--text-muted);margin:0 0 8px;padding:7px 10px;background:var(--surface-2);border-radius:8px;line-height:1.45';
+    note.textContent = 'Whole tournament — every group\u2019s bets plus every event pot, combined.'
+      + ((pay && pay.allFinished === false)
+          ? ' Provisional: ' + (pay.roundsFinished || 0) + ' of ' + (pay.roundsTotal || 0) + ' groups finished.'
+          : '');
+    sl.appendChild(note);
+    if (!settlements.length) {
+      const e0 = document.createElement('div'); e0.className = 'settle-empty';
+      e0.textContent = 'All square across the event — nobody owes anybody. 🍻';
+      sl.appendChild(e0); return;
+    }
+    settlements.forEach(s => {
+      const row = document.createElement('div');
+      row.className = 'settle-row';
+      row.innerHTML = '<div class="from" title="' + escAttr(fullOf(s.fromId)) + '">' + escapeHtml(initOf(s.fromId)) + '</div>'
+        + '<div class="arrow">→</div>'
+        + '<div class="to" title="' + escAttr(fullOf(s.toId)) + '">' + escapeHtml(initOf(s.toId)) + '</div>'
+        + '<div class="amt">$' + (Number(s.amount) || 0).toFixed(2) + '</div>';
+      sl.appendChild(row);
+    });
+    const flow = settlements.reduce((a, s) => a + (Number(s.amount) || 0), 0);
+    const sum = document.createElement('div');
+    sum.className = 'settle-summary';
+    sum.textContent = settlements.length + ' payment' + (settlements.length > 1 ? 's' : '') + ' · $' + flow.toFixed(2) + ' total in motion';
+    sl.appendChild(sum);
+  } catch (e) {}
+}
 async function _t2RepaintMoneyBoardForScope(g, scope) {
   if (scope === 'group') return;
   const tid = g && g.t2 && g.t2.tournamentId;
@@ -62939,9 +63004,12 @@ async function _t2RepaintMoneyBoardForScope(g, scope) {
     const t = await t2Get(tid);
     if (myToken !== _t2RepaintToken) return;   // a newer tap/render superseded this one
     if (!t) { mb.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">Tournament not found.</div>'; return; }
-    const pay = scope === 'total' ? await t2ComputeCombinedPayouts(t) : await t2ComputeTournamentOnlyPayouts(t);
+    // v1050: only two scopes remain and 'group' returned above, so this is
+    // always the whole-tournament combined number.
+    const pay = await t2ComputeCombinedPayouts(t);
     if (myToken !== _t2RepaintToken) return;
     if (!pay) { mb.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">No scores in this event yet.</div>'; return; }
+    try { _t2RepaintSettleUpForScope(pay); } catch (e) {}
     // v865 (Tyler): "When I click total I should see the tournament & group bets
     // combined... make it just like you did for the tournament and group bets."
     // Total used to hide the ENTIRE board until every group finished (per an
@@ -62950,7 +63018,7 @@ async function _t2RepaintMoneyBoardForScope(g, scope) {
     // board the other two tabs show, just with a small heads-up that it's still
     // provisional while groups are in progress. t2ComputeCombinedPayouts already
     // computes rows/byGame regardless of allFinished, so this is display-only.
-    const notice = (scope === 'total' && !pay.allFinished)
+    const notice = (!pay.allFinished)
       ? '<div class="help-text" style="padding:8px 4px;text-align:center;font-size:12px">Provisional — ' + pay.roundsFinished + ' of ' + pay.roundsTotal + ' groups finished. Totals will update as more finish.</div>'
       : '';
     mb.innerHTML = notice + _t2PayoutBoardRowsHtml(pay.rows);
