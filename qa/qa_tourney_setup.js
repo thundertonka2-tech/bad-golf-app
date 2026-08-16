@@ -389,6 +389,80 @@ function seedEvent(opts) {
   const html2 = bd([{ key: 'Skins won', money: {}, pending: true }], rows);
   check('a pending pot says "not settled" instead of a bare dash', html2.includes('not settled') && html2.includes('still live'));
 
+  // ── 11. Settle-up share split (v1058) ───────────────────────────
+  section('11. SETTLE-UP SHARE — the two-button split');
+  check('a shared sms sender exists for both paths', typeof qa.fn('_bgSendSettleSms') === 'function');
+  check('the round share takes a mode', /function shareSettleUpSms\(mode\)/.test(src));
+  check('both round buttons exist', src.includes('id="btn-text-settle"') && src.includes('id="btn-text-settle-nums"'));
+  check('both buttons exist on the combined payout screen', src.includes("id=\"t2pb-text\"") && src.includes('t2pb-text-nums'));
+  check('both buttons exist on the event summary screen', src.includes('summary-text-combined') && src.includes('summary-text-combined-nums'));
+  // A button that renders but is never wired is the easy way to ship a dead control —
+  // asserting the id exists does NOT catch it (found by mutation while writing this).
+  check('the round numbers button is actually wired',
+    /textNumBtn\s*=\s*\$\('btn-text-settle-nums'\)/.test(src) &&
+    /textNumBtn\.onclick\s*=\s*\(\)\s*=>\s*shareSettleUpSms\('sms'\)/.test(src));
+  check('the round images button passes mode "images"',
+    /textBtn\.onclick\s*=\s*\(\)\s*=>\s*shareSettleUpSms\('images'\)/.test(src));
+  check('both combined numbers buttons are wired to mode "sms"',
+    (src.match(/shareCombinedSettleUp\(t, pay, \{ mode: 'sms' \}\)/g) || []).length === 2 &&
+    /querySelector\('#t2pb-text-nums'\)/.test(src) &&
+    /getElementById\('summary-text-combined-nums'\)/.test(src));
+  check('both combined images buttons pass mode "images"',
+    (src.match(/shareCombinedSettleUp\(t, pay, \{ mode: 'images' \}\)/g) || []).length === 2);
+  // The whole point of the sms button is that it does NOT hand the recipient picker
+  // back to the OS. Prove the share sheet is genuinely skipped, not just reordered.
+  ev('globalThis.__shareCalls = 0');
+  ctx.navigator.share = async () => { ctx.__shareCalls++; };
+  ctx.navigator.canShare = () => true;
+  ev('_bgSettleRecipients = async function () { return "5551234567,5559876543"; }');
+  ev('buildSettleUpText = async function () { return "QA settle-up text"; }');
+  ev('calculateSettlements = function () { return []; }');
+  let navUrl = '';
+  Object.defineProperty(ctx.window, 'location', { configurable: true, value: { get href() { return navUrl; }, set href(v) { navUrl = v; }, search: '', hash: '', protocol: 'https:', reload() {} } });
+  ev('state = state || {}; state.game = { players: [{ id: "p1", name: "Tyler OConnor" }], code: "QA1" }');
+
+  navUrl = ''; ctx.__shareCalls = 0; clearSpy();
+  try { await qa.fn('shareSettleUpSms')('sms'); } catch (e) { console.log('   sms mode threw: ' + e.message); }
+  check('mode "sms" never opens the share sheet', ctx.__shareCalls === 0, 'share calls=' + ctx.__shareCalls);
+  check('mode "sms" opens Messages with recipients pre-filled', /^sms:5551234567,5559876543/.test(navUrl), navUrl.slice(0, 60));
+  check('  ...and carries the settle-up text as the body', /body=/.test(navUrl));
+  check('  ...and tells the user how many numbers it added', toasts().some(t => /2 number/.test(t)), toasts().join('|'));
+
+  navUrl = ''; ctx.__shareCalls = 0; clearSpy();
+  try { await qa.fn('shareSettleUpSms')('images'); } catch (e) { console.log('   images mode threw: ' + e.message); }
+  check('mode "images" DOES use the share sheet', ctx.__shareCalls > 0, 'share calls=' + ctx.__shareCalls);
+  check('  ...and does not fall through to sms', navUrl === '', navUrl);
+
+  // No saved numbers must still open Messages, just without recipients.
+  ev('_bgSettleRecipients = async function () { return ""; }');
+  navUrl = ''; ctx.__shareCalls = 0; clearSpy();
+  try { await qa.fn('shareSettleUpSms')('sms'); } catch (e) {}
+  check('no saved numbers still opens Messages (and says so)',
+    /^sms:[?&]body=/.test(navUrl) && toasts().some(t => /No saved phone/i.test(t)), navUrl.slice(0, 30) + ' | ' + toasts().join('|'));
+
+  // ── 12. Zero-sum invariant (closes the $2 item) ─────────────────
+  section('12. ZERO-SUM — the invariant behind the $2 discrepancy');
+  const roundNets = qa.fn('_t2RoundNets');
+  check('_t2RoundNets exists', typeof roundNets === 'function');
+  if (typeof roundNets === 'function') {
+    // Largest-remainder: rounding each player independently is what used to leave a
+    // board summing to a few cents that don't exist. Awkward splits are the test.
+    [[10 / 3, 10 / 3, 10 / 3, -10], [1 / 7, 2 / 7, 4 / 7, -1], [0.005, 0.005, -0.01],
+     [-33.333333, 16.666666, 16.666667], [94.444, 48.444, -1.111, -7.555, -12, -15.555, -31.111, -75.556]]
+      .forEach((set, i) => {
+        const out = roundNets(set);
+        const s = Math.round(out.reduce((a, b) => a + b, 0) * 100) / 100;
+        check('rounding set ' + (i + 1) + ' still sums to $0.00', Math.abs(s) < 0.005, 'sum=' + s);
+        check('  ...and every figure is whole cents', out.every(v => Math.abs(v * 100 - Math.round(v * 100)) < 1e-6));
+      });
+  }
+  // The live board Tyler posted, both groups finished.
+  const BOARD = [94.44, 48.44, -1.11, -7.55, -12.00, -15.55, -31.11, -75.56];
+  const boardSum = Math.round(BOARD.reduce((a, b) => a + b, 0) * 100) / 100;
+  check('the finished Senior Sunday board reconciles to $0.00', Math.abs(boardSum) < 0.005, 'sum=' + boardSum);
+  check('Chris and Gregory match the v1053 audit figures',
+    BOARD[6] === -31.11 && BOARD[7] === -75.56, BOARD[6] + ' / ' + BOARD[7]);
+
   // ── done ────────────────────────────────────────────────────────
   console.log('\n' + '─'.repeat(46));
   if (!fails.length) { console.log('ALL ' + pass + ' CHECKS PASSED'); process.exit(0); }
