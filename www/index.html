@@ -8029,7 +8029,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1074';
+const BG_BUILD = 'v2026.11.1075';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -10759,6 +10759,411 @@ async function renderAdminSpectate() {
   }
 }
 
+// ===== v1075 — GLOBAL SNAPSHOT + FULL QUEUES ================================
+// Tyler: "On the admin page I have no way of seeing a global snapshot of where
+// things stand. I have to go to the state to see what is going on. Fix this page
+// to where I can see the full incomplete queue if I click on it and see the full
+// code reject queue as well... make them clickable... searchable and sortable by
+// state... a quick snapshot showing complete totals, incomplete... a fun graph
+// with our goal of getting to 100% complete."
+//
+// WHY THERE WASN'T ONE. Every number on the Admin screen is SCOPED. The worklist
+// refuses to load until a state is picked, and the dashboard's course tiles are
+// explicitly clamped to that same scope (see the v964 note in _dashLoadRaw) —
+// deliberately, because getMappedCourseIdSet() fetches per-course GPS counts in
+// chunks of 40 ids, and walking ~14k courses that way is hundreds of sequential
+// round-trips. So the library-wide truth existed nowhere in the app.
+//
+// WHAT THIS DOES. One library-wide pass over course_gps using the PAGED
+// full-table read (500 rows a page, ~30 requests for the whole table) instead of
+// the chunked one. From that single pass: complete / incomplete / in-review /
+// rejected totals, a progress track toward the 100% goal, a per-state bar chart,
+// and two full queues (Incomplete + Code Review Reject) that are searchable,
+// sortable, filterable by state, and whose every row opens the same course detail
+// screen the rest of Admin uses.
+//
+// It is a BIG one-off read, so it is button-triggered (never on Admin open),
+// shows live progress, and is cached in memory for the session.
+let _bgSnap = null;        // { at, ok, total, complete, incomplete, pct, byState, lists }
+let _bgSnapBusy = false;
+
+// Whole-table course_gps read. Same shape getMappedCourseIdSet() returns, but the
+// paged path (which that function only uses for its legacy no-args call) plus a
+// progress callback and an honest scanOk flag — a snapshot built from a half-read
+// table would report mapped courses as unmapped, and we must never claim that.
+async function bgScanAllGps(onProg) {
+  const counts = new Map();
+  counts.fwc = new Map(); counts.need = new Map(); counts.center = new Map();
+  counts.dig = new Map(); counts.unknown = new Set();
+  counts.has = function (id) { return (this.get(id) || 0) >= 18; };
+  counts.scanOk = false;
+  try {
+    if (typeof initSupabase === 'function' && !supaReady) await initSupabase();
+    if (supa && supaOnline) {
+      let from = 0, n = 0, ok = true; const page = 500;
+      for (;;) {
+        const r = await supa.from('course_gps').select('course_id,holes').range(from, from + page - 1);
+        if (r.error) { console.warn('global gps scan page failed', r.error); ok = false; break; }
+        const data = r.data;
+        if (!data || !data.length) break;
+        data.forEach(_storeMappedRow);
+        n += data.length;
+        if (onProg) { try { onProg(n); } catch (e) {} }
+        if (data.length < page) break;
+        from += page;
+        // Yield to the main thread — this runs on Kevin's phone, and 30 back-to-back
+        // JSON parses of 500 hole blobs will jank the UI if we never let go.
+        await new Promise(function (rs) { setTimeout(rs, 0); });
+      }
+      counts.scanOk = ok;
+    }
+  } catch (e) { console.warn('global gps scan failed', e); }
+  try {
+    _adminMappedCache.forEach(function (m, id) {
+      if (!m) return;
+      if (m.holes) counts.set(id, m.holes);
+      if (m.fwc) counts.fwc.set(id, m.fwc);
+      if (m.need != null) counts.need.set(id, m.need);
+      if (m.dig) counts.dig.set(id, m.dig);
+      if (m.center) counts.center.set(id, m.center);
+    });
+  } catch (e) {}
+  return counts;
+}
+
+// Build the library-wide snapshot. Uses the EXACT same predicates the scoped
+// worklist uses (bgCourseStatus via buildAdminWorklist, admin sign-off, and the
+// v1072 rule that a Code Review Reject outranks the automated gates) so the
+// global number and the per-state number can never disagree.
+async function bgBuildGlobalSnapshot(onProg) {
+  const step = function (msg) { if (onProg) { try { onProg(msg); } catch (e) {} } };
+  step('Reading every scorecard…');
+  const saves = await getCourseSavesFreshForAdmin().catch(function () { return {}; });
+  step('Reading every mapped hole…');
+  const mapped = await bgScanAllGps(function (n) {
+    step('Reading every mapped hole… ' + n.toLocaleString() + ' rows');
+  });
+  step('Reading the code review queue…');
+  let cr = []; try { cr = await crReadQueue(); } catch (e) { cr = []; }
+  // Refresh the shared review sets from the same read (identical to what
+  // ensureAdminData does) so the worklist and this snapshot agree.
+  try {
+    const hasC = function (e) { return e && e.course && e.course.id; };
+    _crPendingIds = new Set((cr || []).filter(function (e) { return hasC(e) && e.status !== 'resolved' && e.status !== 'rejected'; }).map(function (e) { return e.course.id; }));
+    _crResolvedIds = new Set((cr || []).filter(function (e) { return hasC(e) && e.status === 'resolved'; }).map(function (e) { return e.course.id; }));
+    _crRejectedIds = new Set((cr || []).filter(function (e) { return hasC(e) && e.status === 'rejected'; }).map(function (e) { return e.course.id; }));
+    _crRejectedNotes = {};
+    (cr || []).forEach(function (e) { if (hasC(e) && e.status === 'rejected' && e.resolutionNote) _crRejectedNotes[e.course.id] = e.resolutionNote; });
+    _crEntryByCourse = {};
+    const _crs = (cr || []).filter(function (e) { return e && e.id && hasC(e); })
+      .sort(function (a, b) { return String(a.createdAt || '').localeCompare(String(b.createdAt || '')); });
+    _crs.forEach(function (e) { _crEntryByCourse[e.course.id] = e.id; });
+    _crs.forEach(function (e) { if (e.status !== 'resolved' && e.status !== 'rejected') _crEntryByCourse[e.course.id] = e.id; });
+  } catch (e) {}
+  step('Crunching the library…');
+  // playCount is only a sort tiebreaker; skip the extra read for the global pass.
+  const work = buildAdminWorklist(saves, mapped, {});
+  // Make the global list the live worklist source so every queue row can open the
+  // normal course detail screen (openCourseDetail looks the item up in _adminWork).
+  try { _adminWork = work; } catch (e) {}
+  // The scoped path re-derives from _adminMappedCache; every id we just read is in
+  // it, so seed the genuine MISSES too and a state pick after this is instant
+  // instead of another chunked walk. Only when the scan completed cleanly — seeding
+  // zeros off a half-read table is exactly the v741 cache-poisoning bug.
+  try {
+    if (mapped.scanOk) {
+      (COURSE_LIBRARY || []).forEach(function (c) {
+        if (!c || !c.id) return;
+        if (!_adminMappedCache.has(c.id)) _adminMappedCache.set(c.id, { holes: 0, fwc: 0, center: null });
+        try {
+          const tn = (typeof tnNines === 'function') ? tnNines(c.id) : null;
+          if (tn) tn.forEach(function (n) { const k = c.id + '#' + n.key; if (!_adminMappedCache.has(k)) _adminMappedCache.set(k, { holes: 0, fwc: 0, center: null }); });
+        } catch (e) {}
+      });
+    }
+  } catch (e) {}
+
+  const rej = function (id) { return !!(_crRejectedIds && _crRejectedIds.has(id)); };
+  const signed = function (id) { return !!(_adminVerified && _adminVerified.has(id)); };
+  const known = function (it) { return !it.countsUnknown; };
+  // v1060: an admin sign-off counts as Complete. v1072: a Code Review Reject
+  // outranks BOTH the gates and an earlier sign-off — it is the most recent human
+  // decision and it says "not done".
+  const isDone = function (it) { return ((known(it) && it.complete) || signed(it.id)) && !rej(it.id); };
+
+  const lists = { incomplete: [], complete: [], rejected: [], review: [], skipped: [] };
+  const byState = {};
+  work.forEach(function (it) {
+    const done = isDone(it);
+    (done ? lists.complete : lists.incomplete).push(it);
+    if (rej(it.id)) lists.rejected.push(it);
+    if (_crPendingIds && _crPendingIds.has(it.id)) lists.review.push(it);
+    if (_adminSkipped && _adminSkipped.has(it.id)) lists.skipped.push(it);
+    const s = it.st || '—';
+    const b = byState[s] || (byState[s] = { st: s, total: 0, complete: 0, incomplete: 0, rejected: 0 });
+    b.total++; if (done) b.complete++; else b.incomplete++;
+    if (rej(it.id)) b.rejected++;
+  });
+  const total = work.length;
+  const complete = lists.complete.length;
+  return {
+    at: Date.now(),
+    ok: !!mapped.scanOk,
+    total: total,
+    complete: complete,
+    incomplete: lists.incomplete.length,
+    rejected: lists.rejected.length,
+    review: lists.review.length,
+    skipped: lists.skipped.length,
+    pct: total ? (complete / total * 100) : 0,
+    byState: Object.keys(byState).map(function (k) { return byState[k]; }),
+    lists: lists
+  };
+}
+
+async function bgLoadGlobalSnapshot(force) {
+  if (_bgSnapBusy) return;
+  if (_bgSnap && !force) { try { renderGlobalSnap(); } catch (e) {} return; }
+  _bgSnapBusy = true;
+  const paint = function (msg) {
+    const el = document.getElementById('adm-globalsnap'); if (!el) return;
+    el.innerHTML = '<div style="border:1px solid var(--border);border-radius:14px;padding:14px;background:var(--surface-2)">'
+      + '<div style="font-weight:800;font-size:16px;margin-bottom:8px">🌎 Building the library snapshot…</div>'
+      + '<div class="bg-inline-load"><span class="sp"></span>' + (msg || 'Starting…') + '</div>'
+      + '<div class="small-text" style="color:var(--text-muted);margin-top:9px;line-height:1.45">This reads every course’s mapped holes once — one big pass instead of a state at a time. It stays cached for the rest of this session; tap ↻ Refresh to re-run it.</div>'
+      + '</div>';
+  };
+  paint('Starting…');
+  try { _bgSnap = await bgBuildGlobalSnapshot(paint); }
+  catch (e) { console.warn('global snapshot failed', e); _bgSnap = null; try { showToast('Snapshot failed — try again'); } catch (e2) {} }
+  _bgSnapBusy = false;
+  try { renderGlobalSnap(); } catch (e) {}
+  // The worklist counts now come off the same fresh data.
+  try { if (_adminStateFilter || _adminSearch) renderAdminWorklist(); } catch (e) {}
+}
+
+// The "fun graph": a fairway from the tee to the pin. The ball sits at the current
+// completion %, the flag is the 100% goal, and the 25/50/75 ticks are the markers.
+function bgSnapTrack(pct) {
+  const p = Math.max(0, Math.min(100, Number(pct) || 0));
+  const ballPct = Math.max(0, Math.min(97, p));
+  const ticks = [25, 50, 75].map(function (t) {
+    return '<div style="position:absolute;left:' + t + '%;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.30)"></div>';
+  }).join('');
+  return '<div style="position:relative;height:34px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border);overflow:hidden">'
+    +   '<div class="bg-snap-fill" style="position:absolute;left:0;top:0;bottom:0;width:' + p.toFixed(1) + '%;background:linear-gradient(90deg,#1f6f43,#2e9e57 55%,#7ac943)"></div>'
+    +   ticks
+    +   '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.6);letter-spacing:.2px">' + p.toFixed(1) + '% to the pin</div>'
+    + '</div>'
+    + '<div style="position:relative;height:22px;margin-top:1px;font-size:15px">'
+    +   '<div style="position:absolute;left:0;top:2px;font-size:12px;color:var(--text-muted);font-weight:700">⛳ tee</div>'
+    +   '<div class="bg-snap-ball" style="position:absolute;left:' + ballPct.toFixed(1) + '%;top:0">🏌️</div>'
+    +   '<div style="position:absolute;right:0;top:0">🏳️</div>'
+    + '</div>';
+}
+
+function renderGlobalSnap() {
+  const el = document.getElementById('adm-globalsnap'); if (!el) return;
+  if (_bgSnapBusy) return;   // the loader owns the box while it is running
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : function (x) { return x; };
+  const stateNames = (typeof US_STATE_NAMES !== 'undefined') ? US_STATE_NAMES : {};
+  if (!_bgSnap) {
+    const libN = (typeof COURSE_LIBRARY !== 'undefined' && COURSE_LIBRARY) ? COURSE_LIBRARY.length : 0;
+    el.innerHTML = '<div style="border:1px solid var(--border);border-radius:14px;padding:14px;background:var(--surface-2)">'
+      + '<div style="font-weight:800;font-size:16px">🌎 Where we stand — whole library</div>'
+      + '<div class="small-text" style="color:var(--text-muted);margin:5px 0 10px;line-height:1.45">Complete vs incomplete across <strong>every state at once</strong>, the full Incomplete and Code Review Reject queues, and our run at 100%. ' + libN.toLocaleString() + ' courses — one big read, then it’s cached.</div>'
+      + '<button id="adm-snap-load" class="adm-act map" style="width:100%;padding:13px;font-size:15px;font-weight:700">📈 Load global snapshot</button>'
+      + '</div>';
+    const b = document.getElementById('adm-snap-load');
+    if (b) b.onclick = function () { bgLoadGlobalSnapshot(true); };
+    return;
+  }
+  const s = _bgSnap;
+  const when = new Date(s.at);
+  const hh = when.getHours(), mm = String(when.getMinutes()).padStart(2, '0');
+  const clock = ((hh % 12) || 12) + ':' + mm + (hh < 12 ? 'am' : 'pm');
+  const tile = function (key, icon, label, n, color, sub) {
+    return '<button class="adm-snap-tile" data-queue="' + key + '" style="flex:1 1 calc(50% - 4px);min-width:132px;min-height:76px;text-align:left;padding:10px 11px;border-radius:12px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer">'
+      + '<div style="font-size:12px;font-weight:700;color:var(--text-muted)">' + icon + ' ' + label + '</div>'
+      + '<div style="font-size:22px;font-weight:800;line-height:1.15;color:' + color + '">' + n.toLocaleString() + '</div>'
+      + '<div class="small-text" style="color:var(--text-muted)">' + sub + '</div>'
+      + '</button>';
+  };
+  const left = Math.max(0, s.total - s.complete);
+  // Per-state bars. Most work left first — that is the order Kevin actually works in.
+  const states = s.byState.slice().sort(function (a, b) { return b.incomplete - a.incomplete || a.st.localeCompare(b.st); });
+  const topStates = states.filter(function (x) { return x.incomplete > 0; }).slice(0, 12);
+  const stateRow = function (x) {
+    const p = x.total ? (x.complete / x.total * 100) : 0;
+    const nm = stateNames[x.st] || x.st;
+    return '<button class="adm-snap-state" data-st="' + (typeof escAttr === 'function' ? escAttr(x.st) : x.st) + '" style="display:block;width:100%;text-align:left;background:transparent;border:none;border-bottom:1px solid var(--border);padding:9px 2px;cursor:pointer;color:var(--text);min-height:44px">'
+      + '<div style="display:flex;align-items:baseline;gap:8px">'
+      +   '<div style="flex:1;min-width:0;font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(nm) + '</div>'
+      +   '<div class="small-text" style="color:var(--text-muted);white-space:nowrap">' + x.complete.toLocaleString() + '/' + x.total.toLocaleString() + ' · <strong style="color:#d98a2b">' + x.incomplete.toLocaleString() + ' left</strong> ›</div>'
+      + '</div>'
+      + '<div style="height:9px;border-radius:999px;background:var(--surface-2);overflow:hidden;margin-top:5px">'
+      +   '<div style="height:100%;width:' + p.toFixed(1) + '%;background:linear-gradient(90deg,#1f6f43,#4caf50)"></div>'
+      + '</div>'
+      + '</button>';
+  };
+  el.innerHTML = '<div style="border:1px solid var(--border);border-radius:14px;padding:14px;background:var(--surface-2)">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">'
+    +   '<div style="flex:1;font-weight:800;font-size:16px">🌎 Where we stand — whole library</div>'
+    +   '<button id="adm-snap-refresh" class="small" style="padding:7px 10px">↻ Refresh</button>'
+    + '</div>'
+    + '<div class="small-text" style="color:var(--text-muted);margin-bottom:10px">All ' + s.byState.length + ' states · as of ' + clock + (s.ok ? '' : ' · ⚠️ partial read — tap Refresh') + '</div>'
+    + '<div style="font-size:12px;font-weight:800;color:var(--text-muted);letter-spacing:.4px;margin-bottom:5px">⛳ THE GOAL: 100% COMPLETE</div>'
+    + bgSnapTrack(s.pct)
+    + '<div class="small-text" style="color:var(--text-muted);margin:6px 0 12px;line-height:1.45"><strong style="color:var(--money-pos)">' + s.complete.toLocaleString() + ' done</strong> · <strong style="color:#d98a2b">' + left.toLocaleString() + ' to go</strong> out of ' + s.total.toLocaleString() + '. ' + (left ? ('Finish ' + left.toLocaleString() + ' more and we’re holing out.') : 'Library complete — that’s the whole card 🏆') + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:8px">'
+    +   tile('incomplete', '🚧', 'Incomplete', s.incomplete, '#d98a2b', 'tap for the full queue')
+    +   tile('complete', '✅', 'Complete', s.complete, 'var(--money-pos)', Math.round(s.pct) + '% of the library')
+    +   tile('rejected', '❌', 'Code Review Reject', s.rejected, '#c0392b', 'sent back — tap for the queue')
+    +   tile('review', '🔎', 'In code review', s.review, 'var(--accent)', 'waiting on a decision')
+    + '</div>'
+    + (topStates.length
+      ? '<div style="margin-top:14px"><div style="font-size:12px;font-weight:800;color:var(--text-muted);letter-spacing:.4px;margin-bottom:2px">📊 MOST WORK LEFT — TAP A STATE</div>'
+        + topStates.map(stateRow).join('')
+        + (states.filter(function (x) { return x.incomplete > 0; }).length > topStates.length
+          ? '<div class="small-text" style="color:var(--text-muted);padding-top:7px">+ ' + (states.filter(function (x) { return x.incomplete > 0; }).length - topStates.length) + ' more state(s) with work left — open the Incomplete queue and sort by state.</div>' : '')
+        + '</div>'
+      : '')
+    + '</div>';
+  { const r = document.getElementById('adm-snap-refresh'); if (r) r.onclick = function () { bgLoadGlobalSnapshot(true); }; }
+  el.querySelectorAll('.adm-snap-tile').forEach(function (b) {
+    b.onclick = function () { try { openAdminQueue(b.getAttribute('data-queue')); } catch (e) { console.warn('queue', e); } };
+  });
+  el.querySelectorAll('.adm-snap-state').forEach(function (b) {
+    b.onclick = function () { try { openAdminQueue('incomplete', b.getAttribute('data-st')); } catch (e) {} };
+  });
+}
+
+// The full queue screen. Searchable, sortable, filterable by state, and every row
+// opens openCourseDetail() — the same screen the worklist cards open, so the
+// existing edit / map / rate / review tools are all one tap away.
+function openAdminQueue(kind, presetState) {
+  if (!_bgSnap) { try { showToast('Load the global snapshot first'); } catch (e) {} return; }
+  const old = document.getElementById('adm-queue-ov'); if (old) old.remove();
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : function (x) { return x; };
+  const ea = (typeof escAttr === 'function') ? escAttr : function (x) { return x; };
+  const stateNames = (typeof US_STATE_NAMES !== 'undefined') ? US_STATE_NAMES : {};
+  const META = {
+    incomplete: { title: '🚧 Incomplete queue', list: 'incomplete', blurb: 'Every course in the library that is not finished — all states at once.' },
+    rejected:   { title: '❌ Code Review Reject queue', list: 'rejected', blurb: 'Sent back in code review. A reject outranks the automated gates — these are not done, whatever the gates say.' },
+    complete:   { title: '✅ Complete', list: 'complete', blurb: 'Passed the gates or signed off by an admin, and not sent back.' },
+    review:     { title: '🔎 In code review', list: 'review', blurb: 'Filed in the code review queue and still waiting on a decision.' }
+  };
+  const meta = META[kind] || META.incomplete;
+  const rows = ((_bgSnap.lists && _bgSnap.lists[meta.list]) || []).slice();
+  let q = '', sort = 'state', stf = presetState || '', show = 0;
+  const PAGE = 60;
+
+  const ov = document.createElement('div');
+  ov.id = 'adm-queue-ov';
+  // Sits BELOW openCourseDetail (z-index 10000) on purpose: tapping a row opens the
+  // detail screen on top, and closing it drops you straight back into the queue.
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9998;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch';
+  const stOpts = [''].concat(Array.from(new Set(rows.map(function (r) { return r.st || ''; }))).filter(Boolean)
+    .sort(function (a, b) { return (stateNames[a] || a).localeCompare(stateNames[b] || b); }));
+  ov.innerHTML = '<div style="max-width:760px;margin:0 auto;padding:calc(12px + env(safe-area-inset-top,0px)) 14px calc(env(safe-area-inset-bottom,16px) + 28px)">'
+    + '<div style="display:flex;align-items:center;gap:8px;position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);padding:8px 0 8px;z-index:3">'
+    +   '<div style="flex:1;min-width:0;font-size:18px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + meta.title + '</div>'
+    +   '<button id="aq-close" aria-label="Close" style="width:40px;height:40px;flex:0 0 auto;border-radius:50%;border:none;background:var(--surface-2);color:var(--text);font-size:18px;font-weight:800;cursor:pointer">✕</button>'
+    + '</div>'
+    + '<div class="small-text" style="color:var(--text-muted);margin-bottom:9px;line-height:1.45">' + esc(meta.blurb) + ' <strong>' + rows.length.toLocaleString() + '</strong> course' + (rows.length === 1 ? '' : 's') + '. Tap any row to open it.</div>'
+    + '<input id="aq-search" type="text" placeholder="Search name, city or state…" style="width:100%;padding:13px 14px;font-size:16px;margin-bottom:8px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:9px">'
+    + '<select id="aq-state" style="width:100%;padding:12px;font-size:16px;min-height:46px;margin-bottom:8px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:9px">'
+    +   stOpts.map(function (s) { return '<option value="' + ea(s) + '"' + (s === stf ? ' selected' : '') + '>' + (s ? esc(stateNames[s] || s) : 'All states') + '</option>'; }).join('')
+    + '</select>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">'
+    +   '<span class="small-text" style="color:var(--text-muted)">Sort:</span>'
+    +   '<button class="aq-sort adm-filter" data-sort="state">🗺️ By state</button>'
+    +   '<button class="aq-sort adm-filter" data-sort="az">🔤 A–Z</button>'
+    +   '<button class="aq-sort adm-filter" data-sort="left">⚡ Closest to done</button>'
+    + '</div>'
+    + '<div id="aq-list"></div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#aq-close').onclick = function () { try { ov.remove(); } catch (e) {} };
+
+  const lbl = { both: 'Needs GPS + ratings', gps: 'Needs GPS', rs: 'Needs ratings', targets: 'Needs targets', done: '✓ Complete', card: 'Needs scorecard' };
+  const draw = function () {
+    const listEl = ov.querySelector('#aq-list'); if (!listEl) return;
+    const terms = q.toLowerCase().split(/[\s,]+/).filter(Boolean);
+    let f = rows.filter(function (it) {
+      if (stf && (it.st || '') !== stf) return false;
+      if (terms.length) {
+        const hay = ((it.name || '') + ' ' + (it.city || '') + ' ' + (it.st || '') + ' ' + (stateNames[it.st] || '') + ' ' + (it.id || '')).toLowerCase();
+        if (!terms.every(function (t) { return hay.includes(t); })) return false;
+      }
+      return true;
+    });
+    if (sort === 'az') f.sort(function (a, b) { return (a.name || '').localeCompare(b.name || '') || (a.st || '').localeCompare(b.st || ''); });
+    else if (sort === 'left') f.sort(function (a, b) {
+      // Closest to done = most greens already mapped, then most complete-looking.
+      const ap = (a.holes || 0) / Math.max(1, a.expHoles || 18), bp = (b.holes || 0) / Math.max(1, b.expHoles || 18);
+      return bp - ap || (a.name || '').localeCompare(b.name || '');
+    });
+    else f.sort(function (a, b) {
+      const an = stateNames[a.st] || a.st || '￿', bn = stateNames[b.st] || b.st || '￿';
+      return String(an).localeCompare(String(bn)) || (a.name || '').localeCompare(b.name || '');
+    });
+    if (!f.length) {
+      listEl.innerHTML = '<div class="help-text" style="padding:22px 0;text-align:center">Nothing matches. ' + (rows.length ? 'Clear the search or the state filter.' : 'This queue is empty 🎉') + '</div>';
+      return;
+    }
+    const cap = Math.min(f.length, Math.max(PAGE, show || 0));
+    let html = '<div class="small-text" style="color:var(--text-muted);margin-bottom:7px">Showing ' + cap.toLocaleString() + ' of ' + f.length.toLocaleString() + '</div>';
+    let lastSt = null;
+    f.slice(0, cap).forEach(function (it) {
+      if (sort === 'state' && (it.st || '') !== lastSt) {
+        lastSt = it.st || '';
+        const cnt = f.filter(function (x) { return (x.st || '') === lastSt; }).length;
+        html += '<div style="position:sticky;top:calc(56px + env(safe-area-inset-top,0px));background:var(--bg);z-index:2;font-weight:800;font-size:13px;color:var(--accent);padding:9px 2px 5px;border-bottom:1px solid var(--border);margin-top:6px">'
+          + esc(stateNames[lastSt] || lastSt || 'No state recorded') + ' <span class="small-text" style="color:var(--text-muted);font-weight:600">' + cnt.toLocaleString() + '</span></div>';
+      }
+      const loc = [it.city, it.st].filter(Boolean).join(', ') || '—';
+      const note = (typeof _crRejectedNotes !== 'undefined' && _crRejectedNotes) ? _crRejectedNotes[it.id] : null;
+      html += '<div class="aq-row" data-id="' + ea(it.id) + '" role="button" style="display:block;padding:11px 12px;margin-top:7px;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);cursor:pointer">'
+        + '<div style="font-weight:700;font-size:14px;line-height:1.3">' + esc(it.displayName || it.name || it.id)
+        +   (it.holesLabel ? ' <span class="adm-flag" style="background:var(--accent)">' + esc(it.holesLabel) + '</span>' : '')
+        +   ((_adminSkipped && _adminSkipped.has(it.id)) ? ' <span class="adm-flag" style="background:#d98a2b">⏭ Skipped</span>' : '')
+        + '</div>'
+        + '<div class="small-text" style="color:var(--text-muted);margin-top:1px">' + esc(loc) + '</div>'
+        + '<div class="adm-badges" style="margin-top:5px">'
+        +   '<span class="adm-flag ' + (it.flag || '') + '"' + (it.flag === 'done' ? ' style="background:var(--money-pos)"' : '') + '>' + (lbl[it.flag] || 'Needs work') + '</span>'
+        +   ((it.holes != null && !it.hasGPS) ? '<span class="adm-flag" style="background:' + ((it.holes > 0) ? '#d98a2b' : 'var(--text-muted)') + '">' + it.holes + '/' + (it.expHoles || 18) + ' mapped</span>' : '')
+        +   ((_crRejectedIds && _crRejectedIds.has(it.id)) ? '<span class="adm-flag" style="background:#c0392b">❌ Sent back</span>' : '')
+        +   ((_crPendingIds && _crPendingIds.has(it.id)) ? '<span class="adm-flag" style="background:var(--accent)">🔎 In review</span>' : '')
+        +   ((_adminVerified && _adminVerified.has(it.id)) ? '<span class="adm-flag" style="background:var(--money-pos)">☑️ Signed off</span>' : '')
+        + '</div>'
+        + (note ? '<div class="small-text" style="margin-top:5px;padding:6px 9px;background:rgba(192,57,43,0.10);border:1px solid rgba(192,57,43,0.30);border-radius:8px;line-height:1.35"><strong style="color:#c0392b">❌ Sent back:</strong> ' + esc(note) + '</div>' : '')
+        + '<div class="small-text" style="margin-top:4px;color:var(--accent);font-weight:700">tap to open ›</div>'
+        + '</div>';
+    });
+    if (cap < f.length) html += '<button id="aq-more" class="adm-act map" style="width:100%;margin-top:10px;padding:12px">Show ' + Math.min(PAGE, f.length - cap) + ' more (' + (f.length - cap).toLocaleString() + ' left)</button>';
+    listEl.innerHTML = html;
+    // Feed the detail screen's Next/Skip sweep with exactly what is on screen.
+    try { _adminOrder = f.map(function (x) { return x.id; }); } catch (e) {}
+    listEl.querySelectorAll('.aq-row').forEach(function (r) {
+      r.onclick = function () { try { openCourseDetail(r.getAttribute('data-id')); } catch (e) { console.warn('open detail', e); } };
+    });
+    { const m = listEl.querySelector('#aq-more'); if (m) m.onclick = function () { show = cap + PAGE; draw(); }; }
+  };
+  const paintSort = function () {
+    ov.querySelectorAll('.aq-sort').forEach(function (b) {
+      if (b.getAttribute('data-sort') === sort) b.classList.add('active'); else b.classList.remove('active');
+    });
+  };
+  ov.querySelector('#aq-search').oninput = function (e) { q = e.target.value || ''; show = 0; draw(); };
+  ov.querySelector('#aq-state').onchange = function (e) { stf = e.target.value || ''; show = 0; draw(); };
+  ov.querySelectorAll('.aq-sort').forEach(function (b) {
+    b.onclick = function () { sort = b.getAttribute('data-sort'); show = 0; paintSort(); draw(); };
+  });
+  paintSort();
+  draw();
+}
+// ===== end v1075 global snapshot ===========================================
+
 async function renderAdmin() {
   const guard = document.getElementById('admin-guard');
   const body = document.getElementById('admin-body');
@@ -10823,6 +11228,10 @@ async function renderAdmin() {
   let html = '';
   // ---- Dashboard ----
   html += '<button id="adm-dash-toggle" class="adm-act map" style="width:100%;margin-bottom:12px;padding:13px;font-size:15px;font-weight:700">📊 Admin dashboard</button>';
+  // v1075: library-wide snapshot + the two full queues (Incomplete / Code Review
+  // Reject). Renders a Load button first — the pass is a big one-off read, so it is
+  // never fired automatically on Admin open. See bgBuildGlobalSnapshot().
+  html += '<div id="adm-globalsnap" style="margin-bottom:14px"></div>';
   // ---- Spectate any active round (admin only) ----
   html += '<h3 style="margin:4px 0 2px">👀 Spectate any round</h3>';
   html += '<div class="help-text" style="margin-bottom:8px">Watch any live round — not just your friends\'. Tap Spectate, then switch players inside the GPS view.</div>';
@@ -10864,6 +11273,7 @@ async function renderAdmin() {
   body.innerHTML = html;
   const dashBtn = document.getElementById('adm-dash-toggle');
   if (dashBtn) dashBtn.onclick = () => { try { openAdminDashboard(); } catch (e) { console.warn('dash', e); } };
+  try { renderGlobalSnap(); } catch (e) { console.warn('global snapshot', e); }   // v1075
   try { renderAdminSpectate(); } catch (e) {}
   { const _sr = document.getElementById('adm-spectate-refresh'); if (_sr) _sr.onclick = () => { try { renderAdminSpectate(); } catch (e) {} }; }
   try { renderAdminLockBar(); } catch (e) {}   // v880
