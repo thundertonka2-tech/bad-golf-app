@@ -8019,7 +8019,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1062';
+const BG_BUILD = 'v2026.11.1063';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -9690,6 +9690,14 @@ function renderAdminUserList() {
 // Session cache of per-course mapped-hole info so the admin never refetches the
 // same course twice (course_id -> { holes, fwc, center }).
 let _adminMappedCache = new Map();
+// v1063 (Tyler, after the Alaska recount): ids whose course_gps counts could NOT be
+// read on the last pass. See getMappedCourseIdSet below — a chunk that errors or comes
+// back empty used to fall through and render as "Not mapped · 0/18", which is a LIE:
+// we don't know. A small state fits in ONE 40-id chunk, so a single blip turned the
+// whole state red (AK read 14 incomplete when the database had 0). Unknown is now its
+// own state: excluded from every count, shown as "Counts unavailable", auto-retried.
+let _adminCountsUnknown = new Set();
+let _adminCountsRetryPending = false;
 // v882 (Kevin, via Tyler): "In admin it says 27. When I click I only get the choice
 // of a certain 18... I just opened again and the mapping is messed up. Might need to
 // figure a way I can go map all 3 separate."
@@ -9903,6 +9911,7 @@ async function getMappedCourseIdSet(ids) {
   counts.need = new Map();
   counts.center = new Map();
   counts.dig = new Map();          // v975: per-hole GPS digest, so the list can use bgCountGps
+  counts.unknown = new Set();      // v1063: ids we could not read this pass — NOT "zero"
   counts.has = function (id) { return (this.get(id) || 0) >= 18; };
   try {
     if (!supaReady) await initSupabase();
@@ -9942,16 +9951,32 @@ async function getMappedCourseIdSet(ids) {
             if (error) { console.warn('mapped hole-count chunk failed — retry', error); }
             await new Promise(rs => setTimeout(rs, 350));
           }
-          if (error) { continue; }                 // hard error — retry on the next load
-          if (!data || !data.length) { continue; } // empty response — treat as transient, don't poison
+          // v1063: a chunk we could not read is UNKNOWN, not empty. Flag every id in it
+          // so the list can say so out loud instead of showing a fake 0/18.
+          if (error) { chunk.forEach(id => _adminCountsUnknown.add(id)); continue; }
+          if (!data || !data.length) { chunk.forEach(id => _adminCountsUnknown.add(id)); continue; }
           data.forEach(_storeMappedRow);
-          chunk.forEach(id => { if (!_adminMappedCache.has(id)) _adminMappedCache.set(id, { holes: 0, fwc: 0, center: null }); });
+          chunk.forEach(id => { _adminCountsUnknown.delete(id); if (!_adminMappedCache.has(id)) _adminMappedCache.set(id, { holes: 0, fwc: 0, center: null }); });
         }
       }
     }
   } catch (e) { console.warn('mapped hole-count fetch failed', e); }
   const wanted = Array.isArray(ids) ? ids : Array.from(_adminMappedCache.keys());
   wanted.forEach(id => { const m = _adminMappedCache.get(id); if (!m) return; if (m.holes) counts.set(id, m.holes); if (m.fwc) counts.fwc.set(id, m.fwc); if (m.need != null) counts.need.set(id, m.need); if (m.dig) counts.dig.set(id, m.dig); if (m.center) counts.center.set(id, m.center); });
+  // v1063: hand the unknowns to the list, and quietly try them ONCE more a few seconds
+  // later (network blips are short) so the admin usually never has to reload at all.
+  try {
+    wanted.forEach(id => { if (_adminCountsUnknown.has(id)) counts.unknown.add(id); });
+    if (counts.unknown.size && !_adminCountsRetryPending) {
+      _adminCountsRetryPending = true;
+      const _retryIds = Array.from(counts.unknown);
+      setTimeout(async () => {
+        try { await getMappedCourseIdSet(_retryIds); } catch (e) {}
+        _adminCountsRetryPending = false;
+        try { if (typeof _adminDataReady !== 'undefined') _adminDataReady = false; renderAdminWorklist(); } catch (e) {}
+      }, 4000);
+    }
+  } catch (e) {}
   return counts;
 }
 
@@ -10055,7 +10080,18 @@ function buildAdminWorklist(saves, mappedSet, playCount) {
     const flag = _st.flag;
     const st = lib.st || (typeof courseStateCode === 'function' ? courseStateCode(lib) : '') || '';
     const _cen = (mappedSet && mappedSet.center && typeof mappedSet.center.get === 'function') ? mappedSet.center.get(id) : null;
-    items.push({ id, name, displayName: dispName, holesLabel: holesLabel, city: lib.city || '', st, hasGPS, hasRS, complete, flag, holes, fwcCount, targetsNeeded, targetsComplete, needsTargets: hasGPS && !targetsComplete, expHoles: _expH, nineProg: nineProg, pop: playCount[name.toLowerCase()] || 0,
+    // v1063: did we actually READ this course's mapping this pass? A three-nine is
+    // unknown if any of its nines is.
+    let _cu = false;
+    try {
+      const _unk = (mappedSet && mappedSet.unknown && typeof mappedSet.unknown.has === 'function') ? mappedSet.unknown : null;
+      if (_unk) {
+        _cu = _unk.has(id);
+        const _nn = tnNines(id);
+        if (!_cu && _nn) _cu = _nn.some(n => _unk.has(id + '#' + n.key));
+      }
+    } catch (e) {}
+    items.push({ id, name, displayName: dispName, holesLabel: holesLabel, city: lib.city || '', st, hasGPS, hasRS, complete, flag, countsUnknown: _cu, holes, fwcCount, targetsNeeded, targetsComplete, needsTargets: hasGPS && !targetsComplete, expHoles: _expH, nineProg: nineProg, pop: playCount[name.toLowerCase()] || 0,
       lat: (typeof lib.lat === 'number' ? lib.lat : (_cen ? _cen.lat : null)), lng: (typeof lib.lng === 'number' ? lib.lng : (_cen ? _cen.lng : null)) });
   });
   // Partially-mapped courses first (closest to done — quickest to finish), most
@@ -10311,17 +10347,22 @@ function renderAdminWorklist() {
   });
   // Filters are action-oriented: "Needs mapping" = EVERY course without full GPS,
   // "Needs ratings" = mapped courses missing rating/slope, "Skipped" = parked ones.
-  const cNoMap = base.filter(it => !it.hasGPS && (it.holes || 0) === 0).length;   // no GPS at all
-  const cPartial = base.filter(it => !it.hasGPS && (it.holes || 0) > 0).length;   // some holes, not all 18
+  // v1063: a course whose counts we could not read is NOT evidence of anything — it is
+  // excluded from every mapping-derived tally. Rating/slope comes from the scorecard, not
+  // course_gps, so cRate is unaffected.
+  const _known = it => !it.countsUnknown;
+  const cUnknown = base.filter(it => it.countsUnknown).length;
+  const cNoMap = base.filter(it => _known(it) && !it.hasGPS && (it.holes || 0) === 0).length;   // no GPS at all
+  const cPartial = base.filter(it => _known(it) && !it.hasGPS && (it.holes || 0) > 0).length;   // some holes, not all 18
   const cRate = base.filter(it => !it.hasRS).length;                              // missing rating/slope
-  const cTargets = base.filter(it => it.hasGPS && !it.targetsComplete).length;     // mapped greens, missing fairway targets
+  const cTargets = base.filter(it => _known(it) && it.hasGPS && !it.targetsComplete).length;     // mapped greens, missing fairway targets
   // v1060: an admin sign-off now counts as Complete rather than being its own state,
   // so the chips add up to the library instead of double-counting.
-  const cComplete = base.filter(it => it.complete || _adminVerified.has(it.id)).length;
+  const cComplete = base.filter(it => (_known(it) && it.complete) || _adminVerified.has(it.id)).length;
   const cVerified = base.filter(it => _adminVerified.has(it.id)).length;           // manually verified by an admin
   const cReviewed = scopeItems.filter(it => _crResolvedIds.has(it.id)).length;     // resolved in Kevin's code-review queue (final-verification bucket)
   const cRejected = scopeItems.filter(it => _crRejectedIds.has(it.id)).length;     // rejected in the code-review queue
-  const cIncomplete = base.filter(it => !it.complete && !_adminVerified.has(it.id)).length;   // v755: single "needs work" bucket
+  const cIncomplete = base.filter(it => _known(it) && !it.complete && !_adminVerified.has(it.id)).length;   // v755: single "needs work" bucket
   const chip = (key, label, n) => '<button class="adm-filter' + (f === key ? ' active' : '') + '" data-filter="' + key + '">' + label + ' (' + n + ')</button>';
   const sortBtn = (key, label) => '<button class="adm-filter' + (_adminSort === key ? ' active' : '') + '" data-sort="' + key + '">' + label + '</button>';
   const chipsHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px">'
@@ -10329,6 +10370,7 @@ function renderAdminWorklist() {
     + chip('done', '✅ Complete', cComplete)
     + chip('reviewed', '🏁 Code Review Complete', cReviewed)
     + chip('rejected', '❌ Code Review Reject', cRejected) + '</div>'
+    + (cUnknown ? '<div class="small-text" style="margin:0 0 8px;padding:7px 10px;background:rgba(217,138,43,0.12);border:1px solid rgba(217,138,43,0.35);border-radius:8px;line-height:1.35"><strong>⚠️ ' + cUnknown + ' course' + (cUnknown === 1 ? "'s" : "s'") + ' mapping counts could not be loaded</strong> — they are left out of the counts above rather than shown as unmapped. Retrying automatically; pull to reload if they stay.</div>' : '')
     + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px;align-items:center">'
     + '<span class="small-text" style="color:var(--text-muted)">Sort:</span>'
     + sortBtn('worklist', '⚑ Incomplete first')
@@ -10346,12 +10388,13 @@ function renderAdminWorklist() {
   // Which items to show. The Skipped bucket shows parked courses (regardless of
   // complete), still respecting the state filter so they can be reviewed by state.
   const matchFilter = it => {
-    if (f === 'incomplete') return !it.complete && !_adminVerified.has(it.id);   // not done and not signed off
-    if (f === 'nomap') return !it.hasGPS && (it.holes || 0) === 0;     // never mapped
-    if (f === 'partial') return !it.hasGPS && (it.holes || 0) > 0;     // some holes, not all 18
+    // v1063: unknown counts belong in no mapping bucket — they show under "All".
+    if (f === 'incomplete') return _known(it) && !it.complete && !_adminVerified.has(it.id);   // not done and not signed off
+    if (f === 'nomap') return _known(it) && !it.hasGPS && (it.holes || 0) === 0;     // never mapped
+    if (f === 'partial') return _known(it) && !it.hasGPS && (it.holes || 0) > 0;     // some holes, not all 18
     if (f === 'rate') return !it.hasRS;                               // missing rating/slope
-    if (f === 'targets') return it.hasGPS && !it.targetsComplete;      // mapped greens, missing fairway targets
-    if (f === 'done') return it.complete || _adminVerified.has(it.id);   // done, or signed off by an admin
+    if (f === 'targets') return _known(it) && it.hasGPS && !it.targetsComplete;      // mapped greens, missing fairway targets
+    if (f === 'done') return (_known(it) && it.complete) || _adminVerified.has(it.id);   // done, or signed off by an admin
     if (f === 'verified') return _adminVerified.has(it.id);           // admin-verified
     if (f === 'reviewed') return _crResolvedIds.has(it.id);           // resolved in code-review queue
     if (f === 'rejected') return _crRejectedIds.has(it.id);           // rejected in code-review queue
@@ -10401,7 +10444,9 @@ function renderAdminWorklist() {
     + filt.slice(0, cap).map(it => {
       const left = (it.expHoles || 18) - (it.holes || 0);
       // GPS status pill: partial (some holes done — quick to finish) vs full.
-      const gpsPill = !it.hasGPS
+      const gpsPill = it.countsUnknown
+        ? '<span class="adm-flag" style="background:#d98a2b">Counts unavailable ↻</span>'
+        : !it.hasGPS
         ? (it.holes > 0
           ? '<span class="adm-flag adm-jump" data-jump="gpsmiss" data-jid="' + ea(it.id) + '" style="background:#d98a2b;cursor:pointer">Partial · ' + it.holes + '/' + (it.expHoles||18) + ' \u203A</span>'
           : '<span class="adm-flag adm-jump" data-jump="gps" data-jid="' + ea(it.id) + '" style="background:var(--text-muted);cursor:pointer">Not mapped · 0/' + (it.expHoles||18) + ' \u203A</span>')
@@ -10410,8 +10455,8 @@ function renderAdminWorklist() {
         : (it.holes > 0 ? '🗺️ Map ' + left + ' more hole' + (left === 1 ? '' : 's') : '🗺️ Map this course');
       // v751: the status badge itself deep-links to the exact editor for what's
       // missing (greens / fairway targets / rating), bypassing the detail landing.
-      const _jk = (it.flag === 'rs') ? 'rate' : ((it.flag === 'targets') ? 'targets' : ((it.flag === 'gps' || it.flag === 'both') ? 'gps' : ''));
-      const badge = '<span class="adm-flag ' + it.flag + (_jk ? ' adm-jump' : '') + '"' + (it.flag === 'done' ? ' style="background:var(--money-pos)"' : (_jk ? ' data-jump="' + _jk + '" data-jid="' + ea(it.id) + '" style="cursor:pointer"' : '')) + '>' + lbl[it.flag] + (_jk ? ' \u203A' : '') + '</span>'
+      const _jk = it.countsUnknown ? '' : ((it.flag === 'rs') ? 'rate' : ((it.flag === 'targets') ? 'targets' : ((it.flag === 'gps' || it.flag === 'both') ? 'gps' : '')));
+      const badge = (it.countsUnknown ? '<span class="adm-flag" style="background:var(--text-muted)">Mapping not read — retrying</span>' : '') + '<span class="adm-flag ' + it.flag + (_jk ? ' adm-jump' : '') + '"' + (it.flag === 'done' ? ' style="background:var(--money-pos)"' : (_jk ? ' data-jump="' + _jk + '" data-jid="' + ea(it.id) + '" style="cursor:pointer"' : '')) + '>' + lbl[it.flag] + (_jk ? ' \u203A' : '') + '</span>'
         + (_adminVerified.has(it.id) ? ' <span class="adm-flag" style="background:var(--money-pos)">✅ Complete</span>' : '')
         + ((_crPendingIds && _crPendingIds.has(it.id)) ? ' <span class="adm-flag" style="background:#d98a2b">🔎 Code Review</span>' : '');
       // Clean tappable card — the whole card opens the course detail screen
