@@ -8019,7 +8019,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1064';
+const BG_BUILD = 'v2026.11.1065';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -14140,7 +14140,7 @@ async function _mergeGameForWrite(local, opts) {
         local.players = local.players.map(lp => (cloud.players.find(p => p && p.id === lp.id) || lp));
         cloud.players.forEach(cp => { if (cp && !(_rmPids && _rmPids.has(cp.id)) && !local.players.some(p => p && p.id === cp.id)) local.players.push(cp); });
       }
-      ['games', 'hcpRules', 'pars', 'sis', 'tees', 'teeYards', 'unranked', 'nineMode', 'trackPutts', 'trackGirs', 'trackFairways', 'trackPenalties', 'trackSands', 'naturalBoost', 'hydration'].forEach(k => {
+      ['games', 'hcpRules', 'pars', 'sis', 'tees', 'teeYards', 'teePars', 'teeSis', 'unranked', 'nineMode', 'trackPutts', 'trackGirs', 'trackFairways', 'trackPenalties', 'trackSands', 'naturalBoost', 'hydration'].forEach(k => {
         if (cloud[k] === undefined) return;
         if (k === 'games') {
           // Cloud wins per game, BUT keep a locally-stamped tournament fieldOnly game
@@ -16724,7 +16724,9 @@ async function archiveScoresFromRound(g) {
       trackedSands: !!g.trackSands && !_isClr('sandData'),
       scoreMix,
       holeScores: Array.isArray(arr) ? arr.map(v => (v == null ? null : v)) : null,
-      pars: Array.isArray(g.pars) ? g.pars.slice() : null,
+      // v1065: store the par/SI THIS player actually played to, not the card.
+      pars: Array.isArray(g.pars) ? g.pars.map((_v, _i) => parFor(g, p.id, _i)) : null,
+      sisPlayed: Array.isArray(g.sis) ? g.sis.map((_v, _i) => siFor(g, p.id, _i)) : null,
       gameCode: g.code || null,
       // v902: stamp the tournament id so the trophy on Home / Saved rounds works
       // offline and keeps working after the tournament_groups rows are gone.
@@ -25131,6 +25133,84 @@ function netHoleScore(grossScore, playerHcp, holeSi, par, rules, nHoles) {
   return grossScore - strokesOnHole(playerHcp, holeSi, par, rules, nHoles);
 }
 
+// ── v1065: PER-TEE PAR + STROKE INDEX ──────────────────────────────────────
+// Ladies' and senior tees legitimately print a DIFFERENT par than the men's
+// tees on the same scorecard. USGA sets par by effective playing length and
+// the yardage boundaries differ by gender (men par-4 = 251-470 yds; women
+// par-4 = 211-400), so a 420-yard hole is genuinely par 4 for men and par 5
+// for women. Many cards also rank their stroke index differently per tee.
+//
+// Storage mirrors the existing g.teeYards shape exactly: { teeLabel: [18] }.
+// A tee with no override is absent from the map and falls back to the card,
+// so every existing course keeps working untouched.
+//
+// ALWAYS route a PLAYER-context par/SI read through parFor/siFor. Card-level
+// reads (the hole header, GPS, closest-to-pin gates, the admin editors) keep
+// using g.pars/g.sis directly - those are shared, not per-player.
+function _bgTeeArr(g, map, pid) {
+  try {
+    if (!g || !map) return null;
+    var ps = g.players || [];
+    var p = null;
+    for (var i = 0; i < ps.length; i++) { if (ps[i] && ps[i].id === pid) { p = ps[i]; break; } }
+    if (!p) return null;
+    var lbl = p.teeLabel;
+    // Single-tee course: players may have no explicit label (gatherSetup only
+    // forces one when there is a choice) - fall back to the only tee.
+    if (!lbl && Array.isArray(g.tees) && g.tees.length === 1) lbl = g.tees[0].label;
+    if (!lbl) return null;
+    var a = map[lbl];
+    return Array.isArray(a) ? a : null;
+  } catch (e) { return null; }
+}
+// Par on hole `i` (0-based) as printed on THIS player's tee.
+function parFor(g, pid, i) {
+  var a = _bgTeeArr(g, g && g.teePars, pid);
+  if (a && a[i] != null) return a[i];
+  return (g && g.pars) ? g.pars[i] : null;
+}
+// Stroke index on hole `i` (0-based) as printed on THIS player's tee.
+// Load-bearing: SI decides which holes a player pops on, so a differently
+// ranked ladies' card reallocates every stroke.
+function siFor(g, pid, i) {
+  var a = _bgTeeArr(g, g && g.teeSis, pid);
+  if (a && a[i] != null) return a[i];
+  return (g && g.sis) ? g.sis[i] : null;
+}
+// Total par from this player's tee - drives the WHS course-handicap term
+// (Rating - Par). A ladies' card at par 73 vs a men's 71 is a 2-stroke swing.
+function parTotalFor(g, pid) {
+  var a = _bgTeeArr(g, g && g.teePars, pid);
+  var src = a || (g && g.pars) || [];
+  var t = 0;
+  for (var i = 0; i < src.length; i++) t += (src[i] || 0);
+  return t;
+}
+// Build a { teeLabel: [18] } map from a scorecard's tees[] for key `k`
+// ('pars' or 'sis'). Only tees that actually carry an override appear.
+function _bgTeeMapFrom(tees, k, nHoles) {
+  var out = {};
+  if (!Array.isArray(tees)) return out;
+  for (var i = 0; i < tees.length; i++) {
+    var t = tees[i];
+    if (!t || !t.label || !Array.isArray(t[k])) continue;
+    if (nHoles && t[k].length !== nHoles) continue;
+    out[t.label] = t[k].slice();
+  }
+  return out;
+}
+// Remap every tee's array through the same transform applied to the card when
+// a round is played as front9 / back9 / a repeated nine. Without this a
+// 9-hole round silently falls back to card par for everyone.
+function _bgTeeMapRemap(map, fn) {
+  var out = {};
+  try {
+    for (var k in map) { if (!Object.prototype.hasOwnProperty.call(map, k)) continue;
+      var v = fn(map[k]); if (Array.isArray(v)) out[k] = v; }
+  } catch (e) { return map || {}; }
+  return out;
+}
+
 // Effective handicap for a player given current game rules. Returns 0 when:
 //   - the global "no handicaps" rule is on, OR
 //   - this player has the per-player "plays gross" toggle on
@@ -27929,6 +28009,9 @@ async function selectCourseById(id) {
       teesToShow = [{ label: 'Back', rating: saved.rating, slope: saved.slope }];
     }
     renderTeesList(teesToShow);
+    // v1065: per-tee par/SI overrides ride along on the tee objects.
+    state.courseTeePars = _bgTeeMapFrom(teesToShow, 'pars', (saved.pars || []).length);
+    state.courseTeeSis  = _bgTeeMapFrom(teesToShow, 'sis',  (saved.sis  || []).length);
     // Collapse par+SI grids AND tees into compact summaries — saved scorecards
     // rarely need editing, so the big grids and tee table are visual clutter.
     collapseScorecardSummary(saved.pars, saved.sis, teesToShow);
@@ -30620,7 +30703,15 @@ function gatherSetup() {
       // Index × (Slope ÷ 113) + (Rating − Par), rounded. computeCourseHcp
       // falls back to Math.round(index) when the tee has no rating/slope.
       const teeObj = tees.find(t => t.label === teeLabel) || (tees.length === 1 ? tees[0] : null);
-      const courseHcp = computeCourseHcp(hcpIndex, teeObj, parTotal);
+      // v1065: use the par total printed on THIS player's tee. WHS course
+      // handicap is Index x Slope/113 + (Rating - Par); a ladies' card at
+      // par 73 against a men's 71 shifts this player by a full 2 strokes.
+      let _parTotalP = parTotal;
+      try {
+        const _tp = teeObj && Array.isArray(teeObj.pars) ? teeObj.pars : null;
+        if (_tp && _tp.length === pars.length) _parTotalP = _tp.reduce((a, b) => a + (b || 0), 0);
+      } catch (e) {}
+      const courseHcp = computeCourseHcp(hcpIndex, teeObj, _parTotalP);
       players.push({
         id: playerId,
         puid: row.dataset.puid, // stable row id — keys team assignments (name-edit safe)
@@ -31300,7 +31391,7 @@ function gatherSetup() {
 
   let hydrationCfg = null;
   try { if (typeof readHydrationFromForm === 'function') hydrationCfg = readHydrationFromForm(); } catch (e) { console.warn('hydration read failed:', e); }
-  return { course, pars, sis, tees, players, games, hcpRules, unranked, warnings: _setupWarnings, noCourse: !courseNamed, trackPutts: !!($('track-putts') && $('track-putts').checked), trackGirs: !!($('track-girs') && $('track-girs').checked), trackFairways: !!($('track-fairways') && $('track-fairways').checked), trackPenalties: !!($('track-penalties') && $('track-penalties').checked), trackSands: !!($('track-sands') && $('track-sands').checked), naturalBoost: !!($('natural-boost') && $('natural-boost').checked), nineMode: ($('nine-mode') && $('nine-mode').value) || 'all18', hydration: hydrationCfg };
+  return { course, pars, sis, tees, teePars: _bgTeeMapFrom(tees, 'pars', pars.length), teeSis: _bgTeeMapFrom(tees, 'sis', sis.length), players, games, hcpRules, unranked, warnings: _setupWarnings, noCourse: !courseNamed, trackPutts: !!($('track-putts') && $('track-putts').checked), trackGirs: !!($('track-girs') && $('track-girs').checked), trackFairways: !!($('track-fairways') && $('track-fairways').checked), trackPenalties: !!($('track-penalties') && $('track-penalties').checked), trackSands: !!($('track-sands') && $('track-sands').checked), naturalBoost: !!($('natural-boost') && $('natural-boost').checked), nineMode: ($('nine-mode') && $('nine-mode').value) || 'all18', hydration: hydrationCfg };
 }
 
 // ============================================================
@@ -31334,7 +31425,18 @@ function renderScoreEntry() {
   _bgWatchSyncSoon();   // keep the paired Apple Watch on this hole/score
   const h = state.currentHole;
   $('cur-hole').textContent = h;
-  $('cur-par').textContent = g.pars[h - 1];
+  // v1065: with mixed tees a single number is a lie - show every par in play.
+  (function () {
+    var _seen = [];
+    try {
+      (g.players || []).forEach(function (p) {
+        var v = parFor(g, p.id, h - 1);
+        if (v != null && _seen.indexOf(v) < 0) _seen.push(v);
+      });
+    } catch (e) { _seen = []; }
+    if (_seen.length > 1) _seen.sort(function (a, b) { return a - b; });
+    $('cur-par').textContent = _seen.length ? _seen.join(' / ') : g.pars[h - 1];
+  })();
   $('cur-si').textContent = g.sis ? g.sis[h - 1] : '—';
 
   // Re-Map Hole button (manually-mapped courses only, until 3 rounds lock it).
@@ -31390,7 +31492,7 @@ function renderScoreEntry() {
     // Build individual score rows
     g.players.forEach(p => {
       const score = (g.scores[p.id] && g.scores[p.id][h - 1] != null) ? g.scores[p.id][h - 1] : null;
-      const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[h - 1], g.pars[h - 1], g.hcpRules) : 0;
+      const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, h - 1), parFor(g, p.id, h - 1), g.hcpRules) : 0;
       const row = document.createElement('div');
       row.className = 'score-entry';
       // v625 CONSENT: show waiting/declined state and dim the stepper (writes
@@ -32028,7 +32130,7 @@ function renderGameBanners() {
           const birds = g.players.filter(p => {
             const s = (g.scores[p.id] && g.scores[p.id][h - 1] != null) ? g.scores[p.id][h - 1] : null;
             if (s === null) return false;
-            const bb = (cfg.birdieBasis === 'net' && g.sis) ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h - 1], g.pars[h - 1], g.hcpRules) : s;
+            const bb = (cfg.birdieBasis === 'net' && g.sis) ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h - 1), parFor(g, p.id, h - 1), g.hcpRules) : s;
             return bb <= par - 1;
           });
           if (birds.length === 0) return '';
@@ -32388,12 +32490,12 @@ function renderGameBanners() {
           const t1Scores = t1Players.map(p => {
             const s = (g.scores[p.id] && g.scores[p.id][sh] != null) ? g.scores[p.id][sh] : null;
             if (s === null) return null;
-            return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[sh], g.pars[sh], g.hcpRules) : s;
+            return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, sh), parFor(g, p.id, sh), g.hcpRules) : s;
           });
           const t2Scores = t2Players.map(p => {
             const s = (g.scores[p.id] && g.scores[p.id][sh] != null) ? g.scores[p.id][sh] : null;
             if (s === null) return null;
-            return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[sh], g.pars[sh], g.hcpRules) : s;
+            return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, sh), parFor(g, p.id, sh), g.hcpRules) : s;
           });
           if (t1Scores.some(x => x === null) || t2Scores.some(x => x === null)) {
             complete = false;
@@ -33746,7 +33848,7 @@ function girStatusFor(g, pid, h) {
     const s = g.scores && g.scores[pid] ? g.scores[pid][h - 1] : null;
     const pu = g.puttsData && g.puttsData[pid] ? g.puttsData[pid][h - 1] : null;
     if (s == null || pu == null) return null;
-    return (s - pu) <= (g.pars[h - 1] - 2);
+    return (s - pu) <= (parFor(g, pid, h - 1) - 2); // v1065: their tee par
   }
   const gd = g.girData && g.girData[pid];
   if (!gd) return null;
@@ -34394,7 +34496,7 @@ function announceStrokes(leaving, localSuppress){
     const si = (g.sis && g.sis[leaving - 1] != null) ? g.sis[leaving - 1] : null;
     if (si == null) return;
     const par = g.pars ? g.pars[leaving - 1] : null;
-    const any = (g.players || []).some(p => strokesOnHole(effectiveHcp(p, rules), si, par, rules) > 0);
+    const any = (g.players || []).some(p => strokesOnHole(effectiveHcp(p, rules), siFor(g, p.id, leaving - 1), parFor(g, p.id, leaving - 1), rules) > 0);
     if (!any) return;
     g.strokeHole = { hole: leaving, at: Date.now() };
     try { saveGame(g); } catch (e) {}
@@ -34427,7 +34529,7 @@ async function reactToStrokeAnnounce(localSuppress){
       }
     } catch (e) {}
     if (!meP) return; // no linked player → can't say "you"
-    const strokes = strokesOnHole(effectiveHcp(meP, rules), si, par, rules);
+    const strokes = strokesOnHole(effectiveHcp(meP, rules), siFor(g, meP.id, hole - 1), parFor(g, meP.id, hole - 1), rules);
     if (strokes <= 0) return;
     const sub = 'Hole ' + hole + (strokes > 1 ? ' — ' + strokes + ' strokes here. Net is on your side.' : ' — net is on your side here.');
     showFunPopup({ img: 'stroke_popup.JPG', title: 'You get a stroke!', sub, fallbackEmoji: '⛳' });
@@ -35125,7 +35227,7 @@ function calcTotals(g) {
       if (s !== null && s !== undefined) {
         gross += s;
         count++;
-        const ns = g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : s;
+        const ns = g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, i), parFor(g, p.id, i), g.hcpRules) : s;
         net += ns;
         if (i < 9) { front += s; frontCount++; }
         else { back += s; backCount++; }
@@ -35272,7 +35374,7 @@ function calcSkins(g) {
     const si = g.sis[h];
     const scores = participants.map(p => {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
-      const net = raw != null ? netHoleScore(raw, _skHcp(p), si, par, g.hcpRules) : null;
+      const net = raw != null ? netHoleScore(raw, _skHcp(p), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : null;
       return { pid: p.id, name: p.name, score: raw, netScore: net, hcp: p.hcp };
     });
     const allScored = scores.every(s => s.score !== null);
@@ -35290,7 +35392,7 @@ function calcSkins(g) {
     if (require !== 'none') {
       winners = winners.filter(w => {
         const checkScore = require === 'net' ? w.netScore : w.score;
-        return checkScore != null && checkScore <= par;
+        return checkScore != null && checkScore <= parFor(g, w.pid, h); // v1065: their tee par
       });
     }
 
@@ -35299,7 +35401,7 @@ function calcSkins(g) {
     // tied player who only got there with a handicap stroke. Only birdies/eagles
     // trump — a tie of pars (or worse) is unaffected.
     if (g.naturalBoost && winners.length > 1) {
-      const natural = winners.filter(w => w.score != null && w.score <= par - 1);
+      const natural = winners.filter(w => w.score != null && w.score <= parFor(g, w.pid, h) - 1); // v1065: their tee par
       if (natural.length > 0 && natural.length < winners.length) winners = natural;
     }
 
@@ -35453,8 +35555,8 @@ function pairwiseStandings(g, aId, bId, fromHole, toHole, useNet) {
     if (aScore == null || bScore == null) continue;
     holesPlayed++;
     const _nH = roundHoles(g);
-    const aNet = (useNet === false) ? aScore : netHoleScore(aScore, effectiveHcp(a, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules, _nH);
-    const bNet = (useNet === false) ? bScore : netHoleScore(bScore, effectiveHcp(b, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules, _nH);
+    const aNet = (useNet === false) ? aScore : netHoleScore(aScore, effectiveHcp(a, g.hcpRules), siFor(g, a.id, idx), parFor(g, a.id, idx), g.hcpRules, _nH);
+    const bNet = (useNet === false) ? bScore : netHoleScore(bScore, effectiveHcp(b, g.hcpRules), siFor(g, b.id, idx), parFor(g, b.id, idx), g.hcpRules, _nH);
     aStrokes += aNet;
     bStrokes += bNet;
     if (aNet < bNet) aHolesWon++;
@@ -35545,7 +35647,7 @@ function groupStrokeStandings(g, playerIds, fromHole, toHole, useNet) {
       const raw = arr[idx];
       if (raw == null) continue;
       holesPlayed++;
-      net += (useNet === false) ? raw : netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules, roundHoles(g));
+      net += (useNet === false) ? raw : netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, idx), parFor(g, p.id, idx), g.hcpRules, roundHoles(g));
     }
     return { id: p.id, name: p.name, net, holesPlayed };
   });
@@ -35752,8 +35854,8 @@ function calcNassau(g) {
               const bRaw = (g.scores[b.id] || [])[idx];
               if (aRaw == null || bRaw == null) continue;
               hp++;
-              aStr += (useNet === false) ? aRaw : netHoleScore(aRaw, effectiveHcp(a, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
-              bStr += (useNet === false) ? bRaw : netHoleScore(bRaw, effectiveHcp(b, g.hcpRules), g.sis[idx], g.pars[idx], g.hcpRules);
+              aStr += (useNet === false) ? aRaw : netHoleScore(aRaw, effectiveHcp(a, g.hcpRules), siFor(g, a.id, idx), parFor(g, a.id, idx), g.hcpRules);
+              bStr += (useNet === false) ? bRaw : netHoleScore(bRaw, effectiveHcp(b, g.hcpRules), siFor(g, b.id, idx), parFor(g, b.id, idx), g.hcpRules);
             }
             if (hp > 0) {
               if (aStr === bStr) {
@@ -36041,7 +36143,7 @@ function calcStroke(g) {
     const arr = g.scores[p.id] || [];
     let net = 0;
     const _nH = roundHoles(g);
-    arr.forEach((s, i) => { if (s != null && s !== undefined) net += (g.sis ? netHoleScore(s, hcp, g.sis[i], g.pars[i], g.hcpRules, _nH) : s); });
+    arr.forEach((s, i) => { if (s != null && s !== undefined) net += (g.sis ? netHoleScore(s, hcp, siFor(g, p.id, i), parFor(g, p.id, i), g.hcpRules, _nH) : s); });
     return net;
   };
   const score = p => cfg.net ? _netAllow(p) : totals[p.id].gross;
@@ -36098,7 +36200,7 @@ function bankerStandingsThrough(g, throughHole) {
     _bParts.forEach(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return;
-      const bBasis = (cfg.net && g.sis) ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+      const bBasis = (cfg.net && g.sis) ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
       if (bBasis <= par - 1) {
         birdiesByPlayer[p.id] = true;
         anyoneBirdie = true;
@@ -36126,8 +36228,8 @@ function bankerStandingsThrough(g, throughHole) {
       const wager = pBet * mult;
       let bn = bankerScore, pn = s;
       if (cfg.net && g.sis) {
-        bn = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
-        pn = netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
+        bn = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), siFor(g, banker.id, h), parFor(g, banker.id, h), g.hcpRules);
+        pn = netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules);
       }
       if (bn < pn) { money[banker.id] += wager; money[p.id] -= wager; }
       else if (pn < bn) { money[banker.id] -= wager; money[p.id] += wager; }
@@ -36198,8 +36300,8 @@ function computeBankerAutoPress(g) {
       if (s === null) return;
       let bn = bankerScore, pn = s;
       if (cfg.net && g.sis) {
-        bn = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
-        pn = netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
+        bn = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), siFor(g, banker.id, h), parFor(g, banker.id, h), g.hcpRules);
+        pn = netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules);
       }
       if (pn < bn) { streak[p.id] = 0; }
       else if (bn < pn) { streak[p.id] = (streak[p.id] || 0) + 1; }
@@ -36279,7 +36381,7 @@ function calcBanker(g) {
     participants.forEach(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return;
-      const bBasis = _useNetBirdie ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+      const bBasis = _useNetBirdie ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
       if (bBasis <= par - 1) { birdiesByPlayer[p.id] = true; anyoneBirdie = true; }
       if (bBasis <= par - 2) { eaglesByPlayer[p.id] = true; anyoneEagle = true; }
     });
@@ -36323,8 +36425,8 @@ function calcBanker(g) {
       let bankerNet = bankerScore;
       let playerNet = s;
       if (cfg.net && g.sis) {
-        bankerNet = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
-        playerNet = netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
+        bankerNet = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), siFor(g, banker.id, h), parFor(g, banker.id, h), g.hcpRules);
+        playerNet = netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules);
       }
       let outcome = 'tie';
       if (bankerNet < playerNet) {
@@ -36419,7 +36521,7 @@ function calcVegas(g) {
     function getScore(p, useNet) {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      if (useNet && g.sis) return netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
+      if (useNet && g.sis) return netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules);
       return s;
     }
     const aScores = teamA.map(p => getScore(p, cfg.net));
@@ -36591,7 +36693,7 @@ function calcDynamicVegas(g) {
   function getScore(p, h, useNet) {
     const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
     if (s === null) return null;
-    if (useNet && g.sis) return netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules);
+    if (useNet && g.sis) return netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules);
     return s;
   }
 
@@ -36783,12 +36885,12 @@ function calcSixes(g) {
       const aScores = teamA.map(p => {
         const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
         if (s === null) return null;
-        return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+        return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
       });
       const bScores = teamB.map(p => {
         const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
         if (s === null) return null;
-        return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+        return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
       });
       if (aScores.some(s => s === null) || bScores.some(s => s === null)) { complete = false; continue; }
       aScore += Math.min(...aScores);
@@ -36849,7 +36951,7 @@ function calcSplixSixes(g) {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (raw === null) return null;
       return cfg.net && g.sis
-        ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules)
+        ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules)
         : raw;
     });
 
@@ -37014,10 +37116,11 @@ function calcStableford(g) {
     participants.forEach(p => {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (raw === null) { holeResult[p.id] = null; return; }
+      const _par = parFor(g, p.id, h); // v1065: points come off THIS player's tee par
       const score = cfg.net && g.sis
-        ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], par, g.hcpRules)
+        ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), _par, g.hcpRules)
         : raw;
-      holeResult[p.id] = Math.max(0, 2 - (score - par));
+      holeResult[p.id] = Math.max(0, 2 - (score - _par));
       points[p.id] += holeResult[p.id];
       anyScored = true;
     });
@@ -37145,7 +37248,7 @@ function computeQuotaPoints(g, cfg, participants) {
       // target (36 − handicap), so applying net strokes per hole too would
       // double-count the handicap. Net option removed in v2026.11.268.
       const score = raw;
-      const pts = quotaPointsForHole(score, par);
+      const pts = quotaPointsForHole(score, parFor(g, p.id, h)); // v1065: their tee par
       hr[p.id] = pts;
       points[p.id] += pts;
       any = true;
@@ -37411,12 +37514,12 @@ function calcRyderCup(g) {
       const aScores = teamA.map(p => {
         const raw = (g.scores[p.id] && g.scores[p.id][hi] != null) ? g.scores[p.id][hi] : null;
         if (raw === null) return null;
-        return cfg.net && g.sis ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[hi], g.pars[hi], g.hcpRules) : raw;
+        return cfg.net && g.sis ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, hi), parFor(g, p.id, hi), g.hcpRules) : raw;
       });
       const bScores = teamB.map(p => {
         const raw = (g.scores[p.id] && g.scores[p.id][hi] != null) ? g.scores[p.id][hi] : null;
         if (raw === null) return null;
-        return cfg.net && g.sis ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[hi], g.pars[hi], g.hcpRules) : raw;
+        return cfg.net && g.sis ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, hi), parFor(g, p.id, hi), g.hcpRules) : raw;
       });
       // v985 (T8): BEST BALL only - a partner who picked up doesn't void the hole.
       const aVals = aScores.filter(s => s !== null), bVals = bScores.filter(s => s !== null);
@@ -37692,8 +37795,8 @@ function calcMatch(g) {
       const aRaw = (g.scores[a.id] && g.scores[a.id][h] != null) ? g.scores[a.id][h] : null;
       const bRaw = (g.scores[b.id] && g.scores[b.id][h] != null) ? g.scores[b.id][h] : null;
       if (aRaw === null || bRaw === null) continue;
-      const aSc = (useNet && g.sis) ? netHoleScore(aRaw, effectiveHcp(a, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : aRaw;
-      const bSc = (useNet && g.sis) ? netHoleScore(bRaw, effectiveHcp(b, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : bRaw;
+      const aSc = (useNet && g.sis) ? netHoleScore(aRaw, effectiveHcp(a, g.hcpRules), siFor(g, a.id, h), parFor(g, a.id, h), g.hcpRules) : aRaw;
+      const bSc = (useNet && g.sis) ? netHoleScore(bRaw, effectiveHcp(b, g.hcpRules), siFor(g, b.id, h), parFor(g, b.id, h), g.hcpRules) : bRaw;
       played++;
       let res = 'halve';
       if (aSc < bSc) { aUp++; res = 'a'; }
@@ -37784,12 +37887,12 @@ function calcTeamMatch(g) {
     const aScores = teamA.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
     });
     const bScores = teamB.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
     });
     // v985 (T8): in BEST BALL a player picking up is normal - the partner's ball
     // IS the team score. Voiding the whole hole threw away a partner's birdie,
@@ -37853,7 +37956,7 @@ function calcTeamLowball4man(g, cfg) {
     const scores = team.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
     });
     // v985 (T8): one team-mate picking up no longer deletes the hole from the
     // 4-man team total that the field standings rank on.
@@ -37889,12 +37992,12 @@ function calcTeamLowball(g) {
     const aScores = teamA.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
     });
     const bScores = teamB.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
-      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : s;
+      return cfg.net && g.sis ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
     });
     // v985 (T8): see calcTeamMatch - only void the hole when a whole side is blank.
     const aVals = aScores.filter(s => s !== null), bVals = bScores.filter(s => s !== null);
@@ -38078,7 +38181,8 @@ function calcBirdiePool(g) {
     participants.forEach(p => {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (raw == null) return;
-      const basis = _useNetBP ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], par, g.hcpRules) : raw;
+      const _par = parFor(g, p.id, h); // v1065: this player's tee par
+      const basis = _useNetBP ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), _par, g.hcpRules) : raw;
       let kind = null;
       let amount = 0;
       // v973 (Tyler code review): a hole-in-one claimed the score and then bailed
@@ -38089,10 +38193,10 @@ function calcBirdiePool(g) {
       if (raw === 1 && (Number(cfg.hio) || 0) > 0) {
         kind = 'HIO';
         amount = Number(cfg.hio) || 0;
-      } else if (basis - par <= -2 && (Number(cfg.eagle) || 0) > 0) {
+      } else if (basis - _par <= -2 && (Number(cfg.eagle) || 0) > 0) {
         kind = 'Eagle';
         amount = Number(cfg.eagle) || 0;
-      } else if (basis - par <= -1) {
+      } else if (basis - _par <= -1) {
         // v983 (Tyler code review): the v973 ace fix removed this swallow at the
         // HIO tier only — the SAME one survived at Eagle. An eagle with the Eagle
         // box left blank claimed the score, hit the `amount === 0` guard below and
@@ -38214,9 +38318,9 @@ function _bgPoolStats(g, players, hcpPct) {
       const s = sc[h];
       if (s == null) continue;
       scored++;
-      const par = pars ? pars[h] : 4;
+      const par = parFor(g, p.id, h); // v1065: this player's tee par
       net += (sis && typeof netHoleScore === 'function')
-        ? netHoleScore(s, fullHcp, sis[h], par, g.hcpRules || null)
+        ? netHoleScore(s, fullHcp, siFor(g, p.id, h), par, g.hcpRules || null)
         : s;
       const pu = (g.puttsData && g.puttsData[p.id]) ? g.puttsData[p.id][h] : null;
       if (pu != null) { putts += Number(pu) || 0; puttHoles++; }
@@ -38533,7 +38637,7 @@ function calcNiners(g) {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (raw === null) return null;
       return cfg.net && g.sis
-        ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules)
+        ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules)
         : raw;
     });
     if (scores.some(s => s === null)) { holePoints.push(null); continue; }
@@ -38614,7 +38718,7 @@ function calcHighLow(g) {
   const teamB = cfg.teamB.map(id => g.players.find(p => p.id === id)).filter(Boolean);
   if (teamA.length !== teamB.length || teamA.length === 0) return _bgDropBet('highLow', 'uneven teams — a player was probably removed mid-round');   // v983
   const value = cfg.value || 0;
-  const netOf = (p, raw, h) => (cfg.net && g.sis) ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : raw;
+  const netOf = (p, raw, h) => (cfg.net && g.sis) ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : raw;
   let aPts = 0, bPts = 0, played = 0, complete = true;
   for (let h = 0; h < 18; h++) {
     const aRaw = teamA.map(p => (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null);
@@ -38664,7 +38768,7 @@ function calcUmbrella(g) {
   if (teamA.length !== 2 || teamB.length !== 2) return _bgDropBet('umbrella', 'uneven teams — a player was probably removed mid-round');   // v983
   const money = {}; g.players.forEach(p => money[p.id] = 0);
   const value = cfg.value || 0;
-  const netOf = (p, raw, h) => (cfg.net && g.sis) ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], g.pars[h], g.hcpRules) : raw;
+  const netOf = (p, raw, h) => (cfg.net && g.sis) ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : raw;
   let aPts = 0, bPts = 0, played = 0, complete = true, umbrellas = 0;
   const holeRows = [];
   for (let h = 0; h < 18; h++) {
@@ -38742,7 +38846,7 @@ function calcPotOfGold(g) {
     const holeVal = baseVal + incoming;
     const scored = participants.map(p => {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
-      const net = raw != null ? (useNet ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), si, par, g.hcpRules) : raw) : null;
+      const net = raw != null ? (useNet ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : raw) : null;
       return { pid: p.id, name: p.name, raw, net };
     });
     const allScored = scored.every(s => s.raw !== null);
@@ -38867,9 +38971,9 @@ function calcAnimals(g) {
   participants.forEach(p => {
     for (let h = 0; h < 18; h++) {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
-      const par = (g.pars && g.pars[h] != null) ? g.pars[h] : null;
+      const par = parFor(g, p.id, h); // v1065: this player's tee par
       if (raw == null || par == null) continue;
-      const basis = _useNetAN ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], par, g.hcpRules) : raw;
+      const basis = _useNetAN ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), par, g.hcpRules) : raw;
       const d = basis - par;
       if (d <= -3) points[p.id] += 8;
       else if (d === -2) points[p.id] += 4;
@@ -38907,9 +39011,9 @@ function calcMarks(g) {
   participants.forEach(p => {
     for (let h = 0; h < 18; h++) {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
-      const par = (g.pars && g.pars[h] != null) ? g.pars[h] : null;
+      const par = parFor(g, p.id, h); // v1065: this player's tee par
       if (raw == null || par == null) continue;
-      const basis = _useNetMK ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), g.sis[h], par, g.hcpRules) : raw;
+      const basis = _useNetMK ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), par, g.hcpRules) : raw;
       const d = basis - par;
       if (d <= -3) points[p.id] += 10;
       else if (d === -2) points[p.id] += 5;
@@ -39105,8 +39209,8 @@ function calcHammer(g) {
     if (s == null) return null;
     if (!useNet) return s;
     const p = players.find(x => x.id === pid);
-    const si = g.sis ? g.sis[h - 1] : 0;
-    const par = g.pars ? g.pars[h - 1] : 4;
+    const si = p ? siFor(g, p.id, h - 1) : (g.sis ? g.sis[h - 1] : 0);
+    const par = p ? parFor(g, p.id, h - 1) : (g.pars ? g.pars[h - 1] : 4);
     const str = (typeof strokesOnHole === 'function') ? strokesOnHole(effectiveHcp(p, rules), si, par, rules) : 0;
     return s - str;
   };
@@ -39964,8 +40068,8 @@ function _t2NetArray(g, p) {
   const net = new Array(18).fill(null), gross = new Array(18).fill(null); let thru = 0;
   for (let h = 0; h < 18; h++) {
     const s = sc[h]; if (s == null) continue;
-    const par = pars ? pars[h] : 4; gross[h] = s;
-    net[h] = (sis && typeof netHoleScore === 'function') ? netHoleScore(s, (typeof effectiveHcp === 'function' ? effectiveHcp(p, rules) : (p.hcp || 0)), sis[h], par, rules) : s;
+    const par = parFor(g, p.id, h); gross[h] = s; // v1065: this player's tee par
+    net[h] = (sis && typeof netHoleScore === 'function') ? netHoleScore(s, (typeof effectiveHcp === 'function' ? effectiveHcp(p, rules) : (p.hcp || 0)), siFor(g, p.id, h), par, rules) : s;
     thru++;
   }
   return { net: net, gross: gross, thru: thru };
@@ -42148,7 +42252,7 @@ function buildStackedScorecardHtml(g, fieldSkinMap) {
       const penArr = (g.trackPenalties && g.penaltiesData && g.penaltiesData[p.id]) || [];
       let tot = 0, any = false;
       let row = '<tr><td class="pn">' + (typeof displayFirst === 'function' ? displayFirst(p) : (p.name || '?')) + '</td>';
-      cols.forEach(i => { const s = arr[i]; if (s != null) { tot += s; any = true; } const _pen = penArr[i]; const _ps = _pen ? '<sup style="color:var(--money-neg);font-size:8px">+' + _pen + '</sup>' : ''; const _strk = (g.sis && typeof strokesOnHole === 'function') ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0; const _dot = _strk > 0 ? '<span class="sc-stroke-dot"></span>' : ''; row += '<td style="position:relative">' + _dot + (s != null ? skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id])) + _ps : '–') + '</td>'; });
+      cols.forEach(i => { const s = arr[i]; if (s != null) { tot += s; any = true; } const _pen = penArr[i]; const _ps = _pen ? '<sup style="color:var(--money-neg);font-size:8px">+' + _pen + '</sup>' : ''; const _strk = (g.sis && typeof strokesOnHole === 'function') ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, i), parFor(g, p.id, i), g.hcpRules) : 0; const _dot = _strk > 0 ? '<span class="sc-stroke-dot"></span>' : ''; row += '<td style="position:relative">' + _dot + (s != null ? skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id])) + _ps : '–') + '</td>'; });
       row += '<td class="tot">' + (any ? tot : '–') + '</td></tr>';
       h += row;
     });
@@ -42326,7 +42430,7 @@ function buildRoundScorecardHtml(g, fieldSkinMap) {
       for (let i = 0; i < 18; i++) {
         const s = (arr[i] != null) ? arr[i] : null;
         let strokes = 0;
-        try { strokes = (g.sis && typeof strokesOnHole === 'function') ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0; } catch (e) {}
+        try { strokes = (g.sis && typeof strokesOnHole === 'function') ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, i), parFor(g, p.id, i), g.hcpRules) : 0; } catch (e) {}
         const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
         const won = !!(skinMap[i] && skinMap[i][p.id]);
         const wonF = !!(fMap[i] && fMap[i][p.id]);   // v897: tournament field skin → gold
@@ -42452,7 +42556,7 @@ function renderScorecard(g, totals, fieldSkinMap) {
       let out = 0, inT = 0;
       for (let i = 0; i < 9; i++) {
         const s = arr[i];
-        const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0;
+        const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, i), parFor(g, p.id, i), g.hcpRules) : 0;
         const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
         if (s != null) { out += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id]))}</td>`; }
         else html += `<td style="position:relative">${dot}—</td>`;
@@ -42460,7 +42564,7 @@ function renderScorecard(g, totals, fieldSkinMap) {
       html += `<td class="total">${out || '—'}</td>`;
       for (let i = 9; i < 18; i++) {
         const s = arr[i];
-        const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], g.pars[i], g.hcpRules) : 0;
+        const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, i), parFor(g, p.id, i), g.hcpRules) : 0;
         const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
         if (s != null) { inT += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id]))}</td>`; }
         else html += `<td style="position:relative">${dot}—</td>`;
@@ -60324,8 +60428,8 @@ function t2ComputeCrossGroupMatches(t, rows) {
       const netA = new Array(18).fill(null), grossA = new Array(18).fill(null); let thru = 0;
       for (let h = 0; h < 18; h++) {
         const s = sc[h]; if (s == null) continue;
-        const par = pars ? pars[h] : 4; grossA[h] = s;
-        netA[h] = (sis && typeof netHoleScore === 'function') ? netHoleScore(s, (typeof effectiveHcp === 'function' ? effectiveHcp(p, rules) : (p.hcp || 0)), sis[h], par, rules, _nH) : s;
+        const par = parFor(g, p.id, h); grossA[h] = s; // v1065: this player's tee par
+        netA[h] = (sis && typeof netHoleScore === 'function') ? netHoleScore(s, (typeof effectiveHcp === 'function' ? effectiveHcp(p, rules) : (p.hcp || 0)), siFor(g, p.id, h), par, rules, _nH) : s;
         thru++;
       }
       if (!thru) return;
@@ -60694,8 +60798,8 @@ function t2ComputeFieldNassau(rows, cfg) {
       const net = new Array(18).fill(null); let thru = 0;
       for (let h = 0; h < 18; h++) {
         const s = sc[h]; if (s == null) continue;
-        const par = pars ? pars[h] : 4;
-        net[h] = netHoleScore(s, (p.hcp != null ? p.hcp : 0), sis[h], par, rules, _nH); thru++;
+        const par = parFor(g, p.id, h); // v1065: this player's tee par
+        net[h] = netHoleScore(s, (p.hcp != null ? p.hcp : 0), siFor(g, p.id, h), par, rules, _nH); thru++;
       }
       if (!thru) return;
       const k = nmk(p.name); const cur = byDay[day].parts[k];
@@ -60798,8 +60902,8 @@ function t2ComputeFieldSkins(rows, cfg) {
       const net = new Array(18).fill(null); let thru = 0;
       for (let h = 0; h < 18; h++) {
         const s = sc[h]; if (s == null) continue;
-        const par = pars ? pars[h] : 4;
-        net[h] = netHoleScore(s, _skHcp(p, rules), sis[h], par, rules, _nH); thru++;
+        const par = parFor(g, p.id, h); // v1065: this player's tee par
+        net[h] = netHoleScore(s, _skHcp(p, rules), siFor(g, p.id, h), par, rules, _nH); thru++;
       }
       if (!thru) return;
       const k = nmk(p.name); const cur = byDay[day].parts[k];
@@ -61048,8 +61152,8 @@ function t2ComputeFieldSidePots(rows, cfg) {
         for (let h = 0; h < 18; h++) {
           const s = sc[h]; if (s == null) continue;
           scored++;
-          const par = pars ? pars[h] : 4;
-          net += (sis ? netHoleScore(s, fullHcp, sis[h], par, g.hcpRules || null, _nH) : s);
+          const par = parFor(g, p.id, h); // v1065: this player's tee par
+          net += (sis ? netHoleScore(s, fullHcp, siFor(g, p.id, h), par, g.hcpRules || null, _nH) : s);
           const pu = (g.puttsData && g.puttsData[p.id]) ? g.puttsData[p.id][h] : null;
           if (pu != null) {
             putts += Number(pu) || 0; puttHoles++;
@@ -63271,7 +63375,7 @@ function _t2BuildFieldScorecardHtml(rawRounds, headerG, fieldSkinMap, fieldPlaye
       let out = 0, inT = 0;
       for (let i = 0; i < 9; i++) {
         const s = arr[i];
-        const strokes = rg.sis ? strokesOnHole(effectiveHcp(p, rg.hcpRules), rg.sis[i], rg.pars[i], rg.hcpRules) : 0;
+        const strokes = rg.sis ? strokesOnHole(effectiveHcp(p, rg.hcpRules), siFor(rg, p.id, i), parFor(rg, p.id, i), rg.hcpRules) : 0;
         const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
         if (s != null) { out += s; html += '<td style="position:relative">' + dot + skinMark(s, rg.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id])) + '</td>'; }
         else html += '<td style="position:relative">' + dot + '—</td>';
@@ -63279,7 +63383,7 @@ function _t2BuildFieldScorecardHtml(rawRounds, headerG, fieldSkinMap, fieldPlaye
       html += '<td class="total">' + (out || '—') + '</td>';
       for (let i = 9; i < 18; i++) {
         const s = arr[i];
-        const strokes = rg.sis ? strokesOnHole(effectiveHcp(p, rg.hcpRules), rg.sis[i], rg.pars[i], rg.hcpRules) : 0;
+        const strokes = rg.sis ? strokesOnHole(effectiveHcp(p, rg.hcpRules), siFor(rg, p.id, i), parFor(rg, p.id, i), rg.hcpRules) : 0;
         const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
         if (s != null) { inT += s; html += '<td style="position:relative">' + dot + skinMark(s, rg.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id])) + '</td>'; }
         else html += '<td style="position:relative">' + dot + '—</td>';
@@ -66612,6 +66716,8 @@ async function init() {
       sis: setup.sis,
       tees: Array.isArray(setup.tees) ? setup.tees : [],
       teeYards: state.courseTeeYards || {}, // per-tee hole yardages for the GPS tee-box readout
+      teePars: setup.teePars || {}, // v1065: per-tee par overrides (ladies'/senior cards)
+      teeSis: setup.teeSis || {},   // v1065: per-tee stroke-index overrides
       players: setup.players,
       games: setup.games,
       hcpRules: setup.hcpRules,
@@ -66641,9 +66747,17 @@ async function init() {
     if (setup.nineMode === 'f9x2') {
       game.pars = setup.pars.slice(0, 9).concat(setup.pars.slice(0, 9));
       game.sis = setup.sis.slice(0, 9).concat(setup.sis.slice(0, 9));
+      // v1065: per-tee overrides must follow the SAME remap or they silently
+      // stop applying and every player falls back to the card.
+      const _f9 = a => a.slice(0, 9).concat(a.slice(0, 9));
+      game.teePars = _bgTeeMapRemap(game.teePars, _f9);
+      game.teeSis  = _bgTeeMapRemap(game.teeSis,  _f9);
     } else if (setup.nineMode === 'b9x2') {
       game.pars = setup.pars.slice(9).concat(setup.pars.slice(9));
       game.sis = setup.sis.slice(9).concat(setup.sis.slice(9));
+      const _b9 = a => a.slice(9).concat(a.slice(9));
+      game.teePars = _bgTeeMapRemap(game.teePars, _b9);
+      game.teeSis  = _bgTeeMapRemap(game.teeSis,  _b9);
     } else if ((setup.nineMode === 'front9' || setup.nineMode === 'back9')
                && Array.isArray(setup.pars) && setup.pars.length >= 18) {
       // Play ONLY one nine of a regulation 18-hole course. Slice pars/SI to the
@@ -66654,6 +66768,10 @@ async function init() {
       const _from = (setup.nineMode === 'front9') ? 0 : 9;
       game.pars  = setup.pars.slice(_from, _from + 9);
       game.sis   = setup.sis.slice(_from, _from + 9);
+      // v1065: slice every tee override to the same nine.
+      const _sl9 = a => a.slice(_from, _from + 9);
+      game.teePars = _bgTeeMapRemap(game.teePars, _sl9);
+      game.teeSis  = _bgTeeMapRemap(game.teeSis,  _sl9);
       game.holes = 9;
       // The exact front/back rating split isn't stored on 18-hole courses, so the
       // 9-hole tee rating is approximated as half the 18 rating (standard when only
@@ -67466,9 +67584,9 @@ async function init() {
         const s = arr[i];
         if (s == null) continue;
         played++;
-        const par = (g.pars && g.pars[i] != null) ? g.pars[i] : 4;
+        const par = parFor(g, p.id, i); // v1065: this player's tee par
         let st = 0;
-        try { st = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), g.sis[i], par, g.hcpRules) : 0; } catch (e) {}
+        try { st = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, i), par, g.hcpRules) : 0; } catch (e) {}
         const adj = Math.min(s, par + 2 + (st > 0 ? st : 0));   // WHS net double bogey cap
         if (i < 9) { grossF += s; adjF += adj; } else { grossB += s; adjB += adj; }
       }
@@ -77493,6 +77611,18 @@ async function courseDataImport(file, stateFilter, override, force) {
       // v219: course-level per-hole pars / stroke index, read once per course.
       if (!g.pars) { const _p = read18(r, PARS, ['par'], 3, 6); if (_p) g.pars = _p; }
       if (!g.sis) { const _s = read18(r, SIS, ['si', 'hcp', 'handicap'], 1, 18); if (_s) g.sis = _s; }
+      // v1065: PER-TEE par / stroke index. Ladies' and senior tees legitimately
+      // print a different par than the men's tees on the same card (USGA sets par
+      // by effective playing length and the yardage boundaries differ by gender),
+      // and frequently a different stroke index. A row whose pars/SI differ from
+      // the course card attaches them to ITS OWN tee; a row that matches the card
+      // adds nothing, so existing single-par courses import exactly as before.
+      try {
+        const _tp = read18(r, PARS, ['par'], 3, 6);
+        if (_tp && g.pars && JSON.stringify(_tp) !== JSON.stringify(g.pars)) t.pars = _tp;
+        const _ts = read18(r, SIS, ['si', 'hcp', 'handicap'], 1, 18);
+        if (_ts && g.sis && JSON.stringify(_ts) !== JSON.stringify(g.sis)) t.sis = _ts;
+      } catch (e) {}
       teeRows++;
     });
     let groupList = Object.values(groups);
