@@ -31,6 +31,12 @@ workflows:
       cache_paths:
         - $CM_BUILD_DIR/node_modules
         - $HOME/Library/Caches/CocoaPods
+        # ~/.cocoapods/repos/trunk is the CDN *index* (the podspec shards).
+        # Without it every build re-downloads that index from
+        # raw.githubusercontent.com, which is what returned 429 Too Many
+        # Requests on 2026-08-17 and killed the v1067 build. Caching it means
+        # most builds never touch GitHub for pod metadata at all.
+        - $HOME/.cocoapods
     scripts:
       - name: Install npm dependencies
         script: npm install
@@ -70,7 +76,20 @@ workflows:
         script: |
           npx --yes @capacitor/assets generate --ios
       - name: Capacitor sync (copies web app + plugins into the native project)
-        script: npx cap sync ios
+        script: |
+          # `cap sync` shells out to `pod install`, so a transient CocoaPods CDN
+          # 429 (GitHub rate-limiting the shared CI IPs) fails the build here
+          # before anything of ours runs. Retry with backoff instead of dying.
+          n=0
+          until npx cap sync ios; do
+            n=$((n+1))
+            if [ $n -ge 4 ]; then
+              echo "cap sync still failing after $n attempts - giving up."
+              exit 1
+            fi
+            echo "cap sync failed (usually a CocoaPods CDN 429) - retry $n of 3 in $((n*45))s"
+            sleep $((n*45))
+          done
       - name: Add privacy + export-compliance keys to Info.plist
         script: |
           PLIST="ios/App/App/Info.plist"
@@ -156,7 +175,18 @@ workflows:
           ruby ios-config/add_widget_target.rb
       - name: Install CocoaPods dependencies
         script: |
-          cd ios/App && pod install
+          # Same CDN-429 retry as the Capacitor sync step above.
+          cd ios/App
+          n=0
+          until pod install; do
+            n=$((n+1))
+            if [ $n -ge 4 ]; then
+              echo "pod install still failing after $n attempts - giving up."
+              exit 1
+            fi
+            echo "pod install failed (usually a CocoaPods CDN 429) - retry $n of 3 in $((n*45))s"
+            sleep $((n*45))
+          done
       - name: Set up code signing (reuse the stored key -> one cert, forever)
         script: |
           keychain initialize
