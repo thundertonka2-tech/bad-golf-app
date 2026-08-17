@@ -3316,6 +3316,12 @@
         <div id="home-my-hcp"><div class="help-text">Loading…</div></div>
       </div>
 
+      <!-- v1079: HOME COURSE, on the Home page where Tyler looked for it. This
+           card is the feature's front door: prominent while unset (it replaces
+           the one-time popup that could never be relied on), compact once set.
+           Rendered by _bgRenderHomeCourseCard(). -->
+      <div class="card" id="home-course-card" style="display:none"></div>
+
       <!-- Rounds you've been invited to or have scheduled, PLUS your completed round
            history (all-time, newest first) — capped at 5 with a "Show all" expand. -->
       <!-- v895 (Tyler): Crew highlights + message board, pulled OUT of the "Live now"
@@ -8036,7 +8042,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1078';
+const BG_BUILD = 'v2026.11.1079';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -35770,6 +35776,7 @@ function _bgRefreshHomeAwayViews() {
   try { if (typeof loadRounds === 'function') loadRounds(); } catch (e) {}
   try { if (typeof renderHomeInvites === 'function') renderHomeInvites(); } catch (e) {}
   try { _bgRenderHomeCourseRow(); } catch (e) {}
+  try { _bgRenderHomeCourseCard(); } catch (e) {}   // v1079
 }
 // true = home, false = away, null = can't tell (no home course set, or no course
 // on the row). null is what keeps this invisible for anyone who never sets one.
@@ -35856,6 +35863,45 @@ function _bgRenderHomeCourseRow() {
   } catch (e) {}
 }
 
+// v1079: the Home-page home-course card. Prominent while unset (this is what
+// makes the feature discoverable at all), compact once set. No timers, no
+// guards, no one-time flag — it simply renders every time Home renders, which
+// is why it succeeds where the popup failed.
+function _bgRenderHomeCourseCard() {
+  try {
+    var card = document.getElementById('home-course-card');
+    if (!card) return;
+    var hc = getMyHomeCourse();
+    if (hc && hc.name) {
+      card.style.display = 'block';
+      card.innerHTML =
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<div style="font-size:20px;line-height:1">\u{1F3E0}</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div class="small-text" style="color:var(--text-muted);font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase">Home course</div>' +
+            '<div style="font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(hc.name) + '</div>' +
+          '</div>' +
+          '<button class="small" id="bg-home-course-change" style="flex:0 0 auto">Change</button>' +
+        '</div>';
+      var ch = card.querySelector('#bg-home-course-change');
+      if (ch) ch.onclick = function () { try { openHomeCoursePicker({ onDone: _bgRenderHomeCourseCard, onCancel: _bgRenderHomeCourseCard }); } catch (e) {} };
+    } else {
+      card.style.display = 'block';
+      card.innerHTML =
+        '<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">' +
+          '<div style="font-size:22px;line-height:1">\u{1F3E0}</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-weight:800;font-size:15px">Set your home course</div>' +
+            '<div class="help-text" style="margin:3px 0 0">Your rounds get a \u{1F3E0} at home and an \u2708\uFE0F away, and new rounds start on your home course automatically.</div>' +
+          '</div>' +
+        '</div>' +
+        '<button class="primary full" id="bg-home-course-set">Choose my home course</button>';
+      var st = card.querySelector('#bg-home-course-set');
+      if (st) st.onclick = function () { try { openHomeCoursePicker({ onDone: _bgRenderHomeCourseCard, onCancel: _bgRenderHomeCourseCard }); } catch (e) {} };
+    }
+  } catch (e) {}
+}
+
 // One-time, fully skippable nudge for anyone who has no home course yet.
 function showHomeCourseOnboard() {
   try {
@@ -35883,30 +35929,52 @@ function showHomeCourseOnboard() {
   } catch (e) {}
 }
 
-// Same shape as maybePromptPaySetup: never interrupts a live round, a deep link
-// or another modal, and never burns the one-time flag before it actually asks.
-function maybePromptHomeCourse(attempt) {
+// v1079 REWRITE. The v1066 version bailed the moment ANY .modal-overlay.show was
+// on screen, retried twice (~21s) and then gave up silently for the rest of the
+// session. At boot the sign-in gate (#auth-modal) is showing — confirmed by
+// driving the live file headless — so on a real phone the budget expired while
+// the user was still signing in and the popup NEVER appeared, on that load or
+// any later one. It now WAITS for the app to be idle instead of surrendering.
+//
+// This is belt-and-braces only: the Home-page card (_bgRenderHomeCourseCard) is
+// the reliable route now, and it has no timing dependency at all.
+function maybePromptHomeCourse() {
   try {
+    if (window._bgHomeCoursePromptRunning) return;   // one waiter, ever
     if (localStorage.getItem(KEY_HOMECOURSE_ONBOARD_SEEN)) return;
     if (getMyHomeCourse()) { try { localStorage.setItem(KEY_HOMECOURSE_ONBOARD_SEEN, '1'); } catch (e) {} return; }
-    attempt = attempt || 0;
-    setTimeout(async function () {
+    window._bgHomeCoursePromptRunning = true;
+    var tries = 0;
+    var MAX = 60;                                    // 60 x 5s = 5 minutes of patience
+    var tick = async function () {
       try {
-        // The value usually lives in the SYNCED roster and lands a beat after
-        // boot — resolve it right before asking, so a user who already set it on
-        // another phone is never prompted.
+        tries++;
+        if (tries > MAX) { window._bgHomeCoursePromptRunning = false; return; }
+        // Resolve from the synced roster each pass — someone who set it on
+        // another phone must never be prompted here.
         try { await _bgHydrateHomeCourse(); } catch (e) {}
-        if (getMyHomeCourse()) { try { localStorage.setItem(KEY_HOMECOURSE_ONBOARD_SEEN, '1'); } catch (e) {} return; }
-        if (typeof isMaintenanceLink === 'function' && isMaintenanceLink()) return;
-        if (typeof state === 'object' && state && state.game) return;         // mid-round
-        if (document.querySelector('.modal-overlay.show')) { if (attempt < 2) maybePromptHomeCourse(attempt + 1); return; }
-        // Not signed in / no name yet -> don't spend the one-time flag. Ask on a
-        // later load once we know who they are.
-        var me = null; try { me = await getMeName(); } catch (e) {}
-        if (!me) return;
+        if (getMyHomeCourse()) {
+          try { localStorage.setItem(KEY_HOMECOURSE_ONBOARD_SEEN, '1'); } catch (e) {}
+          window._bgHomeCoursePromptRunning = false;
+          return;
+        }
+        if (typeof isMaintenanceLink === 'function' && isMaintenanceLink()) { window._bgHomeCoursePromptRunning = false; return; }
+        // NOT idle yet (mid-round, a modal open, no name resolved) -> WAIT and
+        // look again. These are reasons to postpone, never reasons to quit.
+        // NOTE: deliberately NOT gated on getMeName(). v1066 required a resolved
+        // account name, which is null for a guest and for anyone whose profile
+        // read hasn't landed yet — a second silent way to never ask. The home
+        // course is stored locally regardless, and setMyHomeCourse() writes it
+        // to the roster only when it can, so a name is simply not needed to ask.
+        var busy = false;
+        if (typeof state === 'object' && state && state.game) busy = true;
+        if (document.querySelector('.modal-overlay.show')) busy = true;
+        if (busy) { setTimeout(tick, 5000); return; }
+        window._bgHomeCoursePromptRunning = false;
         showHomeCourseOnboard();
-      } catch (e) {}
-    }, attempt === 0 ? 3500 : 9000);
+      } catch (e) { window._bgHomeCoursePromptRunning = false; }
+    };
+    setTimeout(tick, 3500);
   } catch (e) {}
 }
 
@@ -43626,6 +43694,7 @@ async function renderHome() {
   // spectate below, sell-grid last. Splash art moved to the loading screen.
   try { if (typeof window._cpClearSearch === 'function') window._cpClearSearch(); } catch (e) {}
   updateActiveRoundBar();
+  try { _bgRenderHomeCourseCard(); } catch (e) {}   // v1079
 
   // ---- Handicaps: my card + compact crew list ----
   try {
