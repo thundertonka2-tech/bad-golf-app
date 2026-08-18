@@ -4643,6 +4643,16 @@
                 <label>$ buy-in per player</label>
                 <input type="number" id="teamQuota-buyin" value="5" min="0" step="1" oninput="try{updateTeamQuotaUI()}catch(e){}">
               </div>
+              <!-- v1086: with up to eight teams in one pot, paying a single winner can
+                   leave most of the field with nothing — so the payout is choosable. -->
+              <div class="field" style="margin-top:8px">
+                <label>Pot payout</label>
+                <select id="teamQuota-payout" onchange="try{updateTeamQuotaUI()}catch(e){}">
+                  <option value="winner" selected>Winning team takes the pot</option>
+                  <option value="7030">Top 2 teams — 70 / 30</option>
+                  <option value="502030">Top 3 teams — 50 / 30 / 20</option>
+                </select>
+              </div>
               <div class="help-text" id="teamQuota-pot-line" style="margin:6px 0 0"></div>
               <div class="help-text" id="teamQuota-nobuyin-warn" style="display:none;margin:6px 0 0;padding:8px;background:rgba(200,140,0,0.12);border-radius:6px;line-height:1.5">
                 ⚠️ Buy-in is <strong>$0</strong> — this will track points and crown a winning team, but <strong>no money will settle</strong>. Set a buy-in if there's cash on it.
@@ -8065,7 +8075,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1085';
+const BG_BUILD = 'v2026.11.1086';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -27556,11 +27566,20 @@ function updateTeamQuotaUI() {
     const n = (typeof getCurrentSetupPlayers === 'function') ? getCurrentSetupPlayers().length : 0;
     const potLine = $('teamQuota-pot-line');
     if (potLine) {
-      potLine.innerHTML = (!isPerPoint && buy > 0 && n > 0)
-        ? ('Pot: <strong>$' + (buy * n).toFixed(2).replace(/\.00$/, '') + '</strong> (' + n + ' × $' + buy + '). Winning team splits it — about <strong>$' +
-           ((buy * n) / Math.max(1, Math.floor(n / 2))).toFixed(2).replace(/\.00$/, '') + '</strong> each, so roughly <strong>$' +
-           (((buy * n) / Math.max(1, Math.floor(n / 2))) - buy).toFixed(2).replace(/\.00$/, '') + '</strong> up on your ante.')
-        : '';
+      // v1086: the pot line now reflects the chosen payout AND the team size, so an
+      // eight-team pot reads honestly instead of assuming two big sides.
+      const _po = ($('teamQuota-payout') && $('teamQuota-payout').value) || 'winner';
+      const _splits = _po === '502030' ? [0.5, 0.3, 0.2] : (_po === '7030' ? [0.7, 0.3] : [1]);
+      // team size: in a tournament the commissioner sets it; here, assume two sides.
+      const _teamN = Math.max(1, Math.floor(n / 2));
+      const _money = v => '$' + v.toFixed(2).replace(/\.00$/, '');
+      if (potLine) {
+        potLine.innerHTML = (!isPerPoint && buy > 0 && n > 0)
+          ? ('Pot: <strong>' + _money(buy * n) + '</strong> (' + n + ' × $' + buy + '). ' +
+             _splits.map((sh, i) => (i === 0 ? '1st' : (i === 1 ? '2nd' : '3rd')) + ' <strong>' + _money(buy * n * sh) + '</strong>').join(' · ') +
+             '. On a 2-player team that is about <strong>' + _money((buy * n * _splits[0]) / 2 - buy) + '</strong> up each for the winners.')
+          : '';
+      }
     }
     const warn = $('teamQuota-nobuyin-warn');
     if (warn) warn.style.display = (!isPerPoint && buy <= 0) ? '' : 'none';
@@ -31205,6 +31224,7 @@ function applySavedConfig(config) {
       if (games.teamQuota.value != null) $('teamQuota-value').value = games.teamQuota.value;
     } else {
       if (games.teamQuota.buyin != null) $('teamQuota-buyin').value = games.teamQuota.buyin;
+    if ($('teamQuota-payout')) $('teamQuota-payout').value = games.teamQuota.payout || 'winner';   // v1086
     }
     if (games.teamQuota.quotaNames) {
       if (!state.quotaManual) state.quotaManual = {};
@@ -31865,6 +31885,9 @@ function gatherSetup() {
       basis: basis,
       value: tqMode === 'perpoint' ? (parseFloat($('teamQuota-value').value) || 0) : 0,
       buyin: tqMode === 'pool'     ? (parseFloat($('teamQuota-buyin').value) || 0) : 0,
+      // v1086: how the pot splits when there are 3+ teams. Ignored at two teams,
+      // where the winning side always takes the lot.
+      payout: ($('teamQuota-payout') && $('teamQuota-payout').value) || 'winner',
       teamMode: tqTeamMode,
       teamA: tqTeamA,
       teamB: tqTeamB
@@ -38584,10 +38607,85 @@ function calcTeamQuota4man(g, cfg) {
            teamAIds: team.map(p => p.id), teamBIds: [], mode: cfg.mode || 'perpoint', teamMode: '4man' };
 }
 
+// v1086: MULTI-TEAM pot. When cfg.teams is present with 3+ sides — which only ever
+// happens on the EVENT-level settle, never inside a cart round — every team's total is
+// ranked and the pot is paid by cfg.payout. Two-team rounds skip this entirely and run
+// the original code below, unchanged, so nothing that already works is re-priced.
+// Payout rules: 'winner' (default, winner takes all), '7030' (top two 70/30),
+// '502030' (top three 50/30/20). Ties at a paid place split that place's money.
+function calcTeamQuotaMulti(g, cfg) {
+  const keys = Object.keys(cfg.teams || {}).filter(k => Array.isArray(cfg.teams[k]) && cfg.teams[k].length);
+  if (keys.length < 2) return null;
+  const byKey = {}, all = [];
+  keys.forEach(k => {
+    const arr = cfg.teams[k].map(id => g.players.find(p => p.id === id)).filter(Boolean);
+    byKey[k] = arr; arr.forEach(p => all.push(p));
+  });
+  if (!all.length) return null;
+  // Equal sizes matter here for the same reason they do at two teams: this compares
+  // raw team totals, so a bigger team would simply out-total a smaller one.
+  const sizes = keys.map(k => byKey[k].length);
+  const uneven = Math.min.apply(null, sizes) !== Math.max.apply(null, sizes);
+  if (uneven) return _bgDropBet('teamQuota', 'teams are uneven (' + sizes.join(' / ') + ') — even them up and this settles again');
+
+  const { points, holePoints } = computeQuotaPoints(g, cfg, all);
+  const quotas = {}, result = {};
+  all.forEach(p => { quotas[p.id] = quotaTargetFor(g, cfg, p); result[p.id] = points[p.id] - quotas[p.id]; });
+  const teamTotals = {}, teamIds = {};
+  keys.forEach(k => {
+    teamTotals[k] = byKey[k].reduce((s, p) => s + result[p.id], 0);
+    teamIds[k] = byKey[k].map(p => p.id);
+  });
+  const ranked = keys.slice().sort((x, y) => teamTotals[y] - teamTotals[x])
+                     .map(k => ({ key: k, total: teamTotals[k], ids: teamIds[k] }));
+
+  const money = {}; g.players.forEach(p => money[p.id] = 0);
+  const buyin = cfg.buyin != null ? Number(cfg.buyin) || 0 : 0;
+  const _done = !!(g && g.finishedAt) || (typeof allHolesScored === 'function' && allHolesScored(g));
+  const base = { points, quotas, result, holePoints, money, teamTotals, teamIds, ranked,
+                 nTeams: keys.length, teamKeys: keys, mode: 'pool', multi: true,
+                 // keep the legacy pair populated so any 2-team display still reads
+                 aTotal: teamTotals.A != null ? teamTotals.A : ranked[0].total,
+                 bTotal: teamTotals.B != null ? teamTotals.B : ranked[1].total,
+                 teamAIds: teamIds.A || ranked[0].ids, teamBIds: teamIds.B || ranked[1].ids };
+  // Field-only (a cart's own Board) and mid-round both report points and pay nothing.
+  if (cfg._t2field || !_done || buyin <= 0) {
+    return Object.assign(base, { pending: true, field: !!cfg._t2field });
+  }
+  all.forEach(p => money[p.id] = -buyin);
+  const pot = all.length * buyin;
+  const splits = cfg.payout === '502030' ? [0.5, 0.3, 0.2]
+               : cfg.payout === '7030'   ? [0.7, 0.3]
+               : [1];
+  // Walk the ranking place by place. Teams level on points share the combined money
+  // for every place they cover, so a two-way tie for 1st on a 70/30 splits 100%.
+  let i = 0, place = 0;
+  while (i < ranked.length && place < splits.length) {
+    let j = i; while (j + 1 < ranked.length && ranked[j + 1].total === ranked[i].total) j++;
+    const nTied = (j - i) + 1;
+    let share = 0;
+    for (let s = place; s < Math.min(place + nTied, splits.length); s++) share += splits[s];
+    if (share > 0) {
+      const perTeam = (pot * share) / nTied;
+      for (let k2 = i; k2 <= j; k2++) {
+        const ids = ranked[k2].ids;
+        const per = perTeam / ids.length;
+        ids.forEach(id => { money[id] += per; });
+      }
+    }
+    place += nTied; i = j + 1;
+  }
+  return Object.assign(base, { pot, buyin, payout: cfg.payout || 'winner' });
+}
+
 function calcTeamQuota(g) {
   if (!g.games.teamQuota) return null;
   const cfg = g.games.teamQuota;
   if (cfg.teamMode === '4man') return calcTeamQuota4man(g, cfg);
+  // v1086: 3+ sides -> the multi-team pot. Two sides fall through untouched.
+  if (cfg.teams && Object.keys(cfg.teams).filter(k => (cfg.teams[k] || []).length).length > 2) {
+    return calcTeamQuotaMulti(g, cfg);
+  }
   if (!cfg.teamA || !cfg.teamB) return null;
   const teamA = cfg.teamA.map(id => g.players.find(p => p.id === id)).filter(Boolean);
   const teamB = cfg.teamB.map(id => g.players.find(p => p.id === id)).filter(Boolean);
@@ -41509,14 +41607,37 @@ async function buildSettleUpText() {
   // button, same place, upgrades automatically. Before that point (or for a
   // non-tournament round) this falls straight through to the round-only text,
   // completely unchanged, so nothing mid-event ever comes up empty.
+  // v1086 (Tyler): "the final settle up text should always include both." It used to
+  // send the tournament-wide total ONLY once every group had finished, and otherwise
+  // fell back to this group's own bets alone — so a text sent while one cart was still
+  // out carried the group side bets and none of the event money. Now a tournament round
+  // always sends BOTH: the whole-event total (marked provisional if groups are still
+  // out) followed by this group's own bets, clearly labelled as already included so
+  // nobody pays twice.
   if (g.t2 && g.t2.tournamentId) {
     try {
       const t = await t2Get(g.t2.tournamentId);
       if (t) {
         const combinedPay = await t2ComputeCombinedPayouts(t);
-        if (combinedPay && combinedPay.allFinished) {
-          const combinedText = await buildCombinedSettleUpText(t, combinedPay);
-          if (combinedText) return combinedText;
+        if (combinedPay) {
+          const combinedText = await buildCombinedSettleUpText(t, combinedPay, { allowProvisional: true });
+          if (combinedText) {
+            let groupBlock = '';
+            try {
+              const _m = computeAllGameMoney(g).combined;
+              const _rows = (g.players || [])
+                .map(p => ({ p: p, net: _m[p.id] || 0 }))
+                .filter(r => Math.abs(r.net) > 0.005)
+                .sort((a, b) => b.net - a.net);
+              if (_rows.length) {
+                const _fm = v => (v > 0 ? '+' : '−') + '$' + Math.abs(v).toFixed(2);
+                groupBlock = '\n\n— — —\nYour group\'s own bets' + (g.course ? ' at ' + g.course : '')
+                  + ' (already counted in the totals above):\n'
+                  + _rows.map(r => '  ' + displayFull(r.p) + '  ' + _fm(r.net)).join('\n');
+              }
+            } catch (e) {}
+            return combinedText + groupBlock;
+          }
         }
       }
     } catch (e) {}
@@ -55334,17 +55455,74 @@ function openT2TeamNamesEditor() {
   const ov = document.createElement('div');
   ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100061';
   const close = () => ov.remove();
+  // v1086: this modal now sets HOW MANY teams the event runs (2-8) as well as their
+  // names and logos. A row is drawn per active team key.
   const row = (k) => { const logo = t2TeamLogo(t, k); return '<div class="card" style="padding:12px;margin-bottom:10px"><div style="display:flex;align-items:center;gap:10px">'
     + '<button type="button" class="t2tn-logo" data-team="' + k + '" style="flex:0 0 auto;border:1px solid var(--border);background:var(--surface-2);border-radius:12px;width:54px;height:54px;font-size:24px;cursor:pointer">' + (logo ? t2LogoHtml(logo, 40) : '🎨') + '</button>'
-    + '<div style="flex:1;min-width:0"><label class="small-text" style="color:var(--text-muted);display:block;margin-bottom:3px">Team ' + k + ' name</label>'
-    + '<input type="text" class="t2tn-name" data-team="' + k + '" value="' + t2esc(k === 'A' ? (t.team_a_name || 'Team A') : (t.team_b_name || 'Team B')) + '" style="width:100%;font-size:16px;padding:8px"></div></div></div>'; };
-  ov.innerHTML = '<div class="modal" style="max-width:440px"><h2 style="margin-bottom:8px">Team names & logos</h2>' + row('A') + row('B') + '<div class="actions" style="margin-top:8px"><button class="primary full" id="t2tn-done">Done</button></div></div>';
+    + '<div style="flex:1;min-width:0"><label class="small-text" style="color:var(--text-muted);display:block;margin-bottom:3px">' + t2TeamDot(k) + ' Team ' + k + ' name</label>'
+    + '<input type="text" class="t2tn-name" data-team="' + k + '" value="' + t2esc(t2TeamName(t, k)) + '" style="width:100%;font-size:16px;padding:8px"></div></div></div>'; };
+  const draw = () => {
+    const keys = t2TeamKeys(t);
+    const opts = [];
+    for (let n = 2; n <= T2_MAX_TEAMS; n++) opts.push('<option value="' + n + '"' + (n === keys.length ? ' selected' : '') + '>' + n + ' teams</option>');
+    ov.innerHTML = '<div class="modal" style="max-width:440px;max-height:86vh;overflow-y:auto"><h2 style="margin-bottom:8px">Teams, names &amp; logos</h2>'
+      + '<div class="field" style="margin-bottom:10px"><label>How many teams?</label>'
+      + '<select id="t2tn-count" style="width:100%">' + opts.join('') + '</select>'
+      + '<div class="help-text" style="margin-top:6px">Two big sides, or up to twelve small ones — e.g. <strong>8 teams of 2</strong> from a 16-player field, or 12 pairs from 24. Every team needs the same number of players.</div></div>'
+      + keys.map(row).join('')
+      + '<div class="actions" style="margin-top:8px"><button class="primary full" id="t2tn-done">Done</button></div></div>';
+    wire();
+  };
+  const saveName = async (inp) => {
+    const k = inp.dataset.team;
+    const v = (inp.value || '').trim() || ('Team ' + k);
+    // A and B keep their real columns so everything that reads team_a_name still works;
+    // C..H live in settings.teamNames (jsonb — no migration).
+    if (k === 'A' || k === 'B') {
+      const f = k === 'A' ? { team_a_name: v } : { team_b_name: v };
+      if (await t2Update(t.id, f)) {
+        if (k === 'A') t.team_a_name = v; else t.team_b_name = v;
+        if (_t2Current) { _t2Current.team_a_name = t.team_a_name; _t2Current.team_b_name = t.team_b_name; }
+      }
+    } else {
+      const okS = await t2MergeSettings(t.id, s => { s.teamNames = s.teamNames || {}; s.teamNames[k] = v; });
+      if (okS) { t.settings = t.settings || {}; t.settings.teamNames = t.settings.teamNames || {}; t.settings.teamNames[k] = v;
+                 if (_t2Current) { _t2Current.settings = t.settings; } }
+    }
+  };
+  const wire = () => {
+    ov.querySelectorAll('.t2tn-name').forEach(inp => { inp.onchange = () => saveName(inp); inp.addEventListener('blur', () => saveName(inp)); });
+    ov.querySelectorAll('.t2tn-logo').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
+    const cnt = ov.querySelector('#t2tn-count');
+    if (cnt) cnt.onchange = async () => {
+      const n = Math.max(2, Math.min(T2_MAX_TEAMS, parseInt(cnt.value, 10) || 2));
+      // Shrinking the field would strand anyone on a team that no longer exists, so
+      // say so and put them back in the unassigned pile rather than losing them.
+      let stranded = [];
+      try {
+        const pl = await t2GetPlayers(t.id);
+        const keep = T2_TEAM_KEYS.slice(0, n);
+        stranded = (pl || []).filter(p => p.team && keep.indexOf(p.team) < 0);
+      } catch (e) {}
+      if (stranded.length) {
+        const go = await uiConfirm(stranded.length + ' player' + (stranded.length === 1 ? ' is' : 's are') + ' on a team that would no longer exist. They will be moved back to Unassigned so you can place them again.',
+          { title: 'Fewer teams', okLabel: 'Move them', cancelLabel: 'Cancel' });
+        if (!go) { cnt.value = String(t2TeamCount(t)); return; }
+        for (const p of stranded) { try { await t2SetPlayerTeam(p.id, null); } catch (e) {} }
+      }
+      const okS = await t2MergeSettings(t.id, s => { s.teamCount = n; });
+      if (!okS) { showToast('Could not save the team count'); return; }
+      t.settings = t.settings || {}; t.settings.teamCount = n;
+      if (_t2Current) _t2Current.settings = t.settings;
+      showToast(n + ' teams ✓');
+      draw();
+    };
+    const done = ov.querySelector('#t2tn-done');
+    if (done) done.onclick = async () => { close(); try { await renderT2Home(); } catch (e) {} };
+  };
   document.body.appendChild(ov);
   ov.onclick = (e) => { if (e.target === ov) close(); };
-  const saveName = async (inp) => { const v = (inp.value || '').trim() || ('Team ' + inp.dataset.team); const f = inp.dataset.team === 'A' ? { team_a_name: v } : { team_b_name: v }; if (await t2Update(t.id, f)) { if (inp.dataset.team === 'A') t.team_a_name = v; else t.team_b_name = v; if (_t2Current) { _t2Current.team_a_name = t.team_a_name; _t2Current.team_b_name = t.team_b_name; } } };
-  ov.querySelectorAll('.t2tn-name').forEach(inp => { inp.onchange = () => saveName(inp); inp.addEventListener('blur', () => saveName(inp)); });
-  ov.querySelectorAll('.t2tn-logo').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
-  ov.querySelector('#t2tn-done').onclick = async () => { close(); try { await renderT2Home(); } catch (e) {} };
+  draw();
 }
 
 async function openT2ScorekeepersEditor(day) {
@@ -55934,6 +56112,10 @@ async function t2ToggleWithdraw(pid) {
 
 function t2PlayerRow(p, amCommish, od, teeLabel, opts) {
   if (typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p)) { return ''; }
+  // v1086: at two teams "the other one" is unambiguous and the single button stays.
+  // With 3-8 teams there is no "other", so the row shows a picker instead (built below).
+  const _tKeys = t2TeamKeys(_t2Current);
+  const _multiTeam = _tKeys.length > 2;
   const other = p.team === 'A' ? 'B' : 'A';
   const claimed = p.claimed ? ' <span class="small-text" style="color:var(--accent)">✓ joined</span>' : '';
   const _guestTag = !p.user_id ? ' <span class="guest-pill">GUEST</span>' : '';   // v636: no linked account = guest
@@ -55977,7 +56159,19 @@ function t2PlayerRow(p, amCommish, od, teeLabel, opts) {
       'value="' + _hvShow + '" placeholder="HCP" title="Handicap index" inputmode="decimal">' +
       '<button type="button" class="t2-hcp-step" data-dir="1" tabindex="-1" aria-label="Raise handicap">+</button>' +
       '</span></span>';
-    if (!od) { const _on = (other === 'A' ? (_t2Current && _t2Current.team_a_name) : (_t2Current && _t2Current.team_b_name)) || ('Team ' + other); row += '<button class="small t2-team-btn" data-pid="' + p.id + '" data-team="' + other + '" title="Move to ' + t2esc(_on) + '" style="flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center">→ ' + t2esc(_on) + '</button>'; }
+    if (!od) {
+      if (_multiTeam) {
+        // v1086: one <select> listing every team, so a player can be dropped straight
+        // onto any of the eight instead of ping-ponging between two.
+        row += '<select class="small t2-team-sel" data-pid="' + p.id + '" title="Move to a team" style="flex:1 1 auto;min-width:0;max-width:150px">'
+          + '<option value=""' + (p.team ? '' : ' selected') + '>— team —</option>'
+          + _tKeys.map(k => '<option value="' + k + '"' + (p.team === k ? ' selected' : '') + '>' + t2TeamDot(k) + ' ' + t2esc(t2TeamName(_t2Current, k)) + '</option>').join('')
+          + '</select>';
+      } else {
+        const _on = (other === 'A' ? (_t2Current && _t2Current.team_a_name) : (_t2Current && _t2Current.team_b_name)) || ('Team ' + other);
+        row += '<button class="small t2-team-btn" data-pid="' + p.id + '" data-team="' + other + '" title="Move to ' + t2esc(_on) + '" style="flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center">→ ' + t2esc(_on) + '</button>';
+      }
+    }
     // v986 (T38): NOTHING in the file ever emitted a .t2-wd-btn, so the whole
     // withdrawal feature — t2ToggleWithdraw, the WD pill on this row, the
     // sit-out filtering in the group builders, the forfeit rules in the
@@ -56094,9 +56288,9 @@ async function _rosterT2Add(name, hcp) {
     let _team = 'A';
     try {
       if (!((typeof t2IsOneDay === 'function') && t2IsOneDay(_t2Current))) {
+        // v1086: land on the smallest of however many teams the event runs.
         const _cp = await t2GetPlayers(_rosterT2Tid);
-        const _a = _cp.filter(p => p.team === 'A').length, _b = _cp.filter(p => p.team === 'B').length;
-        _team = (_a <= _b) ? 'A' : 'B';
+        _team = t2SmallestTeamKey(_cp, _t2Current);
       }
     } catch (e) {}
     // v1009: this toasted "added \u2713" unconditionally — t2FillOrAddPlayer
@@ -56171,7 +56365,7 @@ async function renderT2RosterPick() {
     if (!_team) {
       const _od = (typeof t2IsOneDay === 'function') && t2IsOneDay(_t2Current);
       if (_od) _team = 'A';
-      else { try { const _cp = await t2GetPlayers(_t2Current.id); const _a = _cp.filter(p => p.team === 'A').length, _b = _cp.filter(p => p.team === 'B').length; _team = (_a <= _b) ? 'A' : 'B'; } catch (e) { _team = 'A'; } }
+      else { try { const _cp = await t2GetPlayers(_t2Current.id); _team = t2SmallestTeamKey(_cp, _t2Current); } catch (e) { _team = 'A'; } }   // v1086: smallest of N teams
     }
     try {
       await t2FillOrAddPlayer(_t2Current.id, {
@@ -56732,6 +56926,44 @@ function _t2DayIs4Man(t, dayNumber) {
 function _t2CoherentGroups(ordered, teamGet, is4man) {
   const A = ordered.filter(p => teamGet(p) === 'A');
   const B = ordered.filter(p => teamGet(p) === 'B');
+  // v1086: with 3-8 teams this used to keep only A and B and silently drop every
+  // other team out of the carts. Pair the teams up two at a time — Tyler's rule is
+  // two whole teams per foursome — and deal each pair into carts of four. Eight
+  // teams of two becomes four carts: (A,B) (C,D) (E,F) (G,H), partners riding
+  // together and every cart a natural head-to-head.
+  const _keys = (typeof T2_TEAM_KEYS !== 'undefined' ? T2_TEAM_KEYS : ['A','B'])
+    .filter(k => ordered.some(p => teamGet(p) === k));
+  if (_keys.length > 2) {
+    const out = [];
+    if (is4man) {
+      _keys.forEach(k => {
+        const mem = ordered.filter(p => teamGet(p) === k);
+        for (let i = 0; i < mem.length; i += 4) out.push(mem.slice(i, i + 4));
+      });
+    } else {
+      for (let i = 0; i < _keys.length; i += 2) {
+        const t1 = ordered.filter(p => teamGet(p) === _keys[i]);
+        const t2 = _keys[i + 1] ? ordered.filter(p => teamGet(p) === _keys[i + 1]) : [];
+        const pair = t1.length + t2.length;
+        // A pair of teams normally IS one foursome; if the teams are bigger than
+        // two, spread the same pair across as many carts as it needs so the two
+        // sides still meet in every one of them.
+        const nG = Math.max(1, Math.ceil(pair / 4));
+        const buckets = []; for (let b = 0; b < nG; b++) buckets.push([]);
+        t1.forEach((p, j) => buckets[j % nG].push(p));
+        t2.forEach((p, j) => buckets[j % nG].push(p));
+        buckets.forEach(bk => { if (bk.length) out.push(bk); });
+      }
+    }
+    // Anyone with no team at all still needs a seat — fill the short carts, then
+    // make new ones, so nobody is left off the tee sheet.
+    const _loose = ordered.filter(p => _keys.indexOf(teamGet(p)) < 0);
+    _loose.forEach(p => {
+      const room = out.find(gp => gp.length < 4);
+      if (room) room.push(p); else out.push([p]);
+    });
+    return out;
+  }
   const groups = [];
   if (is4man) {
     for (let i = 0; i < A.length; i += 4) groups.push(A.slice(i, i + 4));
@@ -56766,8 +56998,13 @@ async function _t2BuildCartsOfTwoImpl(dayId, dayNumber, byHcp, opts) {
   // 4-man format → whole-team groups (4-0); otherwise 2 from each team (2 v 2).
   // No teams (individual event) → even split by handicap / shuffle as before.
   const _A = ordered.filter(p => p.team === 'A'), _B = ordered.filter(p => p.team === 'B');
+  // v1086: "are there teams to keep coherent?" is now "are there two or more DISTINCT
+  // teams", not "are A and B both populated" — an 8-team event has no team B players
+  // in most carts and would otherwise fall through to the unteamed path.
+  const _distinctTeams = (typeof T2_TEAM_KEYS !== 'undefined' ? T2_TEAM_KEYS : ['A','B'])
+    .filter(k => ordered.some(p => p.team === k)).length;
   let groups;
-  if (_A.length && _B.length) {
+  if (_distinctTeams >= 2) {
     groups = _t2CoherentGroups(ordered, p => p.team, _t2DayIs4Man(t, dayNumber));
   } else {
     groups = [];
@@ -56839,17 +57076,26 @@ async function t2AssignTeamsAndCarts(dayId, dayNumber, byHcp, opts) {
   if (active.length < 2) { showToast('Add at least two players first'); return; }
   const hcpOf = p => (p.handicap == null ? 999 : Number(p.handicap));
   const ordered = byHcp ? active.slice().sort((a, b) => hcpOf(a) - hcpOf(b)) : t2Shuffle(active.slice());
+  // v1086: deal into however many teams the event runs (2-8), not always two.
+  const _keys = t2TeamKeys(t);
+  const _nT = _keys.length;
   const teamOf = {};
   if (byHcp) {
-    // Snake draft A,B,B,A,A,B,B,A… keeps total handicap balanced across both teams.
-    ordered.forEach((p, i) => { teamOf[p.id] = (Math.floor(i / 2) % 2 === 0) ? (i % 2 === 0 ? 'A' : 'B') : (i % 2 === 0 ? 'B' : 'A'); });
+    // Serpentine draft — 1st pick to team 1, then back down the order — so the total
+    // handicap stays level across N teams. At two teams this is the original
+    // A,B,B,A,A,B… snake exactly.
+    ordered.forEach((p, i) => {
+      const roundNo = Math.floor(i / _nT);
+      const pos = i % _nT;
+      teamOf[p.id] = _keys[(roundNo % 2 === 0) ? pos : (_nT - 1 - pos)];
+    });
   } else {
-    const half = Math.ceil(ordered.length / 2);
-    ordered.forEach((p, i) => { teamOf[p.id] = i < half ? 'A' : 'B'; });
+    // Random: deal round-robin so every team ends within one player of every other.
+    ordered.forEach((p, i) => { teamOf[p.id] = _keys[i % _nT]; });
   }
   for (const p of active) { if (teamOf[p.id] && p.team !== teamOf[p.id]) { try { await t2SetPlayerTeam(p.id, teamOf[p.id]); } catch (e) {} } }
   try { await t2BuildCartsOfTwo(dayId, dayNumber, byHcp, opts || { force: true }); } catch (e) {}
-  showToast(byHcp ? 'Teams balanced by handicap ⚖️ — carts filled' : 'Random teams set 🔀 — carts filled');
+  showToast((byHcp ? 'Teams balanced by handicap ⚖️' : 'Random teams set 🔀') + ' — ' + _nT + ' teams, carts filled');
 }
 
 // "Configure Carts" — one place to split the field into cart groups (by handicap
@@ -57136,9 +57382,17 @@ async function openT2Summary(t) {
 // group: team games take the group's A/B split (or the whole group for 4-man),
 // a Match re-seats onto the group's first two, everything else applies to all
 // group players. Values/options/team-format are preserved.
-function t2RemapGamesToGroup(src, gp, Aids, Bids) {
+// v1086: `teamKeys` is the pair of REAL global team keys the local A/B sides stand for
+// in THIS cart, e.g. ['C','F']. A cart only ever holds two teams (Tyler's rule: two
+// whole teams per foursome), so the round engines stay happily 2-sided — but the field
+// settle has to know that this cart's "A" was really team C, or it would merge team C
+// with some other cart's "A" and pay the wrong people. Omitted -> ['A','B'], i.e. every
+// existing 2-team event, unchanged.
+function t2RemapGamesToGroup(src, gp, Aids, Bids, teamKeys) {
   const out = {};
   const allIds = gp.map(p => p.id);
+  const _tkA = (teamKeys && teamKeys[0]) || 'A';
+  const _tkB = (teamKeys && teamKeys[1]) || 'B';
   const TEAM_GAMES = ['scramble', 'teamMatch', 'teamLowball', 'teamQuota', 'ryderCup', 'vegas'];
   for (const key in src) {
     if (!src[key]) continue;
@@ -57146,7 +57400,11 @@ function t2RemapGamesToGroup(src, gp, Aids, Bids) {
     let cfg; try { cfg = JSON.parse(JSON.stringify(src[key])); } catch (e) { cfg = Object.assign({}, src[key]); }
     if (TEAM_GAMES.indexOf(key) >= 0) {
       if (cfg.teamMode === '4man') { cfg.teamA = allIds.slice(); cfg.teamB = []; }
-      else { cfg.teamA = Aids.slice(); cfg.teamB = Bids.slice(); }
+      else {
+        cfg.teamA = Aids.slice(); cfg.teamB = Bids.slice();
+        // v1086: stamp which REAL teams these two local sides are.
+        cfg.teamAKey = _tkA; cfg.teamBKey = _tkB;
+      }
       out[key] = cfg;
     } else if (key === 'match') {
       // Honor the configured 1v1 pairings, mapping names → this group's player IDs.
@@ -57512,8 +57770,11 @@ async function openT2AddPlayerPicker(t, onDone) {
   const commit = async (pairs) => {
     if (_busy || !pairs.length) return; _busy = true;
     let _a = 0, _b = 0;
+    // v1086: a running copy of the roster so a BATCH add spreads across however many
+    // teams the event runs, instead of stacking everyone onto one side.
+    let _batchRoster = [];
     const _od = (typeof t2IsOneDay === 'function') && t2IsOneDay(t);
-    if (!_od) { try { const _cp = await t2GetPlayers(t.id); _a = _cp.filter(p => p.team === 'A').length; _b = _cp.filter(p => p.team === 'B').length; } catch (e) {} }
+    if (!_od) { try { const _cp = await t2GetPlayers(t.id); _a = _cp.filter(p => p.team === 'A').length; _b = _cp.filter(p => p.team === 'B').length; _batchRoster = (_cp || []).map(p => ({ team: p.team })); } catch (e) {} }
     let _added = 0;
     for (const pair of pairs) {
       const name = pair[0], hv = pair[1];
@@ -57521,7 +57782,7 @@ async function openT2AddPlayerPicker(t, onDone) {
       const nm2 = name.trim();
       let _uid = null; try { _uid = await t2ResolveUserIdByName(nm2); } catch (e) {}
       let _team = 'A';
-      if (!_od) { _team = (_a <= _b) ? 'A' : 'B'; if (_team === 'A') _a++; else _b++; }
+      if (!_od) { _team = t2SmallestTeamKey(_batchRoster, t); _batchRoster.push({ team: _team }); }   // v1086
       try { await t2FillOrAddPlayer(t.id, { displayName: nm2, team: _team, handicap: (hv !== '' && hv != null) ? parseFloat(hv) : null, userId: _uid || null }); _added++; }
       catch (e) {}
       avail = avail.filter(r => (r.name || '').trim().toLowerCase() !== nm2.toLowerCase());
@@ -57975,8 +58236,11 @@ async function t2ResyncLaunchedGroupsForDay(t, dayId, dayNumber, kind, onlyGroup
         if (tp && tp.display_name) teamByName[normalizeNameSegment(tp.display_name)] = m.team;
       });
       const gp = g.players.map(p => Object.assign({}, p, { _team: teamByName[normalizeNameSegment(p.name || combineName(p.firstName, p.lastName) || '')] }));
-      const Aids = gp.filter(p => p._team === 'A').map(p => p.id);
-      const Bids = gp.filter(p => p._team === 'B').map(p => p.id);
+      // v1086 — see t2LaunchDayRounds: take the two team keys actually in this cart.
+      const _cartKeys = T2_TEAM_KEYS.filter(k => gp.some(p => p._team === k));
+      const _kA = _cartKeys[0] || 'A', _kB = _cartKeys[1] || 'B';
+      const Aids = gp.filter(p => p._team === _kA).map(p => p.id);
+      const Bids = gp.filter(p => p._team === _kB).map(p => p.id);
       let changed = false;
       if (kind === 'day') {
         // Only resync a round that was actually launched by t2StartDay (which
@@ -57991,7 +58255,7 @@ async function t2ResyncLaunchedGroupsForDay(t, dayId, dayNumber, kind, onlyGroup
         // misfiled as legacy and skipped forever: adding CTP afterwards reached
         // nobody, permanently, for that whole event.
         if (_dayGamesCfg && g.t2 && Array.isArray(g.t2.dayGameKeys)) {
-          const remapped = t2RemapGamesToGroup(_dayGamesCfg, gp, Aids, Bids);
+          const remapped = t2RemapGamesToGroup(_dayGamesCfg, gp, Aids, Bids, [_kA, _kB]);
           if (remapped.stableford) { remapped.stableford._t2field = true; remapped.stableford._t2fieldCount = (players || []).length; }
           if (remapped.ctp) { remapped.ctp.fieldOnly = true; }
           if (remapped.quota) { remapped.quota._t2field = true; remapped.quota._t2fieldCount = (players || []).length; }
@@ -58014,7 +58278,7 @@ async function t2ResyncLaunchedGroupsForDay(t, dayId, dayNumber, kind, onlyGroup
       } else if (kind === 'group') {
         try {
           const _grpGames = (t.settings && t.settings.groupGames && t.settings.groupGames[grp.id]) || null;
-          const remappedGrp = (_grpGames && Object.keys(_grpGames).length) ? t2RemapGamesToGroup(_grpGames, gp, Aids, Bids) : {};
+          const remappedGrp = (_grpGames && Object.keys(_grpGames).length) ? t2RemapGamesToGroup(_grpGames, gp, Aids, Bids, [_kA, _kB]) : {};
           g.groupGames = (remappedGrp && Object.keys(remappedGrp).length) ? remappedGrp : undefined;
           changed = true;
         } catch (e) {}
@@ -58240,14 +58504,21 @@ async function t2LaunchDayRounds(courseId) {
         p.hcp = Math.round(base * _pct / 100);
       });
     })();
-    const Aids = gp.filter(p => p._team === 'A').map(p => p.id);
-    const Bids = gp.filter(p => p._team === 'B').map(p => p.id);
+    // v1086: a cart carries at most two teams, but with 3+ teams in the event they
+    // will not be 'A' and 'B' — cart 3 might hold teams E and F. Take whichever two
+    // keys are actually present, in team order, and hand them down so the field settle
+    // can tell this cart's sides apart from every other cart's. A classic two-team
+    // event yields exactly ['A','B'] and behaves as before.
+    const _cartKeys = T2_TEAM_KEYS.filter(k => gp.some(p => p._team === k));
+    const _kA = _cartKeys[0] || 'A', _kB = _cartKeys[1] || 'B';
+    const Aids = gp.filter(p => p._team === _kA).map(p => p.id);
+    const Bids = gp.filter(p => p._team === _kB).map(p => p.id);
     // Prefer the per-day games configured via "Configure Day" (mapped onto this
     // group); fall back to the legacy single-format switch when none was saved.
     let games;
     const _dayGamesCfg = (t.settings && t.settings.dayGames && t.settings.dayGames[ctx.dayNumber]) || null;
     if (_dayGamesCfg && Object.keys(_dayGamesCfg).length) {
-      games = t2RemapGamesToGroup(_dayGamesCfg, gp, Aids, Bids);
+      games = t2RemapGamesToGroup(_dayGamesCfg, gp, Aids, Bids, [_kA, _kB]);
       // The day's Stableford is a WHOLE-FIELD pool, not a per-group bet: tag it so the
       // group round shows points only and never settles per-group (the field settles).
       if (games.stableford) { games.stableford._t2field = true; games.stableford._t2fieldCount = (players || []).length; }
@@ -58282,7 +58553,7 @@ async function t2LaunchDayRounds(courseId) {
       } else if (fmt === 'quota') {
         games.quota = { mode: 'pool', net: true, basis: 'auto', value: 0, buyin: 0, payout: 'winner' };
       } else if (fmt === 'teamquota') {
-        games.teamQuota = { mode: 'perpoint', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids };
+        games.teamQuota = { mode: 'pool', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids, teamAKey: _kA, teamBKey: _kB };
       } // 'stroke' = leaderboard-only day: no game pre-configured
     }
     // v1022 (Tyler): "it allows me to log a long putt on one user but on my other
@@ -58309,7 +58580,7 @@ async function t2LaunchDayRounds(courseId) {
     try {
       const _grpGames = (t.settings && t.settings.groupGames && t.settings.groupGames[grp.id]) || null;
       if (_grpGames && Object.keys(_grpGames).length) {
-        const _rm = t2RemapGamesToGroup(_grpGames, gp, Aids, Bids);
+        const _rm = t2RemapGamesToGroup(_grpGames, gp, Aids, Bids, [_kA, _kB]);
         if (_rm && Object.keys(_rm).length) groupGamesObj = _rm;
       }
     } catch (e) {}
@@ -58823,6 +59094,81 @@ const T2_STOCK_LOGOS = [
   ['💀','var(--surface-3)'], ['👑','var(--warn-light)'.toLowerCase()], ['🍺','var(--warn-light)'], ['🏴‍☠️','var(--surface-3)'],
   ['⛳','var(--money-pos-light)'], ['🎯','var(--danger-light)'], ['🚀','var(--accent-light)'], ['🤠','var(--warn-light)']
 ];
+// ============================================================================
+// MULTI-TEAM MODEL (v1086) — 2 to 8 teams per tournament.
+// Storage, deliberately migration-free:
+//   · a player's team           tournament_players.team          (text, any key)
+//   · a group member's team     tournament_group_members.team    (text, any key)
+//   · team count                tournaments.settings.teamCount   (jsonb)
+//   · names A/B                 tournaments.team_a_name/_b_name  (existing columns)
+//   · names C..H                tournaments.settings.teamNames   (jsonb)
+//   · logos A..H                tournaments.settings.logoA..H    (already key-agnostic)
+// Everything falls back to the classic 2-team shape, so an event created before this
+// build behaves identically and needs no backfill.
+// ============================================================================
+const T2_TEAM_KEYS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'];
+const T2_MAX_TEAMS = 12;
+// Colour + dot per team so twelve sides stay tellable apart at a glance. The first two
+// keep the blue/red the app has always used for A/B. Circles run out at nine, so
+// J/K/L use squares — still instantly distinguishable at a glance on a scorecard.
+const T2_TEAM_DOTS = {
+  A: '\u{1F535}', B: '\u{1F534}', C: '\u{1F7E2}', D: '\u{1F7E1}', E: '\u{1F7E3}', F: '\u{1F7E0}',
+  G: '\u26AB', H: '\u{1F7E4}', I: '\u26AA', J: '\u{1F7E6}', K: '\u{1F7E5}', L: '\u{1F7E9}'
+};
+const T2_TEAM_COLORS = {
+  A: '#2b78c8', B: '#d1434a', C: '#2e9e5b', D: '#d6a419', E: '#8b5cf6', F: '#e07b39',
+  G: '#5b6470', H: '#8a5a3c', I: '#0f8b8d', J: '#3d5afe', K: '#c2185b', L: '#558b2f'
+};
+function t2TeamDot(key) { return T2_TEAM_DOTS[key] || '\u26AA'; }
+function t2TeamColor(key) { return T2_TEAM_COLORS[key] || 'var(--text-muted)'; }
+
+// How many teams this event runs. Defaults to 2 — every legacy event.
+function t2TeamCount(t) {
+  try {
+    const n = Number((t && t.settings && t.settings.teamCount) || 2);
+    if (!isFinite(n)) return 2;
+    return Math.max(2, Math.min(T2_MAX_TEAMS, Math.round(n)));
+  } catch (e) { return 2; }
+}
+// The active team keys, in order: ['A','B'] … up to ['A'..'H'].
+function t2TeamKeys(t) { return T2_TEAM_KEYS.slice(0, t2TeamCount(t)); }
+// A team's display name. A and B keep their real columns so nothing that reads
+// team_a_name breaks; C..H live in settings.teamNames.
+function t2TeamName(t, key) {
+  try {
+    if (key === 'A' && t && t.team_a_name) return t.team_a_name;
+    if (key === 'B' && t && t.team_b_name) return t.team_b_name;
+    const n = t && t.settings && t.settings.teamNames && t.settings.teamNames[key];
+    if (n) return n;
+  } catch (e) {}
+  return 'Team ' + key;
+}
+// [{key, name, logo, dot, color}] — the list every screen should render from.
+function t2Teams(t) {
+  return t2TeamKeys(t).map(k => ({
+    key: k, name: t2TeamName(t, k),
+    logo: (typeof t2TeamLogo === 'function') ? t2TeamLogo(t, k) : null,
+    dot: t2TeamDot(k), color: t2TeamColor(k)
+  }));
+}
+// Which team should the next player go on? The smallest one; ties go to the earliest
+// key, which reproduces the old `(_a <= _b) ? 'A' : 'B'` exactly at two teams.
+function t2SmallestTeamKey(players, t) {
+  const keys = t2TeamKeys(t);
+  const count = {}; keys.forEach(k => { count[k] = 0; });
+  (players || []).forEach(p => { const k = p && p.team; if (k && count[k] != null) count[k]++; });
+  let best = keys[0];
+  keys.forEach(k => { if (count[k] < count[best]) best = k; });
+  return best;
+}
+// Is this event running more than the classic two sides?
+function t2IsMultiTeam(t) { return t2TeamCount(t) > 2; }
+// Group a player list by team key -> { A:[p,…], C:[p,…] }, active keys only.
+function t2GroupByTeam(players, t) {
+  const out = {}; t2TeamKeys(t).forEach(k => { out[k] = []; });
+  (players || []).forEach(p => { const k = p && p.team; if (k && out[k]) out[k].push(p); });
+  return out;
+}
 function t2TeamLogo(t, team) {
   return (t && t.settings && t.settings['logo' + team]) || null;
 }
@@ -59118,7 +59464,10 @@ async function renderT2Home() {
   const od = t2IsOneDay(t); // individual event: no teams, leaderboard-only
   const teamA = players.filter(p => p.team === 'A');
   const teamB = players.filter(p => p.team === 'B');
-  const unassigned = players.filter(p => !p.team);
+  // v1086: the full 2-8 team split. teamA/teamB stay for the two-team screens.
+  const _tmKeys = t2TeamKeys(t);
+  const _byTeam = t2GroupByTeam(players, t);
+  const unassigned = players.filter(p => !p.team || _tmKeys.indexOf(p.team) < 0);
   // Active day for the per-row tees + the Assign Tees button (tees are stored
   // per day's course). Default day 1; a day selector shows when multi-day.
   const _numDays = t.num_days || 1;
@@ -59135,7 +59484,9 @@ async function renderT2Home() {
   // left UNGATED on purpose: they pick their course inside Configure Day, so the
   // course->date->configure-day chain would deadlock. (Tyler, June 2026.)
   const _wfPlayersDone = players.length >= 2;
-  const _wfAssigned = (od || (typeof t2IsGroup === 'function' && t2IsGroup(t))) ? players.slice() : players.filter(p => p.team === 'A' || p.team === 'B');
+  // v1086: "has a team" means any ACTIVE team key, not just A or B — otherwise an
+  // 8-team event could never satisfy the setup gate.
+  const _wfAssigned = (od || (typeof t2IsGroup === 'function' && t2IsGroup(t))) ? players.slice() : players.filter(p => p.team && _tmKeys.indexOf(p.team) >= 0);
   const _wfDayNums = days.map(d => d.day_number);
   const _wfTeeCounts = {};
   await Promise.all(days.map(async d => {
@@ -59289,8 +59640,7 @@ async function renderT2Home() {
           + '<span style="flex:0 0 84px;text-align:center">TEAM</span>'
           + '<span style="flex:0 0 34px"></span></div>';
       }
-      sb += wTeam(t.team_a_name, teamA, 'A');
-      sb += wTeam(t.team_b_name, teamB, 'B');
+      _tmKeys.forEach(k => { sb += wTeam(t2TeamName(t, k), _byTeam[k] || [], k); });
       if (unassigned.length) sb += wTeam('Unassigned', unassigned);
       if (!_wfPlayersDone) sb += '<div class="small-text" style="color:var(--text-muted);margin-top:10px">Add at least 2 players to continue.</div>';
       else if (unassigned.length) sb += '<div class="small-text" style="color:var(--danger);margin-top:10px">⚠️ ' + unassigned.length + ' not on a team yet — tap the “→ Team” button to assign. Unassigned players can’t be grouped.</div>';
@@ -59304,8 +59654,7 @@ async function renderT2Home() {
           + '<div style="flex:1;min-width:0"><label class="small-text" style="color:var(--text-muted);display:block;margin-bottom:3px">Team ' + teamKey + ' name</label>'
           + '<input type="text" class="t2-team-name" data-team="' + teamKey + '" value="' + t2esc(nm) + '" style="width:100%;font-size:16px;padding:8px"></div></div></div>';
       };
-      sb += _trow('A');
-      sb += _trow('B');
+      _tmKeys.forEach(k => { sb += _trow(k); });
       sb += '<div class="small-text" style="color:var(--text-muted)">Name both teams and tap a badge to set a logo (or photo). They show on leaderboards and scorecards. Tap Next when ready.</div>';
     } else if (cur.k === 'course') {
       if (dc && dc.name) sb += '<div class="card" style="padding:12px;margin-bottom:10px"><div style="font-weight:700">✓ ' + t2esc(dc.name) + '</div></div>';
@@ -59338,7 +59687,7 @@ async function renderT2Home() {
       if (gs.length) {
         sb += '<div style="margin-top:12px">' + gs.map(g2 => {
           const mem = (membersByGroup[g2.id] || []).slice().sort((a, b) => (a.slot || 0) - (b.slot || 0));
-          const names = mem.map(m => { const p = pById[m.tournament_player_id]; const nm = p ? p.display_name.split(/\s+/)[0] : '?'; return ((od || wNoTeams) ? '' : (m.team === 'A' ? '🔵' : '🔴')) + nm; }).join(' ');
+          const names = mem.map(m => { const p = pById[m.tournament_player_id]; const nm = p ? p.display_name.split(/\s+/)[0] : '?'; return ((od || wNoTeams) ? '' : t2TeamDot(m.team)) + nm; }).join(' ');   // v1086
           return '<div style="padding:6px 0;border-top:1px solid var(--border)"><div style="font-weight:600;font-size:13px">Group ' + g2.group_number + '</div><div style="font-size:13px;color:var(--text-muted)">' + t2esc(names) + '</div></div>';
         }).join('') + '</div>';
       }
@@ -59448,6 +59797,12 @@ async function renderT2Home() {
       // to the event; Done re-renders this step once (no flicker, no reset).
       { const pickBtn = document.getElementById('t2-pick-roster-btn'); if (pickBtn) pickBtn.onclick = () => openT2RosterPicker(t.id); }
       body.querySelectorAll('.t2-team-btn').forEach(b => b.onclick = async () => { const _ok = await t2SetPlayerTeam(b.dataset.pid, b.dataset.team); if (!_ok) showToast('Could not move that player — check your connection'); await renderT2Home(); });   // v986 (T47)
+      // v1086: the 3-8 team picker. An empty choice sends them back to Unassigned.
+      body.querySelectorAll('.t2-team-sel').forEach(sel => sel.onchange = async () => {
+        const _ok = await t2SetPlayerTeam(sel.dataset.pid, sel.value || null);
+        if (!_ok) showToast('Could not move that player — check your connection');
+        await renderT2Home();
+      });
       body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { const _ok = await t2RemovePlayer(b.dataset.pid); if (!_ok) showToast('Could not remove that player — they may be locked to a started group'); await renderT2Home(); });   // v986 (T47)
       body.querySelectorAll('.t2-wd-btn').forEach(b => b.onclick = () => t2ToggleWithdraw(b.dataset.pid));   // v986 (T38)
       body.querySelectorAll('.t2-fill-slot').forEach(b => b.onclick = () => t2FillSlotPrompt(b.dataset.pid));
@@ -59663,8 +60018,7 @@ async function renderT2Home() {
   } else {
     html += '<h3 style="margin:14px 0 6px">Assign team</h3>';
     if (amCommish) html += '<div style="display:flex;align-items:center;gap:6px;padding:0 0 3px;font-size:10px;font-weight:700;letter-spacing:.03em;color:var(--text-muted)"><div style="flex:1;min-width:0"></div><span style="width:62px;text-align:center;flex:0 0 auto">HCP</span><span style="flex:0 0 auto">Transfer</span><span style="flex:0 0 auto">Invite</span><span style="flex:0 0 auto;width:64px"></span></div>';
-    html += renderTeam(t.team_a_name, teamA, 'A');
-    html += renderTeam(t.team_b_name, teamB, 'B');
+    _tmKeys.forEach(k => { html += renderTeam(t2TeamName(t, k), _byTeam[k] || [], k); });
     if (unassigned.length) html += renderTeam('Unassigned', unassigned);
   }
 
@@ -59742,7 +60096,7 @@ async function renderT2Home() {
         namesHtml = mem.map(m => {
           const p = pById[m.tournament_player_id];
           const nm = p ? p.display_name.split(/\s+/)[0] : '?';
-          const dot = od ? '' : (m.team === 'A' ? '🔵' : '🔴');
+          const dot = od ? '' : t2TeamDot(m.team);   // v1086: a distinct dot per team, not just blue/red
           return '<button class="small t2-swap-chip" data-mid="' + m.id + '" data-team="' + (m.team || '') + '" ' +
             'data-gid="' + m.group_id + '" data-slot="' + (m.slot || 0) + '" data-day="' + i + '" data-fmt="' + (d.format || 'stroke') + '" ' +
             'style="padding:2px 8px;font-size:12px;margin:1px">' + dot + t2esc(nm) + '</button>';
@@ -59751,7 +60105,7 @@ async function renderT2Home() {
         const names = mem.map(m => {
           const p = pById[m.tournament_player_id];
           const nm = p ? p.display_name.split(/\s+/)[0] : '?';
-          return (od ? '' : (m.team === 'A' ? '🔵' : '🔴')) + nm;
+          return (od ? '' : t2TeamDot(m.team)) + nm;   // v1086
         });
         namesHtml = t2esc(names.join(od ? ', ' : ' '));
       }
@@ -59777,19 +60131,29 @@ async function renderT2Home() {
           const fn = m => { const p = pById[m.tournament_player_id]; return p ? t2esc(p.display_name.split(/\s+/)[0]) : '?'; };
           if (plan.mode === 'pairs') {
             const editable = amCommish && !started;
-            const aN = mem.filter(m => m.team !== 'B').length, bN = mem.filter(m => m.team === 'B').length;
-            const bal = aN === 2 && bN === 2;
+            // v1086: this used to count "not B" as A and coerce every chip to A or B,
+            // so a Team-C player was silently displayed AND re-saved as Team A, and the
+            // "✓ 2 v 2" badge read green on a broken cart. Count the real keys instead.
+            const _cartCount = {};
+            mem.forEach(m => { const k = m.team; if (k) _cartCount[k] = (_cartCount[k] || 0) + 1; });
+            const _cartKeys = T2_TEAM_KEYS.filter(k => _cartCount[k]);
+            // A cart is right when it holds exactly two teams with the same headcount
+            // (Tyler's rule: two whole teams per foursome).
+            const bal = _cartKeys.length === 2 && _cartCount[_cartKeys[0]] === _cartCount[_cartKeys[1]]
+                        && mem.every(m => !!m.team);
             const chips = mem.map(m => {
-              const tm = m.team === 'B' ? 'B' : 'A';
-              const dot = tm === 'A' ? '🔵' : '🔴';
+              const tm = m.team || _cartKeys[0] || 'A';
+              const dot = t2TeamDot(tm);
               return editable
-                ? '<button class="small t2-grp-team" data-mid="' + m.id + '" data-team="' + tm + '" style="padding:2px 8px;font-size:12px;margin:1px">' + dot + fn(m) + '</button>'
-                : '<span style="font-size:12px;margin:0 5px">' + dot + fn(m) + '</span>';
+                ? '<button class="small t2-grp-team" data-mid="' + m.id + '" data-team="' + tm + '" title="' + t2esc(t2TeamName(t, tm)) + ' — tap to move to the other team in this cart" style="padding:2px 8px;font-size:12px;margin:1px">' + dot + fn(m) + '</button>'
+                : '<span style="font-size:12px;margin:0 5px" title="' + t2esc(t2TeamName(t, tm)) + '">' + dot + fn(m) + '</span>';
             }).join('');
             const note = !editable ? '' : (bal
-              ? ' <span style="color:var(--accent);font-size:12px">✓ 2 v 2</span>'
-              : ' <span style="color:var(--danger);font-size:12px">⚠️ tap to set 2 🔵 &amp; 2 🔴</span>');
-            html += '<div style="margin:1px 0 7px 8px"><span style="font-size:12px;color:var(--text-muted)">Teams: </span>' + chips + note +
+              ? ' <span style="color:var(--accent);font-size:12px">✓ ' + _cartCount[_cartKeys[0]] + ' v ' + _cartCount[_cartKeys[1]] + '</span>'
+              : ' <span style="color:var(--danger);font-size:12px">⚠️ ' + (_cartKeys.length > 2
+                  ? (_cartKeys.length + ' teams in one cart — a cart holds two')
+                  : (mem.some(m => !m.team) ? 'someone has no team' : 'tap to even the two sides')) + '</span>');
+            html += '<div data-cart-keys="' + _cartKeys.join(',') + '" style="margin:1px 0 7px 8px"><span style="font-size:12px;color:var(--text-muted)">Teams: </span>' + chips + note +
               (editable ? '<div class="small-text" style="color:var(--text-muted);margin:2px 0 0">Tap a player to switch their team. These pairs feed this day’s 2-man games.</div>' : '') + '</div>';
           } else {
             const txt = plan.mode === 'rotate'
@@ -59961,7 +60325,26 @@ async function renderT2Home() {
     const saveTpl = document.getElementById('t2-save-template');
     if (saveTpl) saveTpl.onclick = () => t2SaveAsTemplate();
     body.querySelectorAll('.t2-team-btn').forEach(b => b.onclick = async () => { const _ok = await t2SetPlayerTeam(b.dataset.pid, b.dataset.team); if (!_ok) showToast('Could not move that player — check your connection'); await renderT2Home(); });   // v986 (T47)
-    body.querySelectorAll('.t2-grp-team').forEach(ch => ch.onclick = async () => { const _ok = await t2SetMemberTeam(ch.dataset.mid, ch.dataset.team === 'B' ? 'A' : 'B'); if (!_ok) showToast('Could not change that pairing — check your connection'); await renderT2Home(); });   // v986 (T47)
+    // v1086: the 3-8 team picker. An empty choice sends them back to Unassigned.
+    body.querySelectorAll('.t2-team-sel').forEach(sel => sel.onchange = async () => {
+      const _ok = await t2SetPlayerTeam(sel.dataset.pid, sel.value || null);
+      if (!_ok) showToast('Could not move that player — check your connection');
+      await renderT2Home();
+    });
+    // v1086: this flipped strictly between 'A' and 'B', so tapping a Team-C chip
+    // OVERWROTE that player onto team B. Toggle between the two teams actually in the
+    // cart instead; a cart only ever holds two.
+    body.querySelectorAll('.t2-grp-team').forEach(ch => ch.onclick = async () => {
+      let dest = ch.dataset.team === 'B' ? 'A' : 'B';
+      try {
+        const _row = ch.closest('[data-cart-keys]');
+        const _ks = _row ? String(_row.getAttribute('data-cart-keys') || '').split(',').filter(Boolean) : [];
+        if (_ks.length === 2) dest = (ch.dataset.team === _ks[0]) ? _ks[1] : _ks[0];
+      } catch (e) {}
+      const _ok = await t2SetMemberTeam(ch.dataset.mid, dest);
+      if (!_ok) showToast('Could not change that pairing — check your connection');
+      await renderT2Home();
+    });   // v986 (T47)
     body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { const _ok = await t2RemovePlayer(b.dataset.pid); if (!_ok) showToast('Could not remove that player — they may be locked to a started group'); await renderT2Home(); });   // v986 (T47)
     body.querySelectorAll('.t2-fill-slot').forEach(b => b.onclick = () => t2FillSlotPrompt(b.dataset.pid));
   body.querySelectorAll('.t2-wd-btn').forEach(b => b.onclick = () => t2ToggleWithdraw(b.dataset.pid));
@@ -62179,7 +62562,10 @@ function t2ComputeFieldTeamQuota(rows, t, dayNumber) {
     if (typeof computeQuotaPoints !== 'function' || typeof quotaTargetFor !== 'function') return null;
     const nmk = s => normalizeNameSegment(String(s || ''));
     const seen = {};
-    let aTotal = 0, bTotal = 0, aCount = 0, bCount = 0, scored = 0, any = false;
+    // v1086: totals per REAL team key, so three or more sides each get their own
+    // column instead of everything-that-is-not-A being dumped into B.
+    const totals = {}, counts = {};
+    let scored = 0, any = false;
     rows.forEach(row => {
       const g = (row && row.data) ? row.data : row;
       if (!g || !Array.isArray(g.players) || !g.games || !g.games.teamQuota) return;
@@ -62187,8 +62573,11 @@ function t2ComputeFieldTeamQuota(rows, t, dayNumber) {
       const cfg = g.games.teamQuota;
       if (cfg.teamMode === '4man') return;   // 4-man is one team vs the field, not A vs B
       const side = {};
-      (cfg.teamA || []).forEach(id => { side[id] = 'A'; });
-      (cfg.teamB || []).forEach(id => { side[id] = 'B'; });
+      // The cart's two local sides map to their REAL global keys (v1086); pre-v1086
+      // rounds have none and fall back to A/B.
+      const _kA = cfg.teamAKey || 'A', _kB = cfg.teamBKey || 'B';
+      (cfg.teamA || []).forEach(id => { side[id] = _kA; });
+      (cfg.teamB || []).forEach(id => { side[id] = _kB; });
       const inBet = g.players.filter(p => side[p.id]);
       if (!inBet.length) return;
       let cp = null; try { cp = computeQuotaPoints(g, cfg, inBet); } catch (e) { return; }
@@ -62199,12 +62588,27 @@ function t2ComputeFieldTeamQuota(rows, t, dayNumber) {
         try { res = cp.points[p.id] - quotaTargetFor(g, cfg, p); } catch (e) { return; }
         if (res == null || !isFinite(res)) return;
         seen[k] = 1; any = true;
-        if (side[p.id] === 'A') { aTotal += res; aCount++; } else { bTotal += res; bCount++; }
+        // v1086: this used to be `if A … else …`, which folded EVERY non-A team into
+        // team B's total — with 8 teams that is a wrong number on a real-money pot.
+        const _sk = side[p.id];
+        totals[_sk] = (totals[_sk] || 0) + res;
+        counts[_sk] = (counts[_sk] || 0) + 1;
         try { const sc = (g.scores && g.scores[p.id]) || []; scored = Math.max(scored, sc.filter(x => x != null).length); } catch (e) {}
       });
     });
     if (!any) return null;
-    return { aTotal: aTotal, bTotal: bTotal, aCount: aCount, bCount: bCount, thru: scored,
+    // Ranked standings across however many teams are in play, plus the legacy A/B pair
+    // so the existing two-team displays keep working untouched.
+    const _keys = T2_TEAM_KEYS.filter(k => counts[k]);
+    const teams = _keys.map(k => ({
+      key: k, name: (typeof t2TeamName === 'function') ? t2TeamName(t, k) : ('Team ' + k),
+      total: totals[k] || 0, count: counts[k] || 0,
+      dot: (typeof t2TeamDot === 'function') ? t2TeamDot(k) : '',
+      color: (typeof t2TeamColor === 'function') ? t2TeamColor(k) : ''
+    })).sort((x, y) => y.total - x.total);
+    return { teams: teams, nTeams: teams.length, thru: scored,
+             aTotal: totals.A || 0, bTotal: totals.B || 0,
+             aCount: counts.A || 0, bCount: counts.B || 0,
              teamAName: (t && t.team_a_name) || 'Team A',
              teamBName: (t && t.team_b_name) || 'Team B' };
   } catch (e) { return null; }
@@ -62925,7 +63329,7 @@ async function loadTourneyMoney(t) {
       Object.keys(roundsByDay).map(Number).sort((a, b) => a - b).forEach(day => {
         const dayRounds = roundsByDay[day];
         const cfgByKey = {};
-        const teamOf = {};   // canonical id -> 'A' | 'B'
+        const teamOf = {};   // canonical id -> real team key ('A'..'H')
         let conflict = false;
         dayRounds.forEach(g => {
           if (!g.games) return;
@@ -62944,18 +63348,38 @@ async function loadTourneyMoney(t) {
               const c = canonOf[nm(pn)]; if (!c) return;
               if (teamOf[c] && teamOf[c] !== side) conflict = true; else teamOf[c] = side;
             });
-            assign(cfg.teamA, 'A'); assign(cfg.teamB, 'B');
+            // v1086: use the REAL global keys this cart's two sides stand for. Without
+            // this, cart 1's "A" (team C) and cart 2's "A" (team A) would be merged into
+            // one side and the pot would pay a team that does not exist. Rounds saved
+            // before v1086 carry no keys and fall back to A/B — i.e. exactly as before.
+            assign(cfg.teamA, cfg.teamAKey || 'A'); assign(cfg.teamB, cfg.teamBKey || 'B');
           });
         });
         if (conflict || !Object.keys(cfgByKey).length) return;
-        const aIds = allIds.filter(id => teamOf[id] === 'A');
-        const bIds = allIds.filter(id => teamOf[id] === 'B');
-        if (!aIds.length || !bIds.length) return;
+        // v1086: bucket every player by their REAL team key, so this works the same at
+        // two teams and at eight.
+        const idsByTeam = {};
+        T2_TEAM_KEYS.forEach(k => {
+          const ids = allIds.filter(id => teamOf[id] === k);
+          if (ids.length) idsByTeam[k] = ids;
+        });
+        const _liveKeys = Object.keys(idsByTeam);
+        if (_liveKeys.length < 2) return;
+        const aIds = idsByTeam[_liveKeys[0]] || [];
+        const bIds = idsByTeam[_liveKeys[1]] || [];
         const tGames = {};
         // v1084: clear _t2field here. The group rounds carry it so their own Boards
         // report points only — but THIS is the field settle, so the flag has to come
         // off or calcTeamQuota would zero the money at both levels and nobody pays.
-        Object.keys(cfgByKey).forEach(key => { tGames[key] = Object.assign({}, cfgByKey[key], { teamA: aIds, teamB: bIds, _t2field: false, _t2fieldCount: 0 }); });
+        // v1086: `teams` carries all N sides. calcTeamQuota only switches to the
+        // multi-team pot when there are 3+, so a two-team event settles on exactly the
+        // same code path it always did — teamA/teamB below are still the whole story.
+        Object.keys(cfgByKey).forEach(key => {
+          tGames[key] = Object.assign({}, cfgByKey[key], {
+            teamA: aIds, teamB: bIds, teams: idsByTeam, teamKeys: _liveKeys,
+            _t2field: false, _t2fieldCount: 0
+          });
+        });
         let res = null; try { res = computeAllGameMoney(buildVg(dayRounds, tGames, Object.values(canonPlayer))); } catch (e) {}
         addCombined(res, tourneyNet, tourneyLabels, tourneyNetByGame);   // ← TOURNAMENT pool (cross-group team bets)
       });
@@ -65199,7 +65623,49 @@ async function openEventLeaderboard(t) {
     const [list, money, teamStand, evPlayers, _rawRounds, _combinedPay] = await Promise.all([loadTourneyScores(t), loadTourneyMoney(t), loadTourneyTeamStandings(t), t2GetPlayers(t.id).catch(() => []), loadTourneyRawRounds(t).catch(() => []), t2ComputeCombinedPayouts(t).catch(() => null)]);
     let _fieldStbl = null; try { _fieldStbl = t2ComputeFieldStableford(_rawRounds, t, evPlayers); } catch (e) {}
     let _fieldQuota = null; try { _fieldQuota = t2ComputeFieldQuota(_rawRounds, t, evPlayers); } catch (e) {}
+    // v1086: whole-field TEAM QUOTA standings — every team's points vs quota, ranked.
+    // Works at two teams and at eight, and is the block the GPS quota bubble jumps to.
+    let _fieldTQ = null;
+    try {
+      const _tqDay = (function () {
+        let d = 1;
+        (_rawRounds || []).forEach(r => { const gg = (r && r.data) ? r.data : r; const dd = Number((gg && gg.t2 && gg.t2.day) || 1); if (dd > d) d = dd; });
+        return d;
+      })();
+      _fieldTQ = t2ComputeFieldTeamQuota(_rawRounds, t, _tqDay);
+    } catch (e) {}
     let html = '';
+    if (_fieldTQ && Array.isArray(_fieldTQ.teams) && _fieldTQ.teams.length) {
+      const _tqN = _fieldTQ.teams.length;
+      const _lead = _fieldTQ.teams[0];
+      const _tie = _fieldTQ.teams.filter(x => x.total === _lead.total).length > 1;
+      html += '<div id="ev-team-quota" style="scroll-margin-top:12px">';
+      html += '<h3 style="margin:14px 0 4px">🏹 Team Quota — points vs quota '
+        + '<span class="small-text" style="color:var(--text-muted)">' + _tqN + ' team' + (_tqN === 1 ? '' : 's')
+        + (_fieldTQ.thru ? ' · thru ' + _fieldTQ.thru : '') + '</span></h3>';
+      html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">'
+        + (_tie ? 'Tied at the top' : escapeHtml(_lead.name) + ' leads') + ' — each team\'s total is the sum of its players\' (points − quota).</div>';
+      html += '<div style="font-size:13px">';
+      html += '<div style="display:flex;gap:8px;padding:2px 0;font-size:11px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border)">'
+        + '<span style="width:22px"></span><span style="flex:1;min-width:0">Team</span>'
+        + '<span style="width:52px;text-align:right">Players</span><span style="width:64px;text-align:right">vs quota</span></div>';
+      // Rank with ties marked, same convention as the field standings above.
+      const _pos = []; _fieldTQ.teams.forEach((x, i) => {
+        const pv = i ? _fieldTQ.teams[i - 1] : null;
+        _pos.push((pv && pv.total === x.total) ? _pos[i - 1] : (i + 1));
+      });
+      _fieldTQ.teams.forEach((x, i) => {
+        const _me = false;
+        html += '<div style="display:flex;gap:8px;padding:3px 0;border-bottom:1px solid var(--border)' + (i === 0 ? ';font-weight:700' : '') + '">'
+          + '<span style="width:22px;color:var(--text-muted)">' + _pos[i] + '</span>'
+          + '<span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+          + (x.dot || '') + ' ' + escapeHtml(x.name) + '</span>'
+          + '<span style="width:52px;text-align:right;color:var(--text-muted)">' + x.count + '</span>'
+          + '<span style="width:64px;text-align:right;color:' + (x.total > 0 ? 'var(--accent)' : (x.total < 0 ? 'var(--danger)' : 'var(--text-muted)')) + '">'
+          + (x.total > 0 ? '+' : '') + x.total + '</span></div>';
+      });
+      html += '</div></div>';
+    }
     // Whole field = every registered tournament player, not just those who've started.
     let _fieldList = Array.isArray(list) ? list.slice() : [];
     try {
@@ -73545,7 +74011,28 @@ const gpsView = (() => {
     { const _db = el('gps-drive-bubble'); if (_db) _db.onclick = openDriveShot; }
     { const _lp = el('gps-lp-bubble'); if (_lp) _lp.onclick = () => { try { if (state.game) state.currentHole = hole; close(); if (typeof switchTab === 'function') switchTab('score'); } catch (e) {} }; }
     { const _ld = el('gps-ld-bubble'); if (_ld) _ld.onclick = () => { try { if (state.game) state.currentHole = hole; close(); if (typeof switchTab === 'function') switchTab('score'); } catch (e) {} }; }
-    { const _qb = el('gps-quota-bubble'); if (_qb) _qb.onclick = () => { try { try { state._gpsReturn = (state.game && state.currentHole != null) ? state.currentHole : true; } catch (e2) {} close(); if (typeof switchTab === 'function') switchTab('board'); } catch (e) {} }; }
+    // v1086 (Tyler): tapping the quota bubble should land you on the standings that
+    // bubble is summarising — the whole-field Team Quota table — not just "the Board".
+    // In a tournament that means opening the Event Leaderboard and scrolling straight
+    // to the Team Quota block; anywhere else it behaves exactly as before.
+    { const _qb = el('gps-quota-bubble'); if (_qb) _qb.onclick = async () => {
+      try { state._gpsReturn = (state.game && state.currentHole != null) ? state.currentHole : true; } catch (e2) {}
+      let _tid = null;
+      try { _tid = (state.game && state.game.t2 && state.game.t2.tournamentId) || null; } catch (e) {}
+      try { close(); } catch (e) {}
+      if (_tid) {
+        try {
+          const _t = await t2Get(_tid);
+          if (_t) {
+            await openEventLeaderboard(_t);
+            // Give the sheet a beat to paint, then bring the Team Quota block into view.
+            setTimeout(() => { try { const _el = document.getElementById('ev-team-quota'); if (_el) _el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {} }, 260);
+            return;
+          }
+        } catch (e) {}
+      }
+      try { if (typeof switchTab === 'function') switchTab('board'); } catch (e) {}
+    }; }
     { const _sb = el('gps-stableford-bubble'); if (_sb) _sb.onclick = () => { try { try { state._gpsReturn = (state.game && state.currentHole != null) ? state.currentHole : true; } catch (e2) {} close(); if (typeof switchTab === 'function') switchTab('board'); } catch (e) {} }; }
     { const _bb = el('gps-bbb-bubble'); if (_bb) _bb.onclick = () => { try { try { state._gpsReturn = (state.game && state.currentHole != null) ? state.currentHole : true; } catch (e2) {} close(); if (typeof switchTab === 'function') switchTab('board'); } catch (e) {} }; }
     { const _nb = el('gps-nassau-bubble'); if (_nb) _nb.onclick = () => { try { try { state._gpsReturn = (state.game && state.currentHole != null) ? state.currentHole : true; } catch (e2) {} close(); if (typeof switchTab === 'function') switchTab('board'); } catch (e) {} }; }
