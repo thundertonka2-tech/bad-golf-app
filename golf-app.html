@@ -6560,6 +6560,9 @@
           <button id="btn-recalc-hcp" style="white-space:normal;line-height:1.2;min-height:48px" title="Re-derive each saved round's differential from the course's CURRENT rating/slope (fixes your index after a course's rating was corrected)">♻️ Recalculate handicap</button>
           <button id="btn-restore-rounds" style="white-space:normal;line-height:1.2;min-height:48px" title="Recover rounds — and your profile — from your private cloud backup if any went missing">↩️ Restore rounds</button>
           <button id="btn-recompute-fw" style="white-space:normal;line-height:1.2;min-height:48px" title="Rebuild your Fairway % under the current rule — only holes you marked hit/miss count. Fixes old rounds where unmarked fairways were wrongly counted as misses.">⛳ Recompute fairways</button>
+          <!-- v1085: recovers a finished round that is in your Rounds list but missing
+               from your stats / Lifetime Bets — the case where somebody else kept score. -->
+          <button id="btn-resync-stats" style="white-space:normal;line-height:1.2;min-height:48px" title="Re-read every finished round in your Rounds list and rebuild your stats from it. Use when a round shows in Rounds but is missing from your stats box or Bet history.">🔄 Resync my stats</button>
         </div>
       </div>
       <!-- Compare to a friend — overlays their handicap trend on your chart below. -->
@@ -8062,7 +8065,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1084';
+const BG_BUILD = 'v2026.11.1085';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -26189,6 +26192,51 @@ async function recomputeFairwayStats() {
     try { if (typeof renderStats === 'function') renderStats(); } catch (e) {}
     showToast(n > 0 ? ('Fairways recomputed across ' + n + ' round' + (n === 1 ? '' : 's') + ' \u2713') : 'No saved rounds to recompute');
   } catch (e) { try { showToast('Could not recompute — try again'); } catch (e2) {} }
+}
+// v1085 (Tyler, 8/18) — one-tap repair for "my bet history doesn't match my rounds".
+// Walks every FINISHED round in my Rounds list, loads the shared card, and re-archives
+// it. Adds anything missing (a round a playing partner scored and closed out never
+// reaches my stats on its own) and refreshes anything stale. Idempotent —
+// archiveScoresFromRound dedups by gameCode and updates in place — so it is always
+// safe to run twice. Reports what it actually found rather than a bare "done".
+async function resyncMyStats() {
+  try {
+    if (typeof isSignedIn === 'function' && !isSignedIn()) { showToast('Sign in to resync your stats'); return; }
+    let me = null; try { me = await getMeName(); } catch (e) {}
+    if (!me) { showToast('Link your player first (Stats \u2192 Account)'); return; }
+    showToast('Resyncing your stats\u2026');
+    const _rec = (typeof getRecent === 'function') ? await getRecent() : [];
+    const codes = Array.from(new Set((Array.isArray(_rec) ? _rec : [])
+      .filter(r => r && r.code && r.finishedAt).map(r => r.code)));
+    // What did my history hold BEFORE, so we can report what was actually recovered.
+    let hadBefore = new Set();
+    try {
+      const _r0 = await getPlayerRoster();
+      const _e0 = findMyRosterPlayer(_r0, me);
+      ((_e0 && _e0.scoreHistory) || []).forEach(s => { if (s && s.gameCode) hadBefore.add(s.gameCode); });
+    } catch (e) {}
+    const _meKey = (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(me)) : String(me).trim().toLowerCase();
+    let added = 0, refreshed = 0;
+    for (const c of codes) {
+      try {
+        const g = await loadGame(c);
+        if (!(g && g.finishedAt && Array.isArray(g.players) && g.players.length)) continue;
+        const iAmIn = g.players.some(p => p && ((typeof normalizeNameSegment === 'function')
+          ? normalizeNameSegment(String(p.name || '')) : String(p.name || '').trim().toLowerCase()) === _meKey);
+        if (!iAmIn) continue;
+        await archiveScoresFromRound(g);
+        if (hadBefore.has(c)) refreshed++; else added++;
+      } catch (e) {}
+    }
+    try { window._bgMissingTried = {}; } catch (e) {}
+    try { if (typeof renderHome === 'function') await renderHome(); } catch (e) {}
+    try { if (typeof renderStats === 'function') await renderStats(); } catch (e) {}
+    try { if (typeof loadRounds === 'function') await loadRounds(); } catch (e) {}
+    showToast(added > 0
+      ? ('Recovered ' + added + ' missing round' + (added === 1 ? '' : 's') + ' \u2713 (' + refreshed + ' refreshed)')
+      : (refreshed > 0 ? ('Stats already up to date \u2014 ' + refreshed + ' round' + (refreshed === 1 ? '' : 's') + ' rechecked \u2713')
+                       : 'No finished rounds to resync'));
+  } catch (e) { try { showToast('Could not resync \u2014 try again'); } catch (e2) {} }
 }
 async function recalcMyDifferentials() {
   if (typeof isSignedIn === 'function' && !isSignedIn()) { showToast('Sign in to recalculate your handicap'); return; }
@@ -46156,7 +46204,23 @@ function _roundIsTombstonedSync(s) {
     return keys.some(k => (local && local.has(k)) || (shared && shared.has(k)));
   } catch (e) { return false; }
 }
-function roundCountsForBets(s) { return !!(s && typeof s.money === 'number' && (s.complete === true || typeof s.gross === 'number') && !_roundIsTombstonedSync(s)); }
+// v1085 (Tyler, 8/18): this required `complete === true || typeof gross === 'number'`,
+// which silently excluded every PARTIAL round from Lifetime Bets and Bet history —
+// flatly contradicting archiveScoresFromRound's own documented rule ("Incomplete
+// rounds still get recorded so they count toward Rounds played AND Lifetime bets"),
+// and quietly losing money from a round the group walked in from after 14 holes.
+// If an entry carries a settled money figure, that money was won or lost and belongs
+// in the history. Pure ghost rows (no money, no gross, no holes) are still excluded,
+// so a re-archive artifact can't pad the list.
+function roundCountsForBets(s) {
+  if (!s || typeof s.money !== 'number') return false;
+  if (_roundIsTombstonedSync(s)) return false;
+  if (s.money !== 0) return true;                    // real settled money — always counts
+  if (typeof s.gross === 'number') return true;      // a played round that happened to settle $0
+  if (s.complete === true) return true;
+  if ((s.holesScored || 0) > 0) return true;
+  return false;                                      // $0 and no scorecard at all — ghost
+}
 function getDeletedRoundKeys() {
   try { const a = JSON.parse(localStorage.getItem(KEY_DELETED_ROUNDS) || '[]'); return new Set(Array.isArray(a) ? a : []); } catch (e) { return new Set(); }
 }
@@ -48035,7 +48099,72 @@ async function reconcileMyScoreHistory() {
     const me = await getMeName(); if (!me) return;
     let roster = await getPlayerRoster();
     let entry = findMyRosterPlayer(roster, me);
-    if (!entry || !Array.isArray(entry.scoreHistory) || !entry.scoreHistory.length) return;
+    // v1085: this used to bail whenever scoreHistory was EMPTY — the single case
+    // that needs healing most (stats never archived, or cleared and rebuilding).
+    // An empty history is fine; the missing-round pass below is what fills it.
+    if (!entry) return;
+    if (!Array.isArray(entry.scoreHistory)) entry.scoreHistory = [];
+    let _bgAddedMissing = false;
+
+    // 0-MISSING) v1085 (Tyler, 8/18) — ADD a finished round that never reached my
+    // history at all. archiveScoresFromRound runs on the device that FINISHES the
+    // round; everyone else receives the round into their Rounds list by sync and
+    // then has nothing that writes it into their stats. Step 0 below deliberately
+    // will not help — it only refreshes snapshots that already exist (`if (!snap)
+    // return false`). So a round a playing partner scored and closed out sat in
+    // Rounds while the Home stats box, Lifetime Bets and Bet history all behaved as
+    // if it never happened. Confirmed live: SHANK30 (Buffalo Creek, 8/18) was in
+    // Tyler's Rounds list and in three other players' rosters, and missing from his
+    // own for over three hours.
+    // Strictly additive and conservative: FINISHED rounds only, only rounds I am
+    // actually a player in, never a round I removed, each code attempted once per
+    // session, at most 10 per pass so a long history can't stall the screen.
+    try {
+      const _recAdd = await getRecent();
+      if (Array.isArray(_recAdd) && _recAdd.length) {
+        const _have = new Set((entry.scoreHistory || []).map(s => s && s.gameCode).filter(Boolean));
+        window._bgMissingTried = window._bgMissingTried || {};
+        let _hidden = []; try { _hidden = getHiddenRounds() || []; } catch (e) {}
+        let _delKeys = null; try { _delKeys = getDeletedRoundKeys(); } catch (e) {}
+        const _missing = _recAdd.filter(r => {
+          if (!r || !r.code || !r.finishedAt) return false;      // finished rounds only
+          if (_have.has(r.code)) return false;                   // already in my stats
+          if (window._bgMissingTried[r.code]) return false;      // tried once already
+          if (_hidden.indexOf(r.code) >= 0) return false;        // I removed this round
+          try { if (_delKeys && _delKeys.has(statsRoundKey({ gameCode: r.code }))) return false; } catch (e) {}
+          return true;
+        }).slice(0, 10);
+        if (_missing.length) {
+          const _meKey = (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(me || '')) : String(me || '').trim().toLowerCase();
+          const _loadedM = await Promise.all(_missing.map(async r => {
+            window._bgMissingTried[r.code] = 1;
+            try { return await loadGame(r.code); } catch (e) { return null; }
+          }));
+          let _added = 0;
+          for (const g of _loadedM) {
+            if (!(g && g.finishedAt && Array.isArray(g.players) && g.players.length)) continue;
+            // Only archive a round I actually played in. A crew round that reached my
+            // list some other way must never manufacture an entry in my stats.
+            let _iAmIn = false;
+            try {
+              _iAmIn = g.players.some(p => p && ((typeof normalizeNameSegment === 'function')
+                ? normalizeNameSegment(String(p.name || '')) : String(p.name || '').trim().toLowerCase()) === _meKey);
+            } catch (e) {}
+            if (!_iAmIn) continue;
+            try { await archiveScoresFromRound(g); _added++; } catch (e) {}
+          }
+          if (_added) {
+            _bgAddedMissing = true;
+            try { console.warn('[BadGolf] stats heal: added ' + _added + ' finished round(s) that were missing from my history'); } catch (e) {}
+            roster = await getPlayerRoster();
+            entry = findMyRosterPlayer(roster, me);
+            if (!entry) return true;
+            if (!Array.isArray(entry.scoreHistory)) entry.scoreHistory = [];
+          }
+        }
+      }
+    } catch (e) {}
+    if (!entry.scoreHistory.length && !_bgAddedMissing) return false;
     // 0) HEAL stale snapshots from the canonical saved games so Stats (Hole-by-Hole
     //    + handicap KPIs) always matches the live Events list. A round first archived
     //    early (e.g. 2 holes) and finished later can otherwise stay stale here.
@@ -48132,7 +48261,11 @@ async function reconcileMyScoreHistory() {
     try { entry.scoreHistory = dedupeScoreHistory(entry.scoreHistory); } catch (e) {}
     // v963: report whether anything actually changed, so a caller that ran this in
     // the background knows whether it needs to re-render (see renderStatsForSelectedPlayer).
-    if (entry.scoreHistory.length !== before || _myHealed) { await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false); return true; }
+    // v1085: _bgAddedMissing counts too — a round ADDED by the missing-round pass
+    // leaves length === before (archiveScoresFromRound persisted it itself), so
+    // without this the caller never re-renders and the round stays invisible until
+    // the next screen change. That delay is the whole bug being fixed here.
+    if (entry.scoreHistory.length !== before || _myHealed || _bgAddedMissing) { await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false); return true; }
     return false;
   } catch (e) {}
   return false;
@@ -67609,6 +67742,7 @@ async function init() {
   { const _sh = document.getElementById('btn-share-hcp'); if (_sh) _sh.onclick = () => shareHandicap(); }
   { const _rc = document.getElementById('btn-recalc-hcp'); if (_rc) _rc.onclick = () => { try { recalcMyDifferentials(); } catch (e) {} }; }
   { const _rf = document.getElementById('btn-recompute-fw'); if (_rf) _rf.onclick = () => { try { recomputeFairwayStats(); } catch (e) {} }; }
+  { const _rs = document.getElementById('btn-resync-stats'); if (_rs) _rs.onclick = () => { try { resyncMyStats(); } catch (e) {} }; }
   { const _rr = document.getElementById('btn-restore-rounds'); if (_rr) _rr.onclick = () => { try { restoreRoundsFromCloud(); } catch (e) {} }; }
 
   // Stats tab: danger-zone full reset (button removed from the UI — guard it).
