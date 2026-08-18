@@ -8099,7 +8099,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1095';
+const BG_BUILD = 'v2026.11.1097';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -18509,6 +18509,17 @@ function crEntryStamp(e) {
   try { return String((e && (e.lastEventAt || e.resolvedAt || e.rejectedAt || e.createdAt)) || ''); }
   catch (x) { return ''; }
 }
+// v1096: the ONLY thing that may assign these sets. Three writers used to each keep
+// them up to date by hand, each in a different and incomplete way — which is how a
+// course ended up in Code Review and Code Review Reject simultaneously.
+function crApplyBuckets(cr) {
+  try {
+    const b = crBucketByCourse(cr);
+    _crPendingIds = b.pending; _crResolvedIds = b.resolved; _crRejectedIds = b.rejected;
+    _crRejectedNotes = b.notes; _crEntryByCourse = b.entryByCourse;
+    return b;
+  } catch (e) { return null; }
+}
 function crBucketByCourse(cr) {
   const pending = new Set(), resolved = new Set(), rejected = new Set();
   const notes = {}, entryByCourse = {};
@@ -18558,6 +18569,13 @@ async function crSubmitEntry(entry){
   }catch(e){}
   arr.push(entry);
   await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true);
+  // v1096 (Tyler): "if Kevin submits it back to the code review queue ... it should
+  // not stay in the code reject queue." Submitting appends a NEW entry, so the course
+  // moves to whatever that entry says — but the buckets were maintained by hand at
+  // each call site and only ever ADDED to Code Review. Re-derive all of them from the
+  // array we just wrote, so the move OUT of Reject is not something a caller has to
+  // remember to do.
+  try{ crApplyBuckets(arr); }catch(e){}
   try{ audit('crq_submitted', entry&&entry.id, ((entry&&entry.course&&entry.course.name)||'')+' — '+((entry&&entry.note)||'')); }catch(e){}
 }
 async function crSetStatus(entryId, status, note, work){ const arr=await crReadQueue(); const e=arr.find(function(x){return x&&x.id===entryId;}); if(!e) return;
@@ -18573,7 +18591,12 @@ async function crSetStatus(entryId, status, note, work){ const arr=await crReadQ
     e.lastEventAt=_ev.at; e.lastEventBy=_ev.byName;
     try{ audit('crq_status_'+status, entryId, [_f.done,_f.cant,_f.need].filter(Boolean).join(' | ').slice(0,300)); }catch(_x){}
   }catch(_e){}
-  e.status=status; if(status==='resolved'){ e.resolvedAt=new Date().toISOString(); e.resolvedBy=(currentUserEmail()||'admin'); e.rejectedAt=null; e.rejectedBy=null; if(work&&work.done) e.resolutionNote=String(work.done).trim(); } else if(status==='rejected'){ e.rejectedAt=new Date().toISOString(); e.rejectedBy=(currentUserEmail()||'admin'); e.resolvedAt=null; e.resolvedBy=null; if(note!=null && String(note).trim()) e.resolutionNote=String(note).trim(); } else { e.resolvedAt=null; e.resolvedBy=null; e.rejectedAt=null; e.rejectedBy=null; } await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true); }
+  e.status=status; if(status==='resolved'){ e.resolvedAt=new Date().toISOString(); e.resolvedBy=(currentUserEmail()||'admin'); e.rejectedAt=null; e.rejectedBy=null; if(work&&work.done) e.resolutionNote=String(work.done).trim(); } else if(status==='rejected'){ e.rejectedAt=new Date().toISOString(); e.rejectedBy=(currentUserEmail()||'admin'); e.resolvedAt=null; e.resolvedBy=null; if(note!=null && String(note).trim()) e.resolutionNote=String(note).trim(); } else { e.resolvedAt=null; e.resolvedBy=null; e.rejectedAt=null; e.rejectedBy=null; }
+  await safeSet(CODE_REVIEW_KEY, JSON.stringify(arr), true);
+  // v1096: same reason as crSubmitEntry — the queue modal re-read and looked correct,
+  // but the admin chips behind it kept whatever they were told last.
+  try{ crApplyBuckets(arr); }catch(e){}
+}
 
 /* ==========================================================================
    v881 CODE-REVIEW AUDIT TRAIL (Tyler).
@@ -19038,7 +19061,12 @@ async function crQuickFile(ctx){
       missing:null, resolvedAt:null, resolvedBy:null, resolutionNote:null
     };
     await crSubmitEntry(entry);
-    try{ if(!_crPendingIds) _crPendingIds=new Set(); _crPendingIds.add(ctx.id); }catch(e){}
+    // v1096: this used to ADD the course to _crPendingIds and stop there — never
+    // removing it from _crRejectedIds — so a course Kevin sent back for review showed
+    // in Code Review AND Code Review Reject at the same time, and still counted as
+    // Incomplete (v1072 reads a live rejection as not-done). crSubmitEntry now
+    // re-derives every bucket from the written queue, so there is nothing to patch up
+    // here; the re-render below simply paints the corrected state.
     showToast('Submitted \u2713');
     try{ renderAdminWorklist(); }catch(e){}
   }catch(e){ showToast('Could not submit \u2014 try again'); }
@@ -19102,7 +19130,10 @@ function openCodeReviewModal(ctx){
     };
     if(_crImg){ entry.scorecardImg=_crImg; try{ if(ctx&&ctx.id&&typeof setScorecardImg==='function') await setScorecardImg(ctx.id,_crImg); }catch(e){} }
     const btn=card.querySelector('#cr-submit'); btn.disabled=true; btn.textContent='Filing…';
-    try{ await crSubmitEntry(entry); showToast('Filed for code review ✓'); close(); }
+    // v1096: the full-form path filed the entry and closed, leaving the worklist
+    // showing the old bucket until the next full admin reload. crSubmitEntry has
+    // already corrected the sets — repaint so the move is visible immediately.
+    try{ await crSubmitEntry(entry); showToast('Filed for code review ✓'); close(); try{ renderAdminWorklist(); }catch(e2){} }
     catch(e){ btn.disabled=false; btn.textContent='File flag ›'; showToast('Could not file — try again'); }
   };
 }
@@ -19113,7 +19144,9 @@ async function openCodeReviewQueue(){
   card.style.cssText='background:var(--surface,var(--surface-2));color:var(--text);border-radius:16px;padding:18px;max-width:460px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,0.45)';
   card.innerHTML='<div class="bg-inline-load"><span class="sp"></span>Loading queue…</div>';
   ov.appendChild(card); document.body.appendChild(ov);
-  const close=function(){ try{ov.remove();}catch(e){} };
+  // v1096: the status buttons in here change which chip a course belongs to, and the
+  // worklist is sitting right behind this modal. Repaint it on the way out.
+  const close=function(){ try{ov.remove();}catch(e){} try{ renderAdminWorklist(); }catch(e){} };
   ov.onclick=function(e){ if(e.target===ov) close(); };
   let showResolved=false;
   const badge=function(s){ const m={ 'new':['🆕 new','var(--money-pos)'], 'investigating':['🔍 investigating','#d98a2b'], 'resolved':['✅ resolved','var(--text-muted)'], 'rejected':['❌ rejected','#c0392b'] }; const b=m[s]||m['new']; return '<span class="adm-flag" style="background:'+b[1]+'">'+b[0]+'</span>'; };
@@ -57981,7 +58014,15 @@ function t2FilterDayConfigGames(hide) {
 //     ball per team, so individual-score games make no sense for the group — the menu
 //     is limited to TEAM / whole-ball bets only. state._t2GroupScramble drives this
 //     (set by openT2GroupGamesConfig from the day's format).
-const T2_GROUP_NEVER = new Set(['longdrive']);
+// v1097 (Tyler): "In tournament mode only, take these games out." Eight of the
+// eleven he named were already gated out by T2_GAME_RULES at both levels. These three
+// were not, because their tiles sit in the SIDE BETS section and side bets are
+// deliberately exempt from the main-game allow-list inside a group — so a foursome
+// could still switch them on in an event the director could never offer them in.
+// Long Drive was already here for a different reason (field-wide, one winner a day).
+// Junk / Snake / Greenie / Long Putt / Birdie Pool stay: Tyler did not ask for those,
+// and they settle correctly per group.
+const T2_GROUP_NEVER = new Set(['longdrive', 'animals', 'marks', 'hot-potato']);
 const T2_GROUP_HIDE_FIELD = new Set(['ctp']);   // v829: Birdie Pool removed from this set — it now runs the same way Skins does (its own independent pot at BOTH the director level and each group's level), so a foursome can run their own Birdie Pool alongside (or instead of) the field-wide one. CTP stays director-only (one shot, one field-wide winner).
 const T2_GROUP_SCRAMBLE_ALLOWED = new Set(['team-match', 'team-lowball', 'team-quota', 'scramble', 'ryder-cup', 'ctp', 'longputt']);
 function t2FilterGroupConfigGames(hide) {
