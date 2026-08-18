@@ -8096,7 +8096,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1092';
+const BG_BUILD = 'v2026.11.1095';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -10779,7 +10779,14 @@ async function ensureAdminData() {
   const playCount = {};
   try { (recent || []).forEach(r => { const nm = (r.course || '').trim().toLowerCase(); if (nm) playCount[nm] = (playCount[nm] || 0) + 1; }); } catch (e) {}
   _adminWork = buildAdminWorklist(saves, mapped, playCount);
-  try { const _cr = await crReadQueue(); _crPendingIds = new Set((_cr || []).filter(function (e) { return e && e.status !== 'resolved' && e.status !== 'rejected' && e.course && e.course.id; }).map(function (e) { return e.course.id; })); _crResolvedIds = new Set((_cr || []).filter(function (e) { return e && e.status === 'resolved' && e.course && e.course.id; }).map(function (e) { return e.course.id; })); _crRejectedIds = new Set((_cr || []).filter(function (e) { return e && e.status === 'rejected' && e.course && e.course.id; }).map(function (e) { return e.course.id; })); _crRejectedNotes = {}; (_cr || []).forEach(function (e) { if (e && e.status === 'rejected' && e.course && e.course.id && e.resolutionNote) _crRejectedNotes[e.course.id] = e.resolutionNote; }); _crEntryByCourse = {}; try { const _crs = (_cr || []).filter(function (e) { return e && e.id && e.course && e.course.id; }).sort(function (a, b) { return String(a.createdAt || '').localeCompare(String(b.createdAt || '')); }); _crs.forEach(function (e) { _crEntryByCourse[e.course.id] = e.id; }); _crs.forEach(function (e) { if (e.status !== 'resolved' && e.status !== 'rejected') _crEntryByCourse[e.course.id] = e.id; }); } catch (e2) {} } catch (e) {}
+  // v1095: one bucketing rule, shared with the admin snapshot below — a course sits
+  // where its LATEST entry puts it, not where any historical entry did.
+  try {
+    const _cr = await crReadQueue();
+    const _b = crBucketByCourse(_cr);
+    _crPendingIds = _b.pending; _crResolvedIds = _b.resolved; _crRejectedIds = _b.rejected;
+    _crRejectedNotes = _b.notes; _crEntryByCourse = _b.entryByCourse;
+  } catch (e) {}
   _adminScopeKey = key;
   _adminDataReady = true;
 }
@@ -10930,18 +10937,11 @@ async function bgBuildGlobalSnapshot(onProg) {
   let cr = []; try { cr = await crReadQueue(); } catch (e) { cr = []; }
   // Refresh the shared review sets from the same read (identical to what
   // ensureAdminData does) so the worklist and this snapshot agree.
+  // v1095: same single rule as the boot-time loader above — latest entry wins.
   try {
-    const hasC = function (e) { return e && e.course && e.course.id; };
-    _crPendingIds = new Set((cr || []).filter(function (e) { return hasC(e) && e.status !== 'resolved' && e.status !== 'rejected'; }).map(function (e) { return e.course.id; }));
-    _crResolvedIds = new Set((cr || []).filter(function (e) { return hasC(e) && e.status === 'resolved'; }).map(function (e) { return e.course.id; }));
-    _crRejectedIds = new Set((cr || []).filter(function (e) { return hasC(e) && e.status === 'rejected'; }).map(function (e) { return e.course.id; }));
-    _crRejectedNotes = {};
-    (cr || []).forEach(function (e) { if (hasC(e) && e.status === 'rejected' && e.resolutionNote) _crRejectedNotes[e.course.id] = e.resolutionNote; });
-    _crEntryByCourse = {};
-    const _crs = (cr || []).filter(function (e) { return e && e.id && hasC(e); })
-      .sort(function (a, b) { return String(a.createdAt || '').localeCompare(String(b.createdAt || '')); });
-    _crs.forEach(function (e) { _crEntryByCourse[e.course.id] = e.id; });
-    _crs.forEach(function (e) { if (e.status !== 'resolved' && e.status !== 'rejected') _crEntryByCourse[e.course.id] = e.id; });
+    const _b = crBucketByCourse(cr);
+    _crPendingIds = _b.pending; _crResolvedIds = _b.resolved; _crRejectedIds = _b.rejected;
+    _crRejectedNotes = _b.notes; _crEntryByCourse = _b.entryByCourse;
   } catch (e) {}
   step('Crunching the library…');
   // playCount is only a sort tiebreaker; skip the extra read for the global pass.
@@ -18495,6 +18495,39 @@ async function openCrqAttach(id){
       try{ if(typeof renderAdminWorklist==='function') renderAdminWorklist(); }catch(e){}
     }catch(e){ save.textContent='Save'; save.style.pointerEvents='auto'; try{ showToast('Could not save — try again'); }catch(e2){} }
   };
+}
+// v1095 (Tyler): "once Kevin moves them to a complete or code review they are not
+// moving out of that queue." A course is re-filed every time it comes back round, so
+// 234 of the 1,311 courses in the queue hold more than one entry. Asking "does ANY
+// entry say rejected" pinned every course that had EVER been sent back to the Reject
+// chip, whatever happened to it since. Its bucket is whatever its MOST RECENT entry
+// says — that is the last human decision about it, and it is the only one that counts.
+function crEntryStamp(e) {
+  try { return String((e && (e.lastEventAt || e.resolvedAt || e.rejectedAt || e.createdAt)) || ''); }
+  catch (x) { return ''; }
+}
+function crBucketByCourse(cr) {
+  const pending = new Set(), resolved = new Set(), rejected = new Set();
+  const notes = {}, entryByCourse = {};
+  try {
+    const latest = {};
+    (cr || []).forEach(function (e) {
+      if (!e || !e.course || !e.course.id) return;
+      const cid = e.course.id, cur = latest[cid];
+      // >= so that, on identical timestamps, the entry appended later wins.
+      if (!cur || crEntryStamp(e) >= crEntryStamp(cur)) latest[cid] = e;
+    });
+    Object.keys(latest).forEach(function (cid) {
+      const e = latest[cid];
+      if (e.id) entryByCourse[cid] = e.id;
+      if (e.status === 'resolved') resolved.add(cid);
+      else if (e.status === 'rejected') {
+        rejected.add(cid);
+        if (e.resolutionNote) notes[cid] = e.resolutionNote;
+      } else pending.add(cid);
+    });
+  } catch (x) {}
+  return { pending: pending, resolved: resolved, rejected: rejected, notes: notes, entryByCourse: entryByCourse };
 }
 async function crReadQueue(){
   try{
@@ -29465,12 +29498,22 @@ async function renderRosterList() {
     row.onclick = async (ev) => {
       if (ev.target.closest('.roster-del-btn')) return;
       if (_rosterT2Tid) {
-        // v664: tournament mode — toggle the player on the EVENT; only the modal
-        // list refreshes (the screen behind re-renders once, on Done).
+        // v664: tournament mode — toggle the player on the EVENT.
+        // v1093 (Tyler): "very slow after each selection." Every tap used to await a
+        // full renderRosterList() — getPlayerRoster, fetchProfiles, refreshBgUserNames
+        // and a from-scratch rebuild of every row with avatars — on top of six-odd
+        // database round trips. Adding sixteen people meant paying that sixteen times.
+        // The row ticks NOW, the write happens, and ONE real refresh runs after the
+        // tapping stops. Same shape as v651, which is why the other picker felt fine.
+        if (_rosterT2Busy) return;
         const _nm = combineName(_pf, _pl).trim();
         const _hcpUse = calc.index != null ? Math.round(calc.index * 10) / 10 : (p.hcp || 0);
-        const _ok = _rosterT2InSet.has(_t2key) ? await _rosterT2Remove(_nm) : await _rosterT2Add(_nm, _hcpUse);
-        if (_ok) { try { await renderRosterList(); } catch (e) {} }
+        const _adding = !_rosterT2InSet.has(_t2key);
+        _rosterT2PaintRow(row, _adding);
+        const _ok = _adding ? await _rosterT2Add(_nm, _hcpUse) : await _rosterT2Remove(_nm);
+        if (!_ok) { _rosterT2PaintRow(row, !_adding); return; }   // put the tick back where it was
+        _rosterT2PaintCount();
+        _rosterT2ScheduleRefresh();
         return;
       }
       if (inSetup.has(key)) removeFromSetup(); else addToSetup();
@@ -29903,7 +29946,20 @@ function renderTeamPickers() {
     if (state._t2DayConfig) {
       const _np = (players || []).length, _grps = Math.floor(_np / 4) || 1;
       container.className = 'team-picker-note'; // v493: NOT the 2-col grid — the note must span full width (was squeezed into one column on mobile)
+      // v1095 (Tyler, from the Team Quota setup screen on an 8-team event): this told
+      // him to build cart groups and set each foursome's 2 v 2 — which is right for
+      // two big sides and WRONG for an event that runs its own named teams. Following
+      // it would have had him re-pairing people the event had already paired.
+      let _tnc = 0;
+      try { _tnc = (typeof _t2Current !== 'undefined' && _t2Current && typeof t2TeamCount === 'function') ? t2TeamCount(_t2Current) : 0; } catch (e) {}
+      if (_tnc > 2) {
+        let _tnames = '';
+        try { _tnames = t2TeamKeys(_t2Current).map(function (k) { return t2TeamDot(k) + ' ' + t2TeamName(_t2Current, k); }).join(' · '); } catch (e) {}
+        container.innerHTML = '<div class="small-text" style="color:var(--text-muted);padding:6px 4px">🤝 This event already has <strong>' + _tnc + ' teams</strong> — this game uses them, so there is nothing to pair here. Change who is on which team under <strong>Carts &amp; teams</strong>, or rename them under <strong>Team names &amp; logos</strong>.'
+          + (_tnames ? '<div style="margin-top:5px">' + t2esc(_tnames) + '</div>' : '') + '</div>';
+      } else {
       container.innerHTML = '<div class="small-text" style="color:var(--text-muted);padding:6px 4px">🤝 Teams are set per cart group, not a whole-field split. Build your cart groups (' + _grps + ' group' + (_grps === 1 ? '' : 's') + ' of 4), then tap the players on each foursome\'s card to set its 2 v 2. Rotating games (6’s) and 4-man games set their teams automatically.</div>';
+      }
       const _help = document.getElementById('team-picker-help-' + gameKey);
       if (_help) _help.textContent = '';
       return;
@@ -30177,6 +30233,28 @@ function updateGameVisibilityForPlayerCount() {
       opts.style.display = '';
     }
   });
+  // v1094 (Tyler): "If I selected two man teams in the beginning we should not give
+  // the four man option here, the teams would not match up." 4-man Team Quota / Low
+  // Ball is ONE team against the field — on an event built as eight 2-man teams there
+  // is no such team, so offering it invites a setting that cannot settle. Hide it and
+  // pin the picker to 2-man whenever the event actually runs small teams.
+  try {
+    const _pairsEvent = !!(state && state._t2DayConfig && typeof _t2Current !== 'undefined' && _t2Current
+      && typeof t2TeamCount === 'function' && t2TeamCount(_t2Current) > 2);
+    [['teamQuota-teamfmt', typeof toggleTeamQuotaFmt === 'function' ? toggleTeamQuotaFmt : null],
+     ['team-lowball-teamfmt', typeof toggleTeamLowballFmt === 'function' ? toggleTeamLowballFmt : null]
+    ].forEach(([selId, toggleFn]) => {
+      const sel = document.getElementById(selId); if (!sel) return;
+      const o4 = sel.querySelector('option[value="4man"]');
+      if (o4) { o4.disabled = _pairsEvent; o4.style.display = _pairsEvent ? 'none' : ''; }
+      if (_pairsEvent && sel.value !== '2man') { sel.value = '2man'; if (toggleFn) { try { toggleFn(); } catch (e) {} } }
+      // Say what "2-man" means HERE, rather than the generic "(two teams)".
+      const o2 = sel.querySelector('option[value="2man"]');
+      if (o2) o2.textContent = _pairsEvent
+        ? ('2-man teams (' + t2TeamCount(_t2Current) + ' teams)')
+        : '2-man (two teams)';
+    });
+  } catch (e) {}
   // Scramble: the 2-man (2v2) format needs exactly 4 players. With 2–3 players the
   // only valid mode is ONE team (everyone scrambles together → one team score per hole,
   // no opponent → pure tracking). Force the picker to that mode and lock out 2-man so a
@@ -52587,7 +52665,8 @@ async function t2AddPlayer(tid, p) {
     // event. Pass p.force = true to override (the manual "add anyway" confirm).
     if (!p.force) {
       try {
-        const ex = await t2GetPlayers(tid);
+        // v1093: same list the caller already has, if it passed one down.
+        const ex = (p && Array.isArray(p._known)) ? p._known : await t2GetPlayers(tid);
         const dup = (ex || []).find(x => _t2NameKey(x.display_name) === _t2NameKey(p.displayName));
         if (dup) {
           // Adding a known account onto an unclaimed name slot → adopt it (links the
@@ -52631,7 +52710,9 @@ function t2IsOpenSlot(p) { return !!(p && !p.user_id && !p.claimed && /^Open \d+
 async function t2FillOrAddPlayer(tid, p) {
   if (p && p.force) return await t2AddPlayer(tid, p);
   try {
-    const ex = await t2GetPlayers(tid);
+    // v1093: the caller often already holds this list (the roster picker keeps it in
+    // memory). Re-reading the whole event per tap is what made adding players crawl.
+    const ex = (p && Array.isArray(p._known)) ? p._known : await t2GetPlayers(tid);
     let dup = (ex || []).find(x => !t2IsOpenSlot(x) && _t2NameKey(x.display_name) === _t2NameKey(p.displayName));
     // v1009: a dedupe hit used to return the existing row WITHOUT rewriting
     // display_name, so a row stored as "Tyler  OConnor" kept answering to the
@@ -56321,7 +56402,23 @@ function t2RosterHcp(entry) {
 // so picking a known Bad Golf user LINKS their account on add. Without this the
 // slot is inserted user_id=null and RLS (tourney_is_member) hides the event from
 // that player until they manually claim it. Best-effort; null if nobody linked. (v220)
+// v1093: one entry per name for the life of the session, NULLS INCLUDED. A guest or
+// TEST name can never resolve, so it used to pay for both round trips — the exact
+// match AND the 200-row fuzzy fallback — every single time it was touched. Accounts
+// do not appear mid-picking-session, so this is safe to hold.
+const _t2UidCache = new Map();
 async function t2ResolveUserIdByName(name) {
+  // Key on the SAME normalisation the resolver itself matches on, so "O'Brien",
+  // "OBrien" and "o brien  " share one entry instead of paying three times.
+  let _ck = '';
+  try { _ck = (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(name || '')) : String(name || '').trim().toLowerCase(); }
+  catch (e) { _ck = String(name || '').trim().toLowerCase(); }
+  if (_ck && _t2UidCache.has(_ck)) return _t2UidCache.get(_ck);
+  const _out = await _t2ResolveUserIdByNameUncached(name);
+  if (_ck) _t2UidCache.set(_ck, _out);
+  return _out;
+}
+async function _t2ResolveUserIdByNameUncached(name) {
   try {
     if (!supa || !name) return null;
     const norm = (typeof normalizeNameSegment === 'function') ? normalizeNameSegment : (x => String(x || '').trim().toLowerCase());
@@ -56360,6 +56457,39 @@ async function t2ResolveUserIdByName(name) {
 // on multi-add). openT2RosterPicker puts the shared modal into tournament mode:
 // a tap adds/removes the player on the EVENT, Done re-renders the screen once.
 let _rosterT2Tid = null, _rosterT2InSet = new Set(), _rosterT2ById = {}, _rosterT2Busy = false;
+// v1093: the event's players, held in memory while the picker is open. Every add used
+// to re-read this from the database three or four times over.
+let _rosterT2Players = [], _rosterT2ReT = null;
+// Tick the tapped row immediately. The list is NOT rebuilt per tap any more.
+function _rosterT2PaintRow(row, on) {
+  try {
+    const chk = row && row.querySelector('.roster-check');
+    if (!chk) return;
+    chk.style.borderColor = on ? 'var(--accent)' : 'var(--border)';
+    chk.style.background  = on ? 'var(--accent)' : 'transparent';
+    chk.textContent = on ? '\u2713' : '';
+  } catch (e) {}
+}
+function _rosterT2PaintCount() {
+  try {
+    const el = document.getElementById('roster-pick-count');
+    if (!el) return;
+    const n = _rosterT2InSet.size;
+    el.textContent = n + ' player' + (n === 1 ? '' : 's');
+    el.title = n + ' on this event';
+    el.style.display = '';
+  } catch (e) {}
+}
+// ONE real refresh once the tapping stops — authoritative, and it repairs any drift
+// between the local list and the database.
+function _rosterT2ScheduleRefresh() {
+  try { clearTimeout(_rosterT2ReT); } catch (e) {}
+  _rosterT2ReT = setTimeout(async () => {
+    if (!_rosterT2Tid) return;
+    try { await _rosterT2Refresh(); } catch (e) {}
+    try { await renderRosterList(); } catch (e) {}
+  }, 1500);
+}
 let _rosterT2Err = false;   // v1009: true when the last read FAILED (vs. genuinely empty)
 // v1009: one identity, one key. This built its keys with a raw
 // `display_name.trim().toLowerCase()` while the row check used
@@ -56370,6 +56500,7 @@ let _rosterT2Err = false;   // v1009: true when the last read FAILED (vs. genuin
 async function _rosterT2Refresh() {
   try {
     const ps = await t2GetPlayers(_rosterT2Tid, { strict: true });
+    _rosterT2Players = ps || [];   // v1093: keep it — the add path reads this instead of re-fetching
     _rosterT2InSet = new Set(); _rosterT2ById = {}; _rosterT2Err = false;
     ps.forEach(p => {
       if (typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p)) return;
@@ -56379,7 +56510,7 @@ async function _rosterT2Refresh() {
   } catch (e) {
     // Do NOT pretend the event is empty — that is what made every tap look like
     // a fresh add and left the tick permanently off.
-    _rosterT2InSet = new Set(); _rosterT2ById = {}; _rosterT2Err = true;
+    _rosterT2InSet = new Set(); _rosterT2ById = {}; _rosterT2Err = true; _rosterT2Players = [];
     try { console.warn('_rosterT2Refresh', e); } catch (e2) {}
     try { showToast("Couldn't load who's already in this event \u2014 check your connection"); } catch (e2) {}
   }
@@ -56392,22 +56523,34 @@ async function openT2RosterPicker(tid) {
 async function _rosterT2Add(name, hcp) {
   if (_rosterT2Busy || !_rosterT2Tid) return false; _rosterT2Busy = true;
   try {
-    let _uid = null; try { _uid = await t2ResolveUserIdByName(name); } catch (e) {}
+    let _uid = null; try { _uid = await t2ResolveUserIdByName(name); } catch (e) {}   // v1093: memoised
     // Team: individual events are all Team A; team events auto-balance into the smaller side.
     let _team = 'A';
+    // v1093: the roster we already hold. This was a full database read, per tap, purely
+    // to count how many players are on each team — a question the picker can answer
+    // from memory. If it is somehow empty, fall back to the old read rather than
+    // guessing 'A' and quietly stacking everyone onto one team.
+    let _cp = _rosterT2Players;
     try {
       if (!((typeof t2IsOneDay === 'function') && t2IsOneDay(_t2Current))) {
+        if (!_cp || !_cp.length) { _cp = await t2GetPlayers(_rosterT2Tid); _rosterT2Players = _cp || []; }
         // v1086: land on the smallest of however many teams the event runs.
-        const _cp = await t2GetPlayers(_rosterT2Tid);
         _team = t2SmallestTeamKey(_cp, _t2Current);
       }
     } catch (e) {}
     // v1009: this toasted "added \u2713" unconditionally — t2FillOrAddPlayer
     // returns null when the insert is refused, so Tyler got a tick-less "added".
     // Only claim success when a row actually came back.
-    const _row = await t2FillOrAddPlayer(_rosterT2Tid, { displayName: name, team: _team, handicap: (hcp != null && hcp !== '') ? parseFloat(hcp) : null, userId: _uid || null });
-    await _rosterT2Refresh();
+    const _row = await t2FillOrAddPlayer(_rosterT2Tid, { displayName: name, team: _team, handicap: (hcp != null && hcp !== '') ? parseFloat(hcp) : null, userId: _uid || null, _known: (_cp || []) });
     if (!_row || !_row.id) { try { showToast("Couldn't add " + name + ' \u2014 try again'); } catch (e) {} return false; }
+    // v1093: patch the local roster with the row the insert just handed back, instead
+    // of re-reading the whole event. _rosterT2ScheduleRefresh reconciles this against
+    // the database once the tapping stops, so drift cannot survive.
+    try {
+      const _k = _t2NameKey(_row.display_name || name);
+      _rosterT2Players = (_rosterT2Players || []).filter(x => x && x.id !== _row.id).concat([_row]);
+      if (_k) { _rosterT2InSet.add(_k); _rosterT2ById[_k] = _row.id; }
+    } catch (e) {}
     try { showToast(name + ' added \u2713'); } catch (e) {}
     return true;
   } catch (e) { try { showToast('Could not add \u2014 try again'); } catch (e2) {} return false; }
@@ -56416,14 +56559,27 @@ async function _rosterT2Add(name, hcp) {
 async function _rosterT2Remove(name) {
   if (_rosterT2Busy || !_rosterT2Tid) return false; _rosterT2Busy = true;
   try {
-    const pid = _rosterT2ById[_t2NameKey(name)];   // v1009: same key everywhere
-    if (pid) { await t2RemovePlayer(pid); await _rosterT2Refresh(); try { showToast(name + ' removed'); } catch (e) {} }
+    const _k = _t2NameKey(name);
+    const pid = _rosterT2ById[_k];   // v1009: same key everywhere
+    if (pid) {
+      await t2RemovePlayer(pid);
+      // v1093: local patch, same as the add path — no re-read per tap.
+      try {
+        _rosterT2Players = (_rosterT2Players || []).filter(x => x && x.id !== pid);
+        _rosterT2InSet.delete(_k); delete _rosterT2ById[_k];
+      } catch (e) {}
+      try { showToast(name + ' removed'); } catch (e) {}
+    }
     return true;
   } catch (e) { return false; }
   finally { _rosterT2Busy = false; }
 }
 function _rosterT2Close() {
   if (!_rosterT2Tid) return;
+  // v1093: drop the pending debounced refresh — the picker is shut, and renderT2Home
+  // below re-reads everything anyway.
+  try { clearTimeout(_rosterT2ReT); } catch (e) {}
+  _rosterT2Players = [];
   _rosterT2Tid = null;
   try { renderT2Home(); } catch (e) {}   // ONE re-render after Done — no flicker while picking
 }
@@ -58969,14 +59125,36 @@ async function openT2Round(code) {
 // Board, always read-only, without touching KEY_LAST or joining/scoring.
 async function openT2GroupBoardReadOnly(code) {
   if (!code) return;
+  // v1094 (Tyler): "payouts -> group payout ... says spectating at the top and then
+  // when I click the close button it takes me back to the rounds tab. There is no way
+  // to just go back to the scoring screen where I started."
+  // If this IS the round you are playing, there is nothing to spectate — showing your
+  // own live round read-only cost you the round, because the ✕ on that banner runs
+  // exitViewOnly, which DISCARDS the active round and jumps to Rounds. Just show the
+  // Board tab of the round you are already in.
+  try {
+    if (state.game && state.game.code === code && !state.viewOnlyMode) {
+      switchTab('board');
+      return;
+    }
+  } catch (e) {}
+  // Genuinely another group's board. Remember where we came from so closing the
+  // spectator view puts you back there instead of dumping you on the Rounds tab.
+  try {
+    if (state.game && state.game.code && !state.viewOnlyMode) {
+      const _tabEl = document.querySelector('.tab.active');
+      state._voReturn = { code: state.game.code, hole: state.currentHole || 1,
+                          tab: (_tabEl && _tabEl.dataset && _tabEl.dataset.tab) || 'score' };
+    } else { state._voReturn = null; }
+  } catch (e) { state._voReturn = null; }
   const g = await loadGame(code);
-  if (!g) { showToast('Round not found'); return; }
+  if (!g) { showToast('Round not found'); state._voReturn = null; return; }
   state.game = g;
   state.viewOnlyMode = true;   // always read-only — viewing the board is never editing or scoring
   enableGameTabs(true);
   try { if (!g.finishedAt) subscribeToGame(code); } catch (e) {}   // keep it live-updating while open
   switchTab('board');
-  showToast(g.finishedAt ? 'Viewing your group’s board' : 'Viewing your group’s board — live');
+  showToast(g.finishedAt ? 'Viewing that group’s board' : 'Viewing that group’s board — live');
 }
 
 // Per-group side games — each group's scorekeeper sets money games on THEIR OWN
@@ -63026,8 +63204,11 @@ function t2ComputeFieldTeamQuota(rows, t, dayNumber) {
     return { teams: teams, nTeams: teams.length, thru: scored,
              aTotal: totals.A || 0, bTotal: totals.B || 0,
              aCount: counts.A || 0, bCount: counts.B || 0,
-             teamAName: (t && t.team_a_name) || 'Team A',
-             teamBName: (t && t.team_b_name) || 'Team B' };
+             // v1094 (Tyler): "it says team A instead of the team name." These read the
+             // raw columns, so they missed the resolver entirely — no fun defaults, and
+             // no guard against the 'Players' placeholder or another team's stray label.
+             teamAName: (typeof t2TeamName === 'function') ? t2TeamName(t, 'A') : ((t && t.team_a_name) || 'Team A'),
+             teamBName: (typeof t2TeamName === 'function') ? t2TeamName(t, 'B') : ((t && t.team_b_name) || 'Team B') };
   } catch (e) { return null; }
 }
 // Throttled cache so the (synchronous) GPS bubble can read a field-wide number
@@ -66036,9 +66217,19 @@ async function openEventLeaderboard(t) {
     '<div id="evlb-body"><div class="help-text">Loading the field…</div></div>' +
     '<div class="actions" style="margin-top:16px"><button id="evlb-close" class="primary full" style="width:100%">Close</button></div></div>';
   document.body.appendChild(ov);
-  const _evlbClose = () => { try { ov.remove(); } catch (e) {} };
-  ov.querySelector('#evlb-x').onclick = _evlbClose;
-  { const _cb = ov.querySelector('#evlb-close'); if (_cb) _cb.onclick = _evlbClose; }   // v781: bottom Close so the button is reachable after scrolling a long board
+  // v1094 (Tyler): "if I click the quota bubble to see all scores, once I close that
+  // screen it should take me back to the GPS screen." The bubble already stamps
+  // state._gpsReturn and the Board tab's Back button honours it — this overlay never
+  // did, so closing it left you on whatever tab happened to be underneath.
+  // `skipReturn` is for callers that are navigating somewhere else themselves.
+  const _evlbClose = (skipReturn) => {
+    try { ov.remove(); } catch (e) {}
+    if (skipReturn === true) return;
+    try { if (typeof returnFromGps === 'function' && state._gpsReturn != null) returnFromGps(); } catch (e) {}
+  };
+  // v1094: wrap so the DOM event object is never passed in as `skipReturn`.
+  ov.querySelector('#evlb-x').onclick = () => _evlbClose();
+  { const _cb = ov.querySelector('#evlb-close'); if (_cb) _cb.onclick = () => _evlbClose(); }   // v781: bottom Close so the button is reachable after scrolling a long board
   ov.onclick = (e) => { if (e.target === ov) _evlbClose(); };
   const body = ov.querySelector('#evlb-body');
   // Regular (non-tournament) round → show a clean round view (course, tee time,
@@ -66235,26 +66426,14 @@ async function openEventLeaderboard(t) {
     // v639: commissioner "Event pots" row — the Skins/Nassau/LongPutt config modals
     // existed but their buttons were never emitted anywhere (dead wiring). This row
     // is the always-visible entry point, plus the new Side Pots config.
-    if (_amCommish) {
-      // v836 (Tyler): "it says the Nassau game was an event game but it is not
-      // it is a group game/cross groups." These buttons are just SETUP shortcuts
-      // for the whole-field pots (separate from any group's own Nassau/Skins/etc)
-      // — always shown so a commissioner can find them, regardless of whether a
-      // field pot is actually configured. Sitting under a plain "Event pots:"
-      // label with no on/off indicator, they read as "here are the tournament's
-      // active pots" instead of "tap to configure." Relabeled the row as setup,
-      // and each button now shows ON/off so it's obvious at a glance whether
-      // that whole-field pot is actually turned on for this event.
-      const _epSkOn = !!(t.settings && t.settings.tourneySkins && t.settings.tourneySkins.on);
-      const _epNaOn = !!(t.settings && t.settings.tourneyNassau && t.settings.tourneyNassau.on);
-      const _epSpOn = !!(t.settings && ((['lowNet', 'girs', 'putts'].some(k => t.settings.tourneySidePots && t.settings.tourneySidePots[k] && t.settings.tourneySidePots[k].on)) || (t.settings.tourneyLongPutt && t.settings.tourneyLongPutt.on)));
-      const _epTag = on => on ? ' <span style="color:var(--money-pos);font-weight:800">ON</span>' : ' <span style="color:var(--text-muted)">off</span>';
-      html += '<div style="margin:14px 0 2px"><div style="font-weight:700">💵 Set up event-wide pots</div><div class="small-text" style="color:var(--text-muted);margin-bottom:6px">Whole-field pools — separate from any group’s own bets</div>' +
-        '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
-        '<button type="button" class="small evlb-skins-cfg" style="flex:0 0 auto">🏆 Skins' + _epTag(_epSkOn) + '</button>' +
-        '<button type="button" class="small evlb-sp-cfg" style="flex:0 0 auto">🏅 Side Pots · Long Putt' + _epTag(_epSpOn) + '</button>' +
-        '<button type="button" class="small evlb-nassau-cfg" style="flex:0 0 auto">🏆 Nassau' + _epTag(_epNaOn) + '</button></div></div>';
-    }
+    // v1094 (Tyler): "we should remove this too, you should only be able to do this
+    // in game settings to avoid confusion." The "Set up event-wide pots" chips lived
+    // here AND under Settings -> Event Pots, so the leaderboard — a place you go to
+    // READ the standings — doubled as a place to change the money. Every pot these
+    // chips opened (Skins, Side Pots, Long Putt, Nassau) is still reachable from
+    // Settings -> Event Pots, which is the single place they belong. The .evlb-*-cfg
+    // handlers below stay wired: they are harmless with nothing to bind to, and other
+    // surfaces can still emit those buttons if they ever need to.
     body.innerHTML = html || '<div class="help-text">No scores in this event yet.</div>';
     body.querySelectorAll('.evlb-ld-set').forEach(b => b.onclick = () => openLongDriveWinnerPicker(t, parseInt(b.dataset.day, 10), evPlayers || [], () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
@@ -66267,7 +66446,7 @@ async function openEventLeaderboard(t) {
     // board" button it replaces). Tournament/Total payout stay as light
     // overlays on TOP of this one — same pattern the other config modals use.
     body.querySelectorAll('.evlb-pay-group').forEach(b => b.onclick = async () => {
-      _evlbClose();
+      _evlbClose(true);   // v1094: this handler navigates itself — don't also bounce to GPS
       try { await openT2GroupBoardReadOnly(b.dataset.code); } catch (e) {}
     });
     body.querySelectorAll('.evlb-pay-tournament').forEach(b => b.onclick = () => openT2PayoutBoard(t, 'tournament'));
@@ -68394,7 +68573,26 @@ async function init() {
   // round was started by accident or the user wants a clean slate.
   // Leave a read-only view: nothing to save, just clear and go back to Rounds.
   async function exitViewOnly() {
+    // v1094: if you got here from a live round of your OWN (e.g. Payouts -> another
+    // group's board), go back to it. discardActiveRound wipes state.game, so the
+    // destination has to be captured before it runs and reloaded after.
+    let back = null;
+    try { back = state._voReturn || null; state._voReturn = null; } catch (e) {}
     await discardActiveRound();
+    if (back && back.code) {
+      try {
+        const g2 = await loadGame(back.code);
+        if (g2) {
+          state.game = g2;
+          state.viewOnlyMode = false;
+          state.currentHole = back.hole || 1;
+          enableGameTabs(true);
+          try { if (!g2.finishedAt) subscribeToGame(back.code); } catch (e) {}
+          switchTab(back.tab || 'score');
+          return;
+        }
+      } catch (e) {}
+    }
     switchTab('rounds');
   }
   window.exitViewOnly = exitViewOnly;
@@ -72047,9 +72245,15 @@ const gpsView = (() => {
         const lt = b.querySelector('.lbl');
         const sb = b.querySelector('.sub');
         // Trim a long team name so it fits the bubble ("The Hackers" -> "HACKERS").
+        // v1094: a hard 8-char slice turned "Shank Redemption" into "SHANK RE". Fall
+        // back to the FIRST WORD when the whole name is too wide — "SHANK" reads.
         const shortNm = (s) => {
           s = String(s || '').trim().replace(/^the\s+/i, '');
-          return (s.length > 8 ? s.slice(0, 8) : s).toUpperCase();
+          if (s.length > 9) {
+            const w = s.split(/\s+/)[0] || s;
+            s = (w.length >= 3 && w.length <= 9) ? w : s.slice(0, 9);
+          }
+          return s.toUpperCase();
         };
         const paint = (aTot, bTot, aNm, bNm, subTxt) => {
           const lead = aTot - bTot;
@@ -72066,6 +72270,20 @@ const gpsView = (() => {
 
         // 1) Whole-field standing (tournament) — who is winning the actual event.
         let fld = null; try { fld = t2FieldTeamQuotaCached(g); } catch (e) {}
+        // v1094 (Tyler, on an eight-team event): "it says team A instead of the team
+        // name." At three or more teams an A-vs-B readout is not just mislabelled, it
+        // is wrong — it compared two of the eight sides and called that the standing.
+        // Show the LEADER by name and the gap to second.
+        if (fld && Array.isArray(fld.teams) && fld.teams.length > 2) {
+          const _ld = fld.teams[0], _nd = fld.teams[1];
+          const _gap = (_ld.total || 0) - (_nd.total || 0);
+          if (vt) vt.textContent = _gap === 0 ? 'TIED' : ('+' + _gap);
+          if (lt) lt.textContent = _gap === 0 ? 'LEAD' : shortNm(_ld.name);
+          if (sb) sb.textContent = ((_ld.total > 0 ? '+' : '') + _ld.total) + ' · ' + fld.teams.length + ' teams';
+          b.title = fld.teams.map(x => x.name + ' ' + (x.total > 0 ? '+' : '') + x.total).join(' · ') + ' — whole field';
+          b.style.display = 'block';
+          return;
+        }
         if (fld && (fld.aCount || fld.bCount)) {
           paint(fld.aTotal, fld.bTotal, fld.teamAName, fld.teamBName,
                 (fld.aTotal > 0 ? '+' : '') + fld.aTotal + ' / ' + (fld.bTotal > 0 ? '+' : '') + fld.bTotal);
