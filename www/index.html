@@ -8156,7 +8156,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1137';
+const BG_BUILD = 'v2026.11.1138';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -45719,7 +45719,11 @@ async function loadReactions(keys) {
 async function toggleFistBump(key) {
   if (!isSignedIn() || !supa || !_authUser) { showToast('Sign in (Crew tab) to react'); return; }
   try {
-    const { data } = await supa.from('reactions').select('id').eq('target_key', key).eq('kind', 'fistbump').eq('author_id', _authUser.id);
+    // v1138: this read decides toggle-off vs toggle-on. A failed read looked like
+    // "no existing bump" and inserted a second one, so the button stopped toggling.
+    const _fbRead = await _bgRead(() => supa.from('reactions').select('id').eq('target_key', key).eq('kind', 'fistbump').eq('author_id', _authUser.id), 'toggleFistBump:existing');
+    if (!_fbRead.ok) { try { showToast("Couldn't reach the server \u2014 try that again."); } catch (e) {} return; }
+    const data = _fbRead.data;
     if (data && data.length) await supa.from('reactions').delete().eq('id', data[0].id);
     else {
       let me = 'Player'; try { me = (await getMeName()) || 'Player'; } catch (e) {}
@@ -50465,7 +50469,7 @@ async function openEditProfile(opts) {
       phoneInput.value = '';
       try {
         if (supa && _authUser) {
-          const { data } = await supa.from('profiles').select('phone').eq('id', _authUser.id).maybeSingle();
+          const { data } = await _bgRead(() => supa.from('profiles').select('phone').eq('id', _authUser.id).maybeSingle(), 'openEditProfile:phone');
           if (data && data.phone) phoneInput.value = formatPhoneDisplay(data.phone);
         }
       } catch (e) { /* phone column may not exist yet — run Profile_Phone.sql */ }
@@ -53161,9 +53165,13 @@ async function t2Create(opts) {
   try {
     if (supa && _authUser && opts && opts.name) {
       const _since = new Date(Date.now() - 180000).toISOString();
-      const { data: _dup } = await supa.from('tournaments').select('*')
+      // v1138: this duplicate guard failing open is the same as not having it --
+      // acceptable, since _t2CreateRecent guards above it -- but it should not do
+      // so in silence. NOTE the whole 3-line chain is wrapped: wrapping only the
+      // first line leaves _bgRead( unclosed, which is how this was caught.
+      const { data: _dup } = await _bgRead(() => supa.from('tournaments').select('*')
         .eq('commissioner_id', _authUser.id).eq('name', String(opts.name).trim())
-        .gte('created_at', _since).order('created_at', { ascending: false }).limit(1);
+        .gte('created_at', _since).order('created_at', { ascending: false }).limit(1), 't2Create:dupGuard');
       if (Array.isArray(_dup) && _dup.length) {
         showToast('You already have an event by that name — opening it');
         // v986 (T23): this row ALREADY EXISTS with real settings on it. Four
@@ -53413,7 +53421,7 @@ async function t2ListPublicJoinable() {
   try {
     const uid = _authUser.id;
     const mine = new Set();
-    try { const { data: mp } = await supa.from('tournament_players').select('tournament_id').eq('user_id', uid); (mp || []).forEach(r => { if (r.tournament_id) mine.add(r.tournament_id); }); } catch (e) {}
+    try { const { data: mp } = await _bgRead(() => supa.from('tournament_players').select('tournament_id').eq('user_id', uid), 't2ListPublicJoinable:mine'); (mp || []).forEach(r => { if (r.tournament_id) mine.add(r.tournament_id); }); } catch (e) {}
     const rows = [];
     const PAGE = 200;
     for (let from = 0; from < 4000; from += PAGE) {
@@ -55429,7 +55437,15 @@ async function t2SetGroupCode(groupId, code, opts) {
     const { data, error } = await q.select('id,game_code');
     if (error) { console.warn('t2SetGroupCode', error); return false; }
     if (Array.isArray(data) && data.length) return true;
-    const { data: cur } = await supa.from('tournament_groups').select('game_code').eq('id', groupId).maybeSingle();
+    // v1138: this verify read exists because the compare-and-swap above can match
+    // zero rows with no error. If the VERIFY itself failed, `cur` was null and we
+    // returned false -- "I did not claim this group" -- when we may well have.
+    // Structurally the t2RemovePlayer hole v1134 closed. false is still the answer
+    // (the caller must not assume it owns the code), but it is now distinguishable
+    // in the log from a genuine loss.
+    const _curRead = await _bgRead(() => supa.from('tournament_groups').select('game_code').eq('id', groupId).maybeSingle(), 't2SetGroupCode:verify');
+    if (!_curRead.ok) { try { console.warn('t2SetGroupCode: verify read failed for ' + groupId + ' — reporting NOT claimed, but this is unknown, not a loss'); } catch (e) {} return false; }
+    const cur = _curRead.data;
     return !!(cur && cur.game_code === code);
   } catch (e) { console.warn('t2SetGroupCode', e); return false; }
 }
@@ -55765,9 +55781,13 @@ async function t2PersistStandings(t, players, standings) {
       const existingByGroup = {};
       for (let i = 0; i < gids.length; i += 200) {
         try {
-          const { data } = await supa.from('tournament_matches')
-            .select('id,status,a_points,b_points,group_id').in('group_id', gids.slice(i, i + 200));
-          (data || []).forEach(r => { if (r && r.group_id && !existingByGroup[r.group_id]) existingByGroup[r.group_id] = r; });
+          // v1138: this read is what stops a re-run inserting a SECOND row per
+          // group. A failed read produced an empty existingByGroup, so every group
+          // looked new and the inserts duplicated. Abort rather than double-write.
+          const _exRead = await _bgRead(() => supa.from('tournament_matches')
+            .select('id,status,a_points,b_points,group_id').in('group_id', gids.slice(i, i + 200)), 't2PersistStandings:existing');
+          if (!_exRead.ok) { try { console.warn('t2PersistStandings: existing-row read failed — skipping persist so nothing is duplicated'); } catch (e) {} return false; }
+          (_exRead.data || []).forEach(r => { if (r && r.group_id && !existingByGroup[r.group_id]) existingByGroup[r.group_id] = r; });
         } catch (e) {}
       }
       const inserts = [];
@@ -55938,12 +55958,24 @@ async function _t2MyGroupInfo(t) {
     if (!myP) return null;
     const dayIds = (days || []).map(d => d.id).filter(Boolean);
     let allGroups = [];
-    if (dayIds.length) { try { const { data } = await supa.from('tournament_groups').select('*').in('day_id', dayIds).order('group_number'); allGroups = data || []; } catch (e) {} }
+    // v1138: a failed read here returned a group view built from FEWER groups and
+    // members than exist, with no error -- the "suspect g before the math" chain.
+    // null is already this function's answer for "cannot tell you" (see above), so
+    // abort rather than hand back a plausible, incomplete board.
+    if (dayIds.length) {
+      const _gRead = await _bgRead(() => supa.from('tournament_groups').select('*').in('day_id', dayIds).order('group_number'), '_t2MyGroupInfo:groups');
+      if (!_gRead.ok) return null;
+      allGroups = _gRead.data || [];
+    }
     const groupsByDay = {};
     allGroups.forEach(g => { (groupsByDay[g.day_id] || (groupsByDay[g.day_id] = [])).push(g); });
     const groupIds = allGroups.map(g => g.id).filter(Boolean);
     let allMembers = [];
-    if (groupIds.length) { try { const { data } = await supa.from('tournament_group_members').select('*').in('group_id', groupIds); allMembers = data || []; } catch (e) {} }
+    if (groupIds.length) {
+      const _mRead = await _bgRead(() => supa.from('tournament_group_members').select('*').in('group_id', groupIds), '_t2MyGroupInfo:members');
+      if (!_mRead.ok) return null;
+      allMembers = _mRead.data || [];
+    }
     const membersByGroup = {};
     allMembers.forEach(m => { (membersByGroup[m.group_id] || (membersByGroup[m.group_id] = [])).push(m); });
     const playerById = {}; players.forEach(p => { playerById[p.id] = p; });
@@ -55964,7 +55996,13 @@ async function _t2MyGroupInfo(t) {
           // round row so the list shows "finished / View results" instead of a misleading
           // "live / Join now" that drops the user onto an already-complete card. (Tyler)
           let _finished = false, _rr = null;
-          if (g.game_code) { try { const { data } = await supa.from('games').select('data').eq('code', g.game_code).maybeSingle(); _rr = data; _finished = !!(_rr && _rr.data && _rr.data.finishedAt); } catch (e) {} }
+          // v1138: a failed read made a finished group look unfinished, which is
+          // the v914 shape ("this tourney says it's live but it is not").
+          if (g.game_code) {
+            const _rrRead = await _bgRead(() => supa.from('games').select('data').eq('code', g.game_code).maybeSingle(), '_t2MyGroupInfo:round');
+            if (_rrRead.ok) { _rr = _rrRead.data; _finished = !!(_rr && _rr.data && _rr.data.finishedAt); }
+            else { _rr = null; _finished = false; try { console.warn('_t2MyGroupInfo: round read failed for ' + g.game_code + ' — treating as unfinished, which may be wrong'); } catch (e) {} }
+          }
           // v865 (Tyler): "Why don't I see the games for group 1 here, I know they
           // had a quota and greenies. It should be exactly like my group." Root
           // cause: this only ever read t.settings.groupGames[g.id] -- the PRE-LAUNCH
@@ -56008,12 +56046,24 @@ async function _t2AllGroupsInfo(t) {
     const myP = players.find(p => (p.user_id && p.user_id === _authUser.id) || (myNameKey && normalizeNameSegment(p.display_name || '') === myNameKey));
     const dayIds = (days || []).map(d => d.id).filter(Boolean);
     let allGroups = [];
-    if (dayIds.length) { try { const { data } = await supa.from('tournament_groups').select('*').in('day_id', dayIds).order('group_number'); allGroups = data || []; } catch (e) {} }
+    // v1138: partial reads here produced standings and money computed off fewer
+    // groups/members/rounds than exist -- a wrong number that looks like a right
+    // one. The board still renders (blanking it would be worse), but _agPartial
+    // makes "some of this is missing" visible instead of silent.
+    let _agPartial = false;
+    const _agWarn = () => { if (_agPartial) return; _agPartial = true; try { showToast("Couldn't load every group \u2014 totals may be incomplete. Pull to refresh.", 7000); } catch (e) {} };
+    if (dayIds.length) {
+      const _gRead = await _bgRead(() => supa.from('tournament_groups').select('*').in('day_id', dayIds).order('group_number'), '_t2AllGroupsInfo:groups');
+      if (_gRead.ok) allGroups = _gRead.data || []; else _agWarn();
+    }
     const groupsByDay = {};
     allGroups.forEach(g => { (groupsByDay[g.day_id] || (groupsByDay[g.day_id] = [])).push(g); });
     const groupIds = allGroups.map(g => g.id).filter(Boolean);
     let allMembers = [];
-    if (groupIds.length) { try { const { data } = await supa.from('tournament_group_members').select('*').in('group_id', groupIds); allMembers = data || []; } catch (e) {} }
+    if (groupIds.length) {
+      const _mRead = await _bgRead(() => supa.from('tournament_group_members').select('*').in('group_id', groupIds), '_t2AllGroupsInfo:members');
+      if (_mRead.ok) allMembers = _mRead.data || []; else _agWarn();
+    }
     const membersByGroup = {};
     allMembers.forEach(m => { (membersByGroup[m.group_id] || (membersByGroup[m.group_id] = [])).push(m); });
     const playerById = {}; players.forEach(p => { playerById[p.id] = p; });
@@ -56030,7 +56080,13 @@ async function _t2AllGroupsInfo(t) {
     if (_agCodes.length) {
       const _u = [...new Set(_agCodes)];
       for (let _i = 0; _i < _u.length; _i += 200) {
-        try { const { data } = await supa.from('games').select('code,data').in('code', _u.slice(_i, _i + 200)); (data || []).forEach(r => { if (r && r.code) _agRowByCode[r.code] = r; }); } catch (e) {}
+        // v1138: one failed page silently dropped up to 200 rounds out of the
+        // standings. Same board, but the gap now announces itself.
+        {
+          const _pgRead = await _bgRead(() => supa.from('games').select('code,data').in('code', _u.slice(_i, _i + 200)), '_t2AllGroupsInfo:roundPage');
+          if (_pgRead.ok) (_pgRead.data || []).forEach(r => { if (r && r.code) _agRowByCode[r.code] = r; });
+          else _agWarn();
+        }
       }
     }
     const raw = [];
@@ -56080,9 +56136,14 @@ function t2ChatCode(tid) { return 't2chat-' + tid; }
 async function t2ChatLoad(tid, withMeta) {
   try {
     if (!supa || !tid) return withMeta ? { msgs: [], updated_at: null, exists: false } : [];
-    const { data } = await supa.from('games').select('data,updated_at').eq('code', t2ChatCode(tid)).maybeSingle();
+    // v1138: a failed read returned exists:false, and t2ChatPost's last-resort
+    // branch then upserted [oneMessage] over the entire history. `ok` reports
+    // whether the server actually answered, so exists:false now means "no row"
+    // rather than "we could not ask".
+    const _r = await _bgRead(() => supa.from('games').select('data,updated_at').eq('code', t2ChatCode(tid)).maybeSingle(), 't2ChatLoad');
+    const data = _r.ok ? _r.data : null;
     const msgs = (data && Array.isArray(data.data)) ? data.data : [];
-    return withMeta ? { msgs: msgs, updated_at: (data && data.updated_at) || null, exists: !!data } : msgs;
+    return withMeta ? { msgs: msgs, updated_at: (data && data.updated_at) || null, exists: !!data, ok: _r.ok } : msgs;
   }
   catch (e) { return withMeta ? { msgs: [], updated_at: null, exists: false } : []; }
 }
@@ -56139,8 +56200,15 @@ async function t2ChatPost(tid, msg) {
     // Five lost races is pathological; take the last-writer path rather than
     // dropping the user's message on the floor.
     try {
-      const cur = await t2ChatLoad(tid);
-      const next = cur.concat([m]).slice(-400);
+      // v1138: this is the last-writer path and it carries NO compare-and-swap.
+      // If the re-read failed, `cur` was [] and the upsert replaced the whole
+      // chat with a single message. Only take this path on a read we trust.
+      const _curMeta = await t2ChatLoad(tid, true);
+      if (!_curMeta.ok) {
+        try { showToast("Couldn't reach the chat \u2014 your message wasn't sent. Try again."); } catch (e) {}
+        return false;
+      }
+      const next = (_curMeta.msgs || []).concat([m]).slice(-400);
       await supa.from('games').upsert({ code: t2ChatCode(tid), data: next, updated_at: new Date().toISOString() });
       return true;
     } catch (e) { return false; }
@@ -56264,7 +56332,7 @@ async function renderT2List() {
     const _ids = list.map(t => t.id);
     const _lastDate = {};
     if (_ids.length) {
-      const { data: _dd } = await supa.from('tournament_days').select('tournament_id, play_date').in('tournament_id', _ids);
+      const { data: _dd } = await _bgRead(() => supa.from('tournament_days').select('tournament_id, play_date').in('tournament_id', _ids), 'renderT2List:dates');
       (_dd || []).forEach(r => { if (r.play_date && (!_lastDate[r.tournament_id] || r.play_date > _lastDate[r.tournament_id])) _lastDate[r.tournament_id] = r.play_date; });
     }
     const _now = new Date();
@@ -58228,7 +58296,11 @@ async function t2NotifyAllPlayers(t) {
     } catch (e) {}
     if (!linked.length) return;
     const already = new Set();
-    try { const { data } = await supa.from('game_invites').select('to_user').eq('game_code', 'T2:' + t.id); (data || []).forEach(r => already.add(r.to_user)); } catch (e) {}
+    // v1138: `already` is the only thing stopping a re-invite storm. A failed read
+    // left it empty, so everyone who had already been invited got invited again.
+    const _invRead = await _bgRead(() => supa.from('game_invites').select('to_user').eq('game_code', 'T2:' + t.id), 't2NotifyAllPlayers:already');
+    if (!_invRead.ok) { try { console.warn('t2NotifyAllPlayers: could not read existing invites — sending none rather than duplicating'); } catch (e) {} return; }
+    (_invRead.data || []).forEach(r => already.add(r.to_user));
     for (const uid of linked) { if (already.has(uid)) continue; try { await sendTournamentInvite(uid, { id: t.id, name: t.name }); } catch (e) {} }
   } catch (e) {}
 }
@@ -60008,7 +60080,22 @@ async function t2LaunchDayRounds(courseId) {
   const _eligibleGroups = groups.filter(grp => !grp.game_code);
   const _eligibleGroupIds = _eligibleGroups.map(g => g.id).filter(Boolean);
   let _allLaunchMembers = [];
-  if (_eligibleGroupIds.length) { try { const { data } = await supa.from('tournament_group_members').select('*').in('group_id', _eligibleGroupIds); _allLaunchMembers = data || []; } catch (e) {} }
+  // v1138: a dropped read left _allLaunchMembers empty, so EVERY group built
+  // gp = [] and hit `if (!gp.length) continue` below -- the launch created no
+  // rounds, set no group codes and said nothing at all. That is exactly the
+  // v986 (T37) symptom documented further down ("its player got NO scorecard,
+  // its group_code stayed null, and the day sat waiting forever with nothing on
+  // screen to explain why"), reproduced by first-tee wifi instead of a group of
+  // one. Refuse the whole launch rather than half-launch it in silence.
+  if (_eligibleGroupIds.length) {
+    const _lmRead = await _bgRead(() => supa.from('tournament_group_members').select('*').in('group_id', _eligibleGroupIds), 't2LaunchDayRounds:members');
+    if (!_lmRead.ok) {
+      _t2LaunchInFlight = false;
+      try { showToast("Couldn't reach the groups \u2014 nothing was launched. Check your signal and try again.", 7000); } catch (e) {}
+      return;
+    }
+    _allLaunchMembers = _lmRead.data || [];
+  }
   const _membersByGroupForLaunch = {};
   _allLaunchMembers.forEach(m => { (_membersByGroupForLaunch[m.group_id] || (_membersByGroupForLaunch[m.group_id] = [])).push(m); });
   const _toCreate = [];
@@ -60247,7 +60334,7 @@ async function openT2Round(code) {
   // on this round (director = universal scorer for their event). (Tyler, June 2026.)
   try {
     if (g.t2 && g.t2.tournamentId && typeof supa !== 'undefined' && supa) {
-      const { data: _tt } = await supa.from('tournaments').select('commissioner_id,settings').eq('id', g.t2.tournamentId).maybeSingle();
+      const { data: _tt } = await _bgRead(() => supa.from('tournaments').select('commissioner_id,settings').eq('id', g.t2.tournamentId).maybeSingle(), 'openT2Round:managerIds');
       if (_tt) g.t2.managerIds = [_tt.commissioner_id].concat((_tt.settings && Array.isArray(_tt.settings.admins)) ? _tt.settings.admins : []).filter(Boolean);
       // Field-wide Tournament Long Putt: ensure THIS group round carries a long-putt entry
       // so the scorer can log the longest made putt even if the group didn't run its own
@@ -60301,7 +60388,13 @@ async function openT2Round(code) {
       else {
         let _cap = '';
         if (g.t2 && g.t2.groupId && typeof supa !== 'undefined' && supa) {
-          try { const { data: _gr } = await supa.from('tournament_groups').select('captain').eq('id', g.t2.groupId).maybeSingle(); _cap = (_gr && _gr.captain) || ''; } catch (e) {}
+          // v1138: a dropped read gave _cap = '' and the `else` below made
+        // whoever opened the round the scorer -- two phones scoring one card.
+        // Scoring is deliberately NOT blocked (that would strand a group with
+        // nobody able to enter a score); the ambiguity is surfaced instead.
+        const _grRead = await _bgRead(() => supa.from('tournament_groups').select('captain').eq('id', g.t2.groupId).maybeSingle(), 'openT2Round:captain');
+        _cap = (_grRead.ok && _grRead.data && _grRead.data.captain) || '';
+        if (!_grRead.ok) { try { showToast("Couldn't confirm the scorekeeper \u2014 check with your group before entering scores.", 6000); } catch (e) {} }
         }
         if (_cap) { const _myNm = await getMeName().catch(() => null); _iAmScorer = !!(_myNm && normalizeNameSegment(_cap) === normalizeNameSegment(_myNm)); }
         else { _iAmScorer = true; }   // no scorekeeper set → opener scores
@@ -60925,8 +61018,17 @@ async function t2MoveHere(btn) {
     // by t2LaunchDayRounds' `(a.slot||0) - (b.slot||0)`). Take the real next slot.
     let _slot = 99;
     try {
-      const { data: _mem } = await supa.from('tournament_group_members').select('slot').eq('group_id', btn.dataset.gid);
-      _slot = (_mem || []).reduce((mx, r) => Math.max(mx, parseInt(r && r.slot, 10) || 0), 0) + 1;
+      // v1138: the `99` seed and the catch were both dead for the likely failure
+      // -- the read returns { data: null }, it does not throw. _mem was null, the
+      // reduce ran over [], and _slot became 1, colliding with whoever already
+      // held slot 1. Refuse the move instead of corrupting the tee order.
+      const _memRead = await _bgRead(() => supa.from('tournament_group_members').select('slot').eq('group_id', btn.dataset.gid), 't2MoveHere:slots');
+      if (!_memRead.ok) {
+        try { showToast("Couldn't read that group \u2014 nobody was moved. Try again."); } catch (e) {}
+        _t2SwapSel = null;
+        return;
+      }
+      _slot = (_memRead.data || []).reduce((mx, r) => Math.max(mx, parseInt(r && r.slot, 10) || 0), 0) + 1;
     } catch (e) {}
     // v986 (T47): the result was discarded — an RLS-filtered or failed update
     // still said "Moved" and the player silently stayed put.
@@ -62829,7 +62931,7 @@ async function renderTourneyList() {
   // Tournament group rounds belong under "Tournaments", not "Scheduled Rounds" — build
   // the set of their game codes so we exclude them from the scheduled list below.
   let _t2RoundCodes = new Set();
-  try { if (typeof supa !== 'undefined' && supa) { const { data: _tg } = await supa.from('tournament_groups').select('game_code'); (_tg || []).forEach(g => { if (g.game_code) _t2RoundCodes.add(g.game_code); }); } } catch (e) {}
+  try { if (typeof supa !== 'undefined' && supa) { const { data: _tg } = await _bgRead(() => supa.from('tournament_groups').select('game_code'), 'renderTourneyList:codes'); (_tg || []).forEach(g => { if (g.game_code) _t2RoundCodes.add(g.game_code); }); } } catch (e) {}
   let schedGames = [];
   try {
     const rec = await getRecent();

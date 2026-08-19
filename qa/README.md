@@ -21,7 +21,7 @@ This is the whole gauntlet. Run it from the repo root.
 ```bash
 python3 qa/bg_query_lint.py golf-app.html && python3 qa/bg_query_lint.py www/index.html
 for t in qa_bgread qa_delete_paths qa_read_visibility qa_event_gone qa_name_only_link \
-         qa_course_gps_merge qa_results_field_pots; do
+         qa_course_gps_merge qa_results_field_pots qa_read_contract_1138; do
   node qa/$t.mjs golf-app.html && node qa/$t.mjs www/index.html
 done
 for t in qa_all qa_scramble24 qa_tourney_setup; do
@@ -30,7 +30,7 @@ done
 node qa/check_build.js
 ```
 
-**398 assertions per file** — 176 across the seven `.mjs` suites, 222 across the three `.js`
+**455 assertions per file** — 233 across the eight `.mjs` suites, 222 across the three `.js`
 harnesses (87 + 23 + 112) — plus the lint and the build-integrity check.
 
 > **Why this section exists (2026-08-19).** The three `.js` harnesses were missing from the
@@ -52,7 +52,7 @@ harnesses (87 + 23 + 112) — plus the lint and the build-integrity check.
 | `qa_tourney_setup.js` | Tournament pre-flight (Senior Sunday shape), settlement reconciliation, rounding, settle-up share surfaces. 112 checks. |
 | `bg_query_lint.py` | Validates every `.from()` table/column/RPC against `bg_schema_snapshot.json`. `--audit` lists reads that drop `error`. |
 | `check_build.js` | Script-tag balance, parse check, `BG_BUILD`, and web-vs-iOS byte identity. The canonical both-files-in-step check. |
-| `qa_*.mjs` (×7) | The read-contract suites — `_bgRead`, delete paths, read visibility, event-gone, name-only linking, course-GPS merge, Results field pots. |
+| `qa_*.mjs` (×8) | The read-contract suites — `_bgRead`, delete paths, read visibility, event-gone, name-only linking, course-GPS merge, Results field pots, and the v1138 error-discard conversions. |
 
 ## What it covers
 
