@@ -8096,7 +8096,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1097';
+const BG_BUILD = 'v2026.11.1099';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -56249,7 +56249,21 @@ async function submitT2Create() {
   // Store the rest of the "Basics" in settings (jsonb — no schema change needed). v455.
   // v1087: a 2-man-teams event stores its side count here; everything else reads
   // t2TeamCount() off it. Two-team events write nothing new and default to 2.
-  try { await t2MergeSettings(t.id, s => { s.type = type; s.public = isPublic; s.location = location; s.numPlayers = numPlayers; if (_pairCount >= 2) s.teamCount = _pairCount; }); } catch (e) {}
+  // v1099: t2MergeSettings re-reads the row before writing so concurrent saves can't
+  // clobber each other. Against a row inserted milliseconds ago that read is a wasted
+  // round trip — its settings are {} and nobody else has touched it. An ADOPTED row
+  // (t2Create's duplicate guard handed back an existing event) is a different story:
+  // it carries real dayCourses / playerTees / dayGames, so it still merges.
+  try {
+    const _basics = { type: type, public: isPublic, location: location, numPlayers: numPlayers };
+    if (_pairCount >= 2) _basics.teamCount = _pairCount;
+    if (t._t2Adopted) {
+      await t2MergeSettings(t.id, s => { Object.assign(s, _basics); });
+    } else if (await t2Update(t.id, { settings: _basics })) {
+      t.settings = _basics;
+      if (_t2Current && _t2Current.id === t.id) _t2Current.settings = _basics;
+    }
+  } catch (e) {}
   const dayFormat = oneday ? 'stroke' : (isGroup ? 'scramble' : 'singles');
   const days = [];
   for (let i = 1; i <= numDays; i++) days.push({ dayNumber: i, format: dayFormat, playDate: (i === 1 ? startDate : null) });
@@ -56262,12 +56276,17 @@ async function submitT2Create() {
     if (_meNm && _authUser && _authUser.id) {
       let _meHcp = null;
       try { const _ros = await getPlayerRoster(); const _mine = findMyRosterPlayer(_ros, _meNm); if (_mine) _meHcp = t2RosterHcp(_mine); } catch (e) {}
-      await t2AddPlayer(t.id, { displayName: _meNm, userId: _authUser.id, team: hasTeams ? 'A' : null, handicap: _meHcp });
+      // v1099: force skips t2AddPlayer's duplicate scan — a read of a table we know
+      // is empty, because this event did not exist a moment ago. An adopted row may
+      // already have the creator seated, so it keeps the scan.
+      await t2AddPlayer(t.id, { displayName: _meNm, userId: _authUser.id, team: hasTeams ? 'A' : null, handicap: _meHcp, force: !t._t2Adopted });
     }
   } catch (e) {}
   document.getElementById('t2-create-modal').classList.remove('show');
   showToast(hasTeams ? 'Tournament created' : (isGroup ? 'Group event created' : 'Event created'));
-  await renderT2List();
+  // v1099: this repaints the events LIST, which the wizard modal is about to cover
+  // completely. Awaiting it just made the wizard appear one round trip later.
+  try { renderT2List(); } catch (e) {}
   openT2Home(t.id);
 }
 
@@ -59788,7 +59807,13 @@ function openT2AddPlayer(tId, od) {
     '<input type="text" id="t2m-last" placeholder="Last" autocomplete="off" style="width:100%;margin-bottom:10px">' +
     '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Handicap</label>' +
     '<input type="number" id="t2m-hcp" inputmode="decimal" step="0.1" placeholder="0" autocomplete="off" style="width:100%;margin-bottom:10px">' +
-    (od ? '' : '<label class="help-text" style="font-weight:600;display:block;margin-bottom:4px">Team</label><select id="t2m-team" style="width:100%;margin-bottom:10px"><option value="A" selected>' + t2esc((_t2Current && _t2Current.team_a_name) || 'Team A') + '</option><option value="B">' + t2esc((_t2Current && _t2Current.team_b_name) || 'Team B') + '</option></select>') +
+    // v1098 (Tyler): "it should not even have the team selection because that is done
+    // on a later screen." This dropdown also only ever listed Team A and Team B, so on
+    // an eight-team event six teams were unreachable from it — but the fix is not to
+    // list all twelve. Teams belong in ONE place, Carts & teams, where the choice has
+    // to match who rides together. The player is auto-balanced onto the smallest team
+    // below, the same as every other add path.
+    (od ? '' : '<div class="help-text" style="margin:-4px 0 10px">Teams are set later, on <strong>Carts &amp; teams</strong>.</div>') +
     '<div id="t2m-err" class="help-text" style="color:var(--danger);display:none;margin-bottom:8px"></div>' +
     '<div class="actions" style="margin-top:6px"><button id="t2m-cancel">Cancel</button><button class="primary" id="t2m-save" style="flex:2">Add player</button></div>' +
     '</div>';
@@ -59817,8 +59842,6 @@ function openT2AddPlayer(tId, od) {
     const err = ov.querySelector('#t2m-err');
     if (!nm) { if (err) { err.textContent = 'Enter at least a first name.'; err.style.display = 'block'; } return; }
     const hv = ov.querySelector('#t2m-hcp').value;
-    const teamEl = ov.querySelector('#t2m-team');
-    const team = teamEl ? teamEl.value : 'A';
     // Flag a missing/zero handicap at ADD time — here the player IS editable.
     // (Tyler, June 2026: this used to warn only at Save Day, where the players
     // aren't on screen so it couldn't be fixed there.)
@@ -59832,8 +59855,15 @@ function openT2AddPlayer(tId, od) {
     try {
       // Duplicate guard: a same-name slot already in this event is almost always a
       // mistake (the source of past duplicate players). Make the commissioner confirm.
-      let dup = null;
-      try { const ex = await t2GetPlayers(tId); dup = (ex || []).find(x => _t2NameKey(x.display_name) === _t2NameKey(nm)); } catch (e) {}
+      let dup = null, _ex = [];
+      try { _ex = (await t2GetPlayers(tId)) || []; dup = _ex.find(x => _t2NameKey(x.display_name) === _t2NameKey(nm)); } catch (e) {}
+      // v1098: no team picker any more, so balance onto the smallest team — off the
+      // list the duplicate guard just fetched, so it costs no extra round trip. An
+      // individual event has no teams at all.
+      let team = null;
+      if (!od) {
+        try { team = t2SmallestTeamKey(_ex, _t2Current) || 'A'; } catch (e) { team = 'A'; }
+      }
       if (dup && !(await uiConfirm('"' + nm + '" is already in this event. Add a second player with the same name anyway?', { title: 'Duplicate name?', okLabel: 'Add anyway', cancelLabel: 'Cancel', danger: false }))) {
         saveEl.disabled = false; saveEl.textContent = 'Add player'; return;
       }
@@ -59942,11 +59972,18 @@ async function renderT2Home() {
   // their name (paired with the push the decliner sends). Only the inviter/commish
   // can read these invite rows, so this stays empty for a regular player's view.
   _t2DeclinedIds = new Set();
-  if (amCommish && supa) { try {
-    const { data: _dcl } = await supa.from('game_invites').select('to_user').eq('game_code', 'T2:' + t.id).eq('status', 'declined');
-    (_dcl || []).forEach(r => { if (r && r.to_user) _t2DeclinedIds.add(r.to_user); });
-  } catch (e) {} }
-  const [players, days] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id)]);
+  // v1099 (Tyler, on the ten-second wait before the team-names screen): declined
+  // invites, players, days and stored matches do not depend on one another, but they
+  // were fetched in three serial steps — so the screen waited out three round trips
+  // where one would do. Start them all now; groups still wait for days below because
+  // they need the day ids. Each carries its own catch so an early rejection can never
+  // surface as an unhandled one while the others are still in flight.
+  const _pDecl = (amCommish && supa)
+    ? supa.from('game_invites').select('to_user').eq('game_code', 'T2:' + t.id).eq('status', 'declined').then(r => r, () => ({}))
+    : Promise.resolve({});
+  const _pMatches = Promise.resolve().then(() => t2GetMatches(t.id)).then(r => r, () => []);
+  const [players, days, _dclRes] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id), _pDecl]);
+  try { ((_dclRes && _dclRes.data) || []).forEach(r => { if (r && r.to_user) _t2DeclinedIds.add(r.to_user); }); } catch (e) {}
   // Groups + members per saved day (small scale — a handful of queries).
   const groupsByDay = {}; const membersByGroup = {};
   await Promise.all(days.map(async d => {
@@ -59956,7 +59993,8 @@ async function renderT2Home() {
   }));
   const pById = {}; players.forEach(p => pById[p.id] = p);
   let t2StoredMatches = [];
-  try { t2StoredMatches = await t2GetMatches(t.id); } catch (e) {}
+  // v1099: already in flight since the top of this function.
+  try { t2StoredMatches = (await _pMatches) || []; } catch (e) { t2StoredMatches = []; }
   const standings = await t2ComputeStandings(t, days, groupsByDay, t2StoredMatches, membersByGroup);
   try { t2MaybePostLeadChange(t, standings); } catch (e) {}
   // v986 (T31): nothing in the app ever set status='complete', so a finished
