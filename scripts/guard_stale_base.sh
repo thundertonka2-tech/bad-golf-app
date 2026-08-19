@@ -19,6 +19,10 @@
 #                      new file does not. This is the signal that actually caught
 #                      the 842 loss (isHcpTemp, applyHcpTempBadgeState,
 #                      refreshHcpTempBadge, hcpTempBadgeHtml all vanished).
+#                      A removal you MEANT to make goes in
+#                      scripts/allowed_symbol_drops.txt — see allowlist() below.
+#                      Prefer that over `git commit --no-verify`, which disables
+#                      checks 2-5 as well (GitHub Desktop can't pass it anyway).
 #   2. VERSION GOING BACKWARDS — BG_BUILD lower than HEAD's.
 #   3. TRUNCATION    — unbalanced <script> tags, or no closing </html>.
 #   4. BIG SHRINK    — a large net line-count drop.
@@ -33,6 +37,7 @@
 set -u
 FILES="golf-app.html www/index.html"
 SHRINK_LIMIT=200
+ALLOWFILE="scripts/allowed_symbol_drops.txt"
 TMP="${TMPDIR:-/tmp}/bgguard.$$"
 mkdir -p "$TMP" || exit 0
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -49,6 +54,18 @@ symbols() {
     grep -oE '^(const|let|var)[[:space:]]+[A-Za-z0-9_$]+[[:space:]]*=' "$1" 2>/dev/null \
       | sed -E 's/^(const|let|var)[[:space:]]+//; s/[[:space:]]*=$//'
   } | sort -u
+}
+
+# DECLARED REMOVALS. Listing a symbol in scripts/allowed_symbol_drops.txt (one per
+# line, '#' comments allowed) says "yes, deleting this is on purpose". ONLY check 1
+# (LOST SYMBOLS) consults it -- truncation, web/iOS drift, big-shrink and the
+# version check are never bypassed, and every allowed removal is still PRINTED so
+# it can't happen quietly. Use this instead of `git commit --no-verify`: that turns
+# the entire guard off, including the truncation checks this file exists for.
+allowlist() {
+  if [ -f "$ALLOWFILE" ]; then
+    sed -E 's/#.*//; s/[[:space:]]+//g' "$ALLOWFILE" 2>/dev/null | grep -v '^$' | sort -u
+  fi
 }
 
 # BG_BUILD as a comparable integer (matches the app's own bnum(): M*1e6+m*1e4+p).
@@ -89,14 +106,24 @@ for f in $FILES; do
   # 1. LOST SYMBOLS
   symbols "$base" > "$TMP/a.sym"
   symbols "$f"    > "$TMP/b.sym"
-  comm -23 "$TMP/a.sym" "$TMP/b.sym" > "$TMP/lost.sym"
+  comm -23 "$TMP/a.sym" "$TMP/b.sym" > "$TMP/lost.all"
+  allowlist > "$TMP/allow.sym"
+  comm -12 "$TMP/lost.all" "$TMP/allow.sym" > "$TMP/lost.ok"
+  comm -23 "$TMP/lost.all" "$TMP/allow.sym" > "$TMP/lost.sym"
+  nok=$(wc -l < "$TMP/lost.ok" | tr -d ' ')
+  if [ "$nok" -gt 0 ]; then
+    note "  $f: $nok declared removal(s), allowed by $ALLOWFILE:"
+    sed 's/^/       · /' "$TMP/lost.ok"
+  fi
   n=$(wc -l < "$TMP/lost.sym" | tr -d ' ')
   if [ "$n" -gt 0 ]; then
     problem "$f drops $n top-level symbol(s) that HEAD has:"
     sed 's/^/       - /' "$TMP/lost.sym" | head -40
     [ "$n" -gt 40 ] && note "       ... and $((n - 40)) more"
-    note "       If that is intentional, fine. If you did not mean to delete these,"
-    note "       you are almost certainly writing from a STALE COPY of the file."
+    note "       If you MEANT to delete these, add them to $ALLOWFILE"
+    note "       (one per line) and commit again — that keeps every other check on."
+    note "       If you did NOT mean to delete them, you are almost certainly"
+    note "       writing from a STALE COPY of the file."
   fi
 
   # 2. VERSION GOING BACKWARDS
