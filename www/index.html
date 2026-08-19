@@ -8099,7 +8099,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1101';
+const BG_BUILD = 'v2026.11.1105';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -14786,8 +14786,26 @@ function _applyMyTouchedCells(incoming) {
 // timer + on reconnect, so play continues offline and syncs when signal returns.
 function _dirtyGames() { try { return JSON.parse(localStorage.getItem('golf:dirty-games') || '[]') || []; } catch (e) { return []; } }
 function _dirtyGamesSave(a) { try { localStorage.setItem('golf:dirty-games', JSON.stringify(Array.from(new Set(a)).filter(Boolean))); } catch (e) {} }
-function markGameDirty(code) { try { if (!code) return; const a = _dirtyGames(); if (a.indexOf(code) < 0) { a.push(code); _dirtyGamesSave(a); } } catch (e) {} }
-function clearGameDirty(code) { try { const a = _dirtyGames(); const i = a.indexOf(code); if (i >= 0) { a.splice(i, 1); _dirtyGamesSave(a); } } catch (e) {} try { if (code) localStorage.removeItem('golf:score-touch:' + code); } catch (e) {} }
+// v1105: WHEN each round first went unsynced, so the warning below can say how long
+// it has been waiting. Survives a reload — a queue that outlives the app restarting
+// is exactly the case worth shouting about.
+function _dirtySince() { try { return JSON.parse(localStorage.getItem('golf:dirty-since') || '{}') || {}; } catch (e) { return {}; } }
+function _dirtySinceSave(m) { try { localStorage.setItem('golf:dirty-since', JSON.stringify(m || {})); } catch (e) {} }
+function markGameDirty(code) {
+  try {
+    if (!code) return;
+    const a = _dirtyGames();
+    if (a.indexOf(code) < 0) { a.push(code); _dirtyGamesSave(a); }
+    const m = _dirtySince();
+    if (!m[code]) { m[code] = Date.now(); _dirtySinceSave(m); }   // first failure only — the clock starts once
+  } catch (e) {}
+}
+function clearGameDirty(code) {
+  try { const a = _dirtyGames(); const i = a.indexOf(code); if (i >= 0) { a.splice(i, 1); _dirtyGamesSave(a); } } catch (e) {}
+  try { const m = _dirtySince(); if (m[code]) { delete m[code]; _dirtySinceSave(m); } } catch (e) {}
+  try { if (code) localStorage.removeItem('golf:score-touch:' + code); } catch (e) {}
+  try { bgRenderSyncWarning(); } catch (e) {}
+}
 async function flushDirtyGames() {
   const pending = _dirtyGames();
   if (!pending.length) return;
@@ -14805,11 +14823,13 @@ async function flushDirtyGames() {
       try { localStorage.setItem('game:' + code, JSON.stringify(parsed)); } catch (e) {}
       const r = await _promiseTimeout(
         supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'flushGame');
-      if (r && !r.error) { clearGameDirty(code); updateSyncIndicator(true); }
+      if (r && !r.error) { clearGameDirty(code); updateSyncIndicator(true); try { bgRenderSyncWarning(); } catch (e) {} }
     } catch (e) { /* still offline / still hung → leave queued for the next pass */ }
   }
 }
-try { setInterval(() => { flushDirtyGames().catch(() => {}); }, 15000); } catch (e) {}
+// v1105: the flush already runs every 15s — repaint the warning on the same beat, so
+// it appears, counts up and disappears without a timer of its own.
+try { setInterval(() => { flushDirtyGames().catch(() => {}).then(() => { try { bgRenderSyncWarning(); } catch (e) {} }); }, 15000); } catch (e) {}
 try { window.addEventListener('online', () => { flushDirtyGames().catch(() => {}); }); } catch (e) {}
 
 // Broadcast MY live position to the game channel (Spectator mode source). No-op
@@ -14943,6 +14963,51 @@ function unsubscribeFromGame() {
 }
 
 // Update the small sync indicator dot (added to the UI separately)
+// v1105 (Tyler, after losing a round): a queued save used to announce itself with a
+// 6px dot turning amber and a tooltip. On a phone that is invisible. If the round on
+// screen has been waiting more than 90 seconds, say it plainly, where the scores are.
+const BG_SYNC_WARN_MS = 90000;
+function bgRenderSyncWarning() {
+  try {
+    const g = (typeof state !== 'undefined' && state) ? state.game : null;
+    const code = g && g.code;
+    let since = 0;
+    try { if (code) since = _dirtySince()[code] || 0; } catch (e) {}
+    const waited = since ? (Date.now() - since) : 0;
+    const show = !!(code && since && waited > BG_SYNC_WARN_MS);
+    ['panel-score', 'panel-board'].forEach(function (pid) {
+      const panel = document.getElementById(pid);
+      if (!panel) return;
+      let bar = panel.querySelector('.bg-sync-warning');
+      if (!show) { if (bar) bar.remove(); return; }
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.className = 'bg-sync-warning card';
+        bar.style.cssText = 'background:rgba(200,140,0,0.12);border:1px solid var(--warn,#c88c00);border-radius:10px;padding:10px 12px;margin-bottom:10px';
+        panel.insertBefore(bar, panel.firstChild);
+      }
+      const mins = Math.max(1, Math.round(waited / 60000));
+      bar.innerHTML =
+        '<div style="display:flex;align-items:flex-start;gap:9px">' +
+          '<div style="font-size:18px;line-height:1.1">\u26A0\uFE0F</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-weight:800;font-size:14px">Not saved to the cloud yet</div>' +
+            '<div class="small-text" style="margin-top:2px">This round has been waiting <strong>' + mins + ' min</strong>. Your scores are safe on this phone \u2014 keep the app open and stay in signal until it clears.</div>' +
+          '</div>' +
+          '<button type="button" class="small bg-sync-retry" style="flex:0 0 auto">Retry now</button>' +
+        '</div>';
+      const rb = bar.querySelector('.bg-sync-retry');
+      if (rb) rb.onclick = function () {
+        rb.disabled = true; rb.textContent = 'Trying\u2026';
+        try { flushDirtyGames().catch(function () {}).then(function () {
+          try { bgRenderSyncWarning(); } catch (e) {}
+          try { rb.disabled = false; rb.textContent = 'Retry now'; } catch (e) {}
+        }); } catch (e) { rb.disabled = false; rb.textContent = 'Retry now'; }
+      };
+    });
+  } catch (e) {}
+}
+try { window.bgRenderSyncWarning = bgRenderSyncWarning; } catch (e) {}
 function updateSyncIndicator(justSynced) {
   const dot = document.getElementById('sync-indicator');
   if (!dot) return;
@@ -34459,9 +34524,78 @@ function ctpFmtDist(e) {
 // v680: cache the FIELD-WIDE current leaders (longest putt + longest drive across
 // ALL groups) so the in-round Long Putt tab can show what the group is chasing.
 // Fire-and-forget, throttled; re-renders the Long Putt entry when it changes.
+// v1103 (Tyler): "IDrive got a birdie but I didn't get a notification." Birdies,
+// eagles, the long putt, the long drive and lead changes have always been POSTED to
+// tournament chat as system messages — and t2ChatSubscribe is wired only inside
+// t2ChatToggle, so they arrived nowhere unless the chat panel happened to be open.
+// This is the missing receiver: while a live tournament round is on screen, new
+// system posts surface as a toast.
+//   · only messages that arrive AFTER this round was opened — no history dump
+//   · each shown once, remembered per event across reloads
+//   · never your own; your birdie already popped its own celebration
+var _t2SysSeen = {};      // tid -> Set of message ids already shown
+var _t2SysSince = {};     // tid -> ts we started watching
+var _t2SysBusy = {};
+function _t2SysKey(tid) { return 'golf:t2sys-seen:' + tid; }
+function _t2SysLoadSeen(tid) {
+  if (_t2SysSeen[tid]) return _t2SysSeen[tid];
+  var s = new Set();
+  try {
+    var raw = localStorage.getItem(_t2SysKey(tid));
+    if (raw) JSON.parse(raw).forEach(function (id) { s.add(id); });
+  } catch (e) {}
+  _t2SysSeen[tid] = s;
+  return s;
+}
+function _t2SysRemember(tid, id) {
+  try {
+    var s = _t2SysLoadSeen(tid); s.add(id);
+    // keep the tail only — an event can run to hundreds of posts over a weekend
+    var arr = Array.from(s).slice(-400);
+    _t2SysSeen[tid] = new Set(arr);
+    localStorage.setItem(_t2SysKey(tid), JSON.stringify(arr));
+  } catch (e) {}
+}
+async function _t2RefreshSystemFeed(tid) {
+  try {
+    if (!tid || !supa || typeof t2ChatLoad !== 'function') return;
+    if (_t2SysBusy[tid]) return;
+    // First sight of this event in this session: mark the waterline and show nothing,
+    // so opening a round mid-day does not fire off twenty old birdies at once.
+    if (_t2SysSince[tid] == null) { _t2SysSince[tid] = Date.now(); return; }
+    _t2SysBusy[tid] = true;
+    var msgs = [];
+    try { msgs = (await t2ChatLoad(tid)) || []; } catch (e) { msgs = []; }
+    var seen = _t2SysLoadSeen(tid);
+    var since = _t2SysSince[tid];
+    var mine = '';
+    try { mine = normalizeNameSegment(String((await getMeName()) || '')); } catch (e) {}
+    var fresh = msgs.filter(function (m) {
+      if (!m || m.kind !== 'system' || !m.body) return false;
+      if (!(m.ts > since)) return false;
+      var id = m.id || ('ts' + m.ts);
+      if (seen.has(id)) return false;
+      return true;
+    }).sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); }).slice(-3);
+    fresh.forEach(function (m) {
+      _t2SysRemember(tid, m.id || ('ts' + m.ts));
+      // Your own moment already popped a celebration on this phone — don't double up.
+      try {
+        if (mine) {
+          var first = mine.split(/\s+/)[0];
+          if (first && first.length > 2 && normalizeNameSegment(String(m.body)).indexOf(first) >= 0) return;
+        }
+      } catch (e) {}
+      try { showToast(String(m.body)); } catch (e) {}
+    });
+  } catch (e) {}
+  finally { _t2SysBusy[tid] = false; }
+}
 async function _t2RefreshFieldLead(tid) {
   try {
     if (!tid || !supa) return;
+    // v1103: same cadence, same screen — no second timer to leak.
+    try { _t2RefreshSystemFeed(tid); } catch (e) {}
     window._t2FieldLead = window._t2FieldLead || {};
     const cache = window._t2FieldLead[tid];
     const now = Date.now();
@@ -34495,16 +34629,29 @@ async function _t2RefreshFieldLead(tid) {
 // score screen is the one funnel EVERY device that could log a putt must pass
 // through, so the repair belongs here. One cloud read per round per session.
 const _bgLpChecked = {};
+const _BG_LP_RECHECK_MS = 120000;   // v1104: look again every two minutes, not once ever
 async function bgEnsureFieldLongPutt() {
   try {
     const g = state.game;
     if (!g || !g.code || g.finishedAt) return;              // never touch a settled round
     if (!g.t2 || !g.t2.tournamentId) return;                // not a tournament round
     if (g.games && g.games.longPutt) return;                // already there
-    if (_bgLpChecked[g.code]) return;
-    _bgLpChecked[g.code] = 1;
-    let t = null; try { t = await t2Get(g.t2.tournamentId); } catch (e) { return; }
-    if (!(t && t.settings && t.settings.tourneyLongPutt && t.settings.tourneyLongPutt.on)) return;
+    // v1104 (Tyler): "Longest putt shows up for me but not my other user IDrive."
+    // This flag used to be set to 1 the moment we STARTED looking, so a device that
+    // checked while the pot was still off — or whose read failed — was marked done
+    // for the whole session and never saw the pot get switched on. Remember WHEN we
+    // last looked, and only for an answer that could actually change.
+    const _lastLook = _bgLpChecked[g.code] || 0;
+    if (_lastLook && (Date.now() - _lastLook) < _BG_LP_RECHECK_MS) return;
+    _bgLpChecked[g.code] = Date.now();
+    let t = null;
+    try { t = await t2Get(g.t2.tournamentId); } catch (e) { t = null; }
+    if (!t) {
+      // A failed read is not an answer — don't let it stand in for one.
+      _bgLpChecked[g.code] = _lastLook;
+      return;
+    }
+    if (!(t.settings && t.settings.tourneyLongPutt && t.settings.tourneyLongPutt.on)) return;
     // Re-check after the await: the user may have switched rounds, or a realtime
     // update may have brought the entry in while we were asking.
     const cur = state.game;
@@ -35436,14 +35583,26 @@ async function reactToHoleCelebration(localSuppress){
     if (localSuppress) return; // #19: scorer advanced via Score-card only → no pop-up on this phone
     const hole = a.hole, par = g.pars ? g.pars[hole - 1] : null;
     let mePid = null;
+    // v1103 (Tyler): "Miles had a blow up it prompted me with the blow up message not
+    // Miles." Identity was resolved by NAME only. Ask the account id first — players
+    // carry `uid` and it is exact — then fall back to the name match.
     try {
-      const meName = await getMeName();
-      if (meName) {
-        const norm = s => normalizeNameSegment(String(s || ''));
-        const meP = (g.players || []).find(p => norm(p.name) === norm(meName));
-        if (meP) mePid = meP.id;
+      const _uid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) || null;
+      if (_uid) {
+        const byUid = (g.players || []).find(p => p && p.uid && p.uid === _uid);
+        if (byUid) mePid = byUid.id;
       }
     } catch (e) {}
+    if (!mePid) {
+      try {
+        const meName = await getMeName();
+        if (meName) {
+          const norm = s => normalizeNameSegment(String(s || ''));
+          const meP = (g.players || []).find(p => norm(p.name) === norm(meName));
+          if (meP) mePid = meP.id;
+        }
+      } catch (e) {}
+    }
     const showFor = (p) => {
       const s = g.scores && g.scores[p.id] ? g.scores[p.id][hole - 1] : null;
       const c = celebrationFor(s, par);
@@ -35452,8 +35611,14 @@ async function reactToHoleCelebration(localSuppress){
     if (mePid) {
       const meP = g.players.find(p => p.id === mePid);
       if (meP) showFor(meP);
+    } else if (g.t2 && g.t2.tournamentId) {
+      // v1103: a TOURNAMENT round is multi-device by construction — every player has
+      // their own phone and gets their own pop-up. If this device could not work out
+      // who it belongs to, showing all four is how another player's blow-up ends up
+      // on your screen. Say nothing instead.
+      return;
     } else {
-      (g.players || []).forEach(showFor); // single-phone / unlinked → queue them all
+      (g.players || []).forEach(showFor); // single-phone casual round → queue them all
     }
   } catch (e) { console.warn('hole celebration react failed:', e); }
 }
@@ -36124,6 +36289,11 @@ async function setMyHomeCourse(hc) {
 }
 // Roster -> local mirror (they set it on another device). Repaints the lists
 // once if the value actually moved, so badges appear without a manual refresh.
+// v1102: has the account been asked for its home course yet? Until this is true the
+// Home card must stay quiet — getMyHomeCourse() only sees localStorage, so before
+// hydration a user who set their course on another phone reads as "never set one" and
+// gets pitched at all over again.
+var _bgHomeCourseHydrated = false;
 async function _bgHydrateHomeCourse() {
   try {
     var me = await getMeName(); if (!me) return;
@@ -36133,9 +36303,16 @@ async function _bgHydrateHomeCourse() {
     var cur = getMyHomeCourse();
     var a = cur ? (cur.id || cur.name) : '';
     var b = hc ? (hc.id || hc.name) : '';
-    if (hc && a !== b) { _bgSetHomeCourseLocal(hc); _bgRefreshHomeAwayViews(); }
+    if (hc && a !== b) { _bgSetHomeCourseLocal(hc); }
     else if (!hc && cur && p) { p.homeCourse = cur; try { await savePlayerRoster(roster); } catch (e) {} }
   } catch (e) {}
+  finally {
+    // v1102: mark it done and repaint ONCE, whatever the answer was. This used to
+    // repaint only when a course was actually found, so "you genuinely have none"
+    // never cleared the waiting state and the card was stuck deciding.
+    _bgHomeCourseHydrated = true;
+    try { _bgRefreshHomeAwayViews(); } catch (e) {}
+  }
 }
 function _bgRefreshHomeAwayViews() {
   try { if (typeof loadRounds === 'function') loadRounds(); } catch (e) {}
@@ -36178,8 +36355,16 @@ function bgHomeAwayBadge(courseId, courseName, opts) {
 // a second search that would drift from the library.
 async function openHomeCoursePicker(opts) {
   opts = opts || {};
+  // v1102: every failure path here used to be swallowed by the outer catch, so a
+  // caller that had already closed its own screen never heard back and the user was
+  // left looking at nothing. Any failure now runs onCancel, which is the caller's
+  // "put me back where I was".
+  const _bail = (msg) => {
+    try { if (msg) showToast(msg); } catch (e) {}
+    try { if (typeof opts.onCancel === 'function') opts.onCancel(); } catch (e) {}
+  };
   try {
-    if (typeof t2OpenCoursePicker !== 'function') { try { showToast('Course search unavailable'); } catch (e) {} return; }
+    if (typeof t2OpenCoursePicker !== 'function') { _bail('Course search unavailable'); return; }
     var cur = getMyHomeCourse();
     await t2OpenCoursePicker({
       current: (cur && cur.name) ? { name: cur.name } : null,
@@ -36195,6 +36380,12 @@ async function openHomeCoursePicker(opts) {
       },
       onCancel: opts.onCancel || null
     });
+    // v1102: if the modal is not actually showing, the open failed quietly — tell the
+    // caller so it can restore its own screen rather than leaving the user nowhere.
+    try {
+      const _cm = document.getElementById('t2-course-modal');
+      if (!(_cm && _cm.classList.contains('show'))) { _bail(''); return; }
+    } catch (e) {}
     // Re-label the shared modal for THIS use. Set after the await because
     // t2OpenCoursePicker restores its own default copy on the way in.
     try {
@@ -36203,7 +36394,7 @@ async function openHomeCoursePicker(opts) {
       if (t) t.textContent = '\u{1F3E0} Pick your home course';
       if (h) h.textContent = 'Rounds here are marked 🏠 home; everywhere else is ✈️ away. It also becomes the default course when you set up a new round.';
     } catch (e) {}
-  } catch (e) {}
+  } catch (e) { _bail("Couldn't open course search \u2014 try again"); }
 }
 
 // The "Home course" row inside Edit profile. Safe to call any time — no-ops when
@@ -36290,16 +36481,42 @@ function _bgRenderHomeCourseCard() {
       var ch = card.querySelector('#bg-home-course-change');
       if (ch) ch.onclick = function () { try { _bgGoSetHomeCourse(); } catch (e) {} };   // v1080
     } else {
+      // v1102: say NOTHING until we have actually checked the account. Before
+      // hydration this branch was pitching at people who set a course months ago on
+      // another phone — the local mirror simply had not arrived yet.
+      if (!_bgHomeCourseHydrated) {
+        card.style.display = 'none';
+        card.innerHTML = '';
+        try { _bgHydrateHomeCourse(); } catch (e) {}   // resolves, then repaints once
+        return;
+      }
+      // v1102 (Tyler): "it should only ask once on login and be done." The full pitch
+      // is shown while the user has never been asked. After that it collapses to one
+      // quiet line — still findable, no longer occupying the Home screen every visit.
+      var _asked = false;
+      try { _asked = !!localStorage.getItem(KEY_HOMECOURSE_ONBOARD_SEEN); } catch (e) {}
       card.style.display = 'block';
-      card.innerHTML =
-        '<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">' +
-          '<div style="font-size:22px;line-height:1">\u{1F3E0}</div>' +
-          '<div style="flex:1;min-width:0">' +
-            '<div style="font-weight:800;font-size:15px">Set your home course</div>' +
-            '<div class="help-text" style="margin:3px 0 0">Your rounds get a \u{1F3E0} at home and an \u2708\uFE0F away, and new rounds start on your home course automatically.</div>' +
+      if (_asked) {
+        card.innerHTML =
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<div style="font-size:16px;line-height:1">\u{1F3E0}</div>' +
+            '<div class="small-text" style="flex:1;min-width:0;color:var(--text-muted)">No home course set</div>' +
+            '<button class="small" id="bg-home-course-set" style="flex:0 0 auto">Set one</button>' +
+          '</div>';
+      } else {
+        card.innerHTML =
+          '<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">' +
+            '<div style="font-size:22px;line-height:1">\u{1F3E0}</div>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-weight:800;font-size:15px">Set your home course</div>' +
+              '<div class="help-text" style="margin:3px 0 0">Your rounds get a \u{1F3E0} at home and an \u2708\uFE0F away, and new rounds start on your home course automatically.</div>' +
+            '</div>' +
           '</div>' +
-        '</div>' +
-        '<button class="primary full" id="bg-home-course-set">Choose my home course</button>';
+          '<button class="primary full" id="bg-home-course-set">Choose my home course</button>';
+        // Showing the pitch COUNTS as asking — so it is the last time it appears in
+        // full, whether or not the user acts on it.
+        try { localStorage.setItem(KEY_HOMECOURSE_ONBOARD_SEEN, '1'); } catch (e) {}
+      }
       var st = card.querySelector('#bg-home-course-set');
       if (st) st.onclick = function () { try { _bgGoSetHomeCourse(); } catch (e) {} };   // v1080
     }
@@ -49528,11 +49745,25 @@ function wireEditProfile() {
   // profile modal steps aside so the picker isn't stacked on top of it, and
   // comes back when the user backs out or finishes.
   const hcBtn = document.getElementById('edit-profile-homecourse-btn');
-  if (hcBtn) hcBtn.onclick = () => {
-    try { if (modal) modal.classList.remove('show'); } catch (e) {}
+  if (hcBtn) hcBtn.onclick = async () => {
+    // v1102 (Tyler): "sending me all over the place." This used to hide the profile
+    // modal FIRST and then await the picker — which itself awaits the course library
+    // and a 1.2s nearby lookup. Anything that threw in that window left the profile
+    // closed, the picker unopened and the user stranded on Home with nothing on
+    // screen. Open the picker first; only step aside once it is genuinely showing;
+    // and put the profile back if it never does.
     // v1080: come back to the Home course field, not the top of the profile.
-    const _back = () => { try { openEditProfile({ focusHomeCourse: true }); } catch (e) {} };
-    try { openHomeCoursePicker({ onDone: _back, onCancel: _back }); } catch (e) { _back(); }
+    let _returned = false;
+    const _back = () => { if (_returned) return; _returned = true; try { openEditProfile({ focusHomeCourse: true }); } catch (e) {} };
+    try {
+      await openHomeCoursePicker({ onDone: _back, onCancel: _back });
+      const _cm = document.getElementById('t2-course-modal');
+      if (_cm && _cm.classList.contains('show')) {
+        try { if (modal) modal.classList.remove('show'); } catch (e) {}
+      } else {
+        try { showToast('Course search did not open \u2014 try again'); } catch (e) {}
+      }
+    } catch (e) { _back(); }
   };
   const hcClr = document.getElementById('edit-profile-homecourse-clear');
   if (hcClr) hcClr.onclick = async () => {
