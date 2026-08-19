@@ -8096,7 +8096,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1099';
+const BG_BUILD = 'v2026.11.1101';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -14120,6 +14120,38 @@ async function safeGet(key, shared) {
             if (_cached && _cached.finishedAt && !data.data.finishedAt &&
                 !(_cached.reopenedAt && _cached.reopenedAt > _cached.finishedAt)) {
               data.data.finishedAt = _cached.finishedAt;
+            }
+            // v1101 (Tyler): "I had all my scores done and finished the round then
+            // when I clicked open round from the home screen it wiped all my scores."
+            // Same principle as the v863 guard directly above, applied to the thing
+            // that actually matters. A device whose writes have been QUEUING (see
+            // markGameDirty / the v939 multi-scorer merge deferral) holds the only
+            // copy of the round — and this function used to hand it the emptier cloud
+            // copy and overwrite the cache with it. Scores within a round only ever
+            // accumulate, so fewer of them in the cloud is a stale read, never a
+            // decision. Keep the local copy, leave the cache untouched, and mark the
+            // round dirty so the flush pushes it up. A deliberate clear leaves LOCAL
+            // emptier, so this never blocks one.
+            const _bgScoreCount = function (gg) {
+              var n = 0;
+              try {
+                var s = (gg && gg.scores) || {};
+                Object.keys(s).forEach(function (pid) {
+                  var arr = s[pid];
+                  if (Array.isArray(arr)) arr.forEach(function (v) { if (v != null && v !== '') n++; });
+                });
+              } catch (e) {}
+              return n;
+            };
+            if (_cached && _cachedRaw) {
+              var _localN = _bgScoreCount(_cached), _cloudN = _bgScoreCount(data.data);
+              if (_localN > _cloudN) {
+                try { console.warn('[BG v1101] ' + code + ': cloud has ' + _cloudN + ' scores, this device has ' + _localN + ' — keeping the local round and re-queuing it'); } catch (e) {}
+                try { markGameDirty(code); } catch (e) {}
+                try { updateSyncIndicator(false); } catch (e) {}
+                try { showToast('Using this phone\u2019s scores \u2014 the cloud copy was behind. Re-syncing\u2026'); } catch (e) {}
+                return _cachedRaw;
+              }
             }
           } catch (e) {}
           const json = JSON.stringify(data.data);
@@ -52534,6 +52566,17 @@ async function t2Get(id) {
   try { const { data } = await supa.from('tournaments').select('*').eq('id', id).maybeSingle(); return data; }
   catch (e) { return null; }
 }
+// v1100: t2Get returns null for BOTH "you cannot see this event" and "that request
+// did not come back", and several screens treat the null as the first when it is
+// usually the second. One retry after a short pause separates a blip from a real
+// answer; callers that show the user a message use this instead.
+async function t2GetRetry(id) {
+  let r = null;
+  try { r = await t2Get(id); } catch (e) { r = null; }
+  if (r) return r;
+  await new Promise(res => setTimeout(res, 600));
+  try { return await t2Get(id); } catch (e) { return null; }
+}
 // v1025: PostgREST reports success for an UPDATE or DELETE that matched ZERO
 // rows — under RLS the row is filtered out of the statement rather than the
 // statement being rejected. Pair every user-visible write with .select() and run
@@ -66189,9 +66232,21 @@ async function _t2RepaintMoneyBoardForScope(g, scope) {
   mb.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">Loading…</div>';
   if (bd) bd.style.display = 'none';
   try {
-    const t = await t2Get(tid);
+    // v1100 (Tyler): "when I click tournament total here nothing happens, says
+    // tournament not found." The event was there the whole time — he is its
+    // commissioner and can read it. This one read failed and the message blamed the
+    // data. Retry, then say what actually happened, with a way to try again.
+    const t = await t2GetRetry(tid);
     if (myToken !== _t2RepaintToken) return;   // a newer tap/render superseded this one
-    if (!t) { mb.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">Tournament not found.</div>'; return; }
+    if (!t) {
+      mb.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">Couldn\u2019t load the event totals \u2014 check your connection.'
+        + '<div style="margin-top:8px"><button type="button" class="small" id="t2-money-retry">Try again</button></div></div>';
+      try {
+        const _rb = document.getElementById('t2-money-retry');
+        if (_rb) _rb.onclick = () => { try { _t2RepaintMoneyBoardForScope(g, scope); } catch (e) {} };
+      } catch (e) {}
+      return;
+    }
     // v1050: only two scopes remain and 'group' returned above, so this is
     // always the whole-tournament combined number.
     const pay = await t2ComputeCombinedPayouts(t);
@@ -74749,8 +74804,14 @@ const gpsView = (() => {
       try { _tid = (state.game && state.game.t2 && state.game.t2.tournamentId) || null; } catch (e) {}
       try { close(); } catch (e) {}
       if (_tid) {
+        // v1100 (Tyler): "I clicked the quota bubble expecting to see the standing on
+        // where everyone was for quota. Instead it took me to this screen which is a
+        // mess." When this read came back null the bubble fell through to the Board
+        // tab WITHOUT a word — a different screen answering a different question. If
+        // the event will not load, stay put and say so; never substitute a screen the
+        // user did not ask for.
         try {
-          const _t = await t2Get(_tid);
+          const _t = await t2GetRetry(_tid);
           if (_t) {
             await openEventLeaderboard(_t);
             // Give the sheet a beat to paint, then bring the Team Quota block into view.
@@ -74758,7 +74819,13 @@ const gpsView = (() => {
             return;
           }
         } catch (e) {}
+        try { state._gpsReturn = null; } catch (e) {}
+        try { showToast('Could not load the event standings — check your connection and tap again'); } catch (e) {}
+        try { if (typeof openPlayGps === 'function') openPlayGps(); } catch (e) {}
+        return;
       }
+      // Not a tournament round at all — the Board IS the right place for a plain
+      // round's quota standing.
       try { if (typeof switchTab === 'function') switchTab('board'); } catch (e) {}
     }; }
     { const _sb = el('gps-stableford-bubble'); if (_sb) _sb.onclick = () => { try { try { state._gpsReturn = (state.game && state.currentHole != null) ? state.currentHole : true; } catch (e2) {} close(); if (typeof switchTab === 'function') switchTab('board'); } catch (e) {} }; }
