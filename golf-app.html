@@ -8094,7 +8094,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1119';
+const BG_BUILD = 'v2026.11.1120';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -63817,7 +63817,47 @@ function t2ComputeFieldQuota(rows, t, fieldPlayers) {
 // standing. Points are per-player and additive, so summing group slices IS the field
 // total. De-duped by normalized name so a player appearing in two rows can't be
 // counted twice. Display only — the money still settles in loadTourneyMoney.
-function t2ComputeFieldTeamQuota(rows, t, dayNumber) {
+// v1120 (Tyler, 8/19): "there are eight teams but the quota stuff keeps stopping at
+// 7" / "everything shows 16 players so not sure how we got to 14."
+//
+// Verified against the database: all 16 players were in their rounds with full cards,
+// but only 14 were in the Team Quota bet. The launch code writes a cart's teams into
+// exactly TWO slots:
+//     const _cartKeys = T2_TEAM_KEYS.filter(k => gp.some(p => p._team === k));
+//     const _kA = _cartKeys[0] || 'A', _kB = _cartKeys[1] || 'B';
+// The v1086 comment above it says "a cart carries at most two teams" — true for a
+// 2-team event, false the moment you have 8 teams of 2 in carts of 4. Groups 3 and 4
+// each held THREE teams (E/F/H and F/G/H), and both of Team H's players landed in the
+// non-existent third slot and were dropped. Their points never counted and Team H
+// never got a share of the pot.
+//
+// Fix: stop treating the round's two slots as the source of truth. The EVENT knows
+// every player's team (tournament_players.team), so map by name from the roster and
+// keep the cart's A/B only as a fallback for rounds with no roster available. This
+// repairs events already played — no data migration — and a cart can now hold any
+// number of teams.
+var _t2TeamMapCache = { id: '', at: 0, map: null };
+function _t2TeamMapFromPlayers(ps) {
+  try {
+    const m = {};
+    (ps || []).forEach(p => {
+      if (!p || !p.display_name || !p.team) return;
+      m[normalizeNameSegment(String(p.display_name))] = p.team;
+    });
+    return Object.keys(m).length ? m : null;
+  } catch (e) { return null; }
+}
+async function _t2TeamByNameMap(t) {
+  try {
+    const _id = (t && t.id) ? String(t.id) : '';
+    if (!_id) return null;
+    if (_t2TeamMapCache.id === _id && (Date.now() - _t2TeamMapCache.at) < 30000) return _t2TeamMapCache.map;
+    const _m = _t2TeamMapFromPlayers(await t2GetPlayers(_id).catch(() => []));
+    _t2TeamMapCache = { id: _id, at: Date.now(), map: _m };
+    return _m;
+  } catch (e) { return null; }
+}
+function t2ComputeFieldTeamQuota(rows, t, dayNumber, teamByName) {
   try {
     if (!Array.isArray(rows) || !rows.length) return null;
     if (typeof computeQuotaPoints !== 'function' || typeof quotaTargetFor !== 'function') return null;
@@ -63834,11 +63874,24 @@ function t2ComputeFieldTeamQuota(rows, t, dayNumber) {
       const cfg = g.games.teamQuota;
       if (cfg.teamMode === '4man') return;   // 4-man is one team vs the field, not A vs B
       const side = {};
-      // The cart's two local sides map to their REAL global keys (v1086); pre-v1086
-      // rounds have none and fall back to A/B.
-      const _kA = cfg.teamAKey || 'A', _kB = cfg.teamBKey || 'B';
-      (cfg.teamA || []).forEach(id => { side[id] = _kA; });
-      (cfg.teamB || []).forEach(id => { side[id] = _kB; });
+      // v1120: the EVENT roster wins when we have it — it knows all 8 teams, where the
+      // round's two slots only ever knew 2. Falls back to the cart's A/B mapping for
+      // any round we cannot resolve against a roster, so nothing regresses.
+      let _fromRoster = false;
+      if (teamByName) {
+        g.players.forEach(p => {
+          if (!p || !p.name) return;
+          const _tk = teamByName[nmk(p.name)];
+          if (_tk) { side[p.id] = _tk; _fromRoster = true; }
+        });
+      }
+      if (!_fromRoster) {
+        // The cart's two local sides map to their REAL global keys (v1086); pre-v1086
+        // rounds have none and fall back to A/B.
+        const _kA = cfg.teamAKey || 'A', _kB = cfg.teamBKey || 'B';
+        (cfg.teamA || []).forEach(id => { side[id] = _kA; });
+        (cfg.teamB || []).forEach(id => { side[id] = _kB; });
+      }
       const inBet = g.players.filter(p => side[p.id]);
       if (!inBet.length) return;
       let cp = null; try { cp = computeQuotaPoints(g, cfg, inBet); } catch (e) { return; }
@@ -63905,7 +63958,7 @@ function t2FieldTeamQuotaCached(g) {
         try {
           const t = await t2Get(tid);
           const raw = await loadTourneyRawRounds(t);
-          data = t2ComputeFieldTeamQuota(raw, t, day);
+          data = t2ComputeFieldTeamQuota(raw, t, day, await _t2TeamByNameMap(t));   // v1120
         } catch (e) { data = null; }
         _t2FieldTQCache = { key: key, at: Date.now(), data: data, busy: false };
       })();
@@ -64497,6 +64550,10 @@ async function loadTourneyMoney(t) {
   try {
     if (!supaReady) await initSupabase();
     if (!supa || !supaOnline) return null;
+    // v1120: same roster map the standings use, so the money cannot pay a different
+    // set of teams than the standings rank. Without this, Team H was ranked (once the
+    // standings read the roster) but still paid nothing.
+    let _tqTeamMap = null; try { _tqTeamMap = await _t2TeamByNameMap(t); } catch (e) {}
     const { data, error } = await _t2FetchFieldRounds(t);
     if (error || !Array.isArray(data) || !data.length) return null;
     const rounds = data.map(r => r.data).filter(g => g && Array.isArray(g.players) && g.players.length);
@@ -64690,6 +64747,19 @@ async function loadTourneyMoney(t) {
               const c = canonOf[nm(pn)]; if (!c) return;
               if (teamOf[c] && teamOf[c] !== side) conflict = true; else teamOf[c] = side;
             });
+            // v1120: for TEAM QUOTA, take every player's side from the event roster —
+            // the cart's two slots dropped anyone from a third team. Restricted to
+            // teamQuota on purpose: Team Match / Team Low Ball are head-to-head bets
+            // where the cart's own A-vs-B IS the match, and must not be re-sided.
+            if (key === 'teamQuota' && _tqTeamMap) {
+              (g.players || []).forEach(p => {
+                if (!p || !p.name) return;
+                const _tk = _tqTeamMap[nm(p.name)]; if (!_tk) return;
+                const c = canonOf[nm(p.name)]; if (!c) return;
+                if (teamOf[c] && teamOf[c] !== _tk) conflict = true; else teamOf[c] = _tk;
+              });
+              return;
+            }
             // v1086: use the REAL global keys this cart's two sides stand for. Without
             // this, cart 1's "A" (team C) and cart 2's "A" (team A) would be merged into
             // one side and the pot would pay a team that does not exist. Rounds saved
@@ -67074,7 +67144,9 @@ async function openEventLeaderboard(t) {
         (_rawRounds || []).forEach(r => { const gg = (r && r.data) ? r.data : r; const dd = Number((gg && gg.t2 && gg.t2.day) || 1); if (dd > d) d = dd; });
         return d;
       })();
-      _fieldTQ = t2ComputeFieldTeamQuota(_rawRounds, t, _tqDay);
+      // v1120: evPlayers is already in hand here — build the map from it rather than
+      // re-querying the roster.
+      _fieldTQ = t2ComputeFieldTeamQuota(_rawRounds, t, _tqDay, _t2TeamMapFromPlayers(evPlayers));
     } catch (e) {}
     let html = '';
     if (_fieldTQ && Array.isArray(_fieldTQ.teams) && _fieldTQ.teams.length) {
