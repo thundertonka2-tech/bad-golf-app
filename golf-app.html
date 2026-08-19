@@ -8094,7 +8094,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1115';
+const BG_BUILD = 'v2026.11.1117';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -15024,6 +15024,10 @@ function updateSyncIndicator(justSynced) {
 }
 
 async function saveGame(game, opts) {
+  // v1116: this round is about to change, so the event-wide field-round cache is
+  // stale from here on. Dropping the entry costs nothing and keeps a scorer's own
+  // edit from reading back as the pre-save value on the next payout screen.
+  try { const _tid = game && game.t2 && game.t2.tournamentId; if (_tid) _t2InvalidateFieldRounds(_tid); } catch (e) {}
   opts = opts || {};
   game.updatedAt = Date.now();
   // Audit trail: if this round was reopened from a finished state, every save
@@ -36364,8 +36368,15 @@ async function openHomeCoursePicker(opts) {
   // caller that had already closed its own screen never heard back and the user was
   // left looking at nothing. Any failure now runs onCancel, which is the caller's
   // "put me back where I was".
+  // v1116 (Tyler, 8/19): "now when I click the set one button nothing happens."
+  // This is where nothing happened. v1102 added _bail('') — deliberately SILENT —
+  // for the case where the picker never opens, because the only caller then was the
+  // Edit-profile button, which printed its own message and restored its own screen.
+  // v1114 pointed the Home card straight at this function and it has no such caller:
+  // the empty-string bail fired, onCancel just repainted the same card, and the tap
+  // looked completely dead. Never fail mute — an empty msg gets a default.
   const _bail = (msg) => {
-    try { if (msg) showToast(msg); } catch (e) {}
+    try { showToast(msg || 'Course search didn’t open — try again'); } catch (e) {}
     try { if (typeof opts.onCancel === 'function') opts.onCancel(); } catch (e) {}
   };
   try {
@@ -36451,6 +36462,10 @@ async function _bgGoSetHomeCourse() {
     // with nothing on screen yet — long enough to tap twice and stack two opens.
     if (window._bgGoSetHomeCourseBusy) return;
     window._bgGoSetHomeCourseBusy = true;
+    // v1116: this is a DOUBLE-TAP guard, not a lockout. Holding it the full 2.5s
+    // after a failed open swallowed the user's retry taps too, which is a large part
+    // of why this read as "the button does nothing". Released in the finally below
+    // as soon as the attempt resolves; the timer stays only as a crash backstop.
     setTimeout(function () { window._bgGoSetHomeCourseBusy = false; }, 2500);
     // v1114 (Tyler, 8/19): "you click choose home course, it takes you to the setting
     // screen, then you click choose home course again and it kicks you back to the
@@ -36471,8 +36486,23 @@ async function _bgGoSetHomeCourse() {
       try { _bgRenderHomeCourseCard(); } catch (e) {}
       try { _bgRenderHomeCourseRow(); } catch (e) {}
     };
-    try { await openHomeCoursePicker({ onDone: _refresh, onCancel: _refresh }); } catch (e) { _refresh(); }
-  } catch (e) {}
+    try {
+      await openHomeCoursePicker({ onDone: _refresh, onCancel: _refresh });
+      // v1116: confirm the picker is genuinely on screen. If it is not, fall back to
+      // the pre-v1114 route (the Home course row inside Edit profile) instead of
+      // leaving the user staring at an unchanged screen. One tap stays the normal
+      // path; this is only the safety net for when the search cannot open.
+      const _cm = document.getElementById('t2-course-modal');
+      if (!(_cm && _cm.classList.contains('show'))) {
+        try { await openEditProfile({ focusHomeCourse: true }); } catch (e2) {}
+      }
+    } catch (e) {
+      _refresh();
+      try { showToast('Couldn’t open the course search — try again'); } catch (e2) {}
+    } finally {
+      window._bgGoSetHomeCourseBusy = false;
+    }
+  } catch (e) { try { window._bgGoSetHomeCourseBusy = false; } catch (e2) {} }
 }
 
 // v1079: the Home-page home-course card. Prominent while unset (this is what
@@ -49466,8 +49496,13 @@ async function openRoundBetsSheet(code, courseName) {
     // Group first, event second, matching how he reads this sheet.
     try {
       // One fetch, reused for both the settle-up and the pot table below.
-      const _raw = await loadTourneyRawRounds(t).catch(() => []);
-      const _pay = await t2ComputeCombinedPayouts(t);
+      // v1116: these were serial — the sheet sat on "Loading the money…" for the sum
+      // of both. They are independent, so run them together; the field-round cache
+      // above then collapses their overlapping reads into one.
+      const [_raw, _pay] = await Promise.all([
+        loadTourneyRawRounds(t).catch(() => []),
+        t2ComputeCombinedPayouts(t).catch(() => null)
+      ]);
       if (_pay && Array.isArray(_pay.rows) && _pay.rows.length) {
         const _dict = {}; _pay.rows.forEach(r => { _dict[r.id] = r.net || 0; });
         const _pl = _pay.players || [];
@@ -63137,8 +63172,50 @@ try { window.renderOpenRounds = renderOpenRounds; } catch(e){}
 // answer is complete AND the same every time. Errors are reported exactly the
 // way the old single query did (null data + error) so callers are unchanged.
 const T2_FIELD_PAGE = 500;
+// v1116 (Tyler, 8/19): "everything is getting really slow... the boxes taking a
+// while to load again." This is the app's heaviest read — a PAGED fetch of every
+// round in an event, each row carrying the full round JSON — and it had no caching
+// at all. Opening the round Bets sheet on a tournament round fired it 4-6 times in a
+// row: loadTourneyRawRounds (v1108), then t2ComputeCombinedPayouts doing its OWN
+// loadTourneyRawRounds, then loadTourneyMoney, then the CTP/Stableford/cross-group
+// passes inside it. Every one of those pulled the same rows over the wire again.
+//
+// Short TTL + in-flight dedupe, keyed by tournament id. A burst of calls that all
+// belong to one screen-open collapses to a single fetch; anything more than a few
+// seconds later re-reads for real, so live scoring still updates. saveGame drops the
+// entry outright (see there), so a write is never read back stale.
+//
+// `cols` is now ignored and the superset is always selected: the only two variants in
+// the codebase are 'data' and 'data,updated_at', and an extra column costs nothing
+// while a second cache key would defeat the whole point.
+var _t2FieldRoundsCache = Object.create(null);   // tournament id -> {at, rows, inflight}
+const T2_FIELD_CACHE_MS = 6000;
+function _t2InvalidateFieldRounds(id) {
+  try {
+    if (id) delete _t2FieldRoundsCache[String(id)];
+    else _t2FieldRoundsCache = Object.create(null);
+  } catch (e) {}
+}
 async function _t2FetchFieldRounds(t, cols) {
-  const sel = cols || 'data';
+  const _id = (t && t.id) ? String(t.id) : '';
+  if (_id) {
+    const _c = _t2FieldRoundsCache[_id];
+    if (_c) {
+      if (_c.inflight) { try { return await _c.inflight; } catch (e) {} }
+      else if (_c.rows && (Date.now() - _c.at) < T2_FIELD_CACHE_MS) return { data: _c.rows, error: null };
+    }
+    const _p = _t2FetchFieldRoundsRaw(t);
+    _t2FieldRoundsCache[_id] = { at: Date.now(), rows: null, inflight: _p };
+    let _r = null;
+    try { _r = await _p; } catch (e) { _r = { data: null, error: e }; }
+    if (_r && !_r.error && Array.isArray(_r.data)) _t2FieldRoundsCache[_id] = { at: Date.now(), rows: _r.data, inflight: null };
+    else delete _t2FieldRoundsCache[_id];   // never cache a failure
+    return _r;
+  }
+  return _t2FetchFieldRoundsRaw(t);
+}
+async function _t2FetchFieldRoundsRaw(t, cols) {
+  const sel = 'data,updated_at';
   const out = [];
   try {
     if (!t || !t.id) return { data: [], error: null };
@@ -63917,6 +63994,48 @@ function t2ComputeFieldNassau(rows, cfg) {
   if (!perDay.length) return null;
   return { perDay: perDay, totals: Object.values(totalsByName).sort((a, b) => b.net - a.net), totalsByKey: totalsByName, value: value, split: split, segments: segs };
 }
+// v1117 (Tyler, 8/19): "Long Putt is showing not settled even though the round is
+// over." Every field pot — Long Putt, field Skins, field CTP — gates on EVERY group
+// on the day finishing, and that gate is deliberate: another cart could still beat a
+// logged putt or a CTP, so paying early could have to be revoked (v676 / v984 / v989).
+// What it never had was a way OUT. Tyler's 8-team test has a group that launched and
+// was then abandoned, so `finished` (3) never reaches `rounds` (4) and all three pots
+// read "not settled" / "still live" forever — the same stuck group that kept the
+// event pill on "live" until v1115.
+//
+// Same rule v1115 settled on: once the day is behind us, nobody is coming back to
+// finish it. `lastTouch` is the newest finishedAt/updatedAt seen across that day's
+// rounds, so this needs no extra query and no dates threaded into the engines — and
+// while it is still TODAY the original gate is untouched, so a slow group finishing
+// at dusk can still take the pot off an early leader.
+function _t2DayFieldComplete(d) {
+  try {
+    if (!d) return false;
+    if (d.rounds === 1) return true;                                   // v1030/v1032: one group settles live
+    if (d.rounds > 0 && d.finished === d.rounds) return true;          // everyone in
+    if (!d.rounds || !d.lastTouch) return false;
+    const _lt = new Date(d.lastTouch);
+    if (isNaN(_lt.getTime())) return false;
+    const _ymd = dt => dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+    return _ymd(_lt) < _ymd(new Date());
+  } catch (e) { return false; }
+}
+// Newest activity stamp on a round, as ms. finishedAt wins; updatedAt may be an ISO
+// string or an epoch number depending on how the round was written.
+function _t2RoundTouchMs(g) {
+  try {
+    if (!g) return 0;
+    const _v = g.finishedAt || g.updatedAt || 0;
+    // v1117: Date.parse(0) reads "0" as the YEAR 2000, so a round with no stamps at
+    // all reported a touch in 2000 -- which would read as "long past" and settle the
+    // pot early. Unknown must mean 0, i.e. "no evidence the day is over".
+    if (!_v) return 0;
+    const _p = Date.parse(_v);
+    if (!isNaN(_p)) return _p;
+    const _n = Number(_v);
+    return isFinite(_n) ? _n : 0;
+  } catch (e) { return 0; }
+}
 function t2ComputeFieldSkins(rows, cfg) {
   if (!cfg || !cfg.on || !Array.isArray(rows) || !rows.length) return null;
   const nmk = s => normalizeNameSegment(String(s || ''));
@@ -63943,6 +64062,7 @@ function t2ComputeFieldSkins(rows, cfg) {
     byDay[day] = byDay[day] || { sis: sis, parts: {}, rounds: 0, finished: 0 };
     byDay[day].rounds++;                     // v676: a day's skins pay only when every group finishes
     if (g.finishedAt) byDay[day].finished++;
+    { const _t = _t2RoundTouchMs(g); if (_t > (byDay[day].lastTouch || 0)) byDay[day].lastTouch = _t; }   // v1117
     g.players.forEach(p => {
       if (!p || !p.name) return;
       const sc = (g.scores && g.scores[p.id]) || [];
@@ -64023,7 +64143,7 @@ function t2ComputeFieldSkins(rows, cfg) {
     // hole is decided the moment everyone in it has putted out, so settle live.
     // (The per-hole loop above already refuses to award a skin on a hole the whole
     // field hasn't completed, so a late score can't revoke one.)
-    const _dComplete = (_dInfo.rounds === 1) || (_dInfo.rounds > 0 && _dInfo.finished === _dInfo.rounds);
+    const _dComplete = _t2DayFieldComplete(_dInfo);   // v1117
     perDay.push({ day: Number(day), N: N, totalSkins: totalSkins, skinValue: skinValue, pot: (totalSkins > 0 ? pot : 0), potIfWon: pot, voided: totalSkins === 0, rows: out, complete: _dComplete, finished: _dInfo.finished, total: _dInfo.rounds, holeResults: holeResults });
   });
   if (!perDay.length) return null;
@@ -64046,6 +64166,7 @@ function t2ComputeFieldLongPutt(rows, cfg) {
     // v989: count the day's groups so the pot can't settle mid-round (see below).
     byDay[day].rounds++;
     if (g.finishedAt) byDay[day].finished++;
+    { const _t = _t2RoundTouchMs(g); if (_t > (byDay[day].lastTouch || 0)) byDay[day].lastTouch = _t; }   // v1117
     g.players.forEach(p => { if (p && p.name) byDay[day].names[nmk(p.name)] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name) }; });
     const hd = g.longPuttData;
     if (hd && hd.pid) {
@@ -64073,7 +64194,7 @@ function t2ComputeFieldLongPutt(rows, cfg) {
     // exists because another group could still beat the logged putt -- with a
     // single group there is no other group, so show and settle it live. It
     // recomputes if a longer putt is logged later in the round.
-    const _dComplete = (byDay[day].rounds === 1) || (byDay[day].rounds > 0 && byDay[day].finished === byDay[day].rounds);
+    const _dComplete = _t2DayFieldComplete(byDay[day]);   // v1117
     const out = players.map(p => {
       const isW = nmk(p.name) === nmk(best.name);
       const net = _dComplete ? ((isW ? pot : 0) - contribution) : 0;
@@ -64111,6 +64232,7 @@ function t2ComputeFieldCtp(rows) {
     // t2ComputeFieldSkins does and only move money once the day is done.
     byDay[day] = byDay[day] || { names: {}, holes: {}, value: 0, holeSet: {}, rounds: 0, finished: 0 };
     byDay[day].rounds++; if (g.finishedAt) byDay[day].finished++;
+    { const _t = _t2RoundTouchMs(g); if (_t > (byDay[day].lastTouch || 0)) byDay[day].lastTouch = _t; }   // v1117
     if (val && !byDay[day].value) byDay[day].value = val;
     holes.forEach(h => { byDay[day].holeSet[h] = 1; });
     g.players.forEach(p => { if (p && p.name) byDay[day].names[nmk(p.name)] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name) }; });
@@ -64139,7 +64261,7 @@ function t2ComputeFieldCtp(rows) {
     if (!holeList.length) return;
     // v1032 (Tyler, 8/15): same one-group rule as Skins / Long Putt. A CTP hole is
     // decided the moment the only group on the course plays it.
-    const _dComplete = (d.rounds === 1) || (d.rounds > 0 && d.finished === d.rounds);
+    const _dComplete = _t2DayFieldComplete(d);   // v1117
     const holeRows = [];
     holeList.forEach(h => {
       const best = d.holes[h]; if (!best) return;
