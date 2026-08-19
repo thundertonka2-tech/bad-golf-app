@@ -8153,7 +8153,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1135';
+const BG_BUILD = 'v2026.11.1137';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -43024,7 +43024,9 @@ async function bgFinishRoundFlow() {
       // v1128: a deleted event gets no button at all -- offering one that can only
       // apologise is worse than not offering it.
       if (_tw) _tw.style.display = (_tid && !bgIsDeadEvent(_tid)) ? '' : 'none';
-      if (_tb && _tid) _tb.onclick = async () => { try { const _t = await t2Get(_tid); if (_t) { openEventLeaderboard(_t, { fromCode: (g && g.code) || '' }); } else { bgMarkEventGone(_tid); bgToastEventGone(); if (_tw) _tw.style.display = 'none'; } } catch (e) { showToast('Could not open the tournament'); } };   // v781: keep the Round-complete summary open UNDERNEATH the leaderboard (it sits on top at z-index 100050) so closing it returns here and the user only taps Finish/Save once
+      // v1136: was `if (_t) ... else bgMarkEventGone(...)`, so a dropped request
+      // permanently marked the event deleted on this device. Only a confirmed read.
+      if (_tb && _tid) _tb.onclick = async () => { try { const _r = await t2GetX(_tid); if (_r.data) { openEventLeaderboard(_r.data, { fromCode: (g && g.code) || '' }); } else if (!_r.ok) { showToast('Could not reach the tournament — try again'); } else { bgMarkEventGone(_tid); bgToastEventGone(); if (_tw) _tw.style.display = 'none'; } } catch (e) { showToast('Could not open the tournament'); } };   // v781: keep the Round-complete summary open UNDERNEATH the leaderboard (it sits on top at z-index 100050) so closing it returns here and the user only taps Finish/Save once
     } catch (e) {}
     $('summary-modal').classList.add('show');
     // Fill in the wager outcomes (won/owe + ledger) once the bets are fetched.
@@ -46560,7 +46562,7 @@ async function t2InjectTourneySummaryLink(g, container) {
   container.appendChild(div);
   const b = div.querySelector('.t2-summ-lb');
   if (b) b.onclick = async () => {
-    try { const t = await t2Get(tid); if (t) { openEventLeaderboard(t, { fromCode: (state.game && state.game.code) || '' }); } else { bgMarkEventGone(tid); bgToastEventGone(); } }   // v781: leave the summary open beneath the leaderboard so the round still saves after Close
+    try { const _r = await t2GetX(tid); if (_r.data) { openEventLeaderboard(_r.data, { fromCode: (state.game && state.game.code) || '' }); } else if (!_r.ok) { showToast('Could not reach the tournament — try again'); } else { bgMarkEventGone(tid); bgToastEventGone(); } }   // v781: leave the summary open beneath the leaderboard so the round still saves after Close
     catch (e) { showToast('Could not open the tournament'); }
   };
   // Show THIS player's field-wide tournament money inline (team bets + skins),
@@ -46948,9 +46950,20 @@ async function fillSummaryPayoutBoard(g) {
   if (!el) return;
   if (!g || !g.t2 || !g.t2.tournamentId) return;
   try {
-    const t = await t2Get(g.t2.tournamentId);
+    const _r = await t2GetX(g.t2.tournamentId);
+    const t = _r.data;
     if (!el.isConnected) return;
-    if (!t) { el.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">Tournament not found.</div>'; return; }
+    if (!t) {
+      // v1136 (§2 of the outstanding list): this is one of the two event-context
+      // sites that still said "Tournament not found" for a dropped request. Same
+      // discipline as the round-context ones — record the event as gone ONLY on a
+      // confirmed empty read, and say something true in the other case.
+      if (_r.ok) { try { bgMarkEventGone(g.t2.tournamentId); } catch (e) {} }
+      el.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">' +
+        (_r.ok ? 'That tournament was deleted. This round and its scores are still here.'
+               : "Couldn't load the tournament — check your connection.") + '</div>';
+      return;
+    }
     const pay = await t2ComputeCombinedPayouts(t);
     if (!el.isConnected) return;
     if (!pay) { el.innerHTML = '<div class="help-text" style="padding:16px;text-align:center">No scores in this event yet.</div>'; return; }
@@ -53481,10 +53494,26 @@ async function t2MaybeAutoComplete(t, days) {
     }
   } catch (e) {}
 }
+// v1136: t2GetX is t2Get plus the one answer it never had. t2Get returns null for
+// "no such event", "you may not see it" AND "the request never came back" — and
+// bgMarkEventGone, which writes a PERMANENT local record with no UI to undo it, was
+// being handed that null. Its own doc comment promises "only on a clean empty
+// result, never on a thrown request"; that promise could not be kept, because
+// t2Get catches its own error and returns null, so the callers' try/catch never
+// fired. An offline phone opening a tournament round marked the event dead forever.
+//
+// LIMIT, unchanged and not fixable from the client: an RLS refusal still looks
+// exactly like a clean empty result — tournaments_select is tourney_is_member(id),
+// and PostgREST reports a filtered-out row as a SUCCESSFUL empty read. So
+// { ok: true, data: null } still means "deleted OR not permitted". What ok:false
+// buys is that a failed REQUEST can no longer masquerade as either of them.
+async function t2GetX(id) {
+  if (!supa || !id) return { ok: false, data: null };
+  const r = await _bgRead(() => supa.from('tournaments').select('*').eq('id', id).maybeSingle(), 't2Get');
+  return { ok: r.ok, data: r.ok ? (r.data || null) : null };
+}
 async function t2Get(id) {
-  if (!supa) return null;
-  try { const { data } = await supa.from('tournaments').select('*').eq('id', id).maybeSingle(); return data; }
-  catch (e) { return null; }
+  return (await t2GetX(id)).data;
 }
 // v1100: t2Get returns null for BOTH "you cannot see this event" and "that request
 // did not come back", and several screens treat the null as the first when it is
@@ -57398,12 +57427,21 @@ async function openT2Home(id, _opts) {
   // their own event's settings when the cached auth user was stale/null. (Tyler, Jul 2026.)
   try { await t2EnsureFreshSession(); } catch (e) {}
   let fetched = null;
-  try { fetched = await t2Get(id); } catch (e) {}
+  let _fr = { ok: false, data: null };
+  try { _fr = await t2GetX(id); fetched = _fr.data; } catch (e) {}
   if (fetched) _t2Current = fetched;
   // Transient fetch miss right after a save (e.g. Save Day) shouldn't dump the
   // user back on the setup screen — keep the cached tournament if it's the same
   // one. renderT2Home re-pulls players/groups/days fresh anyway.
-  else if (!(_t2Current && _t2Current.id === id)) { showToast('Tournament not found'); return; }
+  // v1136: a dropped request and a deleted event both said "Tournament not found"
+  // and dumped the user back out. The cached-copy fallback above already handles the
+  // transient-miss-right-after-a-save case; this is what happens when there is no
+  // cache either. Only a CONFIRMED empty read records the event as gone.
+  else if (!(_t2Current && _t2Current.id === id)) {
+    if (_fr.ok) { try { bgMarkEventGone(id); } catch (e) {} showToast('That tournament was deleted'); }
+    else showToast("Couldn't reach the tournament — try again");
+    return;
+  }
   try { if (_t2Current && (typeof t2CanManage !== 'function' || t2CanManage(_t2Current))) t2EnsureInviteTokens(id); } catch (e) {}
   await renderT2Home();
   // v650: never cover an OPEN Configure-Day games screen with this modal — that
@@ -57947,6 +57985,10 @@ async function t2BuildGroupsForDay(dayId, dayNumber, byHcp) {
   // meant the new groups were added ON TOP of the old ones and every player
   // appeared twice.
   if (!(await t2ClearGroups(dayId))) { showToast('Could not clear the old groups — nothing was changed'); return; }
+  // v1137: building the carts is the moment a name-only slot becomes a real
+  // participant, so re-try linking those rows to accounts before they are written
+  // in. Best-effort, never blocking — see _t2LinkNameOnlySlots.
+  try { const _tid = (typeof _t2Current !== 'undefined' && _t2Current) ? _t2Current.id : null; if (_tid) await _t2LinkNameOnlySlots(_tid); } catch (e) {}
   // v986 (T46): two inserts instead of ~250 sequential round-trips for 200 players.
   const _madeG = await t2CreateGroupsBulk(dayId, groups.map((g, gi) => ({ groupNumber: gi + 1, size: g.length })));
   if (_madeG) {
@@ -58451,6 +58493,10 @@ async function _t2BuildCartsOfTwoImpl(dayId, dayNumber, byHcp, opts) {
     }
   }
   if (!(await t2ClearGroups(dayId))) { showToast('Could not clear the old carts — nothing was changed'); return false; }
+  // v1137: building the carts is the moment a name-only slot becomes a real
+  // participant, so re-try linking those rows to accounts before they are written
+  // in. Best-effort, never blocking — see _t2LinkNameOnlySlots.
+  try { const _tid = (typeof _t2Current !== 'undefined' && _t2Current) ? _t2Current.id : null; if (_tid) await _t2LinkNameOnlySlots(_tid); } catch (e) {}
   // v986 (T46): two inserts total instead of ~250 sequential round-trips.
   const _made = await t2CreateGroupsBulk(dayId, groups.map((g, gi) => ({ groupNumber: gi + 1, size: g.length })));
   if (_made) {
@@ -62349,6 +62395,52 @@ async function t2AdoptSlot(playerId, userId) {
   // stops the app asserting something that didn't happen.
   try { return _bgWrote(await supa.from('tournament_players').update({ user_id: userId, claimed: true }).eq('id', playerId).select('id')); }
   catch (e) { return false; }
+}
+// v1137: re-try the account link for roster slots still sitting at user_id NULL.
+//
+// Why they exist: t2ResolveUserIdByName runs once, when the commissioner adds the
+// player, and matches on profiles.my_player. A player who had not signed up yet --
+// or had not set my_player -- resolves to null, the slot is written unlinked, and
+// nothing ever asks again. tourney_is_member is false for them forever, so
+// tournaments_select hides the event and it never reaches their Events list.
+//
+// Why here rather than in RLS: the alternative was widening tournaments_select to
+// admit "holds a round in one of this event's groups", which changes the read model
+// for every surface at once. Linking the row instead fixes the CAUSE -- they become
+// a genuine member -- and touches nothing else.
+//
+// Deliberately narrow:
+//   * only rows with user_id NULL and claimed = false are considered;
+//   * a name resolving to a user who ALREADY holds a row in this event is skipped,
+//     so nobody ends up with two roster entries (the exact trap the v1027 note in
+//     t2ListMine describes);
+//   * writes go through t2AdoptSlot -> _bgWrote, so a refusal reads as a refusal;
+//   * commissioner-only by construction. tp_write_commish is what lets this land,
+//     so for anyone else every write matches zero rows and this returns 0. That is
+//     correct, not a bug -- a player must not be able to link someone else's slot.
+//   * total failure is a no-op. This is a background repair, never a blocker.
+async function _t2LinkNameOnlySlots(tid) {
+  if (!tid || !supa || !_authUser) return 0;
+  let rows = [];
+  // strict: an empty list here must mean "this event has no players", never "the
+  // read failed" — otherwise there is simply nothing to do and we return quietly.
+  try { rows = await t2GetPlayers(tid, { strict: true }); } catch (e) { return 0; }
+  if (!Array.isArray(rows) || !rows.length) return 0;
+  const taken = new Set(rows.map(r => r && r.user_id).filter(Boolean).map(String));
+  const open = rows.filter(r => r && !r.user_id && !r.claimed && String(r.display_name || '').trim());
+  if (!open.length) return 0;
+  let linked = 0;
+  for (const r of open) {
+    let uid = null;
+    try { uid = await t2ResolveUserIdByName(r.display_name); } catch (e) {}
+    if (!uid) continue;                    // no account by that name (guest / test / typo)
+    if (taken.has(String(uid))) continue;  // already in this event under another row
+    let wrote = false;
+    try { wrote = await t2AdoptSlot(r.id, uid); } catch (e) {}
+    if (wrote) { taken.add(String(uid)); linked++; }
+  }
+  if (linked) { try { console.warn('_t2LinkNameOnlySlots: linked ' + linked + ' name-only slot(s) in ' + tid); } catch (e) {} }
+  return linked;
 }
 async function t2AddOrAdoptPlayer(tid, p, existingPlayers) {
   if (p.userId && Array.isArray(existingPlayers)) {
@@ -73099,9 +73191,18 @@ const gpsView = (() => {
     delete holes[ph];
     courseGps[courseId].updatedAt = Date.now();
     // v978: tell the writer this hole is REMOVED, not merely absent locally.
-    try { await saveStore({ remove: [ph] }); } catch (e) {}
+    // v1136: the return value was discarded and the toast claimed success no matter
+    // what. That could already be wrong (all three upsert attempts can fail), and
+    // v1130 added a second way: the write is now deliberately REFUSED when the
+    // current cloud row cannot be read, so a stale local copy can't clobber another
+    // admin's holes. Telling someone a hole is cleared "for everyone" when the
+    // server never heard about it is how a hole gets re-mapped twice and stays wrong.
+    let _cleared = false;
+    try { _cleared = !!(await saveStore({ remove: [ph] })); } catch (e) {}
     try { audit('clear_hole_gps', courseId, 'hole ' + hole); } catch (e) {}
-    gToast('Hole ' + hole + ' GPS cleared — re-map it with the 3 taps');
+    gToast(_cleared
+      ? 'Hole ' + hole + ' GPS cleared — re-map it with the 3 taps'
+      : 'Hole ' + hole + ' cleared on this phone only — the server did not take it. Try again when you have a signal.');
     hd = holeData(hole);   // now null
     showHole(hole);        // setup panel shows "not mapped"; admin pins refresh
   }
