@@ -389,28 +389,52 @@ function seedEvent(opts) {
   const html2 = bd([{ key: 'Skins won', money: {}, pending: true }], rows);
   check('a pending pot says "not settled" instead of a bare dash', html2.includes('not settled') && html2.includes('still live'));
 
-  // ── 11. Settle-up share split (v1058) ───────────────────────────
-  section('11. SETTLE-UP SHARE — the two-button split');
-  check('a shared sms sender exists for both paths', typeof qa.fn('_bgSendSettleSms') === 'function');
-  check('the round share takes a mode', /function shareSettleUpSms\(mode\)/.test(src));
-  check('both round buttons exist', src.includes('id="btn-text-settle"') && src.includes('id="btn-text-settle-nums"'));
-  check('both buttons exist on the combined payout screen', src.includes("id=\"t2pb-text\"") && src.includes('t2pb-text-nums'));
-  check('both buttons exist on the event summary screen', src.includes('summary-text-combined') && src.includes('summary-text-combined-nums'));
+  // ── 11. Settle-up share — one button, images always (v1106/BuildA/v1109) ──
+  section('11. SETTLE-UP SHARE — one button, images always');
+  // REWRITTEN 2026-08-19. This block was written for the v1058 two-button split
+  // ("Text the numbers" vs "… with images"). Since then: v1106 removed the numbers
+  // button from all three surfaces at Tyler's request ("it's causing confusion"),
+  // Build A deleted the t2pb payout board outright, and v1109 removed the dead
+  // 'sms' gate and made images unconditional. The old assertions went on asserting
+  // the deleted buttons INTO existence and had been red ever since — unnoticed,
+  // because this file was not in the documented pre-bump run list.
+  // Removals are now asserted AS removals, so nothing quietly comes back.
+  check('a shared sms sender still exists', typeof qa.fn('_bgSendSettleSms') === 'function');
+  check('the round share still takes a mode', /function shareSettleUpSms\(mode\)/.test(src));
+
+  check('v1106: the round numbers button is gone', !src.includes('btn-text-settle-nums'));
+  check('v1106: the summary numbers button is gone', !src.includes('summary-text-combined-nums'));
+  check('v1106: the payout-board numbers button is gone', !src.includes('t2pb-text-nums'));
+  check('Build A: the whole t2pb payout-board surface is gone', !src.includes('id="t2pb-text"'));
+
+  check('the round settle-up button exists', src.includes('id="btn-text-settle"'));
+  check('the event summary settle-up button exists', src.includes('summary-text-combined'));
+  check('the Bets sheet settle-up button exists', src.includes('id="rb-share"'));
+
+  check('v1109: one name on every surface', (src.match(/Text settle-up/g) || []).length >= 3);
+  check('v1109: the old labels are gone',
+    !src.includes('with images') && !src.includes('Text this breakdown'));
+
   // A button that renders but is never wired is the easy way to ship a dead control —
   // asserting the id exists does NOT catch it (found by mutation while writing this).
-  check('the round numbers button is actually wired',
-    /textNumBtn\s*=\s*\$\('btn-text-settle-nums'\)/.test(src) &&
-    /textNumBtn\.onclick\s*=\s*\(\)\s*=>\s*shareSettleUpSms\('sms'\)/.test(src));
-  check('the round images button passes mode "images"',
+  check('the round button is wired to images',
+    /textBtn\s*=\s*\$\('btn-text-settle'\)/.test(src) &&
     /textBtn\.onclick\s*=\s*\(\)\s*=>\s*shareSettleUpSms\('images'\)/.test(src));
-  check('both combined numbers buttons are wired to mode "sms"',
-    (src.match(/shareCombinedSettleUp\(t, pay, \{ mode: 'sms' \}\)/g) || []).length === 2 &&
-    /querySelector\('#t2pb-text-nums'\)/.test(src) &&
-    /getElementById\('summary-text-combined-nums'\)/.test(src));
-  check('both combined images buttons pass mode "images"',
-    (src.match(/shareCombinedSettleUp\(t, pay, \{ mode: 'images' \}\)/g) || []).length === 2);
-  // The whole point of the sms button is that it does NOT hand the recipient picker
-  // back to the OS. Prove the share sheet is genuinely skipped, not just reordered.
+  check('the summary button is wired and passes mode "images"',
+    /getElementById\('summary-text-combined'\)/.test(src) &&
+    /shareCombinedSettleUp\([^)]*mode:\s*'images'[^)]*\)/.test(src));
+  check('the Bets sheet button is wired', /querySelector\('#rb-share'\)/.test(src));
+
+  // v1109: the scorecard + bets-card pair is built by ONE helper, used by all three.
+  check('_bgSettleShareFilesFor exists', /function _bgSettleShareFilesFor\(/.test(src));
+  check('  ...and every share path goes through it',
+    (src.match(/_bgSettleShareFilesFor\(/g) || []).length >= 4);
+
+  // v1106 removed the UI but deliberately left the helper defined (additive-removal
+  // house style) so re-wiring it later is one line. Assert both halves of that.
+  check('bragToCrew is still defined but unwired',
+    /function bragToCrew\(\)/.test(src) && !/=>\s*bragToCrew\(\)/.test(src));
+
   ev('globalThis.__shareCalls = 0');
   ctx.navigator.share = async () => { ctx.__shareCalls++; };
   ctx.navigator.canShare = () => true;
@@ -422,23 +446,18 @@ function seedEvent(opts) {
   ev('state = state || {}; state.game = { players: [{ id: "p1", name: "Tyler OConnor" }], code: "QA1" }');
 
   navUrl = ''; ctx.__shareCalls = 0; clearSpy();
-  try { await qa.fn('shareSettleUpSms')('sms'); } catch (e) { console.log('   sms mode threw: ' + e.message); }
-  check('mode "sms" never opens the share sheet', ctx.__shareCalls === 0, 'share calls=' + ctx.__shareCalls);
-  check('mode "sms" opens Messages with recipients pre-filled', /^sms:5551234567,5559876543/.test(navUrl), navUrl.slice(0, 60));
-  check('  ...and carries the settle-up text as the body', /body=/.test(navUrl));
-  check('  ...and tells the user how many numbers it added', toasts().some(t => /2 number/.test(t)), toasts().join('|'));
-
-  navUrl = ''; ctx.__shareCalls = 0; clearSpy();
   try { await qa.fn('shareSettleUpSms')('images'); } catch (e) { console.log('   images mode threw: ' + e.message); }
-  check('mode "images" DOES use the share sheet', ctx.__shareCalls > 0, 'share calls=' + ctx.__shareCalls);
-  check('  ...and does not fall through to sms', navUrl === '', navUrl);
+  check('mode "images" uses the share sheet', ctx.__shareCalls > 0, 'share calls=' + ctx.__shareCalls);
+  check('  ...and never falls through to an sms: url', navUrl === '', navUrl);
 
-  // No saved numbers must still open Messages, just without recipients.
-  ev('_bgSettleRecipients = async function () { return ""; }');
+  // v1109 deleted the `mode !== 'sms'` gate, so `mode` is now INERT — every caller
+  // gets the share sheet. Passing 'sms' must therefore behave exactly like 'images'.
+  // This is the INVERSE of what this block asserted before v1109: if it ever flips
+  // back, the "Text the numbers" path has been resurrected by accident.
   navUrl = ''; ctx.__shareCalls = 0; clearSpy();
-  try { await qa.fn('shareSettleUpSms')('sms'); } catch (e) {}
-  check('no saved numbers still opens Messages (and says so)',
-    /^sms:[?&]body=/.test(navUrl) && toasts().some(t => /No saved phone/i.test(t)), navUrl.slice(0, 30) + ' | ' + toasts().join('|'));
+  try { await qa.fn('shareSettleUpSms')('sms'); } catch (e) { console.log('   sms mode threw: ' + e.message); }
+  check('v1109: mode is inert — "sms" also uses the share sheet', ctx.__shareCalls > 0, 'share calls=' + ctx.__shareCalls);
+  check('  ...and does NOT open Messages', navUrl === '', navUrl);
 
   // ── 12. Zero-sum invariant (closes the $2 item) ─────────────────
   section('12. ZERO-SUM — the invariant behind the $2 discrepancy');
