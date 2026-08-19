@@ -2,6 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<!--BGVER=v2026.11.1140-->
+<!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
+     ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
+     request instead of re-downloading the whole 5.3 MB app just to learn whether a
+     newer build shipped. BUMP THIS LINE AND THE VERSION IN THE APP SCRIPT TOGETHER.
+     If they ever drift the version check falls back to the slow-but-correct path --
+     it cannot miss updates.
+     Spelled BGVER on purpose, NOT with the app script's marker name: the pre-commit
+     guard (scripts/guard_stale_base.sh, check 5) compares the two builds from the
+     FIRST line matching that name to EOF. The two files' HEADS legitimately differ
+     (web loads Supabase from lib/, iOS also loads 5 native bridge scripts), so a
+     match up here dragged the heads into the comparison and tripped a false
+     "web and iOS app scripts DIFFER" alarm. Anchoring stays on the app script. -->
 <!-- v977 (Tyler code review): this carried maximum-scale=1.0, user-scalable=no.
      In a Capacitor WKWebView both are honoured, so the user could not zoom AT ALL —
      on an app that ships 9px, 10px and 11px text meant to be read outdoors in bright
@@ -8153,7 +8166,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1139';
+const BG_BUILD = 'v2026.11.1140';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -9041,7 +9054,11 @@ async function fixMyRoundStat(idx, kind) {
   // authoritative: this is an intentional wholesale clear of MY field on this round,
   // so the merge-on-write must NOT re-fold the old cloud values back over the nulls.
   // (This round usually isn't the active game, so the per-cell touch store can't help.)
-  try { await saveGame(g, { authoritative: { [fieldName]: [myId] } }); } catch (e) { ok = false; }
+  // v1140: saveGame() RETURNS false on a failed cloud write -- it does not throw (see
+  // the note on safeSet). `ok` only ever flipped inside this catch, so the "cloud save
+  // failed" toast three lines down was unreachable dead code and the user was always
+  // told the fix landed, even when the round never left the phone.
+  try { ok = (await saveGame(g, { authoritative: { [fieldName]: [myId] } })) !== false; } catch (e) { ok = false; }
   try { await archiveScoresFromRound(g); } catch (e) {}
   try { var fo = document.getElementById('fix-round-ov'); if (fo) fo.remove(); } catch (e) {}
   try { var rc = document.getElementById('round-card-ov'); if (rc) rc.remove(); } catch (e) {}
@@ -13146,6 +13163,22 @@ function stripVParam() {
   } catch (e) {}
 }
 
+// v1140: reads the <!--BGVER=...--> marker out of OUR OWN <head> (a DOM
+// read, no network). Used purely to decide whether the deployed copy's marker can
+// be trusted — see checkForNewBuild below.
+function _bgEarlyBuildMarker() {
+  try {
+    var h = document.head;
+    for (var n = h && h.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 8) {
+        var m = String(n.nodeValue || '').match(/BGVER=([\w.]+)/);
+        if (m) return m[1];
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
 async function checkForNewBuild() {
   try {
     // Never reload while a sign-in is completing. When Google/OAuth redirects
@@ -13168,17 +13201,43 @@ async function checkForNewBuild() {
     // fall back to a full fetch, so this can never miss a real update.
     const url = location.pathname + '?nocache=' + Date.now();
     let txt = '';
+    let latest = null;
+    // v1140 PERF -- THE BIG ONE. The comment above says BG_BUILD sits ~260 KB into
+    // the file. It is actually at ~525 KB, so `Range: bytes=0-400000` NEVER contained
+    // the marker, the regex below always failed, and EVERY web launch fell through to
+    // a full, no-store, uncacheable re-download of the entire 5.3 MB app -- on top of
+    // the 5.3 MB it had just finished loading. ~5.7 MB of pure waste per launch,
+    // measured in a real headless load against GitHub Pages.
+    // Fix: a duplicate of the version string now rides as an HTML comment in the first
+    // ~200 bytes of the file (<!--BGVER=vX-->), so a 2 KB range request can
+    // answer "is there a newer build?". DRIFT-PROOF: the marker is only trusted when
+    // OUR OWN copy's comment agrees with OUR OWN BG_BUILD (read from the DOM, free).
+    // If anyone ever bumps one and not the other, this silently degrades to the wide
+    // range fetch below instead of quietly missing real updates.
+    let _fast = false;
     try {
-      const partial = await fetch(url, { cache: 'no-store', headers: { Range: 'bytes=0-400000' } });
-      if (partial.ok || partial.status === 206) txt = await partial.text();
-    } catch (e) { /* fall through to full fetch */ }
-    if (!/BG_BUILD\s*=\s*'/.test(txt)) {
-      const res = await fetch(location.pathname + '?nocache=' + Date.now(), { cache: 'no-store' });
-      if (!res.ok) return;
-      txt = await res.text();
+      if (_bgEarlyBuildMarker() === BG_BUILD) {
+        const tiny = await fetch(url, { cache: 'no-store', headers: { Range: 'bytes=0-2047' } });
+        if (tiny.ok || tiny.status === 206) {
+          const m0 = String(await tiny.text()).match(/BGVER=([\w.]+)/);
+          if (m0) { latest = m0[1]; _fast = true; }
+        }
+      }
+    } catch (e) { /* fall through to the range / full path */ }
+    if (!_fast) {
+      try {
+        // Widened from 400000 so the FALLBACK actually reaches the marker too.
+        const partial = await fetch(location.pathname + '?nocache=' + Date.now(), { cache: 'no-store', headers: { Range: 'bytes=0-800000' } });
+        if (partial.ok || partial.status === 206) txt = await partial.text();
+      } catch (e) { /* fall through to full fetch */ }
+      if (!/BG_BUILD\s*=\s*'/.test(txt)) {
+        const res = await fetch(location.pathname + '?nocache=' + Date.now(), { cache: 'no-store' });
+        if (!res.ok) return;
+        txt = await res.text();
+      }
+      const m = txt.match(/BG_BUILD\s*=\s*'([^']+)'/);
+      latest = m && m[1];
     }
-    const m = txt.match(/BG_BUILD\s*=\s*'([^']+)'/);
-    const latest = m && m[1];
     if (!latest || latest === BG_BUILD) return;
     const params = new URLSearchParams(location.search);
     if (params.get('v') === latest) return; // already navigated to this build — don't loop
@@ -17062,9 +17121,11 @@ async function joinRoundForStats(g, me) {
   if (me && Array.isArray(g.declinedBy)) g.declinedBy = g.declinedBy.filter(n => n !== me);
   if (!Array.isArray(g.acceptedBy)) g.acceptedBy = [];
   if (me && !g.acceptedBy.includes(me)) g.acceptedBy.push(me);
-  try { await saveGame(g); } catch (e) {}
+  // v1140: saveGame() returns false on a failed cloud write instead of throwing.
+  let _joinOk = false;
+  try { _joinOk = (await saveGame(g)) !== false; } catch (e) { console.warn('join save failed', e); }
   try { if (g.finishedAt) await archiveScoresFromRound(g); } catch (e) {}
-  showToast('Joined — this round now counts toward your stats', 3500);
+  showToast(_joinOk ? 'Joined — this round now counts toward your stats' : "Joined on this phone, but the cloud save failed — reopen this round on a better connection", 3500);
 }
 
 async function archiveScoresFromRound(g) {
@@ -17656,6 +17717,11 @@ async function saveCourseSaves(saves) {
       // drop a shard's worth of cards outright). Read the shard first, keep every
       // card we aren't touching, overlay ours, and honour explicit removals only.
       var _rmSet = {}; _removedIds.forEach(function (rid) { _rmSet[rid] = 1; });
+      // v1140 PERF: the two per-shard loops below re-ran _courseShard() -- a
+      // per-character string hash -- over EVERY card for EVERY changed shard
+      // (shards x cards). Index once up front, then look the shard's ids up.
+      var _byShard = {}; for (var _k0 in saves) { var _s0 = _courseShard(_k0); (_byShard[_s0] || (_byShard[_s0] = [])).push(_k0); }
+      var _rmByShard = {}; for (var _k1 in _rmSet) { var _s1 = _courseShard(_k1); (_rmByShard[_s1] || (_rmByShard[_s1] = [])).push(_k1); }
       var rows = [];
       for (var si = 0; si < shardKeys.length; si++) {
         var sh = shardKeys[si];
@@ -17678,8 +17744,10 @@ async function saveCourseSaves(saves) {
           try { _singletonDirty['golf:courses'] = true; _persistDirty(); } catch (_de) {}
           return false;
         }
-        for (var i2 in saves) { if (_courseShard(i2) === sh) base[i2] = saves[i2]; }
-        for (var rk in _rmSet) { if (_courseShard(rk) === sh) delete base[rk]; }
+        (function (_b) {   // v1140 PERF: prebuilt index, see above
+          (_byShard[sh] || []).forEach(function (i2) { _b[i2] = saves[i2]; });
+          (_rmByShard[sh] || []).forEach(function (rk) { delete _b[rk]; });
+        })(base);
         rows.push({ code: 'shared:courses:' + sh, data: base, updated_at: new Date().toISOString() });
       }
       for (var i = 0; i < rows.length; i += 20) { var e = (await supa.from('games').upsert(rows.slice(i, i + 20))).error; if (e) { console.warn('saveCourseSaves shard write error', e); return false; } }
@@ -28669,13 +28737,18 @@ function _courseFacilityHay(c){
 const _COURSE_FILLER_WORDS = { 'golf':1,'club':1,'course':1,'courses':1,'country':1,'park':1,'links':1,'resort':1,'national':1,'municipal':1,'muni':1,'the':1,'at':1,'and':1,'of':1,'gc':1,'cc':1,'g&cc':1 };
 function _courseMatchesTerms(c, terms){
   if (!terms || !terms.length) return true;
-  var stLabel = (typeof courseStateLabel==='function') ? String(courseStateLabel(c)||'').toLowerCase() : '';
+  // v1140 PERF: stLabel is read ONLY inside the memo-miss branch below, but it was
+  // computed for every course on every keystroke and thrown away -- courseStateLabel()
+  // runs a regex match per call, so that was ~12.8k wasted regexes per keypress once
+  // __bgHay was warm. Moved to where it is actually used. stCode stays here: the
+  // final .every() compares terms against it directly.
   var stCode = (typeof courseStateCode==='function') ? String(courseStateCode(c)||'').toLowerCase() : '';
   // v970 PERF: this concatenated + lowercased 4 fields AND ran a for..in over the
   // facility aliases for all ~5,800 courses on every keystroke. Memoized per course
   // (non-enumerable so it never gets serialized); busted on admin rename.
   var hay = (c && c.__bgHay);
   if (hay === undefined) {
+    var stLabel = (typeof courseStateLabel==='function') ? String(courseStateLabel(c)||'').toLowerCase() : '';   // v1140 PERF: see note above
     hay = String((c && c.name)||'').toLowerCase()+' '+String((c && c.city)||'').toLowerCase()+' '+stLabel+' '+stCode+' '+_courseFacilityHay(c);
     try { Object.defineProperty(c, '__bgHay', { value: hay, enumerable: false, configurable: true, writable: true }); } catch (e) {}
   }
@@ -28711,12 +28784,21 @@ async function renderCourseList(query) {
   // Search matches course NAME or STATE (code like "TX" or full "Texas").
   let matches = COURSE_LIBRARY.slice();
   if (q) {
-    matches = matches.filter(c => _courseMatchesTerms(c, _courseQueryTerms(q)));
+    // v1140 PERF: _courseQueryTerms() was being re-run INSIDE the predicate -- once
+    // per course, ~12.8k times per keystroke, each one a trim + toLowerCase + regex
+    // split + 2 array allocations. Hoisted. (The tee-times picker already did this.)
+    const _qTerms = _courseQueryTerms(q);
+    matches = matches.filter(c => _courseMatchesTerms(c, _qTerms));
   }
   // Don't list a course twice — anything in the Near-you group is excluded
   // from the recents + city groups below.
   matches = matches.filter(c => !nearbyIds.has(c.id));
-  matches = [].concat.apply([], matches.map(expandCourseForSearch));
+  // v1140 PERF: the expand used to run HERE -- across the whole ~12.8k library every
+  // single time the picker opens with no search text -- and with no query its result
+  // was only ever read by the length check on the next line. expandCourseForSearch()
+  // returns exactly one row on both of its code paths, so matches.length is identical
+  // either way. Moved down into the `if (q)` block that actually consumes the rows.
+  // (~3.4ms -> ~0.2ms per picker open, and ~25,600 fewer allocations.)
 
   if (matches.length === 0 && nearbyShown.length === 0) {
     list.innerHTML = `<div class="course-list-empty">
@@ -28786,6 +28868,7 @@ async function renderCourseList(query) {
   // Recent, with a prompt to search. The full state-grouped list renders only
   // once the user types, capped so a 1-letter query can't render thousands.
   if (q) {
+    matches = [].concat.apply([], matches.map(expandCourseForSearch));   // v1140 PERF: moved here (see note above)
     const byState = {};
     matches.forEach(c => {
       if (recentIds.has(c.id)) return;
@@ -36159,8 +36242,19 @@ async function openPaySetup(opts){
     // cloud write finishes in the background so the screen never hangs (Tyler: "took forever to go away").
     markSeen();
     ov.classList.remove('show');
-    try { showToast('Payment info saved ✓'); } catch(e){}
-    (async ()=>{ try { if (player) await savePayHandlesForPlayer(player, h); else await saveMyPay(h); } catch(e){} try { if (state && state.game) renderBoard(); } catch(e){} })();
+    // v1140: the success toast fired BEFORE the write even started, and the write was
+    // fire-and-forget into an empty catch -- so "Payment info saved" was guaranteed
+    // regardless of what happened. The modal still closes INSTANTLY (Tyler: "took
+    // forever to go away"); we just wait to claim success until we know.
+    (async ()=>{
+      let _payOk = true;
+      try {
+        const _pr = player ? await savePayHandlesForPlayer(player, h) : await saveMyPay(h);
+        if (_pr === false) _payOk = false;
+      } catch(e){ console.warn('pay save failed', e); _payOk = false; }
+      try { showToast(_payOk ? 'Payment info saved ✓' : "Saved on this phone — couldn't reach the server. It'll sync next time you're online."); } catch(e){}
+      try { if (state && state.game) renderBoard(); } catch(e){}
+    })();
   };
 }
 
@@ -36324,7 +36418,20 @@ async function _bgHydrateHomeCourse() {
     // repaint only when a course was actually found, so "you genuinely have none"
     // never cleared the waiting state and the card was stuck deciding.
     _bgHomeCourseHydrated = true;
-    try { _bgRefreshHomeAwayViews(); } catch (e) {}
+    // v1140 PERF: this repainted on EVERY call -- and maybePromptHomeCourse() re-invokes
+    // this function every 5 seconds for up to 5 MINUTES whenever the app looks "busy",
+    // which includes a phone simply sitting on the sign-in gate (any .modal-overlay.show
+    // counts). _bgRefreshHomeAwayViews() re-runs loadRounds() + renderHomeInvites(),
+    // ~5 Supabase reads a pass, so that idle loop could fire ~300 requests before it
+    // gave up. Repaint on the FIRST pass -- so the card can never sit stuck "deciding",
+    // which is what v1102 fixed -- and after that only when the answer actually changed.
+    try {
+      var _hcNow = ''; try { _hcNow = String(getMyHomeCourse() || ''); } catch (e2) {}
+      if (!window._bgHomeAwayPainted || _hcNow !== window._bgHomeAwayLast) {
+        window._bgHomeAwayPainted = 1; window._bgHomeAwayLast = _hcNow;
+        _bgRefreshHomeAwayViews();
+      }
+    } catch (e) { try { _bgRefreshHomeAwayViews(); } catch (e3) {} }
   }
 }
 function _bgRefreshHomeAwayViews() {
@@ -42943,8 +43050,11 @@ async function bragToCrew() {
   if (note && note.trim()) txt += ' — "' + note.trim() + '"';
   if (!Array.isArray(g.brags)) g.brags = [];
   g.brags.push({ name: p.name, who, course, gross: holes ? gross : null, toPar: holes ? toPar : null, holes, txt, at: Date.now() });
-  try { await saveGame(g); } catch (e) {}
-  showToast('Posted to your crew feed! 📣');
+  // v1140: saveGame() returns false on a failed cloud write instead of throwing, so
+  // this always claimed the brag posted.
+  let _bragOk = false;
+  try { _bragOk = (await saveGame(g)) !== false; } catch (e) { console.warn('brag save failed', e); }
+  showToast(_bragOk ? 'Posted to your crew feed! 📣' : "Saved on this phone — couldn't reach the crew feed. It'll sync when you're back online.");
   try { if (typeof renderHome === 'function') renderHome(); } catch (e) {}
 }
 
@@ -45421,6 +45531,7 @@ async function renderHomeInvites() {
           if (!s) return false;
           if (_sharedTomb6.has(rosterRoundKey(s)) || _sharedTomb6.has(statsRoundKey(s))) return false;
           if (_delKeys6.has(statsRoundKey(s))) return false;
+          if (s.t2Id && bgIsDeadEvent(s.t2Id)) return false;   // v1140: deleted tournament -- see t2Delete
           return true;
         }).slice().sort((a, b) => (new Date(b.date || 0)) - (new Date(a.date || 0)));
         // v889 (Tyler): "These rounds are taking a while to load — only load the last
@@ -45774,8 +45885,12 @@ async function addComment(key, body) {
   if (!isSignedIn() || !supa || !_authUser) { showToast('Sign in (Crew tab) to comment'); return; }
   try {
     let me = 'Player'; try { me = (await getMeName()) || 'Player'; } catch (e) {}
-    await supa.from('reactions').insert({ target_key: key, author_id: _authUser.id, author_name: me, kind: 'comment', body: body.slice(0, 280) });
-  } catch (e) { console.warn('comment failed', e); }
+    // v1140: the insert result was discarded. A rejected comment resolves normally,
+    // hydrateReactions() then repaints without it, and the comment simply vanished
+    // in front of the user with no explanation.
+    const _cr = await supa.from('reactions').insert({ target_key: key, author_id: _authUser.id, author_name: me, kind: 'comment', body: body.slice(0, 280) });
+    if (_cr && _cr.error) { console.warn('comment failed', _cr.error); try { showToast("Couldn't post that comment — try again"); } catch (e2) {} }
+  } catch (e) { console.warn('comment failed', e); try { showToast("Couldn't post that comment — try again"); } catch (e2) {} }
   hydrateReactions();
 }
 
@@ -46313,6 +46428,30 @@ async function renderHomeBoard() {
   } catch (e) {}
 }
 
+// v1140 PERF: this 40-row window pulls the FULL data blob for 40 rounds (hundreds of
+// KB) and it fired TWICE at boot, ~1ms apart -- init() and renderHome() both call
+// renderHomeLive(). Confirmed with stack-traced fetch hooks in a real headless load.
+// One shared in-flight promise + a short TTL collapses the duplicate; the second
+// caller was rendering identical rows anyway. Same pattern as _singletonInFlight /
+// _rosterInFlight already in this file.
+let _hlRowsP = null, _hlRowsAt = 0, _hlRows = null;
+const HOME_LIVE_TTL_MS = 2500;
+async function _homeLiveRows() {
+  const now = Date.now();
+  if (_hlRows && (now - _hlRowsAt) < HOME_LIVE_TTL_MS) return _hlRows;
+  if (_hlRowsP) return _hlRowsP;
+  _hlRowsP = (async () => {
+    const { data } = await supa.from('games')
+      .select('code,data,updated_at')
+      .not('code', 'like', '%:%')
+      .order('updated_at', { ascending: false })
+      .limit(40);
+    _hlRows = data || []; _hlRowsAt = Date.now();
+    return _hlRows;
+  })();
+  try { return await _hlRowsP; } finally { _hlRowsP = null; }
+}
+
 async function renderHomeLive() {
   const el = $('home-live');
   if (!el) return;
@@ -46324,12 +46463,9 @@ async function renderHomeLive() {
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
-      const { data } = await supa.from('games')
-        .select('code,data,updated_at')
-        .not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */
-        .order('updated_at', { ascending: false })
-        .limit(40);
-      rows = data || [];
+      /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */
+      /* v1140 PERF: the query moved into _homeLiveRows() so the boot double-call shares one fetch. */
+      rows = await _homeLiveRows();
     }
   } catch (e) { console.warn('home live fetch failed:', e); }
   // Friends-only: the Home "Live now" + "Crew highlights" feeds must include
@@ -47214,13 +47350,22 @@ function statsVisibilityLocal(){ try { const v = localStorage.getItem('golf:stat
 async function setStatsVisibility(v){
   v = (v === 'everyone' || v === 'just-me') ? v : 'friends';
   try { localStorage.setItem('golf:stats-visibility', v); } catch (e) {}
+  // v1140: the profile update's { error } was dropped, so the confirmation toast fired
+  // even when the new visibility never reached the server -- a privacy setting the user
+  // believed had applied. The LOCAL preference is saved either way, hence the softer
+  // wording rather than an outright failure.
+  let _visOk = true;
   try {
     if (isSignedIn() && supa && _authUser) {
-      try { await supa.from('profiles').update({ stats_visibility: v }).eq('id', _authUser.id); } catch (e) {}
+      try {
+        const _vr = await supa.from('profiles').update({ stats_visibility: v }).eq('id', _authUser.id);
+        if (_vr && _vr.error) { console.warn('setStatsVisibility', _vr.error); _visOk = false; }
+      } catch (e) { console.warn('setStatsVisibility', e); _visOk = false; }
       await syncMyStatsToCloud(null, v);
     }
-  } catch (e) {}
-  if (typeof showToast === 'function') showToast('Stats visible to: ' + (v === 'everyone' ? 'Everyone' : v === 'just-me' ? 'Just me' : 'Friends'));
+  } catch (e) { _visOk = false; }
+  const _visLabel = (v === 'everyone' ? 'Everyone' : v === 'just-me' ? 'Just me' : 'Friends');
+  if (typeof showToast === 'function') showToast(_visOk ? ('Stats visible to: ' + _visLabel) : ('Saved on this phone (' + _visLabel + ") — couldn't reach the server, it'll sync next time"));
 }
 // Upsert MY stats + visibility into the RLS-protected player_stats table (own row only).
 // Round-delete TOMBSTONES. The player_stats cloud backup deliberately never
@@ -47854,7 +47999,8 @@ async function pastRenderCourseList(q) {
 
   let matches = lib.slice();
   if (term) {
-    matches = matches.filter(c => _courseMatchesTerms(c, _courseQueryTerms(term)));
+    const _tTerms = _courseQueryTerms(term);   // v1140 PERF: hoisted out of the predicate
+    matches = matches.filter(c => _courseMatchesTerms(c, _tTerms));
   }
   matches = matches.filter(c => !nearbyIds.has(c.id));
   matches = [].concat.apply([], matches.map(expandCourseForSearch));
@@ -48207,10 +48353,19 @@ function buildStatsInsights(history) {
   if (recent.length >= 3) {
     const n = recent.length;
     let useCount;
-    if      (n === 3)  useCount = 1; else if (n === 4) useCount = 1; else if (n === 5) useCount = 1;
-    else if (n === 6)  useCount = 2; else if (n <= 8) useCount = 2; else if (n <= 10) useCount = 3;
-    else if (n <= 12)  useCount = 4; else if (n <= 14) useCount = 5; else if (n <= 16) useCount = 6;
-    else if (n <= 18)  useCount = 7; else useCount = 8;
+    // v1140: these were the OLD pre-v924 bands (9-10->3, 11-12->4, 13-14->5, 15-16->6,
+    // 17-18->7, 19+->8). calcHandicapIndex() was corrected to the exact USGA Rule 5.2a
+    // table but this card was not, so at n = 11 and 13-19 the check marks and the
+    // "lowest X of Y count" caption contradicted the index the app actually shows.
+    // Now byte-for-byte the same bands as calcHandicapIndex().
+    if      (n <= 5)   useCount = 1;
+    else if (n <= 8)   useCount = 2;
+    else if (n <= 11)  useCount = 3;
+    else if (n <= 14)  useCount = 4;
+    else if (n <= 16)  useCount = 5;
+    else if (n <= 18)  useCount = 6;
+    else if (n === 19) useCount = 7;
+    else               useCount = 8;
     // Which rounds count = lowest `useCount` differentials.
     const ranked = recent.map((s, i) => ({ i, d: s.differential })).sort((a, b) => a.d - b.d);
     const countingSet = new Set(ranked.slice(0, useCount).map(o => o.i));
@@ -48292,11 +48447,18 @@ function buildStatsInsights(history) {
       const _rec = [...history].filter(s => s.differential != null)
         .sort((a, b) => (b.date || 0) - (a.date || 0)).slice(0, 20);
       const _n = _rec.length;
-      if      (_n < 3)   _useCount = 0;
-      else if (_n <= 5)  _useCount = 1; else if (_n <= 8)  _useCount = 2;
-      else if (_n <= 10) _useCount = 3; else if (_n <= 12) _useCount = 4;
-      else if (_n <= 14) _useCount = 5; else if (_n <= 16) _useCount = 6;
-      else if (_n <= 18) _useCount = 7; else _useCount = 8;
+      // v1140: this comment used to claim it applied "the SAME rule" as the handicap
+      // engine; it applied the old pre-v924 table. Corrected to the exact USGA Rule
+      // 5.2a bands, matching calcHandicapIndex().
+      if      (_n < 3)    _useCount = 0;
+      else if (_n <= 5)   _useCount = 1;
+      else if (_n <= 8)   _useCount = 2;
+      else if (_n <= 11)  _useCount = 3;
+      else if (_n <= 14)  _useCount = 4;
+      else if (_n <= 16)  _useCount = 5;
+      else if (_n <= 18)  _useCount = 6;
+      else if (_n === 19) _useCount = 7;
+      else                _useCount = 8;
       _rec.map((s, i) => ({ i, d: s.differential })).sort((a, b) => a.d - b.d)
         .slice(0, _useCount).forEach(o => { const k = _rk(_rec[o.i]); if (k) _countingKeys.add(k); });
     } catch (e) {}
@@ -48668,7 +48830,7 @@ function buildHoleByHoleHtml(rounds, libPars) {
     }
   }
   const note = (tough >= 0)
-    ? '<div class="small-text" style="margin-top:2px;line-height:1.5">Toughest hole: <strong>#' + (tough + 1) + '</strong> (+' + toughD.toFixed(1) + ' over par on average). Your best: <strong>#' + (easy + 1) + '</strong> (' + (easyD >= 0 ? '+' : '') + easyD.toFixed(1) + ').</div>'
+    ? '<div class="small-text" style="margin-top:2px;line-height:1.5">Toughest hole: <strong>#' + (tough + 1) + '</strong> (' + (toughD >= 0 ? '+' : '') + toughD.toFixed(1) + ' over par on average). Your best: <strong>#' + (easy + 1) + '</strong> (' + (easyD >= 0 ? '+' : '') + easyD.toFixed(1) + ').</div>'
     : '';
   return seg(0, 9, 'OUT') + seg(9, 18, 'IN') + note;
 }
@@ -48686,6 +48848,7 @@ async function renderFriendStatsRounds(player, history) {
   try { const _st = await getSharedTombstones(); if (_st && _st.rounds) tomb = _st.rounds; } catch (e) {}
   const rounds = (Array.isArray(history) ? history : [])
     .filter(s => s && !(tomb.has(rosterRoundKey(s)) || tomb.has(statsRoundKey(s))))
+    .filter(s => !(s.t2Id && bgIsDeadEvent(s.t2Id)))   // v1140: deleted tournament -- see t2Delete
     .slice().sort((a, b) => (new Date(b.date || 0)) - (new Date(a.date || 0)));
   if (!rounds.length) {
     if (emptyCard) emptyCard.style.display = 'block';
@@ -48853,12 +49016,16 @@ function renderHandicapChart(history, calc, compareHistory, compareName) {
   }
 
   // Determine how many rounds count for the handicap calc
+  // v1140: the old table (9-10->3, 11-12->4, 13-14->5, 15-16->6, 17-18->7, 19+->8) made
+  // this chart's check marks AND the "Lowest X of Y rounds count" subtitle below
+  // disagree with the index at n = 11 and 13-19 -- 15 rounds read "Lowest 6 of 15"
+  // while calcHandicapIndex() used the lowest 5. Exact USGA Rule 5.2a bands now.
   let useCount = 1;
-  if (n >= 19) useCount = 8;
-  else if (n >= 17) useCount = 7;
-  else if (n >= 15) useCount = 6;
-  else if (n >= 13) useCount = 5;
-  else if (n >= 11) useCount = 4;
+  if (n >= 20) useCount = 8;
+  else if (n === 19) useCount = 7;
+  else if (n >= 17) useCount = 6;
+  else if (n >= 15) useCount = 5;
+  else if (n >= 12) useCount = 4;
   else if (n >= 9) useCount = 3;
   else if (n >= 6) useCount = 2;
 
@@ -49449,6 +49616,9 @@ async function loadRounds() {
   const recent = _t2DedupeRecentTourneyRounds(fullRecent
     .filter(r => !getHiddenRounds().includes(r.code))
     .filter(r => !(r && r.code && _sharedRoundTomb.has(r.code)))
+    // v1140: addToRecent stamps r.t2.tournamentId on every tournament round, so once
+    // t2Delete marks the event gone these drop out of the list. Round data untouched.
+    .filter(r => !(r && r.t2 && r.t2.tournamentId && bgIsDeadEvent(r.t2.tournamentId)))
     .filter(r => recentRowHasName(r, meName)));
 
   // Upcoming SCHEDULED rounds (shared) — surface them at the top of Rounds so the
@@ -49521,6 +49691,7 @@ async function loadRounds() {
         if (s.gameCode && _liveCodes.has(s.gameCode)) return false;     // still live — shown in the live section
         if (_sharedRoundTomb.has(rosterRoundKey(s)) || _sharedRoundTomb.has(statsRoundKey(s))) return false;
         if (_delKeys.has(statsRoundKey(s))) return false;
+        if (s.t2Id && bgIsDeadEvent(s.t2Id)) return false;   // v1140: deleted tournament -- see t2Delete
         return true;
       }).slice().sort((a, b) => (new Date(b.date || 0)) - (new Date(a.date || 0)));
       pastRounds.forEach(s => { if (s && s.gameCode) _myHistCodes.add(s.gameCode); });
@@ -52059,12 +52230,26 @@ async function sendFriendRequest(toId) {
     showToast('Friend request sent');
   } catch (e) { console.warn('sendFriendRequest', e); showToast('Could not send request'); }
 }
+// v1140: supabase-js RESOLVES on a rejected write (RLS, constraint, offline queue) --
+// it returns { error } instead of throwing -- so the catch below was unreachable and
+// "Friend added" appeared even when the row never changed and the request stayed
+// pending. Both of these now inspect .error, say so, and hand a boolean to callers.
 async function acceptFriend(id) {
-  try { await supa.from('friendships').update({ status: 'accepted' }).eq('id', id); try { _bgSocialCacheBust(); } catch (e2) {} showToast('Friend added'); }
-  catch (e) { showToast('Failed'); }
+  try {
+    const r = await supa.from('friendships').update({ status: 'accepted' }).eq('id', id);
+    if (r && r.error) { console.warn('acceptFriend', r.error); showToast("Couldn't accept that request — try again on a better connection"); return false; }
+    try { _bgSocialCacheBust(); } catch (e2) {}
+    showToast('Friend added');
+    return true;
+  } catch (e) { console.warn('acceptFriend', e); showToast("Couldn't accept that request — try again on a better connection"); return false; }
 }
 async function removeFriendship(id) {
-  try { await supa.from('friendships').delete().eq('id', id); try { _bgSocialCacheBust(); } catch (e2) {} } catch (e) {}
+  try {
+    const r = await supa.from('friendships').delete().eq('id', id);
+    if (r && r.error) { console.warn('removeFriendship', r.error); showToast("Couldn't remove that — try again on a better connection"); return false; }
+    try { _bgSocialCacheBust(); } catch (e2) {}
+    return true;
+  } catch (e) { console.warn('removeFriendship', e); showToast("Couldn't remove that — try again on a better connection"); return false; }
 }
 
 let _crewFriendsOpen = false;   // friends list starts COLLAPSED
@@ -52994,7 +53179,14 @@ async function acceptIncomingInvite() {
   document.getElementById('incoming-invite-modal').classList.remove('show');
   setTimeout(function () { try { checkPendingInvites(); } catch (e) {} }, 700);   // surface the next pending invite (e.g. the wager) once this one is handled
   if (!inv) return;
-  try { await supa.from('game_invites').update({ status: 'accepted' }).eq('id', inv.id); } catch (e) {}
+  // v1140: this update's { error } was dropped, so an invite that failed to accept
+  // still produced the "Added to your rounds" success toast further down.
+  let _invOk = true;
+  try {
+    const _ir = await supa.from('game_invites').update({ status: 'accepted' }).eq('id', inv.id);
+    if (_ir && _ir.error) { console.warn('acceptIncomingInvite', _ir.error); _invOk = false; }
+  } catch (e) { console.warn('acceptIncomingInvite', e); _invOk = false; }
+  if (!_invOk) { try { showToast("Couldn't accept that invite — try again on a better connection"); } catch (e) {} return; }
   if (String(inv.game_code || '').indexOf('T2:') === 0) {
     // v690: accepting an invite ADDS the event to my rounds — land on the Events tab
     // as a PLAYER (the event's already there as a linked player), NOT the admin setup
@@ -53782,10 +53974,22 @@ async function t2Delete(id) {
         // because "gone from your list" is not the same promise as the confirm
         // dialog's "removes the tournament for everyone".
         if (!soft) { try { hideT2(id); } catch (e) {} _t2LastDeleteScope = 'me'; }
-        else _t2LastDeleteScope = 'everyone';
+        else { _t2LastDeleteScope = 'everyone'; try { bgMarkEventGone(id); } catch (e) {} }   // v1140: a soft-deleted event is just as gone -- mark it
         return true;
       }
       _t2LastDeleteScope = 'everyone';   // row is gone
+      // v1140 (Tyler, 8/19): "I delete a tournament but the rounds are still showing up
+      // in my Rounds and my Stats tab." t2Delete only ever removed the tournament row
+      // and its child rows -- the games rows carry the tourneyId INSIDE their JSON,
+      // games has no FK to tournaments, and nothing cleared that stamp. The app already
+      // has the right marker (bgMarkEventGone / bgIsDeadEvent), but it was only ever
+      // reached BY ACCIDENT, when a user happened to open one of the orphaned rounds and
+      // the event lookup came back empty. Seeding it here at the moment of deletion is
+      // what makes the delete reach every screen instead of just the Tourney page.
+      // The rounds and their scores are NOT deleted -- per Tyler no round is ever
+      // deleted -- they simply stop being listed under a tournament that no longer
+      // exists. (Deleting the round itself from the Rounds tab still works as before.)
+      try { bgMarkEventGone(id); } catch (e) {}
     } catch (e) {}
     return true;
   } catch (e) { console.warn('t2Delete', e); return false; }
@@ -58258,7 +58462,8 @@ async function t2RenderCoursePicker(q) {
   }
   if (term) {
     // Search: TOP 25 matches — name-prefix hits first, then alphabetical.
-    let matches = lib.filter(c => _courseMatchesTerms(c, _courseQueryTerms(term))).filter(c => !nearbyIds.has(c.id));
+    const _tTerms2 = _courseQueryTerms(term);   // v1140 PERF: hoisted out of the predicate
+    let matches = lib.filter(c => _courseMatchesTerms(c, _tTerms2)).filter(c => !nearbyIds.has(c.id));
     if (!matches.length && !nearbyShown.length) {
       html += '<div class="course-list-empty">No matches for that search.</div>';
     }
@@ -61925,7 +62130,8 @@ async function renderT2Home() {
       html += '<div class="card" style="margin:0 0 14px;padding:12px">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
         '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em">⛳ ' + (od ? 'Leaderboard' : 'Stroke leaderboard') + '</div>' +
-        (od ? '<button class="small" id="t2-refresh" title="Refresh scores">🔄</button>' : '') + '</div>' +
+        /* v1140: this was a SECOND id="t2-refresh". On a one-day event that also has cup-format group results BOTH cards render, getElementById bound only the first, and this button was dead. */
+        (od ? '<button class="small" id="t2-refresh-lb" title="Refresh scores">🔄</button>' : '') + '</div>' +
         '<div style="display:flex;font-size:11px;color:var(--text-muted);padding:2px 0"><div style="flex:1">Player</div><div style="width:50px;text-align:right">Holes</div><div style="width:50px;text-align:right">Gross</div><div style="width:50px;text-align:right">Net</div></div>' +
         (function () {
           // v986 (T43): every board numbered rows 1..n, so two players on the same
@@ -62338,8 +62544,11 @@ async function renderT2Home() {
     showToast(link);
   });
   // Standings refresh — re-pulls every group round and recomputes the cup.
-  const refreshBtn = document.getElementById('t2-refresh');
-  if (refreshBtn) refreshBtn.onclick = () => { showToast('Refreshing…'); renderT2Home(); };
+  // v1140: wire BOTH refresh buttons (the cup card's #t2-refresh and the leaderboard's
+  // #t2-refresh-lb, which used to be a duplicate id and therefore never bound).
+  [document.getElementById('t2-refresh'), document.getElementById('t2-refresh-lb')].forEach(function (_rb) {
+    if (_rb) _rb.onclick = () => { showToast('Refreshing…'); renderT2Home(); };
+  });
   // Groups: open a group's round (any member); build/start/swap (commissioner).
   body.querySelectorAll('.t2-open-round').forEach(b => b.onclick = () => openT2Round(b.dataset.code));
   body.querySelectorAll('.t2-grp-sidebets').forEach(b => b.onclick = () => openT2GroupSideBets(b.dataset.code));
@@ -76938,13 +77147,17 @@ const gpsView = (() => {
         if (!dom) return;
   
         if (!active) {
-          dom.tabs.style.display = 'none';
-          dom.ctrls.style.display = 'none';
+          // v1140 PERF: same reasoning as the class write just above -- this 700ms
+          // timer runs for the life of the app and was writing BOTH display
+          // properties unconditionally on every tick, and the app-wide
+          // MutationObserver watches attributes. Write only on a real flip.
+          if (dom.tabs.style.display !== 'none') dom.tabs.style.display = 'none';
+          if (dom.ctrls.style.display !== 'none') dom.ctrls.style.display = 'none';
           return;
         }
   
-        dom.tabs.style.display = 'flex';
-        dom.ctrls.style.display = 'flex';
+        if (dom.tabs.style.display !== 'flex') dom.tabs.style.display = 'flex';
+        if (dom.ctrls.style.display !== 'flex') dom.ctrls.style.display = 'flex';
   
         // Mode highlight: a guided fairway-target session lights up Targets, else Mapping.
         var mMap = byId('gmc-map'), mTgt = byId('gmc-tgt');
