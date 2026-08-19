@@ -8156,7 +8156,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1134';
+const BG_BUILD = 'v2026.11.1135';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -26470,7 +26470,15 @@ async function restoreRoundsFromCloud() {
   try {
     const me = await getMeName();
     const roster = await getPlayerRoster();
-    const { data } = await supa.from('player_stats').select('stats,player_name').eq('user_id', _authUser.id).maybeSingle();
+    // v1135: this read dropped `error`, so a PostgREST failure, an RLS refusal and
+    // a dead network all arrived here as "no rows" — and the user was told, flatly,
+    // that their round history has no backup. Of everything in this file that can be
+    // wrong, that is the worst sentence to be wrong about: it invites someone to go
+    // and re-enter rounds that are sitting safely in the cloud. "We could not ask" is
+    // a different statement from "there is nothing there", and now it reads as one.
+    const _cb = await _bgRead(() => supa.from('player_stats').select('stats,player_name').eq('user_id', _authUser.id).maybeSingle(), 'restoreRoundsFromCloud');
+    if (!_cb.ok) { showToast("Couldn't reach your cloud backup — check your connection and try again"); return; }
+    const data = _cb.data;
     const cloud = (data && Array.isArray(data.stats)) ? data.stats : [];
     if (!cloud.length) { showToast('No cloud backup found for your account'); return; }
     let p = findMyRosterPlayer(roster, me);
@@ -53255,8 +53263,8 @@ async function t2ListMine() {
     // tab could even start fetching the actual tournament rows). Same logic,
     // same error isolation per branch, just run concurrently.
     await Promise.all([
-      (async () => { try { const { data } = await supa.from('tournaments').select('*').eq('commissioner_id', uid); (data || []).forEach(t => { byId[t.id] = t; linked.add(t.id); }); } catch (e) {} })(),
-      (async () => { try { const { data } = await supa.from('tournament_players').select('tournament_id').eq('user_id', uid); (data || []).forEach(r => { if (r.tournament_id) { need.push(r.tournament_id); linked.add(r.tournament_id); } }); } catch (e) {} })(),
+      (async () => { try { const { data } = await _bgRead(() => supa.from('tournaments').select('*').eq('commissioner_id', uid), 't2ListMine:commissioner'); (data || []).forEach(t => { byId[t.id] = t; linked.add(t.id); }); } catch (e) {} })(),
+      (async () => { try { const { data } = await _bgRead(() => supa.from('tournament_players').select('tournament_id').eq('user_id', uid), 't2ListMine:myPlayerRows'); (data || []).forEach(r => { if (r.tournament_id) { need.push(r.tournament_id); linked.add(r.tournament_id); } }); } catch (e) {} })(),
       // (2b) Events where a roster slot matches MY NAME but was never linked to my
       // login (the commissioner added me by name). Without this, a name-only player
       // whose group is scored by someone else never sees the event in their list —
@@ -53278,7 +53286,7 @@ async function t2ListMine() {
             if (_me) {
               // v1027: invite_token comes along so a visible, genuinely
               // unclaimed slot can go through claim_tournament_slot below.
-              const { data } = await supa.from('tournament_players').select('id, tournament_id, user_id, display_name, invite_token').ilike('display_name', _pat);
+              const { data } = await _bgRead(() => supa.from('tournament_players').select('id, tournament_id, user_id, display_name, invite_token').ilike('display_name', _pat), 't2ListMine:nameMatch');
               for (const r of (data || [])) {
                 if (!r.tournament_id) continue;
                 if (_norm(r.display_name) !== _me) continue;      // not actually my name
@@ -53300,10 +53308,10 @@ async function t2ListMine() {
           // relationship (tournament_groups.day_id -> tournament_days.id ->
           // tournaments.id). Two round trips, but ones that actually return rows.
           if (codes.length) {
-            const { data: _grp } = await supa.from('tournament_groups').select('day_id, game_code').in('game_code', codes);
+            const { data: _grp } = await _bgRead(() => supa.from('tournament_groups').select('day_id, game_code').in('game_code', codes), 't2ListMine:groupsByCode');
             const _dayIds = [...new Set((_grp || []).map(x => x && x.day_id).filter(Boolean))];
             if (_dayIds.length) {
-              const { data: _days } = await supa.from('tournament_days').select('id, tournament_id').in('id', _dayIds);
+              const { data: _days } = await _bgRead(() => supa.from('tournament_days').select('id, tournament_id').in('id', _dayIds), 't2ListMine:daysByGroup');
               (_days || []).forEach(d => { if (d && d.tournament_id) { need.push(d.tournament_id); linked.add(d.tournament_id); } });
             }
           }
@@ -53314,7 +53322,7 @@ async function t2ListMine() {
       // authorisation to adopt my unclaimed slot.
       (async () => {
         try {
-          const { data } = await supa.from('game_invites').select('game_code').eq('to_user', uid).like('game_code', 'T2:%');
+          const { data } = await _bgRead(() => supa.from('game_invites').select('game_code').eq('to_user', uid).like('game_code', 'T2:%'), 't2ListMine:invites');
           (data || []).forEach(r => { const c = String((r && r.game_code) || ''); if (c.indexOf('T2:') === 0) linked.add(c.slice(3)); });
         } catch (e) {}
       })()
@@ -53349,7 +53357,12 @@ async function t2ListMine() {
       try { await supa.rpc('claim_tournament_slot', { token: r.invite_token }); } catch (e) {}
     }
     const fetchIds = [...new Set(need)].filter(id => id && !byId[id]);
-    if (fetchIds.length) { try { const { data } = await supa.from('tournaments').select('*').in('id', fetchIds); (data || []).forEach(t => { byId[t.id] = t; }); } catch (e) {} }
+    // v1135: this is the single point where every branch above collapses into one
+    // read. If IT fails, every event the other six discovered disappears at once and
+    // the four-route redundancy buys nothing — so of the seven it is the one most
+    // worth being able to see fail. NOTE the limit, spelled out below: an RLS refusal
+    // is NOT a failure as far as this reports. It comes back ok with zero rows.
+    if (fetchIds.length) { try { const { data } = await _bgRead(() => supa.from('tournaments').select('*').in('id', fetchIds), 't2ListMine:hydrate'); (data || []).forEach(t => { byId[t.id] = t; }); } catch (e) {} }
     // v1127 NOTE (Tyler, 8/19): "the round says it was a tourney but it does not
     // show up under tourneys for IDrive." THIS LINE is where that happens, and it
     // happens silently. The trophy on a round card is drawn from data the round
@@ -55476,7 +55489,13 @@ async function t2AllGroupsFinished(t) {
     const days = await t2GetDays(t.id);
     const dayIds = (days || []).map(d => d.id).filter(Boolean);
     if (!dayIds.length) return false;
-    const { data: groups } = await supa.from('tournament_groups').select('id,group_number,game_code').in('day_id', dayIds);
+    // v1135: a failed read here made `gs` empty, which falls straight through to
+    // `return false` — "not all finished" — so the event keeps the pulsing live pill.
+    // That is the v914 symptom ("This tourney says it's live but it is not") arriving
+    // by a different road. `false` remains the right ANSWER when we cannot tell (far
+    // better than wrongly marking a running event finished); what changes is that the
+    // failure is now visible instead of indistinguishable from an event with no groups.
+    const { data: groups } = await _bgRead(() => supa.from('tournament_groups').select('id,group_number,game_code').in('day_id', dayIds), 't2AllGroupsFinished:groups');
     const gs = groups || [];
     if (!gs.length) return false;
     // v914 (Tyler): "This tourney says it's live but it is not." The v859 check
@@ -55491,7 +55510,7 @@ async function t2AllGroupsFinished(t) {
     if (!launched.length) return false;                      // nothing has started -> genuinely not live yet
     const codes = [...new Set(launched.map(g => g.game_code).filter(Boolean))];
     if (!codes.length) return false;
-    const { data: games } = await supa.from('games').select('code,data').in('code', codes);
+    const { data: games } = await _bgRead(() => supa.from('games').select('code,data').in('code', codes), 't2AllGroupsFinished:games');
     const byCode = {}; (games || []).forEach(r => { byCode[r.code] = r; });
     const allLaunchedDone = launched.every(g => { const r = byCode[g.game_code]; return !!(r && r.data && r.data.finishedAt); });
     // v1115: the date rule is hoisted here because BOTH remaining cases need it —
