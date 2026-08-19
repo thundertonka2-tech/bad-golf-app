@@ -8156,7 +8156,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1138';
+const BG_BUILD = 'v2026.11.1139';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -13405,6 +13405,30 @@ const SHARED_SINGLETONS = ['golf:multinine-configs', 'golf:courses', 'golf:recen
   // v974: MY personal round deletes. Routed to a PER-USER row by singletonRowCode
   // (mytomb:<uid>) so "remove from your list" stays yours — see KEY_MY_ROUND_TOMBSTONES.
   'golf:my-round-tombstones'];
+// v1139 — ONE guard, THREE call sites. singletonRowCode() falls back to the LEGACY
+// GLOBAL row ('shared:recent-games' / 'shared:player-roster') whenever _authUser is
+// unresolved: guest sessions, and the pre-auth window on every single boot. Those
+// sessions are localStorage-only by design and must never READ or WRITE that row.
+//   * Writing it pools a user's players — names, emails, payment handles, full score
+//     history — plus their rounds into one blob every account shares.
+//   * READING it pulls the global blob of EVERYBODY's rounds into this device's
+//     Rounds list. That is also why flipping RECENT_DUAL_WRITE_LEGACY alone would
+//     not make the legacy row unused: the read path kept it alive.
+// v992 added this check to writeSharedSingleton's DIRECT path only, so it read like
+// the write hole was closed. It wasn't: flushDirtySingletons re-pushed the same dirty
+// key 15s later (and on boot, and on 'online') with no check at all, upserting
+// straight into the legacy row. The v992 guard only DELAYED the bad write by a tick.
+// Deferring is recoverable — the next flush after auth lands writes it to
+// recent:<uid> / roster:<uid>. Writing the wrong row is not. Every path funnels
+// through here so the two can never drift apart again.
+function _isLegacyGlobalRow(key, rowCode) {
+  try {
+    const _rc = rowCode || singletonRowCode(key);
+    if (key === KEY_PLAYER_ROSTER && _rc === LEGACY_ROSTER_ROW) return true;
+    if (key === KEY_RECENT && _rc === LEGACY_RECENT_ROW) return true;
+  } catch (e) {}
+  return false;
+}
 function singletonRowCode(key) {
   // v603: the roster is now a PER-USER row (roster:<uid>) instead of the single
   // global 'shared:player-roster'. Every roster read/write funnels through this,
@@ -13514,6 +13538,14 @@ async function readSharedSingleton(key) {
 }
 async function _readSharedSingletonNow(key) {
   const rowCode = singletonRowCode(key);
+  // v1139: signed-out / pre-auth sessions are localStorage-only — give the READ path
+  // the same guard the write path has had since v992. Returning the local copy here
+  // (instead of falling through to the cloud read AND the background refresh below)
+  // is what makes a signed-out session produce ZERO 'games' requests for the legacy
+  // row. Never fall back to the legacy row's CONTENTS — that is the data-pooling bug.
+  if (_isLegacyGlobalRow(key, rowCode)) {
+    try { return localStorage.getItem(key) || null; } catch (e) { return null; }
+  }
   // Cache-first: shared singletons (course library, course overlays, recent list,
   // tourneys, roster) are read on the hot path — boot, GPS open, course pickers.
   // A Supabase round-trip for EACH was the start-up slowdown (worse once the
@@ -13980,15 +14012,13 @@ async function writeSharedSingleton(key, value) {
       // history — into one blob shared by every account. Staying DIRTY means the normal
       // retry writes it to roster:<uid> / recent:<uid> once auth lands; deferring a
       // write is recoverable, writing it to the wrong row is not.
-      try {
-        const _rowCode = singletonRowCode(key);
-        if ((key === KEY_PLAYER_ROSTER && _rowCode === LEGACY_ROSTER_ROW) ||
-            (key === KEY_RECENT && _rowCode === LEGACY_RECENT_ROW)) {
-          _singletonDirty[key] = true; _persistDirty();
-          console.warn('[BG v992] deferring ' + key + ' write — no signed-in uid yet, refusing the legacy global row');
-          return false;
-        }
-      } catch (e) {}
+      // v1139: factored into _isLegacyGlobalRow() so this and flushDirtySingletons()
+      // share one definition of "that's the legacy global row" (see the helper).
+      if (_isLegacyGlobalRow(key)) {
+        _singletonDirty[key] = true; _persistDirty();
+        console.warn('[BG v1139] deferring ' + key + ' write — no signed-in uid yet, refusing the legacy global row');
+        return false;
+      }
       let parsed = JSON.parse(value);
       // ROSTER merge-on-write (v284): the shared player roster must NEVER be blind-
       // written from a possibly-stale local copy — that is the recurring "lost my
@@ -14061,6 +14091,14 @@ async function _flushDirtySingletonsInner(dirtyKeys) {
   try { if (!supaReady) await initSupabase(); } catch (e) {}
   if (!supa || !supaOnline) return;
   for (const key of dirtyKeys) {
+    // v1139 — CLOSE THE FLUSH BYPASS. This is the leg v992 missed: the direct write
+    // deferred the legacy row and marked the key dirty, then this loop pushed that
+    // very key into 'shared:recent-games' 15 seconds later. Re-check the RESOLVED row
+    // code here and leave the key DIRTY, so the retry after auth lands writes it to
+    // recent:<uid> / roster:<uid>. Must sit ABOVE the roster branch and above the
+    // _mergeSharedSingletonValue() call, both of which would otherwise read the
+    // legacy row too.
+    if (_isLegacyGlobalRow(key)) { _singletonDirty[key] = true; _persistDirty(); continue; }
     // The roster has its own hardened merge-on-write; re-run it so a queued retry
     // re-reads the cloud and UNIONS rather than blind-overwriting a stale blob (v284).
     if (key === KEY_PLAYER_ROSTER) {
