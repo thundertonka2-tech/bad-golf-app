@@ -8165,7 +8165,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1128';
+const BG_BUILD = 'v2026.11.1129';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -35283,8 +35283,18 @@ async function handleScoreChange(pid, action) {
   if (!g) return;
   // View-only: block all score edits on a finished round.
   if (state.viewOnlyMode) {
-    showToast(state.game && state.game.finishedAt
-      ? 'Round is finished — reopen to edit'
+    // v1129 (Tyler, 8/19): "don't show a spectate round when someone opens a
+    // finished round." v1127 taught the Board's view-only BANNER that a reopened
+    // round is a played round being corrected, not a live one — but this toast was
+    // missed, and it is the message a viewer actually hits first, because the first
+    // thing anyone does on a scorecard is tap a number. bgReopenRoundFlow DELETES
+    // finishedAt, so the old two-way test fell straight through to "Spectating" on
+    // a round that was played days ago. Three states, read exactly like the banner:
+    // finished · reopened-for-edits · genuinely live.
+    const _vg = state.game;
+    showToast(
+      (_vg && _vg.finishedAt) ? 'Round is finished — reopen to edit'
+      : (_vg && _vg.reopenedAt) ? 'Reopened for edits — only the scorer can change scores'
       : "Spectating — read-only. If this is YOUR round, open it from the Rounds tab.", 'warn');
     return;
   }
@@ -69333,11 +69343,37 @@ window.switchTab = function(name, opts) {
     try { document.body.classList.remove('t2-day-config'); document.body.classList.remove('t2-has-course-step'); } catch (e) {}
   }
   if (name !== 'tourneys') { try { t2ChatUnsubscribe(); } catch (e) {} }   // v922: tournament chat lives on the Tourney tab now
-  // Remember the tab we're leaving so panels without their own nav (e.g. Clubs)
-  // can send the user back exactly where they came from.
+  // v1129 — window._prevTab is GONE (§1 of the v1128 outstanding list).
+  // It was a global last-tab-switch memory, and any screen that read it as "where
+  // I came from" eventually sent someone somewhere unrelated: it is what landed
+  // Tyler on a round's Bets screen after tapping Back in My Clubs (v1127). v1128
+  // removed its last consumer, leaving a write-only global. Deleting the write
+  // rather than leaving it is deliberate — left in place it looks available, and
+  // the next person reaching for it reintroduces the same class of bug.
+  //
+  // What replaces it, here and in state._clubsReturn / state._gpsReturn: record
+  // the origin AT THE MOMENT the screen opens, scoped to that one screen, and
+  // default to Home.
   const _prevActive = document.querySelector('.tab.active');
-  if (_prevActive && _prevActive.dataset.tab && _prevActive.dataset.tab !== name) {
-    window._prevTab = _prevActive.dataset.tab;
+  // §2 — back-behaviour for the Bets/board screen. It is reachable from ~15 places
+  // (the 💵 Bets tab, the bottom nav, the floating active-round bar's "View board",
+  // End round, the round-summary flow, the four GPS money bubbles, Payouts ▸
+  // another group's board, openRecent, openCrewRound, openT2GroupBoardReadOnly…)
+  // and btn-back-score used to hardcode switchTab('score') for all of them — so
+  // tapping 💵 Bets from Home and pressing Back dumped you on the scoring screen.
+  //
+  // Every one of those routes arrives through switchTab('board'), so ONE capture
+  // here covers all fifteen. That is the difference from Clubs, which lives inside
+  // #panel-home and can open WITHOUT a tab switch — which is exactly why Clubs
+  // needs its own capture at each entry point and this screen does not.
+  if (name === 'board') {
+    let _from = null;
+    try { _from = (_prevActive && _prevActive.dataset && _prevActive.dataset.tab) || null; } catch (e) { _from = null; }
+    if (_from === 'clubs') _from = 'home';   // not a real panel; switchTab resolves it to Home
+    // Re-entering the board while already on it (a refresh or re-render) must not
+    // overwrite the origin with 'board' — that would make Back a loop. Keep the
+    // origin recorded by the switch that actually brought the user here.
+    if (_from && _from !== 'board') state._boardReturn = _from;
   }
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
@@ -70349,6 +70385,10 @@ async function init() {
     // destination has to be captured before it runs and reloaded after.
     let back = null;
     try { back = state._voReturn || null; state._voReturn = null; } catch (e) {}
+    // v1129: the board's own origin record belongs to a different navigation
+    // model (§2). Leaving it set here is how a "where I came from" value goes
+    // stale and starts sending people somewhere unrelated — drop it.
+    try { state._boardReturn = null; } catch (e) {}
     await discardActiveRound();
     if (back && back.code) {
       try {
@@ -71634,13 +71674,26 @@ async function init() {
     }; }
 
   $('btn-back-score').onclick = () => {
-    if (state.viewOnlyMode) { exitViewOnly(); return; }
+    // Priority order, most specific first. View-only and GPS both own their own
+    // return contract (state._voReturn / state._gpsReturn); the board's origin
+    // record is the general case underneath them. Clear it on the specific paths
+    // so a stale value can never be read by a later Back.
+    if (state.viewOnlyMode) { try { state._boardReturn = null; } catch (e) {} exitViewOnly(); return; }
     // If you got here from the GPS map (opened settings/board off the map), go back to
     // the map — not the score list — so "Back" returns you where you were.
-    if (typeof returnFromGps === 'function' && state._gpsReturn != null) { returnFromGps(); return; }
-    switchTab('score');
+    if (typeof returnFromGps === 'function' && state._gpsReturn != null) { try { state._boardReturn = null; } catch (e) {} returnFromGps(); return; }
+    // v1129 (§2): honour the origin switchTab recorded when this screen opened.
+    // The hardcoded switchTab('score') this replaces is what sent you to the
+    // scoring screen after opening 💵 Bets from Home, Rounds, Crew or Tourney.
+    // Consume the record so it can never be read twice, and fall back to Score
+    // only when there is a live round you are actually playing — otherwise Home.
+    let _dest = null;
+    try { _dest = state._boardReturn || null; state._boardReturn = null; } catch (e) { _dest = null; }
+    if (_dest === 'board' || _dest === 'clubs') _dest = null;
+    if (!_dest) _dest = (state.game && !state.viewOnlyMode) ? 'score' : 'home';
+    switchTab(_dest);
     try { window.scrollTo(0, 0); } catch (e) {}
-    setTimeout(() => { try { window.scrollTo(0, 0); const _ps = document.getElementById('panel-score'); if (_ps) _ps.scrollTop = 0; } catch (e) {} }, 0);
+    setTimeout(() => { try { window.scrollTo(0, 0); const _ps = document.getElementById('panel-' + _dest); if (_ps) _ps.scrollTop = 0; } catch (e) {} }, 0);
   };
   { const _bh = $('btn-board-home'); if (_bh) _bh.onclick = () => { try { switchTab('home'); } catch (e) {} }; }
 
@@ -79440,8 +79493,9 @@ function wireClubRows() {
     if (d) d.addEventListener('toggle', () => {
       if (!d.open) return;
       // v1127: opening the bag from the Player/Home tab is not a tab switch, so
-      // nothing else records where you were. Do it here, or Back falls through
-      // to a stale window._prevTab. (See the matching note in switchTab.)
+      // nothing else records where you were — capture it here. (v1129: the stale
+      // global this used to fall through to, window._prevTab, no longer exists.
+      // See the matching note in switchTab.)
       try {
         const _fromTab = document.querySelector('.tab.active');
         state._clubsReturn = (_fromTab && _fromTab.dataset.tab) || 'home';
@@ -79464,9 +79518,9 @@ function wireClubRows() {
     renderClubs();
   };
   const back = document.getElementById('btn-clubs-back');
-  // v1127: prefer the origin captured when Clubs was opened. Home is the default
-  // — never window._prevTab, which is the app's global last-tab-switch memory and
-  // has nothing to do with this screen.
+  // v1127: prefer the origin captured when Clubs was opened. Home is the default.
+  // v1129: the global last-tab-switch memory this deliberately avoided,
+  // window._prevTab, has been deleted outright — see switchTab.
   if (back) back.onclick = () => {
     if (returnFromGps()) return;
     let dest = 'home';
