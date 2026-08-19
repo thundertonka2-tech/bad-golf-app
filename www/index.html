@@ -8165,7 +8165,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1127';
+const BG_BUILD = 'v2026.11.1128';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -40119,20 +40119,49 @@ function calcJunk(g) {
 function calcBirdiePool(g) {
   if (!g.games.birdiePool) return null;
   const cfg = g.games.birdiePool;
-  // Birdie Pool ALWAYS requires an explicit participants list. Unlike older
-  // games that default to "everyone", Birdie Pool was introduced after the
-  // participant picker UX was added, so missing participants = misconfigured
-  // game (NOT "everyone plays"). We refuse to run rather than charge anyone.
-  if (!Array.isArray(cfg.participants) || cfg.participants.length < 2) {
-    console.warn('calcBirdiePool: no participants configured; skipping. cfg:', cfg);
-    return null;
+  // v1128 (Tyler, 8/19): "the birdie bumps aren't showing up on the group totals
+  // and it looks like they aren't in the group bets money payout either. They
+  // show up on the tourney bets so maybe they were done at that level instead."
+  //
+  // They weren't done at the event level — there is no field-wide Birdie Bump
+  // engine at all (see _T2_NEVER_OWNED). The pot appeared on the tourney screen
+  // because that screen lists the day's CONFIGURED games, and paid nothing
+  // anywhere because THIS function refused to settle.
+  //
+  // Why it refused: Birdie Bump demands an explicit participants list, and on a
+  // tournament round that list is written by the group-games builder at LAUNCH.
+  // Before v1030 that builder did `delete cfg.participants`, which most games
+  // read as "everyone" but this one reads as "misconfigured" — so every
+  // tournament round launched before v1030 carries a Birdie Bump with no roster.
+  // v1030 fixed the builder, but a builder only runs once: rounds launched before
+  // it stay broken forever, and Tyler's Buffalo Creek round is one of them.
+  //
+  // So: on a TOURNAMENT group round, a missing or stale roster now means "this
+  // group", which is exactly what v1030 established the intent to be. Casual
+  // rounds keep the strict refusal — there, an empty list really can mean a
+  // half-finished setup, and silently charging four people would be worse than
+  // paying nobody.
+  const _isGroupRound = !!(g && g.t2 && g.t2.tournamentId);
+  const _wholeRound = () => (g.players || []).map(p => p.id);
+  let _partList = Array.isArray(cfg.participants) ? cfg.participants : [];
+  if (_partList.length < 2) {
+    if (!_isGroupRound || (g.players || []).length < 2) {
+      console.warn('calcBirdiePool: no participants configured; skipping. cfg:', cfg);
+      return null;
+    }
+    console.warn('calcBirdiePool: tournament round with no participants — defaulting to the whole group (v1128).', cfg);
+    _partList = _wholeRound();
   }
-  const partIds = new Set(cfg.participants);
-  const participants = g.players.filter(p => partIds.has(p.id));
-  // If saved participant IDs are stale (none match current players), also skip
+  const partIds = new Set(_partList);
+  let participants = g.players.filter(p => partIds.has(p.id));
+  // Stale saved IDs (players re-added, round rebuilt) — same rule as above.
   if (participants.length < 2) {
-    console.warn('calcBirdiePool: participants IDs do not match any current players; skipping. cfg:', cfg, 'players:', g.players.map(p => p.id));
-    return null;
+    if (!_isGroupRound || (g.players || []).length < 2) {
+      console.warn('calcBirdiePool: participants IDs do not match any current players; skipping. cfg:', cfg, 'players:', g.players.map(p => p.id));
+      return null;
+    }
+    console.warn('calcBirdiePool: tournament round with stale participant IDs — defaulting to the whole group (v1128).', cfg);
+    participants = (g.players || []).slice();
   }
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
@@ -43104,8 +43133,10 @@ async function bgFinishRoundFlow() {
     try {
       const _tw = $('summary-tourney-wrap'), _tb = $('summary-tourney');
       const _tid = g && g.t2 && g.t2.tournamentId;
-      if (_tw) _tw.style.display = _tid ? '' : 'none';
-      if (_tb && _tid) _tb.onclick = async () => { try { const _t = await t2Get(_tid); if (_t) { openEventLeaderboard(_t, { fromCode: (g && g.code) || '' }); } else showToast('Tournament not found'); } catch (e) { showToast('Could not open the tournament'); } };   // v781: keep the Round-complete summary open UNDERNEATH the leaderboard (it sits on top at z-index 100050) so closing it returns here and the user only taps Finish/Save once
+      // v1128: a deleted event gets no button at all -- offering one that can only
+      // apologise is worse than not offering it.
+      if (_tw) _tw.style.display = (_tid && !bgIsDeadEvent(_tid)) ? '' : 'none';
+      if (_tb && _tid) _tb.onclick = async () => { try { const _t = await t2Get(_tid); if (_t) { openEventLeaderboard(_t, { fromCode: (g && g.code) || '' }); } else { bgMarkEventGone(_tid); bgToastEventGone(); if (_tw) _tw.style.display = 'none'; } } catch (e) { showToast('Could not open the tournament'); } };   // v781: keep the Round-complete summary open UNDERNEATH the leaderboard (it sits on top at z-index 100050) so closing it returns here and the user only taps Finish/Save once
     } catch (e) {}
     $('summary-modal').classList.add('show');
     // Fill in the wager outcomes (won/owe + ledger) once the bets are fetched.
@@ -45175,6 +45206,55 @@ async function tourneyRoundCodes(codes) {
   return set;
 }
 // One definition of the trophy so Home, Events and Stats are pixel-identical.
+// v1128 (Tyler, 8/19): "the round says it was a tourney but it does not show up
+// under tourneys for IDrive."
+//
+// The cause turned out to be simpler than a permissions problem: THE EVENT HAD
+// BEEN DELETED. A round stores its event inline (g.t2.tournamentId, and s.t2Id in
+// scoreHistory) precisely so the trophy survives offline and outlives the
+// tournament_groups rows -- see the v902 note. Deleting a tournament removes the
+// `tournaments` row but leaves every round still pointing at it, so the badge keeps
+// promising an event nothing can ever load. At the time of this build 11 rounds
+// across 8 deleted events were in that state, including 3 of IDrive's 4 tournament
+// rounds -- among them the Gentle Creek round in Tyler's screenshot, whose event
+// ("Rolands B-Day Bash") no longer exists.
+//
+// So: remember the ids that come back empty and stop drawing the badge for them.
+// The round, its scores and its money are untouched -- only the promise of a
+// tournament screen goes away.
+const BG_DEAD_EVENTS_KEY = 'golf:dead-events';
+let _bgDeadEvents = null;
+function bgDeadEvents() {
+  if (_bgDeadEvents) return _bgDeadEvents;
+  try {
+    const raw = localStorage.getItem(BG_DEAD_EVENTS_KEY);
+    _bgDeadEvents = new Set(raw ? JSON.parse(raw) : []);
+  } catch (e) { _bgDeadEvents = new Set(); }
+  return _bgDeadEvents;
+}
+function bgIsDeadEvent(id) {
+  if (!id) return false;
+  try { return bgDeadEvents().has(String(id)); } catch (e) { return false; }
+}
+// Called wherever a t2Get for a round's event comes back EMPTY. Deliberately not
+// called on a thrown/network error -- only on a clean "no such row" -- so an
+// offline phone never mistakes a failed request for a deleted tournament.
+function bgMarkEventGone(id) {
+  if (!id) return;
+  try {
+    const s = bgDeadEvents();
+    if (s.has(String(id))) return;
+    s.add(String(id));
+    localStorage.setItem(BG_DEAD_EVENTS_KEY, JSON.stringify([...s]));
+    try { if (typeof loadRounds === 'function') loadRounds(); } catch (e) {}
+  } catch (e) {}
+}
+// One shared message, so a deleted event never reads as a bug in the app.
+function bgToastEventGone() {
+  try { showToast('That tournament was deleted. This round and its scores are still here.', 5000); } catch (e) {}
+}
+try { window.bgIsDeadEvent = bgIsDeadEvent; window.bgMarkEventGone = bgMarkEventGone; } catch (e) {}
+
 function tourneyTrophy(is) {
   return is ? ' <span title="Tournament round" aria-label="Tournament round" style="font-size:12px;vertical-align:1px">\u{1F3C6}</span>' : '';
 }
@@ -46594,7 +46674,7 @@ async function t2InjectTourneySummaryLink(g, container) {
   container.appendChild(div);
   const b = div.querySelector('.t2-summ-lb');
   if (b) b.onclick = async () => {
-    try { const t = await t2Get(tid); if (t) { openEventLeaderboard(t, { fromCode: (state.game && state.game.code) || '' }); } else showToast('Tournament not found'); }   // v781: leave the summary open beneath the leaderboard so the round still saves after Close
+    try { const t = await t2Get(tid); if (t) { openEventLeaderboard(t, { fromCode: (state.game && state.game.code) || '' }); } else { bgMarkEventGone(tid); bgToastEventGone(); } }   // v781: leave the summary open beneath the leaderboard so the round still saves after Close
     catch (e) { showToast('Could not open the tournament'); }
   };
   // Show THIS player's field-wide tournament money inline (team bets + skins),
@@ -49564,7 +49644,7 @@ async function loadRounds() {
     const btnStyle = (isLive || isScheduled) ? ' style="background:var(--accent);color:#fff;border-color:var(--accent)"' : '';
     row.innerHTML = `
       <div style="flex:1;min-width:0;cursor:pointer" class="recent-row-tap">
-        <div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${bgHomeAwayBadge('', r.course)}${escapeHtml(String(r.course == null ? '' : r.course))}${tourneyTrophy(!!(r.t2 && r.t2.tournamentId) || (!!r.code && _tcodes.has(r.code)))}</div>
+        <div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${bgHomeAwayBadge('', r.course)}${escapeHtml(String(r.course == null ? '' : r.course))}${tourneyTrophy((!!(r.t2 && r.t2.tournamentId) && !bgIsDeadEvent(r.t2.tournamentId)) || (!!r.code && _tcodes.has(r.code)))}</div>
         <div style="font-size:12px;color:var(--text-muted);white-space:normal;line-height:1.4;overflow-wrap:anywhere">${liveTag}${date}${playersStr}</div>
       </div>
       <button class="small recent-open-btn"${btnStyle}>${btnLabel}</button>
@@ -49618,7 +49698,7 @@ async function loadRounds() {
     const _descLine = (_rec && _rec.scoreLine) ? _rec.scoreLine : ('Gross ' + grossStr);
     row.innerHTML =
       '<div style="flex:1;min-width:0;cursor:pointer" class="past-row-tap">' +
-        '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + bgHomeAwayBadge(s.courseId || '', s.course) + escapeHtml(s.course || 'Past round') + tourneyTrophy(!!s.t2Id || (!!s.gameCode && _tcodes.has(s.gameCode))) + '</div>' +
+        '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + bgHomeAwayBadge(s.courseId || '', s.course) + escapeHtml(s.course || 'Past round') + tourneyTrophy((!!s.t2Id && !bgIsDeadEvent(s.t2Id)) || (!!s.gameCode && _tcodes.has(s.gameCode))) + '</div>' +
         '<div style="font-size:12px;color:var(--text-muted);white-space:normal;line-height:1.4;overflow-wrap:anywhere">' +
           bgStatusChip(s.manual ? 'past' : 'complete') +
           escapeHtml(date) + ' · ' + escapeHtml(_descLine) + '</div>' +
@@ -53331,7 +53411,21 @@ async function t2ListMine() {
       (async () => {
         try {
           const codes = [...new Set(((await getRecent()) || []).map(r => r && r.code).filter(Boolean))];
-          if (codes.length) { const { data } = await supa.from('tournament_groups').select('tournament_id, game_code').in('game_code', codes); (data || []).forEach(g => { if (g.tournament_id) { need.push(g.tournament_id); linked.add(g.tournament_id); } }); }
+          // v1128: this asked tournament_groups for a `tournament_id` column that
+          // DOES NOT EXIST on that table -- groups hang off `day_id`, and only
+          // tournament_days carries tournament_id. PostgREST rejected the whole
+          // select, the surrounding catch swallowed it, and so this branch has
+          // never contributed a single id. Go through the day, which is the real
+          // relationship (tournament_groups.day_id -> tournament_days.id ->
+          // tournaments.id). Two round trips, but ones that actually return rows.
+          if (codes.length) {
+            const { data: _grp } = await supa.from('tournament_groups').select('day_id, game_code').in('game_code', codes);
+            const _dayIds = [...new Set((_grp || []).map(x => x && x.day_id).filter(Boolean))];
+            if (_dayIds.length) {
+              const { data: _days } = await supa.from('tournament_days').select('id, tournament_id').in('id', _dayIds);
+              (_days || []).forEach(d => { if (d && d.tournament_id) { need.push(d.tournament_id); linked.add(d.tournament_id); } });
+            }
+          }
         } catch (e) {}
       })(),
       // v986 (T25): invites addressed to ME (game_invites uses the 'T2:<id>' code
@@ -53603,7 +53697,19 @@ async function t2Delete(id) {
     // tournament delete. The old one-line delete failed whenever children lingered,
     // which left "deleted" events still showing. Every step is best-effort.
     let groupIds = [];
-    try { const { data } = await supa.from('tournament_groups').select('id').eq('tournament_id', id); groupIds = (data || []).map(g => g.id).filter(Boolean); } catch (e) {}
+    // v1128: same non-existent column as t2ListMine had (tournament_groups has no
+    // tournament_id -- it hangs off day_id). This select errored every time, so
+    // groupIds stayed empty and the child rows this cleanup exists to remove were
+    // never collected. That is how an event could be "deleted" and still leave
+    // rounds pointing at it. Resolve the groups through the days instead.
+    try {
+      const { data: _dz } = await supa.from('tournament_days').select('id').eq('tournament_id', id);
+      const _dIds = (_dz || []).map(x => x && x.id).filter(Boolean);
+      if (_dIds.length) {
+        const { data } = await supa.from('tournament_groups').select('id').in('day_id', _dIds);
+        groupIds = (data || []).map(g => g.id).filter(Boolean);
+      }
+    } catch (e) {}
     if (groupIds.length) { try { await supa.from('tournament_group_members').delete().in('group_id', groupIds); } catch (e) {} }
     for (const tbl of ['tournament_groups', 'tournament_players', 'tournament_days', 'tournament_matches', 'tournament_standings']) {
       try { await supa.from(tbl).delete().eq('tournament_id', id); } catch (e) {}
