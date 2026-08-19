@@ -8165,7 +8165,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1129';
+const BG_BUILD = 'v2026.11.1130';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -14116,6 +14116,28 @@ function _dirtyCourseGpsList() { try { return JSON.parse(localStorage.getItem('g
 function _dirtyCourseGpsSave(arr) { try { localStorage.setItem('golf:dirty-coursegps', JSON.stringify(Array.from(new Set(arr)).filter(Boolean))); } catch (e) {} }
 function markCourseGpsDirty(cid) { try { if (!cid) return; const a = _dirtyCourseGpsList(); if (a.indexOf(cid) < 0) { a.push(cid); _dirtyCourseGpsSave(a); } } catch (e) {} }
 function clearCourseGpsDirty(cid) { try { if (!cid) return; const a = _dirtyCourseGpsList(); const i = a.indexOf(cid); if (i >= 0) { a.splice(i, 1); _dirtyCourseGpsSave(a); } } catch (e) {} }
+// v1130: the course_gps merge-read below used to destructure ONLY `data`, so a
+// PostgREST error, an RLS refusal and a dead network all arrived looking exactly
+// like "there is no cloud row" — and the writer then upserted LOCAL HOLES ONLY
+// over a row that may hold 18 holes mapped by another admin. supabase-js does not
+// throw for any of those, so the `catch` that was meant to announce it never ran.
+// Proved against the live DB on 8/19: malformed column, RLS denial, empty result
+// and network-down ALL yield the same value through `const { data } = ...`.
+// This answers honestly instead: ok:false means "we could not ask", which is NOT
+// "there is nothing there", and no caller may write a merge it never merged.
+// ok:true with holes:null is the real "no row yet" — first mapping of a course.
+async function _bgReadCloudHoles(cid, tries) {
+  const n = Math.max(1, tries || 3);
+  for (let i = 0; i < n; i++) {
+    let res = null;
+    try { res = await supa.from('course_gps').select('holes').eq('course_id', cid).maybeSingle(); }
+    catch (e) { res = { data: null, error: e }; }
+    if (res && !res.error) return { ok: true, holes: (res.data && res.data.holes) || null };
+    console.warn('course_gps merge-read failed (attempt ' + (i + 1) + '/' + n + '):', res && res.error);
+    if (i < n - 1) await new Promise(r => setTimeout(r, 400 * (i + 1)));
+  }
+  return { ok: false, holes: null };
+}
 async function flushDirtyCourseGps() {
   const pending = _dirtyCourseGpsList();
   if (!pending.length) return;
@@ -14127,14 +14149,17 @@ async function flushDirtyCourseGps() {
     try { const raw = localStorage.getItem('golf:course-gps-cache:' + cid); if (raw) local = JSON.parse(raw); } catch (e) {}
     if (!local || !local.holes) continue; // nothing cached to push — drop it
     let mergedHoles = local.holes || {};
-    try {
-      const { data: cloudRow } = await supa.from('course_gps').select('holes').eq('course_id', cid).maybeSingle();
-      if (cloudRow && cloudRow.holes && Object.keys(cloudRow.holes).length) {
-        const m = Object.assign({}, cloudRow.holes);
-        for (const k of Object.keys(local.holes)) { m[k] = Object.assign({}, cloudRow.holes[k] || {}, local.holes[k] || {}); }
-        mergedHoles = m;
-      }
-    } catch (e) {}
+    // v1130: could not READ the cloud row -> do NOT write. This loop runs on a 15s
+    // timer, on boot and on every 'online' event, unattended, on exactly the flaky
+    // wifi that put the course in this queue — it is the last place that should be
+    // guessing. Staying parked costs one more retry; writing costs other people's holes.
+    const _r = await _bgReadCloudHoles(cid);
+    if (!_r.ok) { remaining.push(cid); continue; }
+    if (_r.holes && Object.keys(_r.holes).length) {
+      const m = Object.assign({}, _r.holes);
+      for (const k of Object.keys(local.holes)) { m[k] = Object.assign({}, _r.holes[k] || {}, local.holes[k] || {}); }
+      mergedHoles = m;
+    }
     const lib = (typeof COURSE_LIBRARY !== 'undefined') ? COURSE_LIBRARY.find(c => c.id === cid) : null;
     const payload = { course_id: cid, name: lib ? lib.name : cid, city: lib ? (lib.city || '') : '', holes: mergedHoles, source: local.source || 'manual', updated_at: new Date().toISOString() };
     try { const { error } = await supa.from('course_gps').upsert(payload); if (error) remaining.push(cid); }
@@ -73019,19 +73044,30 @@ const gpsView = (() => {
       // MERGE-ON-WRITE (v215, Phase 2a): re-read the current cloud row and union our
       // holes into it, so a second admin mapping the same course at the same time can't
       // be overwritten. Our just-made edits win per hole; cloud-only holes are kept.
-      // Falls back to local-only on any read error (the prior behavior).
+      // v1130: it used to fall back to writing LOCAL-ONLY when that read failed,
+      // which is the one outcome the merge exists to prevent — a failed read and an
+      // empty cloud row were indistinguishable. A read we could not complete now
+      // aborts the write instead.
       let _mergedHoles = (courseGps[cid] && courseGps[cid].holes) || {};
-      try {
-        const { data: _cloudRow } = await supa.from('course_gps').select('holes').eq('course_id', cid).maybeSingle();
-        if (_cloudRow && _cloudRow.holes && Object.keys(_cloudRow.holes).length) {
+      {
+        const _r = await _bgReadCloudHoles(cid);
+        if (!_r.ok) {
+          // Nothing typed is lost — gpsCacheSet above already saved it locally.
+          // Park it for the dirty queue ONLY when there is nothing to REMOVE: that
+          // queue unions cloud ∪ local, which would hand a just-cleared hole
+          // straight back and silently undo the delete (the v978 problem).
+          if (!(opts.remove || []).length) { try { markCourseGpsDirty(cid); } catch (e) {} }
+          return false;
+        }
+        if (_r.holes && Object.keys(_r.holes).length) {
           const _local = (courseGps[cid] && courseGps[cid].holes) || {};
-          const _m = Object.assign({}, _cloudRow.holes);
+          const _m = Object.assign({}, _r.holes);
           for (const _k of Object.keys(_local)) {
-            _m[_k] = Object.assign({}, _cloudRow.holes[_k] || {}, _local[_k] || {});
+            _m[_k] = Object.assign({}, _r.holes[_k] || {}, _local[_k] || {});
           }
           _mergedHoles = _m;
         }
-      } catch (e) { console.warn('course_gps merge-read failed, writing local-only:', e); }
+      }
       // v978: apply the explicit removals AFTER the union — this is the whole point.
       // Without it the merge above hands the cloud's copy of a just-cleared hole
       // straight back and the delete is silently undone.

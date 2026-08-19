@@ -1,3 +1,51 @@
+-- ############################################################################
+-- ##  HISTORICAL — DO NOT RUN.  Verified against the live database 2026-08-19. ##
+-- ############################################################################
+--
+-- This file no longer describes reality, and running it would be a PRIVACY
+-- REGRESSION, not a repair. The instructions below it ("Safe to run more than
+-- once... Run in: Supabase -> SQL Editor -> paste -> Run") were correct when it
+-- was written and are dangerous now. They are left intact for the record.
+--
+-- WHAT IT DOES: creates `<table>_read_authenticated` policies, each
+--   FOR SELECT TO authenticated USING (true), on all seven tournament tables.
+--
+-- WHAT IS ACTUALLY LIVE (pg_policies, 2026-08-19) — every read is member-scoped:
+--
+--   tournaments               tournaments_select  USING (tourney_is_member(id))
+--   tournament_days           td_select           USING (tourney_is_member(tournament_id))
+--   tournament_groups         tgrp_select         USING (tourney_is_member(tourney_day_tid(day_id)))
+--   tournament_group_members  tgm_select          USING (tourney_is_member(tourney_group_tid(group_id)))
+--   tournament_players        tp_select           USING (tourney_is_member(tournament_id)
+--                                                        OR user_id = auth.uid())
+--   tournament_matches        tm_select           USING (tourney_is_member(tournament_id))
+--   tournament_standings      tstand_select       USING (tourney_is_member(tournament_id))
+--
+--   None of the `_read_authenticated` policies exist. Each table also carries a
+--   `bg_*_admin_all` policy on bg_is_app_admin() and commissioner-scoped writes.
+--
+-- WHY RUNNING IT IS NOT A NO-OP: Postgres ORs permissive policies together — the
+-- header below says so approvingly, because back then `USING (true)` WAS the
+-- intent. Adding these policies today would not restore anything; it would make
+-- EVERY tournament, roster, cart group, pairing and standing in the database
+-- readable by EVERY signed-in user, with no error, no failed query and no
+-- visible symptom. It would be discovered the same way the tournament_id bug
+-- was: months later, by accident.
+--
+-- WHY THE FILE STAYS: prior handoffs reference it by name, and it is the record
+-- of the read model this app started with. It also caused a wrong diagnosis once
+-- already (see claude/FINDING_TourneyInvisible_UnrosteredPlayer_2026-08-19.md) —
+-- someone reasoned from this file instead of from pg_policies and reached a
+-- confident, wrong conclusion. If you need to know what the read rules are,
+-- query pg_policies. Never this file.
+--
+-- To re-verify in one query:
+--   select tablename, policyname, cmd, qual from pg_policies
+--   where schemaname='public' and tablename like 'tournament%' or tablename='tournaments'
+--   order by tablename, cmd;
+--
+-- ############################################################################
+
 -- ============================================================================
 -- Bad Golf — let tournament PARTICIPANTS (not just the commissioner) READ events
 -- ----------------------------------------------------------------------------
