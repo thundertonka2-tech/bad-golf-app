@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1141-->
+<!--BGVER=v2026.11.1146-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8170,7 +8170,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1145';
+const BG_BUILD = 'v2026.11.1146';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -25923,6 +25923,37 @@ function roundHoles(g){
   } catch(e){}
   return 18;
 }
+// v1146: the ONE implementation of the played-hole -> physical-hole rule. A
+// repeated-nine round plays the same nine twice, so played hole 3 of a 'b9x2'
+// round is physical hole 12 on the satellite -- and on the wrist. gpsView's
+// physHole() and mapInfo()'s inline copy both delegate here now; before this
+// there were three copies of the rule and the third one (the Apple Watch
+// hand-off) simply did not exist, which is the whole of the Bayou Oaks bug.
+function bgPhysHole(g, h) {
+  if (!g || !g.nineMode) return h;
+  if (g.nineMode === 'f9x2') return ((h - 1) % 9) + 1;
+  if (g.nineMode === 'b9x2') return ((h - 1) % 9) + 10;
+  if (g.nineMode === 'front9') return h;      // front 9 only: played hole = physical hole
+  if (g.nineMode === 'back9') return h + 9;   // back 9 only: played hole 1 -> physical hole 10
+  return h;
+}
+// v1146: course_gps.holes is keyed by PHYSICAL hole. The watch looks a green up
+// by the PLAYED hole it is showing, so hand it a map keyed the way it will ask.
+// Returns the original object untouched for a normal 18 (no allocation, no
+// behaviour change); never mutates the cached copy, because the same course can
+// be played all18 in one round and b9x2 in the next.
+function bgHolesByPlayedHole(g, holes) {
+  try {
+    if (!g || !g.nineMode || g.nineMode === 'all18') return holes;
+    if (!holes || typeof holes !== 'object') return holes;
+    var out = {}, n = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+    for (var h = 1; h <= n; h++) {
+      var src = holes[String(bgPhysHole(g, h))];
+      if (src) out[String(h)] = src;
+    }
+    return out;
+  } catch (e) { return holes; }
+}
 function isNineRating(r){ return typeof r==='number' && isFinite(r) && r > 25 && r < 46; }
 // ===== 9-HOLE "PLAY 18 (twice around)" SUPPORT (v527) =======================
 // A regulation 9-hole course can be set up to play 18 holes (the same nine
@@ -26823,6 +26854,14 @@ window.BadGolfWatchSync = async function () {
         window._bgWatchGreens = { id: g.courseId, holes };
       }
     } catch (e) {}
+    // v1146: re-key the greens into PLAYED-hole space. The watch renders the
+    // played hole ('3 of 18') and looks the green up by that number, so on a
+    // repeated-nine round it was ranging to the wrong hole -- 1565 yards on a
+    // par 4. The phone was always right because gpsView applies physHole(); this
+    // is the same rule, applied at the one place it was missing. Mapped here and
+    // not in the cache above on purpose: _bgWatchGreens is keyed by COURSE, and
+    // the same course can be all18 in one round and b9x2 in the next.
+    holes = bgHolesByPlayedHole(g, holes);
     // the wearer's own per-hole strokes → { "1": {strokes}, ... }
     let myPid = null;
     try { myPid = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null; } catch (e) {}
@@ -73578,13 +73617,9 @@ const gpsView = (() => {
   // Repeated-nine rounds play the same physical hole twice: played hole 12
   // on a "front 9 twice" round is physical hole 3 on the satellite.
   function physHole(h) {
-    const g = state.game;
-    if (!g || !g.nineMode) return h;
-    if (g.nineMode === 'f9x2') return ((h - 1) % 9) + 1;
-    if (g.nineMode === 'b9x2') return ((h - 1) % 9) + 10;
-    if (g.nineMode === 'front9') return h;         // front 9 only: round hole = physical hole
-    if (g.nineMode === 'back9') return h + 9;       // back 9 only: round hole 1 → physical hole 10
-    return h;
+    // v1146: delegates to the top-level bgPhysHole so the map, the scorecard and
+    // the Apple Watch hand-off cannot drift apart. Behaviour is unchanged.
+    return bgPhysHole(state.game, h);
   }
   function holeData(h) {
     const c = courseGps && courseGps[courseId];
@@ -75136,6 +75171,21 @@ const gpsView = (() => {
   // Default ON — players love the moving wind streaks. Only off if the user has
   // explicitly turned it off (stored '0'); an unset value means brand-new → on.
   let _windMotionOn = true;
+  // v1146 (Tyler, 8/20): "make sure the wind is turned on by default." The code
+  // default above already was `true` -- the problem is that the checkbox writes a
+  // STICKY '0' to golf:wind-motion, so any phone that ever unchecked "Show wind
+  // drifting on the map" (or tapped it off once to see what it did) kept the
+  // streaks off forever, on every round, with no way back except finding the box
+  // again inside the Wind sheet. This clears that stored '0' exactly ONCE per
+  // device, then falls through to the normal read below -- so the preference is
+  // restored to ON now, and anyone who turns it off AFTER this build keeps it off.
+  // Do not re-use this marker key for a future reset; bump the version in it.
+  try {
+    if (localStorage.getItem('golf:wind-motion-default-v1146') !== '1') {
+      localStorage.removeItem('golf:wind-motion');
+      localStorage.setItem('golf:wind-motion-default-v1146', '1');
+    }
+  } catch (e) {}
   try { const _wm = localStorage.getItem('golf:wind-motion'); if (_wm != null) _windMotionOn = (_wm === '1'); } catch (e) {}
   let _wmBuilt = false;
   function buildWmStreaks() {
@@ -76500,7 +76550,7 @@ const gpsView = (() => {
     await loadCourse(cid);
     const c = courseGps && courseGps[cid];
     if (!c || !c.holes) return { manual: false, holeMapped: false, mappedAt: 0 };
-    const ph = (function () { const g = state.game; if (!g || !g.nineMode) return playedHole; if (g.nineMode === 'f9x2') return ((playedHole - 1) % 9) + 1; if (g.nineMode === 'b9x2') return ((playedHole - 1) % 9) + 10; if (g.nineMode === 'front9') return playedHole; if (g.nineMode === 'back9') return playedHole + 9; return playedHole; })();
+    const ph = bgPhysHole(state.game, playedHole);   // v1146: was a third copy of the rule
     const hd = c.holes[ph] || null;
     // A hole counts as manually mapped if its own source is manual, or the
     // course as a whole was hand-mapped ('manual'/'mixed' covers the case where
