@@ -74,8 +74,15 @@ struct Round: Codable, Equatable {
     var courseName: String
     var playerId: String
     var currentHole: Int
-    var scores: [Int: HoleScore]   // hole -> score
+    var scores: [Int: HoleScore]   // hole -> score, keyed by PLAYED hole
     var holeCount: Int = 18
+    // v1146: both are Optional on purpose. Swift's synthesised Decodable does
+    // NOT fall back to a default for a missing key — it throws — so adding a
+    // non-optional field here would make every already-cached round on every
+    // watch fail to decode on upgrade. Optionals decode as nil when absent.
+    var nineMode: String? = nil    // "all18" | "f9x2" | "b9x2" | "front9" | "back9"
+    var myPlayerId: String? = nil  // this wearer's per-round player id ("p0-…"),
+                                   // the key into games.data.scores
 
     func total() -> Int { scores.values.reduce(0) { $0 + $1.strokes } }
 }

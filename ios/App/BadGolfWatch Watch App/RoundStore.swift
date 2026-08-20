@@ -233,18 +233,62 @@ final class RoundStore: ObservableObject {
     }
 
     // MARK: Direct fetch (when no handoff, watch has network)
+    /// v1146: this used to call `fetchActiveRound(playerId:)`, which queried two
+    /// columns that do not exist and returned HTTP 400 every single time. The
+    /// path was dead, so the watch depended entirely on the phone's hand-off —
+    /// and that heartbeat stops the moment the phone app leaves the foreground.
+    /// Phone in a pocket, watch gets nothing. Two real routes now:
+    ///
+    ///   1. REFRESH the round we already hold, by its code. This is the common
+    ///      case and the valuable one — it keeps the group's scores current with
+    ///      the phone asleep in a bag.
+    ///   2. DISCOVER an unfinished round this account owns, when we hold none.
+    ///      Only finds rounds the wearer CREATED (`games.owner_uid` is the sole
+    ///      account link on the row); for a round you were added to, the phone's
+    ///      hand-off is still the only route in.
+    ///
+    /// Both need the session token — RLS gates round rows to signed-in users.
     func refreshFromSupabase() async {
-        guard let pid = SessionStore.shared.playerId else { return }
-        if let r = await SupabaseService.shared.fetchActiveRound(playerId: pid),
-           r.id != dismissedRoundId {            // v926: closed on watch — stay closed
-            self.round = r
-            self.lastActivityAt = Date()
-            self.currentHole = r.currentHole
-            if let c = await SupabaseService.shared.fetchCourse(courseId: r.courseId) {
-                self.course = c
+        let svc = SupabaseService.shared
+        var fetched: Round? = nil
+
+        if let cur = round, !cur.id.isEmpty {
+            fetched = await svc.fetchRound(code: cur.id, myPlayerId: cur.myPlayerId)
+            // A round we hold that comes back FINISHED (parseGamesRow returns nil
+            // for one) is over. Clearing it here is the safety net for a missed
+            // v890 roundEnded signal — the case that used to pin a workout
+            // session open for days with no way out but deleting the app.
+            if fetched == nil, await svc.roundIsGone(code: cur.id) {
+                closeOnWatch()
+                dismissedRoundId = nil        // it ended on its own; do not suppress the next one
+                return
             }
-            saveCache()
         }
+        if fetched == nil, let uid = SessionStore.shared.playerId, !uid.isEmpty {
+            fetched = await svc.findMyActiveRound(ownerUid: uid)
+        }
+
+        guard var r = fetched, r.id != dismissedRoundId else { return }  // v926: closed on watch — stay closed
+
+        // The row carries no current hole, and the wearer may be browsing. Keep
+        // ours; only a real hand-off from the phone moves the watch's hole.
+        r.currentHole = (round?.id == r.id) ? currentHole : 1
+        // v890: a wrist score that has not synced yet must survive a refresh.
+        if let cur = round, cur.id == r.id {
+            for h in pendingHoles { if let s = cur.scores[h] { r.scores[h] = s } }
+            if r.myPlayerId == nil { r.myPlayerId = cur.myPlayerId }
+        }
+
+        self.round = r
+        self.lastActivityAt = Date()
+        self.currentHole = r.currentHole
+        // v1146: pass nineMode, or a repeated-nine round pulled down this way
+        // would range to the wrong hole exactly like the hand-off used to.
+        if course?.id != r.courseId,
+           let c = await svc.fetchCourse(courseId: r.courseId, nineMode: r.nineMode) {
+            self.course = c
+        }
+        saveCache()
     }
 
     // MARK: Keep the cached greens in sync with the active round's course
@@ -258,8 +302,9 @@ final class RoundStore: ObservableObject {
         if course?.id == r.courseId { return }            // already correct
         if course != nil { course = nil; saveCache() }    // drop stale greens NOW
         let wantedId = r.courseId
+        let wantedNineMode = r.nineMode    // v1146: repeated-nine rounds re-key the greens
         Task { @MainActor in
-            if let c = await SupabaseService.shared.fetchCourse(courseId: wantedId) {
+            if let c = await SupabaseService.shared.fetchCourse(courseId: wantedId, nineMode: wantedNineMode) {
                 // Guard against a race: only apply if the round still wants it.
                 if self.round?.courseId == wantedId {
                     self.course = c
