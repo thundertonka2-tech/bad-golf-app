@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1147-->
+<!--BGVER=v2026.11.1148-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8170,7 +8170,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1147';
+const BG_BUILD = 'v2026.11.1148';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -43266,6 +43266,14 @@ async function bgAbandonRoundFlow() {
     }
     const code = state.game.code;
     if (state.viewOnlyMode) {
+      // v1148: belt-and-braces behind renderBoard's hidden-button rule. A live round
+      // you are spectating is not yours to remove no matter what raised this flow
+      // (a stale handler, a keyboard activation, a future entry point), and
+      // removeRoundForMe on a round you were never in can only do the wrong thing.
+      if (state.game && !state.game.finishedAt && !state.game.reopenedAt) {
+        try { showToast("You're spectating — this round isn't in your list"); } catch (e) {}
+        return;
+      }
       // Finished round being viewed → "Delete" = personal removal (same rules
       // as the Rounds list: only affects YOU, handicap recalculates).
       if (!(await uiConfirm(`Remove this round from your list?\n\nOther players keep it. If it counted toward your handicap, it will be removed from your history and your handicap recalculated.`, { title: 'Remove round?', okLabel: 'Remove' }))) return;
@@ -43308,13 +43316,32 @@ function renderBoard() {
   } catch (e) {}
   const backBtn = $('btn-back-score');
   const abandonBtn = $('btn-abandon-round');
-  if (backBtn) backBtn.textContent = state.viewOnlyMode ? '← Back to rounds' : 'Back';
+  // v1148 (Tyler, 8/20): "I went to spectate Kevin's round on the GPS screen, I
+  // clicked board … there was no back button to take me back to the gps where I
+  // came from, only a back to rounds." The label was chosen off viewOnlyMode, which
+  // answers "can I edit this?" — a different question from "where did I come from?".
+  // state._gpsReturn is stamped by every route that leaves the map for this screen
+  // (the money bubble, the match/Nassau chips, the quota bubble), so it is the one
+  // honest test for "the map is behind me" and it is what the Back handler now acts
+  // on first. Label follows the destination.
+  const _bFromGps = (state._gpsReturn != null);
+  if (backBtn) backBtn.textContent = _bFromGps ? '← Back to map' : (state.viewOnlyMode ? '← Back to rounds' : 'Back');
   // v1127: Abandon is gone app-wide. This button now has exactly one shape —
   // the view-only 🗑️ Delete, which removes a FINISHED round from your own list.
   // On a live round it never appears, so there is no Abandon entry point left.
+  //
+  // v1148 (Tyler, 8/20): "if I am spectating I should not be able to delete."
+  // viewOnlyMode lumps together two situations that differ on OWNERSHIP, not on
+  // editability: a FINISHED (or reopened) round you are reading back is in your own
+  // history, so the personal "remove from my list" Delete is right; a LIVE round you
+  // are SPECTATING belongs to someone else and you have nothing in it to remove —
+  // the button could only misfire. Testing viewOnlyMode alone put a Delete on
+  // Kevin's in-progress round. The finishedAt/reopenedAt test below is the same one
+  // the banner uses to decide it is printing "👀 Spectating".
+  const _bSpectatingLive = !!(state.viewOnlyMode && !g.finishedAt && !g.reopenedAt);
   if (abandonBtn) {
     abandonBtn.textContent = '🗑️ Delete';
-    abandonBtn.style.display = state.viewOnlyMode ? '' : 'none';
+    abandonBtn.style.display = (state.viewOnlyMode && !_bSpectatingLive) ? '' : 'none';
   }
   const banner = $('view-only-banner');
   const finishBtn = $('btn-finish-round');
@@ -72196,10 +72223,17 @@ async function init() {
     // return contract (state._voReturn / state._gpsReturn); the board's origin
     // record is the general case underneath them. Clear it on the specific paths
     // so a stale value can never be read by a later Back.
-    if (state.viewOnlyMode) { try { state._boardReturn = null; } catch (e) {} exitViewOnly(); return; }
-    // If you got here from the GPS map (opened settings/board off the map), go back to
-    // the map — not the score list — so "Back" returns you where you were.
+    // If you got here from the GPS map (opened settings/board/bets off the map), go
+    // back to the map — not the score list — so "Back" returns you where you were.
+    //
+    // v1148 (Tyler, 8/20): this test used to sit BELOW the view-only test, and every
+    // spectator is view-only — so a spectator who tapped a money bubble on Kevin's
+    // map and landed here got exitViewOnly() (which drops you on Rounds and tears the
+    // round down) with no way back to the map at all. Order by SPECIFICITY: "I came
+    // from the map" is a recorded fact about this one trip; "I cannot edit this" is a
+    // standing property of the round. The specific fact wins.
     if (typeof returnFromGps === 'function' && state._gpsReturn != null) { try { state._boardReturn = null; } catch (e) {} returnFromGps(); return; }
+    if (state.viewOnlyMode) { try { state._boardReturn = null; } catch (e) {} exitViewOnly(); return; }
     // v1129 (§2): honour the origin switchTab recorded when this screen opened.
     // The hardcoded switchTab('score') this replaces is what sent you to the
     // scoring screen after opening 💵 Bets from Home, Rounds, Crew or Tourney.
@@ -73899,6 +73933,11 @@ const gpsView = (() => {
     stopWatch();
     try { clearAdmHoleMks(); } catch (e) {}
     mode = 'closed';
+    // v1148: close() is the only teardown the spectate session gets, and it clears
+    // both spectate and window._gpsSpectatePid. Record who was being watched (and in
+    // which round) BEFORE that happens, so returnFromGps can put a spectator back on
+    // the SAME player's map instead of guessing at players[0].
+    try { if (spectate && spectate.pid) state._lastSpectate = { code: (state.game && state.game.code) || '', pid: spectate.pid }; } catch (e) {}
     window._gpsSpectatePid = null;
     el('gps-overlay').classList.remove('open', 'viewing', 'map-only', 'spectating', 'preview');
     el('gps-loading').classList.remove('show');
@@ -80139,6 +80178,29 @@ function returnFromGps() {
     if (hole) state.currentHole = hole;
     if (typeof switchTab === 'function') switchTab('score');
     if (typeof openPlayGps === 'function') { try { openPlayGps(); } catch (e) {} }
+    return true;
+  }
+  // v1148: spectators get their map back too. Until now this function was only ever
+  // reached by a player, so view-only fell through to the switchTab('score') below —
+  // which, in view-only mode, DISCARDS the round and opens a fresh setup form. That
+  // is the exact opposite of "put me back where I was", and it becomes reachable the
+  // moment the Board's Back honours _gpsReturn for spectators. Re-open the watch view
+  // over whatever screen we are on instead; deliberately no switchTab.
+  if (state.game && state.viewOnlyMode && !state.game.finishedAt && !state.game.reopenedAt) {
+    let _pid = null;
+    try {
+      // Only trust the remembered watch target if it belongs to THIS round; a pid
+      // from a previous spectate would point at a player who isn't in this one.
+      const _ls = state._lastSpectate;
+      if (_ls && _ls.pid && _ls.code === state.game.code) _pid = _ls.pid;
+      if (!_pid && Array.isArray(state.game.players) && state.game.players[0]) _pid = state.game.players[0].id;
+    } catch (e) { _pid = null; }
+    if (_pid && typeof gpsView !== 'undefined' && gpsView.open) {
+      if (hole) state.currentHole = hole;
+      try { gpsView.open({ spectate: { pid: _pid } }); return true; } catch (e) {}
+    }
+    // No map to go back to (course unmapped, GPS unavailable) — leave them on the
+    // board rather than wiping the round they are watching.
     return true;
   }
   if (typeof switchTab === 'function') switchTab('score');
