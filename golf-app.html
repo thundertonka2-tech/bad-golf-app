@@ -8167,7 +8167,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1142';
+const BG_BUILD = 'v2026.11.1143';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -45451,7 +45451,10 @@ async function renderHomeInvites() {
           // gone; View opens the Bets sheet for a completed round (see go() below).
           // Side effect worth noting against the v887 measurement: the button column
           // gets NARROWER, so the course name has more room, not less.
-          '<button class="small home-invite-btn" data-i="' + i + '" style="flex:0 0 auto">' + escapeHtml(r.action) + '</button>' +
+          // v1143 (Tyler, 8/20): a row whose only action is "View" renders no
+          // button -- tapping the row opens the same thing. Rows with a real CTA
+          // (Join now / Start / Resume) keep theirs.
+          (r.action === 'View' ? '' : '<button class="small home-invite-btn" data-i="' + i + '" style="flex:0 0 auto">' + escapeHtml(r.action) + '</button>') +
         '</div>' +
         (extras ? '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">' + extras + '</div>' : '') +
       '</div>';
@@ -49293,6 +49296,47 @@ function getHiddenRounds() {
 function setHiddenRounds(l) {
   try { bgLsSet('golf:hidden-rounds', JSON.stringify(l.slice(-300))); } catch (e) {}
 }
+// v1143 (Tyler, 8/20): the round rows on Home / Saved rounds / Stats no longer
+// carry their own View button or red x -- tapping the row opens the Bets sheet,
+// and Delete lives on that sheet instead. This is the ONE implementation of the
+// delete rules the row x used to hold: an admin may wipe a round for EVERYONE
+// (test data), everyone else only removes it from their own list.
+// Returns true when the round was actually deleted, so the caller can close.
+async function bgDeleteRoundFlow(code, courseName) {
+  if (!code) return false;
+  const where = courseName ? (' at ' + courseName) : '';
+  try {
+    if (typeof isAdmin === 'function' && isAdmin()) {
+      // Same two-step gate as v989: the second dialog has no cancel, so a real
+      // yes/no has to come first or a backdrop tap would silently delete.
+      if (!(await uiConfirm('Delete the round' + where + '?', { title: 'Delete round (admin)', okLabel: 'Continue', cancelLabel: 'Cancel' }))) return false;
+      const everyone = await uiConfirm(
+        'Delete the round' + where + ' for ALL players?\n\n"Delete for all" permanently removes the round and its stats from everyone (use this for test data - it cannot be undone).\n\n"Just my list" only removes it from your own Rounds.',
+        { title: 'Delete round (admin)', okLabel: 'Delete for all', cancelLabel: 'Just my list' }
+      );
+      if (everyone) {
+        await deleteRecentGame(code);
+        showToast('Round deleted for all players');
+      } else {
+        const hcpA = await removeRoundForMe(code);
+        showToast(hcpA ? 'Removed from your list - handicap recalculated' : 'Removed from your list');
+      }
+    } else {
+      if (!(await uiConfirm('Remove the round' + where + ' from your list?\n\nOther players keep it. If this round counted toward your handicap, it will be removed from your history and your handicap recalculated.', { title: 'Remove round?', okLabel: 'Remove' }))) return false;
+      const hcp = await removeRoundForMe(code);
+      showToast(hcp ? 'Removed - your handicap has been recalculated' : 'Removed from your list');
+    }
+  } catch (e) {
+    console.warn('bgDeleteRoundFlow', e);
+    try { showToast('Could not delete the round'); } catch (e2) {}
+    return false;
+  }
+  // Repaint every surface that lists rounds so the deleted one is gone from all
+  // of them at once (Saved rounds + Stats share loadRounds; Home has its own card).
+  try { await loadRounds(); } catch (e) {}
+  try { if (typeof renderHomeInvites === 'function') renderHomeInvites(); } catch (e) {}
+  return true;
+}
 async function removeRoundForMe(code) {
   // Don't strand a scheduled round you started — bring it back to the schedule.
   try { await restoreScheduledRoundForCode(code); } catch (e) {}
@@ -49837,14 +49881,15 @@ async function loadRounds() {
         <div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${bgHomeAwayBadge('', r.course)}${escapeHtml(String(r.course == null ? '' : r.course))}${tourneyTrophy((!!(r.t2 && r.t2.tournamentId) && !bgIsDeadEvent(r.t2.tournamentId)) || (!!r.code && _tcodes.has(r.code)))}</div>
         <div style="font-size:12px;color:var(--text-muted);white-space:normal;line-height:1.4;overflow-wrap:anywhere">${liveTag}${date}${playersStr}</div>
       </div>
-      <button class="small recent-open-btn"${btnStyle}>${btnLabel}</button>
-      <button class="small recent-delete-btn" title="Delete" style="background:transparent;color:var(--danger);border-color:var(--danger);padding:4px 10px">×</button>
+      ${btnLabel === 'View' ? '' : `<button class="small recent-open-btn"${btnStyle}>${btnLabel}</button>`}
     `;
     // v905 (Tyler): outline a genuinely LIVE round in red so it stands out in the list.
     try { if (isLive) row.classList.add('bg-live-row'); } catch (e) {}
     row.querySelector('.recent-row-tap').onclick = () => openRecent(r);
-    row.querySelector('.recent-open-btn').onclick = () => openRecent(r);
-    row.querySelector('.recent-delete-btn').onclick = async (e) => {
+    // v1143: a completed row renders no button at all (tap the row) and no row
+    // ever renders the red x, so both of these are now optional wirings.
+    { const _ob = row.querySelector('.recent-open-btn'); if (_ob) _ob.onclick = () => openRecent(r); }
+    { const _db = row.querySelector('.recent-delete-btn'); if (_db) _db.onclick = async (e) => {
       e.stopPropagation();
       // Admins get an extra choice: wipe the round for EVERYONE (handy for
       // clearing test data so it never pollutes anyone's stats), or just remove
@@ -49873,7 +49918,7 @@ async function loadRounds() {
       const hcpAffected = await removeRoundForMe(r.code);
       showToast(hcpAffected ? 'Removed — your handicap has been recalculated' : 'Removed from your list');
       await loadRounds();
-    };
+    }; }
     list.appendChild(row);
   });
 
@@ -49896,8 +49941,7 @@ async function loadRounds() {
       // v1125: the 💵 button v911 added here is gone — View opens the Bets sheet
       // itself now. This renderer backs BOTH the Rounds tab and the Crew tab
       // (loadRoundsInto), so one edit covers the two Tyler asked for.
-      '<button class="small past-open-btn">View</button>' +
-      '<button class="small past-delete-btn" title="Delete" style="background:transparent;color:var(--danger);border-color:var(--danger);padding:4px 10px">×</button>';
+      '';   // v1143: View + red x removed -- tap the row, delete from the Bets sheet
     const _openPast = async () => {
       // v1125: straight into the Bets sheet, same as Home. Reopen lives on the
       // sheet now, so nothing is lost by not routing through openRecent() here.
@@ -49907,8 +49951,8 @@ async function loadRounds() {
       try { switchTab('stats'); } catch (e) {}
     };
     row.querySelector('.past-row-tap').onclick = _openPast;
-    row.querySelector('.past-open-btn').onclick = _openPast;
-    row.querySelector('.past-delete-btn').onclick = async (e) => {
+    { const _pb = row.querySelector('.past-open-btn'); if (_pb) _pb.onclick = _openPast; }
+    { const _pd = row.querySelector('.past-delete-btn'); if (_pd) _pd.onclick = async (e) => {
       e.stopPropagation();
       if (!(await uiConfirm('Remove this round at ' + (s.course || '—') + ' from your stats?\n\nIt will be removed from your history and your handicap recalculated. It won\u2019t come back from a backup.', { title: 'Remove round?', okLabel: 'Remove' }))) return;
       try {
@@ -49932,7 +49976,7 @@ async function loadRounds() {
       showToast('Round removed — handicap recalculated');
       await loadRounds();
       try { renderStats(); } catch (e) {}
-    };
+    }; }
     list.appendChild(row);
   });
   // Wire search filter (preserves current query across reloads). The list shows
@@ -50259,6 +50303,12 @@ async function openRoundBetsSheet(code, courseName) {
   if (g && g.finishedAt) {
     html += '<button id="rb-reopen" class="full" style="width:100%;margin-top:8px;padding:13px;min-height:46px;border:1px solid var(--gold);color:var(--gold);font-weight:600">\u{1F513} Reopen round</button>';
   }
+  // v1143 (Tyler, 8/20): "once they do click on this screen, they need the option
+  // to delete the round from here." The round rows on Home / Saved rounds / Stats
+  // dropped their red x, so this is now the way to delete a round.
+  if (g && g.code) {
+    html += '<button id="rb-delete" class="full" style="width:100%;margin-top:8px;padding:13px;min-height:46px;border:1px solid var(--danger);color:var(--danger);background:var(--surface);font-weight:600">\u{1F5D1} Delete round</button>';
+  }
   body.innerHTML = html;
 
   // v897 (Tyler): tournament rounds — repaint the sheet's scorecard with the
@@ -50298,6 +50348,15 @@ async function openRoundBetsSheet(code, courseName) {
       } catch (e) {
         try { showToast('Could not reopen the round'); } catch (e2) {}
       } finally { rb.disabled = false; }
+    }; }
+  { const dl = body.querySelector('#rb-delete'); if (dl) dl.onclick = async () => {
+      dl.disabled = true;
+      try {
+        const gone = await bgDeleteRoundFlow(g.code, g.course);
+        if (gone) { try { close(); } catch (e) {} }
+      } catch (e) {
+        try { showToast('Could not delete the round'); } catch (e2) {}
+      } finally { dl.disabled = false; }
     }; }
   { const sh = body.querySelector('#rb-share'); if (sh) sh.onclick = async () => {
       try {
@@ -67160,7 +67219,7 @@ function _bgOpenImageZoom(src, title) {
   ov.style.cssText = 'z-index:100090;padding:0;align-items:stretch;justify-content:stretch;background:rgba(0,0,0,.92)';
   ov.innerHTML =
     '<div style="position:fixed;inset:0;display:flex;flex-direction:column">'
-    + '<div style="flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:10px 12px;background:rgba(0,0,0,.55);color:#fff">'
+    + '<div style="flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 10px;background:#000;border-bottom:1px solid rgba(255,255,255,.18);color:#fff">'
       + '<div style="flex:1;min-width:0;font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(title || 'Preview') + '</div>'
       + '<button id="bgz-out" aria-label="Zoom out" style="min-width:44px;min-height:38px;border-radius:8px;border:1px solid rgba(255,255,255,.5);background:transparent;color:#fff;font-size:20px;font-weight:700;cursor:pointer">−</button>'
       + '<button id="bgz-in" aria-label="Zoom in" style="min-width:44px;min-height:38px;border-radius:8px;border:1px solid rgba(255,255,255,.5);background:transparent;color:#fff;font-size:20px;font-weight:700;cursor:pointer">+</button>'
