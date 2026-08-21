@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1152-->
+<!--BGVER=v2026.11.1153-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8167,7 +8167,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1152';
+const BG_BUILD = 'v2026.11.1153';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -26889,6 +26889,41 @@ function setWatchPlaysAsEnabled(on){
 // start, hole change and score save keeps the watch current.
 // Greens are cached per course so we don't re-hit Supabase on every hole change.
 window._bgWatchGreens = window._bgWatchGreens || { id: null, holes: null };
+// v1153 — course_gps holes for the watch handoff, keyed 1..N the way the watch asks.
+//
+// Mirrors the combo branch of gpsView.loadCourse(): a three-nine / multi-nine id is
+// "<base>:<front>-<back>" and its geometry lives in two per-nine rows, "<base>#<front>"
+// and "<base>#<back>", each holding holes 1-9. A single-nine id is "<base>:<nine>"
+// (no dash) and maps to one row, holes 1-9. Anything else is an ordinary flat id.
+//
+// Deliberately its own function rather than a call into gpsView.loadCourse(): that one
+// lives inside the GPS overlay's closure, writes the courseGps store and the local
+// cache, and assumes the map session is up. The watch sync runs from anywhere —
+// including with the GPS screen closed — and only needs the holes.
+async function bgWatchCourseHoles(courseId) {
+  const out = {};
+  try {
+    if (!courseId || !supa) return out;
+    const cs = (typeof comboSpecFromId === 'function') ? comboSpecFromId(courseId) : null;
+    if (!cs) {
+      const { data } = await supa.from('course_gps').select('holes').eq('course_id', courseId).maybeSingle();
+      return (data && data.holes) || {};
+    }
+    const fId = cs.base + '#' + cs.front;
+    const bId = (cs.back && !cs.single) ? (cs.base + '#' + cs.back) : null;
+    const ids = bId ? [fId, bId] : [fId];
+    const { data } = await supa.from('course_gps').select('course_id,holes').in('course_id', ids);
+    const byId = {};
+    (data || []).forEach(function (r) { if (r && r.course_id) byId[r.course_id] = r.holes || {}; });
+    const fH = byId[fId] || {};
+    for (let i = 1; i <= 9; i++) { if (fH[String(i)]) out[String(i)] = fH[String(i)]; }
+    if (bId) {
+      const bH = byId[bId] || {};
+      for (let i = 1; i <= 9; i++) { if (bH[String(i)]) out[String(9 + i)] = bH[String(i)]; }
+    }
+    return out;
+  } catch (e) { return out; }
+}
 window.BadGolfWatchSync = async function () {
   try {
     if (typeof isNativeApp !== 'function' || !isNativeApp()) return;
@@ -26918,14 +26953,30 @@ window.BadGolfWatchSync = async function () {
     try { const s = await supa.auth.getSession(); token = (s && s.data && s.data.session) ? s.data.session.access_token : null; } catch (e) {}
     try { playerId = (typeof _authUser !== 'undefined' && _authUser) ? _authUser.id : null; } catch (e) {}
     // greens for this course (course_gps.holes), cached by courseId
+    //
+    // v1153 (Kevin, mid-round at Peninsula — Cypress / Marsh): this used to be a
+    // single flat lookup on g.courseId. A multi-nine facility is stored as one row
+    // PER NINE — "peninsula-gulf-shores#cypress", "…#marsh" — and there is no row
+    // under the combo id "peninsula-gulf-shores:cypress-marsh", so the lookup found
+    // nothing and the watch was handed an EMPTY course. Every line of his watch
+    // diagnostic followed from that one miss: conf no-hole, green nil, par —,
+    // lastKnown no. The phone map was fine the whole time because
+    // gpsView.loadCourse() has always assembled the two nines; the watch handoff
+    // was simply never taught the same rule. bgWatchCourseHoles below is that rule.
     let holes = {};
     try {
-      if (window._bgWatchGreens.id === g.courseId && window._bgWatchGreens.holes) {
-        holes = window._bgWatchGreens.holes;
+      const _cached = (window._bgWatchGreens.id === g.courseId) ? window._bgWatchGreens.holes : null;
+      if (_cached && Object.keys(_cached).length) {
+        holes = _cached;
       } else if (g.courseId) {
-        const { data } = await supa.from('course_gps').select('holes').eq('course_id', g.courseId).maybeSingle();
-        holes = (data && data.holes) || {};
-        window._bgWatchGreens = { id: g.courseId, holes };
+        holes = await bgWatchCourseHoles(g.courseId);
+        // v1153: only remember a REAL answer. The old line cached `{}` and the
+        // guard above tested the object for truthiness — and `{}` is truthy — so one
+        // empty read poisoned the cache for the rest of the session. Kevin's watch
+        // could not have recovered mid-round even once the data was there; the phone
+        // app had to be relaunched. An empty result now simply is not cached, so the
+        // next sync (every hole, every score) tries again.
+        if (holes && Object.keys(holes).length) window._bgWatchGreens = { id: g.courseId, holes };
       }
     } catch (e) {}
     // v1146: re-key the greens into PLAYED-hole space. The watch renders the
