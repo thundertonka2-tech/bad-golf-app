@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1148-->
+<!--BGVER=v2026.11.1151-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8167,7 +8167,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1148';
+const BG_BUILD = 'v2026.11.1151';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -8663,6 +8663,14 @@ async function resetPasswordEmail(email) {
 // true and blocked the new user's heal/sync from re-running.
 function resetSessionIdentity() {
   try {
+    // v1150: the resolved-identity state is per-ACCOUNT. Left set across a switch,
+    // _meNameFailAt would make the incoming account look unreadable for up to 10s —
+    // long enough for the SIGNED_IN handler's maybeClaimBoundSlot() to decline a
+    // ?join= link — and a stale trust flag would misreport the new account.
+    // (_meNameLastGood is uid-keyed and could not leak, but there is no reason to
+    // carry the previous account's answer forward.)
+    try { _meNameLastGood = null; _meNameReadFailed = false; _meNameFailAt = 0; } catch (e) {}
+    try { localStorage.removeItem(KEY_ME_UID); } catch (e) {}
     window._myStatsBackupRounds = null;   // stop topUpMyRoundsFromBackup injecting the prior user's rounds
     window._myClubs = [];
     window._myShots = [];
@@ -13275,6 +13283,40 @@ async function autoLinkMyPlayer() {
     if (!isSignedIn() || !supa || !_authUser) return;
     const existing = await getMeName();
     if (existing) return; // already tied/claimed
+    // ---- v1149 READ-TRUST GUARDS (Tyler, 8/20) ------------------------------
+    // "I updated to the latest build last night and it prompted me to change my
+    // user name and add my handicap. I am an established user so it never should
+    // have done that."
+    //
+    // This function runs on SIGNED_IN *and INITIAL_SESSION*, i.e. every cold
+    // launch, and until now it decided "brand-new user" from the single
+    // getMeName() above. That call returns null in TWO different situations that
+    // look identical from here: the account genuinely has no linked player, and
+    // the profiles read did not come back (supabase-js resolves { data: null,
+    // error } rather than throwing). This is precisely the v963 defect that once
+    // locked Tyler out of the app behind a name prompt — and the v963 fix was
+    // applied only to ensureMyNameSet(), never here. So the older, more
+    // destructive path kept the bug: an established user got the full first-run
+    // chain (name → handicap → phone), and the handicap prompt is what did the
+    // damage (see the upsertPlayerInRoster note below).
+    //
+    // Same three guards, same order, same principle: only ever act on an answer
+    // we are CONFIDENT in. "Couldn't ask" must never read as "brand-new user".
+    if (typeof _meNameReadFailed !== 'undefined' && _meNameReadFailed) return;   // the read failed — we learned nothing
+    if (typeof supaOnline !== 'undefined' && !supaOnline) return;                // offline — cannot confirm
+    // Authoritative re-check: demand one clean, error-free read before inventing
+    // a player. If this errors we stay quiet and try again on the next launch —
+    // costing at most a delay, where a false positive costs stored data.
+    try {
+      const _r2 = await supa.from('profiles').select('my_player').eq('id', _authUser.id).maybeSingle();
+      if (!_r2 || _r2.error) return;                      // could not confirm → never prompt
+      const _mp2 = _r2.data && _r2.data.my_player;
+      if (_mp2 && String(_mp2).trim()) {
+        try { localStorage.setItem(KEY_ME, _mp2); } catch (e) {}   // heal the cache that went missing
+        return;                                           // they ARE linked — leave them alone
+      }
+    } catch (e) { return; }
+    // -------------------------------------------------------------------------
     // #16 Identity is now tied to the login email — never show the
     // claim-player ("is this you?") prompt. Always create from the account.
     // v1000 (Tyler, brand-new signup): raise the in-flight flag BEFORE prompting.
@@ -16652,7 +16694,23 @@ async function upsertPlayerInRoster(firstName, lastName, hcp, extras) {
     normalizeNameSegment(p.lastName) === lNorm
   );
   if (idx >= 0) {
-    roster[idx].hcp = hcp;
+    // v1149 (Tyler, 8/20): this line used to run unconditionally, and it is what
+    // turned a wrongly-fired first-run prompt into DATA LOSS. Skipping the
+    // "Your handicap" prompt hands this function 0 — so declining to answer
+    // actively wrote 0 over an established handicap. The same silent clobber sat
+    // on the guest-phone path (which passes 0 purely to attach a phone number)
+    // and on the post-round and claim-record paths.
+    //
+    // An existing roster entry's handicap now changes only when a caller says so
+    // outright. The single place a human deliberately types one — the roster
+    // Add-player form — passes extras.setHcp; nothing else does. A brand-new
+    // entry still takes the supplied value in the else branch below, so first-run
+    // and guest adds are unaffected.
+    //
+    // This matches the idiom the claim paths already use ("fill it in if it is
+    // empty, never overwrite"): a handicap is the user's to change, not a side
+    // effect of some other write.
+    if (extras && extras.setHcp) roster[idx].hcp = hcp;
     roster[idx].lastUsed = Date.now();
     if (extras && extras.phone) roster[idx].phone = extras.phone;   // v640
     // Don't overwrite the existing canonical spelling — keep whatever's saved
@@ -17147,6 +17205,25 @@ async function joinRoundForStats(g, me) {
 
 async function archiveScoresFromRound(g) {
   if (!g || !g.players || !g.scores) return;
+  // v1150: every protection further down that keeps MY history honest keys off the
+  // name resolved by getMeName — the deleted-round guard, the shared cloud
+  // tombstones, the "is this my row" test. With that name empty the guard quietly
+  // disables ITSELF: iDeletedThisRound stays false and a round the user deliberately
+  // deleted is re-archived into scoreHistory and saved, moving their handicap.
+  //
+  // Checked HERE, at the top, and not next to the name lookup lower down: by that
+  // point computeAllGameMoney has already run and, on its own failure, already
+  // toasted "scores saved" — a statement this early return would make false. Bail
+  // before anything has been claimed or computed. The archive is retried by the
+  // next finish, by resyncMyStats, and on the next launch, so deferring costs
+  // nothing while writing on an unreadable identity cannot be taken back.
+  try {
+    if (typeof bgMeNameTrusted === 'function' && !bgMeNameTrusted()) {
+      let _meChk = null;
+      try { _meChk = await getMeName(); } catch (e) {}
+      if (!_meChk) return;
+    }
+  } catch (e) {}
   const date = g.createdAt || g.updatedAt || Date.now();
 
   // Resolve tee map by label. Backwards compat: if g.tees is empty/missing
@@ -41767,20 +41844,30 @@ function gpsResolveMyId(g) {
         if (_byUid) { if (code) _gpsMyIdCache[code] = _byUid.id; return _byUid.id; }
       }
     } catch (e) {}
-    let me = '';
-    try { me = (localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
+    // v1151: try every name that means me, not just the linked one. A mislinked
+    // account resolved to nobody here, and because this function correctly refuses to
+    // guess players[0], the Score pill had no player at all — Tyler read "even par"
+    // for a whole round he shot 84 in. The email-matched roster row answers the same
+    // question without depending on my_player being right.
+    let _names = [];
+    try { _names = bgMyNames(); } catch (e) { _names = []; }
+    if (!_names.length) { try { const c = (localStorage.getItem(KEY_ME) || '').trim(); if (c) _names = [c]; } catch (e) {} }
     // Name not known yet → DON'T guess players[0] (that showed the creator's score
     // as yours). Reuse a prior confident match for this round if we have one.
-    if (!me) return (code && _gpsMyIdCache[code]) || null;
+    if (!_names.length) return (code && _gpsMyIdCache[code]) || null;
     const norm = s => normalizeNameSegment(String(s || ''));
-    const meParts = me.split(/\s+/); const meFull = norm(me), meFirst = norm(meParts[0]);
-    const hit = g.players.find(p => {
-      const pn = String(p.name || '').trim(); if (!pn) return false;
-      const pp = pn.split(/\s+/);
-      if (norm(pn) === meFull) return true;
-      if (pp.length === 1 || meParts.length === 1) return norm(pp[0]) === meFirst;
-      return false;
-    });
+    let hit = null;
+    for (let _i = 0; _i < _names.length && !hit; _i++) {
+      const me = _names[_i];
+      const meParts = me.split(/\s+/); const meFull = norm(me), meFirst = norm(meParts[0]);
+      hit = g.players.find(p => {
+        const pn = String(p.name || '').trim(); if (!pn) return false;
+        const pp = pn.split(/\s+/);
+        if (norm(pn) === meFull) return true;
+        if (pp.length === 1 || meParts.length === 1) return norm(pp[0]) === meFirst;
+        return false;
+      }) || null;
+    }
     if (hit) { if (code) _gpsMyIdCache[code] = hit.id; return hit.id; }
     // Name is set but matches no one here (e.g. spectating) → neutral, never players[0].
     return (code && _gpsMyIdCache[code]) || null;
@@ -43100,7 +43187,15 @@ async function bragToCrew() {
   try { me = (await getMeName()) || ''; } catch (e) {}
   const meNorm = me ? normalizeNameSegment(me) : '';
   let p = meNorm ? g.players.find(pp => pp.name && normalizeNameSegment(pp.name) === meNorm) : null;
-  if (!p) p = g.players[0];
+  // v1150: this used to fall back to `g.players[0]`, so an unresolved identity
+  // posted YOUR brag to the whole crew feed under the FIRST player's name —
+  // persisted by saveGame, seen by everyone, with no edit path anywhere in the app.
+  // Posting as a stranger is worse than not posting, and the two ways of landing
+  // here deserve different messages.
+  if (!p) {
+    try { showToast(meNorm ? "You're not a player in this round" : "Couldn't tell which player is you — try again in a moment"); } catch (e) {}
+    return;
+  }
   const arr = (g.scores && g.scores[p.id]) || [];
   let gross = 0, par = 0, holes = 0;
   for (let i = 0; i < 18; i++) {
@@ -47346,41 +47441,193 @@ const KEY_ME = 'golf:me-name';
 // Phase 2 (Cloud): "me" (which roster player this account IS) is PER-ACCOUNT,
 // stored on the user's profile so it follows them across devices and never
 // collides with another friend's "me". Guests fall back to localStorage.
+// ---- v1150: WHY THIS FUNCTION IS SHAPED LIKE THIS -------------------------
+// Identity in this app is a NAME, and until now that name had exactly one source
+// (the profiles read below) and one durable anchor (the localStorage cache). When
+// both came up empty this returned '' — the same answer it gives a user who
+// genuinely has no linked player. About 140 call sites read that empty as the
+// second meaning. Two were hardened individually after each caused a real incident:
+// v963 (locked out behind a name prompt after a round at the course) and v1149
+// (shown the brand-new-user prompts after an update, where skipping the handicap
+// question wrote 0 over a stored handicap).
+//
+// An audit of the other ~138 found the same assumption throughout, including writes
+// with no undo in the UI: posting a brag to the crew feed under another player's
+// name, pushing an empty roster row and re-pointing profiles.my_player at it,
+// writing null over player_name on the durable stats backup, and re-archiving
+// rounds the user deliberately deleted. Patching 140 sites one at a time is a
+// queue, not a fix. So the fix is here:
+//
+//   1. Remember the last good answer for the session, so a later blip cannot
+//      un-know something already established. Keyed to the auth user id — an
+//      answer belongs to ONE account and must never survive into the next one.
+//   2. Retry once before conceding; most failures here are a cold-launch blip.
+//      A recent failure is memoised briefly so 140 call sites do not each pay for
+//      re-discovering the same outage.
+//   3. Fall back to the roster row matched by ACCOUNT EMAIL — a genuine second
+//      identity source that does not depend on the read that just failed. Read
+//      from the LOCAL roster copy only (see the deadlock note below), and kept in
+//      memory only: it is an inference, not a fact about the server, so it must
+//      never be written to the cache that the fast path treats as trusted.
+//   4. Keep _meNameReadFailed honest and expose bgMeNameTrusted(), so the handful
+//      of callers that must be certain before writing still can.
+//
+// A TRUSTED empty is still honoured and still clears the session memory: the read
+// succeeded and my_player really is null, so unlinking keeps working. The whole
+// change is scoped to the UNTRUSTED empty.
+//
+// DEADLOCK NOTE — do not "improve" step 3 into a getPlayerRoster() call. That path
+// runs _getPlayerRosterUncached() → topUpMyRoundsFromBackup() → getMeName(), and
+// getPlayerRoster coalesces concurrent callers onto one in-flight promise. Calling
+// it from in here makes that promise await itself: it never settles, the roster
+// in-flight flag is never cleared, and every later getMeName AND getPlayerRoster in
+// the session hangs. The local snapshot below has no such edge.
+//
+// CACHE OWNERSHIP — KEY_ME has never recorded WHICH account it belongs to, and the
+// only thing that clears it on an account switch is resetSessionIdentity(), which
+// runs from signOutUser() and from a uid-change branch gated on an IN-MEMORY
+// _lastAuthUid. After a refresh-token expiry or a cleared session there is no
+// sign-out and no remembered uid, so the previous account's name sits on disk and
+// the fast path below hands it to whoever signs in next. That is pre-existing, but
+// v1150 makes trust a load-bearing signal (bgMeNameTrusted gates irreversible
+// writes), so serving an unowned cache as TRUSTED would have been a new hole.
+// KEY_ME_UID stamps the cache with the account whose confirmed read produced it:
+//   • stamp matches   → the cache is ours, and trusted.
+//   • stamp mismatches→ it is someone else's; ignore it and go ask.
+//   • no stamp        → a cache from before this build, or one written offline by
+//                       setMeName. Serve it (it is almost always right) but do NOT
+//                       claim it is server-confirmed.
+const KEY_ME_UID = 'golf:me-name-uid';
+var _meNameLastGood = null;     // { uid, name } established this session
+var _meNameFailAt = 0;          // when the profiles read last came back broken
+const ME_FAIL_MEMO_MS = 10000;  // don't re-probe a known outage for every call site
+function bgMeNameTrusted() { return !_meNameReadFailed; }
+function _meStampCache(uid, name) {
+  try { if (name) localStorage.setItem(KEY_ME, name); } catch (e) {}
+  try { if (uid) localStorage.setItem(KEY_ME_UID, uid); } catch (e) {}
+}
+function _meLastGoodFor(uid) {
+  return (_meNameLastGood && uid && _meNameLastGood.uid === uid) ? _meNameLastGood.name : null;
+}
+// The user's own roster row, resolved WITHOUT a name: findMyRosterPlayer matches on
+// the account email first. Reads the local roster snapshot directly — no cloud, no
+// getPlayerRoster(), so it cannot recurse or block.
+function _meNameFromLocalRoster() {
+  try {
+    const raw = localStorage.getItem(KEY_PLAYER_ROSTER);
+    if (!raw) return null;
+    const ros = JSON.parse(raw);
+    if (!Array.isArray(ros)) return null;
+    const mine = findMyRosterPlayer(ros, null);
+    return (mine && mine.name) ? mine.name : null;
+  } catch (e) { return null; }
+}
+// v1151: every name that means "me" on this device, best first.
+//
+// profiles.my_player is the primary answer and usually the only one needed. But it
+// can be pointing at the WRONG roster player — Tyler's account was linked to
+// "Simplistic Fishing" (his Google display name, adopted at signup) while his real
+// 60-round history sat on "Tyler OConnor". A single-name identity meant every
+// "is this me?" test in the app answered no: the GPS score pill resolved to nobody
+// and read even par for eighteen holes, and his finished round was filtered out of
+// his own Rounds list.
+//
+// The roster row carrying this ACCOUNT'S EMAIL is a second, independent answer to the
+// same question — and unlike my_player it cannot point at someone else, because the
+// email is the one unique thing in a roster entry. Callers that ask "which of these
+// players is me?" should accept either. Synchronous and local: safe on hot paths.
+function bgMyNames() {
+  const out = [];
+  try { const c = (localStorage.getItem(KEY_ME) || '').trim(); if (c) out.push(c); } catch (e) {}
+  try { const r = _meNameFromLocalRoster(); if (r) out.push(r); } catch (e) {}
+  const seen = new Set(), res = [];
+  out.forEach(function (n) {
+    const k = normalizeNameSegment(n);
+    if (k && !seen.has(k)) { seen.add(k); res.push(n); }
+  });
+  return res;
+}
 async function getMeName() {
   if (isSignedIn() && supa && _authUser) {
+    const _uid = _authUser.id;
     // Fast path: serve the cached link instantly, refresh in the background.
     // getMeName sits on the hot "start a round" path and was doing a Supabase
     // round-trip on EVERY call (several per start). my_player almost never changes
     // mid-session, setMeName keeps the cache current when it does, and the async
     // refresh below self-heals if it was changed on another device.
-    let cached = null;
+    let cached = null, _cacheUid = null;
     try { cached = localStorage.getItem(KEY_ME) || null; } catch (e) {}
+    try { _cacheUid = localStorage.getItem(KEY_ME_UID) || null; } catch (e) {}
+    const _cacheForeign = !!(cached && _cacheUid && _cacheUid !== _uid);
+    if (_cacheForeign) cached = null;   // another account's cache — never serve it
     if (cached) {
+      // Only a cache this account's own confirmed read produced counts as trusted.
+      // An unstamped one is still served (it is nearly always right) but leaves the
+      // trust flag alone, so the guards that gate irreversible writes stay cautious.
+      if (_cacheUid === _uid) { _meNameReadFailed = false; _meNameLastGood = { uid: _uid, name: cached }; }
       try {
-        supa.from('profiles').select('my_player').eq('id', _authUser.id).maybeSingle()
-          .then(function (r) { var mp = r && r.data && r.data.my_player; if (mp && mp !== cached) { try { localStorage.setItem(KEY_ME, mp); } catch (e) {} } })
+        supa.from('profiles').select('my_player').eq('id', _uid).maybeSingle()
+          .then(function (r) {
+            if (!r || r.error) return;                 // a failed refresh proves nothing
+            var mp = r.data && r.data.my_player;
+            if (!mp) return;                           // trusted-empty is handled on the slow path
+            _meStampCache(_uid, mp);                   // stamp even when unchanged — that is what earns trust
+            _meNameLastGood = { uid: _uid, name: mp };
+          })
           .catch(function () {});
       } catch (e) {}
       return cached;
     }
-    try {
-      // v963 CRITICAL (Tyler locked out of the app after a round at the course):
-      // this destructured ONLY `data` and ignored `error`. supabase-js does NOT throw
-      // on a network/RLS failure — it resolves with { data: null, error }. So a failed
-      // read returned null, which is byte-for-byte the same answer as "this user has
-      // genuinely never set a name". ensureMyNameSet() then hard-locked the app behind
-      // a name prompt whose Cancel button is deliberately disabled. Capture the error
-      // and record whether this answer is TRUSTWORTHY, so the gate can tell "no name"
-      // apart from "couldn't ask".
+    // v963 CRITICAL (Tyler locked out of the app after a round at the course):
+    // this used to destructure ONLY `data` and ignore `error`. supabase-js does NOT
+    // throw on a network/RLS failure — it resolves with { data: null, error }, so a
+    // failed read returned null, byte-for-byte the same answer as "never set a name".
+    const _readMy = async function () {
       const { data, error } = await supa.from('profiles')
-        .select('my_player').eq('id', _authUser.id).maybeSingle();
-      _meNameReadFailed = !!error;
-      if (data && data.my_player) {
-        try { localStorage.setItem(KEY_ME, data.my_player); } catch (e) {}
-        return data.my_player;
+        .select('my_player').eq('id', _uid).maybeSingle();
+      return { mp: (data && data.my_player) || null, error: error || null };
+    };
+    // A failure we already established moments ago is not worth re-establishing at
+    // every one of ~140 call sites — go straight to the fallbacks.
+    const _recentlyFailed = _meNameReadFailed && (Date.now() - _meNameFailAt) < ME_FAIL_MEMO_MS;
+    if (!_recentlyFailed) {
+      let _r;
+      try { _r = await _readMy(); } catch (e) { _r = { mp: null, error: e || true }; }
+      if (_r.error) {
+        // One retry. The failures behind both prior incidents were transient — a
+        // cold launch, a weak signal at the course — and a second ask answers them.
+        // Only reached on a cache miss, so this never sits on the hot path.
+        try { await new Promise(function (res) { setTimeout(res, 400); }); } catch (e) {}
+        try { _r = await _readMy(); } catch (e) { _r = { mp: null, error: e || true }; }
       }
-      if (!error) return null; // signed in, read SUCCEEDED, genuinely not linked → picker
-    } catch (e) { _meNameReadFailed = true; /* fall through to local cache */ }
+      _meNameReadFailed = !!_r.error;
+      if (_r.error) _meNameFailAt = Date.now();
+      if (_r.mp) {
+        _meStampCache(_uid, _r.mp);
+        _meNameLastGood = { uid: _uid, name: _r.mp };
+        return _r.mp;
+      }
+      if (!_r.error) {
+        // Signed in, read SUCCEEDED, genuinely not linked → the picker. Drop the
+        // session memory too, so an unlink can never be undone by a stale answer.
+        _meNameLastGood = null;
+        return null;
+      }
+    }
+    // ---- The read did not come back. Never answer "no name" from that. --------
+    const _known = _meLastGoodFor(_uid);
+    if (_known) return _known;
+    const _fromRoster = _meNameFromLocalRoster();
+    if (_fromRoster) {
+      // In MEMORY only. Writing this to KEY_ME would make the fast path above serve
+      // it as a trusted, server-confirmed link forever — including for a user who is
+      // genuinely unlinked, or one who unlinked on another device.
+      _meNameLastGood = { uid: _uid, name: _fromRoster };
+      return _fromRoster;
+    }
+    // Nothing left to try. The tail below reads KEY_ME raw, so a cache we rejected
+    // as another account's would sneak back in through it — answer null instead.
+    if (_cacheForeign) return null;
   }
   return await safeGet(KEY_ME, false);
 }
@@ -47637,13 +47884,23 @@ async function syncMyStatsToCloud(roster, visOverride){
       }
     } catch (e) { console.warn('syncMyStatsToCloud: cloud read failed — skipping upsert (will retry)', e); return; }
     if (!stats.length && !_cloudEmptyConfirmed) return;   // never shrink the backup to empty without confirmation
-    const _up = await supa.from('player_stats').upsert({
+    // v1150: player_name used to be written as null whenever the identity read
+    // failed. Every name-keyed reader in this file skips rows without one
+    // (fetchPlayerCloudStats, the crew aggregate, mergedPlayerHistory), so a single
+    // blip made the user's durable stats backup invisible to all of them until
+    // something happened to rewrite the column. A name we could not read is not a
+    // name change: omit the key entirely and the upsert leaves the stored value
+    // alone. (The stats array itself is already protected by the v935 union +
+    // _cloudEmptyConfirmed guard above; this closes the same hole on the name.)
+    const _statsRow = {
       user_id: _authUser.id,
       player_name: meNm || (me && me.name) || null,
       stats,
       visibility: visOverride || statsVisibilityLocal(),
       updated_at: new Date().toISOString()
-    }, { onConflict: 'user_id' });
+    };
+    if (_statsRow.player_name == null) delete _statsRow.player_name;
+    const _up = await supa.from('player_stats').upsert(_statsRow, { onConflict: 'user_id' });
     if (_up && _up.error) console.warn('syncMyStatsToCloud: upsert failed', _up.error);
     else { try { _bgStatsCacheBust(); } catch (e) {} }   // v963: my backup changed — drop the 30s memo so the next board read sees it
   } catch (e) { console.warn('syncMyStatsToCloud failed', e); }
@@ -50142,16 +50399,32 @@ async function gameHasMe(g) {
 // commas) — cheap pre-filter before the full game is even loaded.
 function recentRowHasName(r, meName) {
   if (!meName || !r || !r.players) return true;
-  const meParts = String(meName).trim().split(/\s+/);
-  const meFull = normalizeNameSegment(meName);
-  const meFirst = normalizeNameSegment(meParts[0]);
-  return String(r.players).split(',').some(n => {
-    const nn = String(n).trim();
-    if (normalizeNameSegment(nn) === meFull) return true;
-    const parts = nn.split(/\s+/);
-    if (parts.length === 1 || meParts.length === 1) return normalizeNameSegment(parts[0]) === meFirst;
-    return false;
-  });
+  // v1151: match on ANY name that means me, not just the linked one. With a
+  // mislinked account this filter hid the user's own rounds from their own Rounds
+  // list — Tyler finished 18 holes at Woodbridge and the round simply was not there,
+  // because the row read "Tyler OConnor, Rolo Castillo" and his account said
+  // "Simplistic Fishing". Broadening a filter can only ever show MORE of the user's
+  // own rounds, never someone else's: every candidate still has to appear in this
+  // row's player list.
+  const _cands = [meName];
+  try {
+    bgMyNames().forEach(function (n) {
+      if (normalizeNameSegment(n) !== normalizeNameSegment(meName)) _cands.push(n);
+    });
+  } catch (e) {}
+  const _hits = function (cand) {
+    const meParts = String(cand).trim().split(/\s+/);
+    const meFull = normalizeNameSegment(cand);
+    const meFirst = normalizeNameSegment(meParts[0]);
+    return String(r.players).split(',').some(n => {
+      const nn = String(n).trim();
+      if (normalizeNameSegment(nn) === meFull) return true;
+      const parts = nn.split(/\s+/);
+      if (parts.length === 1 || meParts.length === 1) return normalizeNameSegment(parts[0]) === meFirst;
+      return false;
+    });
+  };
+  return _cands.some(_hits);
 }
 
 // Helper: open a recent game. Rounds YOU are in resume normally; rounds you
@@ -52326,9 +52599,29 @@ async function saveMyName() {
   if (/^player$/i.test(first)) { showToast('Please enter your real name'); return; }
   if (looksLikeJunkName(first, false)) { showToast('Please enter a real first name'); return; }
   if (looksLikeJunkName(last, true)) { showToast('Please enter a real last name'); return; }
-  _nameRequired = false;   // a valid name is being saved — clear the mandatory gate
   const newName = combineName(first, last);
   const oldMe = await getMeName();
+  // v1150: oldMe is how this function finds the row it is meant to RENAME. Empty,
+  // it finds nothing — and then either refuses the user's own name ("already taken
+  // by another player", because _myCodes ends up empty so _knownToMe() rejects their
+  // own history) or pushes a brand-new empty roster entry and points
+  // profiles.my_player at it, orphaning the score history, handicap and money ledger
+  // on a row nothing links to any more. Renaming on an identity we could not read is
+  // not a guess worth making; the modal stays open so they can simply try again.
+  // Deliberately ABOVE the _nameRequired reset below — clearing the mandatory-name
+  // gate without having saved a name would let the lockout modal re-fire later with
+  // no record that the user had already answered it.
+  // Scoped to a RENAME. _nameRequired is set only by the blank-name gate, i.e. a
+  // user who has no linked player yet — there is no row to orphan, and refusing
+  // them would block a brand-new user from setting their name on a weak signal at
+  // the course, which is the exact situation the rest of this file bends over
+  // backwards to support. Everything else reaching here with an empty oldMe is an
+  // established account whose identity we simply could not read.
+  if (!oldMe && !_nameRequired && typeof bgMeNameTrusted === 'function' && !bgMeNameTrusted()) {
+    try { showToast("Couldn't reach your profile — check your connection and try again"); } catch (e) {}
+    return;
+  }
+  _nameRequired = false;   // a valid name is being saved — clear the mandatory gate
   const roster = await getPlayerRoster();
   let entry = oldMe ? roster.find(p => p.name === oldMe) : null;
   // Same-name detection. Only offer to merge with UNCLAIMED players (no email).
@@ -71237,7 +71530,10 @@ async function init() {
       const _phEl = document.getElementById('roster-add-phone');
       const phone = _phEl ? String(_phEl.value || '').trim() : '';
       _rs.disabled = true; _rs.textContent = 'Saving…';
-      try { await upsertPlayerInRoster(first, last, hcp || 0, phone ? { phone: phone } : null); } catch (e) {}
+      // v1149: setHcp — the roster Add-player form is the ONE place a person
+      // deliberately types a handicap, so it is the one caller allowed to write
+      // one onto an entry that already exists. See upsertPlayerInRoster.
+      try { await upsertPlayerInRoster(first, last, hcp || 0, { setHcp: true, phone: phone || undefined }); } catch (e) {}
       try { if (_rosterT2Tid) await _rosterT2Add(combineName(first, last), hcp || 0); } catch (e) {}   // v664: tournament mode
       _rs.disabled = false; _rs.textContent = 'Save player';
       document.getElementById('roster-add-first').value = ''; document.getElementById('roster-add-last').value = ''; document.getElementById('roster-add-hcp').value = '';
@@ -71559,6 +71855,68 @@ async function init() {
       try { const _sb = $('btn-start-round'); if (_sb) _sb.disabled = false; } catch (e) {}
     }
   };
+  // v1151 — see the call site below. Offers to re-point this account at the roster
+  // player the user is actually playing as.
+  //
+  // The hard part is not offering it, it is NOT offering it wrongly: a scorer who
+  // enters a round for four buddies must never be asked "is Kevin Wells you?".
+  // Two pieces of evidence qualify a candidate, and nothing else does:
+  //   • the row carries THIS ACCOUNT'S EMAIL — definitive, it is already ours; or
+  //   • every round in my linked player's history is ALSO in the candidate's. A
+  //     strict superset means the two records cannot be different people: a buddy
+  //     shares SOME of my scorecards, only I share all of them. Requires at least
+  //     three of my own rounds so a brand-new account with one shared round cannot
+  //     trip it, and the candidate must carry no other account's email.
+  async function bgMaybeRelinkFromSetup(setup) {
+    if (typeof isSignedIn !== 'function' || !isSignedIn() || !supa || !_authUser) return;
+    if (!setup || !Array.isArray(setup.players) || !setup.players.length) return;
+    let me = null;
+    try { me = await getMeName(); } catch (e) { return; }
+    if (!me) return;                                                    // not linked yet — autoLinkMyPlayer owns that case
+    if (typeof bgMeNameTrusted === 'function' && !bgMeNameTrusted()) return;   // never act on an identity we could not read
+    const norm = s => normalizeNameSegment(String(s || ''));
+    const meN = norm(me);
+    if (setup.players.some(p => norm(p && p.name) === meN)) return;     // I am already in this round under my linked name
+    let roster = [];
+    try { roster = await getPlayerRoster(); } catch (e) { return; }
+    if (!Array.isArray(roster) || !roster.length) return;
+    const codesOf = p => new Set((((p && p.scoreHistory) || [])).map(r => r && r.gameCode).filter(Boolean));
+    const mine = roster.find(x => x && norm(x.name) === meN) || null;
+    const myCodes = codesOf(mine);
+    const myEmail = String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').trim().toLowerCase();
+    let target = null;
+    for (let i = 0; i < setup.players.length && !target; i++) {
+      const pn = norm(setup.players[i] && setup.players[i].name);
+      if (!pn || pn === meN) continue;
+      const row = roster.find(x => x && norm(x.name) === pn);
+      if (!row) continue;
+      const rowEmail = String((row.email || '')).trim().toLowerCase();
+      if (rowEmail && rowEmail !== myEmail) continue;                   // belongs to another account — never touch it
+      if (rowEmail && rowEmail === myEmail) { target = row; continue; }  // definitive
+      if (myCodes.size < 3) continue;                                   // too little history to prove anything
+      const theirs = codesOf(row);
+      let coversAll = true;
+      myCodes.forEach(function (c) { if (!theirs.has(c)) coversAll = false; });
+      if (coversAll) target = row;
+    }
+    if (!target) return;
+    const n = ((target.scoreHistory || []).length);
+    const ok = await uiConfirm(
+      'You\u2019re about to play as "' + target.name + '", but your account is linked to "' + me + '".\n\n' +
+      'Make "' + target.name + '" your player? Your scores, handicap and saved rounds follow that name from now on \u2014 including the ' + n + ' round' + (n === 1 ? '' : 's') + ' already on it.',
+      { title: 'Is "' + target.name + '" you?', okLabel: 'Yes, that\u2019s me', cancelLabel: 'Keep ' + me, danger: false });
+    if (!ok) return;
+    try {
+      target.email = myEmail || target.email || '';
+      target.claimedBy = myEmail || '';
+      target.claimedAt = Date.now();
+      await savePlayerRoster(roster);
+    } catch (e) {}
+    try { await setMeName(target.name); } catch (e) {}
+    try { renderAccountUI(); } catch (e) {}
+    try { showToast('You\u2019re ' + target.name + ' now \u2713'); } catch (e) {}
+  }
+
   async function _bgStartRoundInner() {
     // First, intercept any roster duplicates with the prevention modal. If
     // the user cancels at any point in this walk-through, abort start.
@@ -71568,6 +71926,13 @@ async function init() {
     if (!setup) return;
     if (setup.noCourse) { await uiConfirm('Pick a course before you start the round — search the library above or add a new one. A course is required so scores, handicaps and bets stay accurate.', { title: 'Course required', okLabel: 'OK', cancelLabel: 'Close', danger: false }); showToast('Select a course to start the round'); return; }
     if (!(await confirmSetupWarnings(setup))) return;
+    // v1151 (Tyler, 8/21): "it kept wanting to start my round as Simplistic Fishing
+    // instead of my name, and when I changed my name back to Tyler O'Connor it put me
+    // in as a guest." Typing your real name over the prefilled one used the roster
+    // player it belongs to — but left the ACCOUNT pointed at the old one, so nothing
+    // downstream recognised you. Offer to fix the link here, at the one moment the
+    // user has just told us who they are. Runs before the loader so it can prompt.
+    try { await bgMaybeRelinkFromSetup(setup); } catch (e) {}
     // Cap open rounds per user (default 5). Forces finishing/deleting old rounds
     // instead of letting unfinished ones pile up. Edit-live saves use a different
     // button, so this only gates brand-new rounds.
@@ -78975,6 +79340,19 @@ async function maybeClaimBoundSlot() {
     let existing = null;
     try { existing = await getMeName(); } catch (e) { return false; }
     if (existing && String(existing).trim() && !/^player$/i.test(String(existing).trim())) return false;
+    // v1150: the THROW path already declined (`catch { return false }`) but the
+    // EMPTY path did not — and an unreadable identity is exactly what this guard
+    // exists to catch. What follows on a confirm is setMeName() +
+    // upsertPlayerInRoster() + stamping tokUsedBy on the host's round: this account
+    // re-pointed at somebody else's slot, with their name and handicap, and the
+    // host's round marked claimed. There is no undo for that in the UI.
+    // Put the invite token BACK before declining — it was consumed above, and
+    // without it the next attempt loses the one-tap bound-slot path (v1041) and
+    // drops the user into the generic "Which player are you?" picker instead.
+    if (!existing && typeof bgMeNameTrusted === 'function' && !bgMeNameTrusted()) {
+      try { if (tok) { localStorage.setItem('golf:pending-join-tok', tok); _pendingJoinTok = tok; } } catch (e) {}
+      return false;
+    }
     const g = await loadGame(String(code).trim().toUpperCase());
     if (!g || !Array.isArray(g.players) || !g.players.length) return false;
     const myEmail = String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').toLowerCase();
