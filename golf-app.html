@@ -7183,6 +7183,7 @@
     <div style="margin-top:14px">
       <button id="summary-share" class="full" style="background:var(--surface);color:var(--accent);border:1px solid var(--accent);border-radius:12px;padding:11px;font-weight:700">📤 Share results</button>
     </div>
+    <div id="summary-t2day" style="margin-top:8px;display:none"></div>
     <div id="summary-tourney-wrap" style="margin-top:8px;display:none">
       <button id="summary-tourney" class="full" style="font-weight:700;background:linear-gradient(135deg,#1d6fd6,var(--accent));color:#fff;border:none;border-radius:12px;padding:11px">🏆 Tournament results</button>
     </div>
@@ -8167,7 +8168,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1153';
+const BG_BUILD = 'v2026.11.1154';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -43399,6 +43400,7 @@ async function bgFinishRoundFlow() {
     // Fill in the wager outcomes (won/owe + ledger) once the bets are fetched.
     try { fillSummaryWagers(g); } catch (e) { console.warn('fillSummaryWagers failed:', e); }
     try { fillSummaryPayoutBoard(g); } catch (e) { console.warn('fillSummaryPayoutBoard failed:', e); }
+    try { fillSummaryT2Day(g); } catch (e) { console.warn('fillSummaryT2Day failed:', e); }   // v1154: Day N of M + cup standings + next day
     // 💧 "Do the Dance" finale — tap-to-dismiss, under the Sip-time pop-ups toggle.
     if (typeof maybeShowDanceFinale === 'function') { try { maybeShowDanceFinale(g); } catch (e) { console.warn('dance finale failed:', e); } }
   }
@@ -56083,6 +56085,26 @@ async function t2ClaimSlot(token) {
 }
 
 // ---- days ----
+// v1154: which cup FORMAT a day is, read off the games the director configured in
+// Configure Day. Drives cart building (1v1 twosomes vs 2v2 foursomes) and the
+// launch fallback. Team/head-to-head games win over points pools; nothing
+// recognisable → null (leave the stored format alone).
+function t2FormatFromGames(games) {
+  try {
+    const g = games || {};
+    const has = (k) => !!g[k];
+    const two = (k) => has(k) && g[k].teamMode !== '4man';
+    if (two('ryderCup')) { const c = g.ryderCup; return (c.seg1 === 'altshot' && c.seg2 === 'altshot' && c.seg3 === 'altshot') ? 'altshot' : 'rydercup'; }
+    if (two('scramble')) return 'scramble';
+    if (two('teamMatch') || two('teamLowball')) return 'bestball';
+    if (two('teamQuota')) return 'teamquota';
+    if (has('match')) return 'singles';
+    if (has('stableford')) return (g.stableford.teamMode === '2man' || g.stableford.team) ? 'teamstableford' : 'stableford';
+    if (has('quota')) return 'quota';
+    if (has('stroke')) return 'stroke';
+    return null;
+  } catch (e) { return null; }
+}
 async function t2SetDays(tid, days) {
   // days: [{ dayNumber, format, playDate }]
   // Returns null on success, or an error message string on failure.
@@ -56669,7 +56691,7 @@ let _t2Current = null;
 let _t2DeclinedIds = new Set();  // v690: user_ids who DECLINED their invite to _t2Current (director-visible "✕ Declined" tag)
 let _pendingTjoin = null;
 function t2esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-const T2_FORMATS = [['singles','Singles (1v1)'],['bestball','Best Ball (2v2)'],['scramble','Scramble (2v2)'],['altshot','Alt Shot (2v2)'],['rydercup','Ryder Cup (2v2, 3 formats)'],['quota','Quota (points)'],['teamquota','Team Quota'],['stroke','Stroke (leaderboard)']];
+const T2_FORMATS = [['singles','Singles (1v1)'],['bestball','Best Ball (2v2)'],['scramble','Scramble (2v2)'],['altshot','Alt Shot (2v2)'],['rydercup','Ryder Cup (2v2, 3 formats)'],['quota','Quota (points)'],['teamquota','Team Quota'],['stableford','Stableford (1v1 points)'],['teamstableford','Team Stableford (2v2 points)'],['stroke','Stroke (leaderboard)']];
 
 function wireT2() {
   if (_t2Wired) return;
@@ -58675,7 +58697,7 @@ async function t2BuildGroupsForDay(dayId, dayNumber, byHcp) {
   const A = prep(players.filter(p => p.team === 'A'));
   const B = prep(players.filter(p => p.team === 'B'));
   const groups = []; const left = [];
-  if (fmt === 'singles') {
+  if (fmt === 'singles' || fmt === 'stableford') {   // v1154: Stableford day = 1v1 pairs
     // byHcp: both sides sorted → low plays low, high plays high (fair matches)
     const n = Math.min(A.length, B.length);
     for (let i2 = 0; i2 < n; i2++) groups.push([{ p: A[i2], team: 'A' }, { p: B[i2], team: 'B' }]);
@@ -60880,6 +60902,10 @@ async function t2LaunchDayRounds(courseId) {
         games.quota = { mode: 'pool', net: true, basis: 'auto', value: 0, buyin: 0, payout: 'winner' };
       } else if (fmt === 'teamquota') {
         games.teamQuota = { mode: 'pool', net: true, basis: 'auto', value: 0, buyin: 0, teamA: Aids, teamB: Bids, teamAKey: _kA, teamBKey: _kB };
+      } else if (fmt === 'stableford' || fmt === 'teamstableford') {
+        // v1154: Stableford as a CUP day — points only (no per-group money); the cup
+        // engine compares A vs B inside the cart (1v1 pairs, or 2v2 combined).
+        games.stableford = { mode: 'pool', net: true, value: 0, buyin: 0, payout: 'winner', participants: gp.map(p => p.id), participantNames: gp.map(p => p.name), _t2field: true, _t2fieldCount: (players || []).length };
       } // 'stroke' = leaderboard-only day: no game pre-configured
     }
     // v1022 (Tyler): "it allows me to log a long putt on one user but on my other
@@ -61142,7 +61168,7 @@ async function openT2GroupBoardReadOnly(code) {
 // The group's live editor strips these from the form (a group must never edit
 // the event's games — Tyler: tournament games are admin-only via Events) and
 // re-attaches them untouched on save.
-const _T2_FMT_GAMES = { singles: ['match'], bestball: ['teamMatch'], scramble: ['scramble'], altshot: ['ryderCup'], rydercup: ['ryderCup'], quota: ['quota'], teamquota: ['teamQuota'] };
+const _T2_FMT_GAMES = { singles: ['match'], bestball: ['teamMatch'], scramble: ['scramble'], altshot: ['ryderCup'], rydercup: ['ryderCup'], quota: ['quota'], teamquota: ['teamQuota'], stableford: ['stableford'], teamstableford: ['stableford'] };
 // v1030: game keys that are configured at the EVENT level but have no field-wide
 // settlement engine, so they must still settle inside each group's own round.
 // Stripping them as "tournament-owned" just deletes the money (see v1030 note in
@@ -61190,6 +61216,270 @@ async function openT2GroupSideBets(code) {
 // count toward a projected score. Every player's gross/net feeds the
 // stroke leaderboard regardless of format.
 // ============================================================
+// v1154: every cup match inside ONE cart, from the games on the round.
+// Returns [{a, b, decided, label, fmt}] where a/b are the cart-local sides
+// (gk[0] / gk[1]) and each entry is worth exactly one point (½ each on a tie).
+//   1. Explicit head-to-head games (Match Play 1v1s — one point PER pairing —
+//      Team Match, Team Low Ball, Scramble, Ryder Cup, Team Quota).
+//   2. Otherwise a POINTS day: Stableford (higher wins) or Quota (points − quota,
+//      higher wins), 1v1 by cart slot order, or 2v2 combined on a team day.
+//   3. Otherwise a plain stroke day: net strokes 1v1 (lower wins) — so every day
+//      of a team trip scores the cup, as Tyler asked. One-day (no-team) events
+//      never get here (od guard) — they stay leaderboard-only.
+function _t2CartCupMatches(g, fmt, finished, rHoles, gk, members, od) {
+  const out = [];
+  const games = (g && g.games) || {};
+  const players = (g && g.players) || [];
+  const teamByPid = {}, slotByPid = {};
+  (members || []).forEach(m => { if (m && m.tournament_player_id) { teamByPid[m.tournament_player_id] = m.team; slotByPid[m.tournament_player_id] = m.slot || 0; } });
+  const sideOf = (p) => { if (!p || !p.t2pid) return null; const tk = teamByPid[p.t2pid]; return tk === gk[0] ? 'a' : (tk === gk[1] ? 'b' : null); };
+  const first = (nm) => String(nm || '').trim().split(/\s+/)[0] || '?';
+  const split = (aWins, bWins) => aWins ? [1, 0] : (bWins ? [0, 1] : [0.5, 0.5]);
+  // Team games stamp which REAL team their local A is (teamAKey); swap when it is gk[1].
+  const sw = (cfg, ab) => (cfg && cfg.teamAKey && cfg.teamAKey === gk[1]) ? [ab[1], ab[0]] : ab;
+  const push = (ab, decided, label, key) => out.push({ a: ab[0], b: ab[1], decided: !!decided, label: label, fmt: key });
+  // ---- 1. explicit head-to-head games ----
+  try {
+    if (games.match) {
+      const r = calcMatch(g);
+      ((r && r.matches) || []).forEach((m, idx) => {
+        if (!m || !(m.played > 0)) return;
+        const pa = players.find(p => p.id === m.aId), pb = players.find(p => p.id === m.bId);
+        let sa = sideOf(pa), sb = sideOf(pb);
+        // Rounds launched before t2pid was stamped: the first pairing is the cart's A vs B.
+        if ((!sa || !sb) && fmt === 'singles' && idx === 0 && !out.length) { sa = 'a'; sb = 'b'; }
+        if (!sa || !sb || sa === sb) return;   // a friendly inside one team / unknown → not a cup match
+        let ab = split(m.finalUp > 0, m.finalUp < 0);
+        if (sa === 'b') ab = [ab[1], ab[0]];
+        const lbl = first(m.a) + ' v ' + first(m.b) + ': ' + (m.complete ? (m.winner === 'AS' ? 'halved' : (first(m.winner) + ' ' + (m.closedScore || 'wins'))) : ('thru ' + m.played));
+        push(ab, m.complete, lbl, 'singles');
+      });
+    }
+    if (games.teamMatch && games.teamMatch.teamMode !== '4man') {
+      const r = calcTeamMatch(g); const rr = r && r.result;
+      if (rr && rr.played > 0) push(sw(games.teamMatch, split(rr.aHolesWon > rr.bHolesWon, rr.bHolesWon > rr.aHolesWon)), rr.complete || finished, 'Team match ' + (rr.complete || finished ? 'final ' : 'thru ' + rr.played + ' · ') + rr.aHolesWon + '–' + rr.bHolesWon, 'bestball');
+    }
+    if (games.teamLowball && games.teamLowball.teamMode !== '4man' && typeof calcTeamLowball === 'function') {
+      const r = calcTeamLowball(g); const rr = r && r.result;
+      if (rr && rr.played > 0) push(sw(games.teamLowball, split(rr.aTotal < rr.bTotal, rr.bTotal < rr.aTotal)), rr.complete || finished, 'Low ball ' + (rr.complete || finished ? 'final ' : 'thru ' + rr.played + ' · ') + rr.aTotal + '–' + rr.bTotal, 'bestball');
+    }
+    if (games.scramble && games.scramble.teamMode !== '4man') {
+      const r = calcScramble(g);
+      if (r && r.holesComplete > 0) {
+        const byStroke = games.scramble.scoring === 'stroke';
+        const ab = byStroke ? split(r.aTotal < r.bTotal, r.bTotal < r.aTotal) : split(r.aHolesWon > r.bHolesWon, r.bHolesWon > r.aHolesWon);
+        const dec = r.holesComplete >= rHoles || finished;
+        push(sw(games.scramble, ab), dec, 'Scramble ' + (dec ? 'final ' : 'thru ' + r.holesComplete + ' · ') + (byStroke ? r.aTotal + '–' + r.bTotal : r.aHolesWon + '–' + r.bHolesWon), 'scramble');
+      }
+    }
+    if (games.ryderCup) {
+      const r = calcRyderCup(g);
+      const playedH = r ? (r.holeResults || []).filter(x => x && x.result !== null).length : 0;
+      if (r && playedH > 0) { const dec = playedH >= rHoles || finished; push(sw(games.ryderCup, split(r.aPoints > r.bPoints, r.bPoints > r.aPoints)), dec, 'Ryder Cup ' + (dec ? 'final ' : 'thru ' + playedH + ' · ') + r.aPoints + '–' + r.bPoints, 'rydercup'); }
+    }
+    if (games.teamQuota && games.teamQuota.teamMode !== '4man') {
+      const r = calcTeamQuota(g);
+      const playedH = r ? (r.holePoints || []).filter(x => x !== null).length : 0;
+      if (r && playedH > 0 && r.aTotal != null && r.bTotal != null) { const dec = playedH >= rHoles || finished; push(sw(games.teamQuota, split(r.aTotal > r.bTotal, r.bTotal > r.aTotal)), dec, 'Team quota ' + (dec ? 'final ' : 'thru ' + playedH + ' · ') + (r.aTotal > 0 ? '+' : '') + r.aTotal + ' / ' + (r.bTotal > 0 ? '+' : '') + r.bTotal, 'teamquota'); }
+    }
+  } catch (e) { console.warn('t2 cart cup (explicit)', e); }
+  if (out.length || od) return out;
+  // ---- 2/3. points day or stroke day: A vs B inside the cart ----
+  try {
+    const A = players.filter(p => sideOf(p) === 'a').sort((x, y) => (slotByPid[x.t2pid] || 0) - (slotByPid[y.t2pid] || 0));
+    const B = players.filter(p => sideOf(p) === 'b').sort((x, y) => (slotByPid[x.t2pid] || 0) - (slotByPid[y.t2pid] || 0));
+    if (!A.length || !B.length) return out;
+    const holesOf = (p) => ((g.scores && g.scores[p.id]) || []).filter(v => v != null).length;
+    let metric, higherWins, key, name;
+    if (fmt === 'stableford' || fmt === 'teamstableford' || games.stableford) {
+      const net = !(games.stableford && games.stableford.net === false);
+      metric = (p) => { let pts = 0; for (let h = 0; h < 18; h++) { const raw = (g.scores && g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null; if (raw === null) continue; const par = parFor(g, p.id, h); const sc = (net && g.sis) ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), par, g.hcpRules) : raw; pts += Math.max(0, 2 - (sc - par)); } return pts; };
+      higherWins = true; key = (fmt === 'teamstableford') ? 'teamstableford' : 'stableford'; name = 'Stableford';
+    } else if (fmt === 'quota' || games.quota) {
+      const r = games.quota ? calcQuota(g) : null;
+      if (!r || !r.result) return out;
+      metric = (p) => (r.result[p.id] != null ? r.result[p.id] : null);
+      higherWins = true; key = 'quota'; name = 'Quota';
+    } else {
+      const totals = calcTotals(g);
+      metric = (p) => { const tt = totals[p.id]; return (tt && tt.count) ? (tt.net != null ? tt.net : tt.gross) : null; };
+      higherWins = false; key = 'stroke'; name = 'Net stroke';
+    }
+    const fmtV = (v) => (key === 'quota' && v > 0 ? '+' : '') + v;
+    const teamDay = (fmt === 'teamstableford' || fmt === 'bestball' || fmt === 'scramble' || fmt === 'altshot' || fmt === 'rydercup' || fmt === 'teamquota') && A.length > 1 && B.length > 1;
+    if (teamDay) {
+      const sum = (arr) => arr.reduce((acc, p) => { const v = metric(p); return acc + (v == null ? 0 : v); }, 0);
+      const hA = A.map(holesOf), hB = B.map(holesOf);
+      if (!hA.some(Boolean) && !hB.some(Boolean)) return out;
+      const av = sum(A), bv = sum(B);
+      const dec = finished || (hA.concat(hB).every(n => n >= rHoles));
+      push(split(higherWins ? av > bv : av < bv, higherWins ? bv > av : bv < av), dec, name + ' (team) ' + (dec ? 'final ' : 'thru ' + Math.min.apply(null, hA.concat(hB)) + ' · ') + fmtV(av) + ' / ' + fmtV(bv), key);
+    } else {
+      const n = Math.min(A.length, B.length);
+      for (let i = 0; i < n; i++) {
+        const pa = A[i], pb = B[i];
+        const ha = holesOf(pa), hb = holesOf(pb);
+        if (!ha && !hb) continue;
+        const av = metric(pa), bv = metric(pb);
+        if (av == null || bv == null) continue;
+        const dec = finished || (ha >= rHoles && hb >= rHoles);
+        push(split(higherWins ? av > bv : av < bv, higherWins ? bv > av : bv < av), dec, name + ' ' + first(pa.name) + ' v ' + first(pb.name) + ': ' + fmtV(av) + ' / ' + fmtV(bv) + (dec ? '' : ' thru ' + Math.min(ha, hb)), key);
+      }
+    }
+  } catch (e) { console.warn('t2 cart cup (points)', e); }
+  return out;
+}
+
+// v1154: load everything the cup engine needs for an event (same fetches
+// renderT2Home does) so the Results screen and the round summary can show the
+// identical standings without being on the tournament home.
+async function t2LoadCupStandings(t) {
+  const out = { t: t, players: [], days: [], groupsByDay: {}, membersByGroup: {}, standings: null };
+  try {
+    if (!t || !t.id) return out;
+    const _pMatches = Promise.resolve().then(() => t2GetMatches(t.id)).then(r => r, () => []);
+    const [players, days] = await Promise.all([t2GetPlayers(t.id).catch(() => []), t2GetDays(t.id).catch(() => [])]);
+    out.players = players || []; out.days = (days || []).slice().sort((a, b) => a.day_number - b.day_number);
+    await Promise.all(out.days.map(async d => {
+      const gs = await t2GetGroups(d.id).catch(() => []);
+      out.groupsByDay[d.day_number] = gs || [];
+      await Promise.all((gs || []).map(async g2 => { out.membersByGroup[g2.id] = await t2GetGroupMembers(g2.id).catch(() => []); }));
+    }));
+    let stored = []; try { stored = (await _pMatches) || []; } catch (e) { stored = []; }
+    out.standings = await t2ComputeStandings(t, out.days, out.groupsByDay, stored, out.membersByGroup);
+  } catch (e) { console.warn('t2LoadCupStandings', e); }
+  return out;
+}
+
+// v1154: day-by-day cup table — one row per team, one column per day, plus the
+// running total — and the per-match lines grouped under each day. Shared by the
+// tournament home, the Tournament Results screen and the round-complete summary.
+function _t2CupDayTableHtml(t, standings, days, opts) {
+  try {
+    if (!t || !standings || !standings.anyRounds) return '';
+    const o = opts || {};
+    const keys = (standings.teamKeys && standings.teamKeys.length) ? standings.teamKeys : ['A', 'B'];
+    const dayNums = (days || []).map(d => d.day_number).sort((a, b) => a - b);
+    const nDays = Math.max(dayNums.length, t.num_days || 1);
+    const cols = []; for (let i = 1; i <= nDays; i++) cols.push(i);
+    const per = {}; keys.forEach(k => { per[k] = { final: {}, proj: {} }; });
+    const byDayLines = {};
+    (standings.lines || []).forEach(l => {
+      const ka = l.teamA || 'A', kb = l.teamB || 'B';
+      [[ka, l.a], [kb, l.b]].forEach(pr => {
+        const k = pr[0]; if (!per[k]) per[k] = { final: {}, proj: {} };
+        if (l.final) per[k].final[l.day] = (per[k].final[l.day] || 0) + pr[1];
+        per[k].proj[l.day] = (per[k].proj[l.day] || 0) + pr[1];
+      });
+      (byDayLines[l.day] = byDayLines[l.day] || []).push(l);
+    });
+    const name = (k) => (typeof t2TeamName === 'function') ? t2TeamName(t, k) : (k === 'A' ? (t.team_a_name || 'Team A') : (k === 'B' ? (t.team_b_name || 'Team B') : 'Team ' + k));
+    const dot = (k) => (typeof t2TeamDot === 'function') ? (t2TeamDot(k) || '') : '';
+    const fmtPts = (v) => (v == null ? '–' : (Math.round(v * 2) / 2).toString());
+    const ranked = keys.slice().sort((x, y) => ((standings.points[y] || {}).final || 0) - ((standings.points[x] || {}).final || 0) || ((standings.points[y] || {}).proj || 0) - ((standings.points[x] || {}).proj || 0));
+    const dayMeta = (dn) => {
+      const d = (days || []).find(x => x.day_number === dn) || {};
+      const fmtL = (T2_FORMATS.find(f => f[0] === d.format) || [])[1] || '';
+      const crs = (t.settings && t.settings.dayCourses && t.settings.dayCourses[dn] && t.settings.dayCourses[dn].name) || '';
+      return { d: d, fmt: fmtL, course: crs, status: d.status || '' };
+    };
+    let h = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">';
+    h += '<tr style="font-size:11px;color:var(--text-muted)"><th style="text-align:left;padding:3px 4px">Team</th>' + cols.map(dn => '<th style="padding:3px 4px;text-align:right">D' + dn + '</th>').join('') + '<th style="padding:3px 4px;text-align:right">Total</th></tr>';
+    ranked.forEach((k, i) => {
+      const p = per[k] || { final: {}, proj: {} };
+      const tot = (standings.points[k] || {}).final || 0, proj = (standings.points[k] || {}).proj || 0;
+      h += '<tr style="border-top:1px solid var(--border)' + (i === 0 ? ';font-weight:700' : '') + '"><td style="padding:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px">' + dot(k) + ' ' + t2esc(name(k)) + '</td>';
+      cols.forEach(dn => {
+        const f = p.final[dn], pj = p.proj[dn];
+        const live = pj != null && (f == null || Math.abs(pj - f) > 0.001);
+        h += '<td style="padding:4px;text-align:right;color:' + (live ? 'var(--text-muted)' : 'inherit') + '">' + (f != null ? fmtPts(f) : '') + (live ? '<span style="font-size:10px"> (' + fmtPts(pj) + ')</span>' : (f == null ? '–' : '')) + '</td>';
+      });
+      h += '<td style="padding:4px;text-align:right;color:var(--accent);font-weight:700">' + fmtPts(tot) + (Math.abs(proj - tot) > 0.001 ? '<span style="font-size:10px;color:var(--text-muted)"> (' + fmtPts(proj) + ')</span>' : '') + '</td></tr>';
+    });
+    h += '</table></div>';
+    if (standings.anyLive) h += '<div class="small-text" style="color:var(--text-muted);margin-top:2px">Numbers in ( ) include matches still on the course.</div>';
+    if (!o.noLines) {
+      cols.forEach(dn => {
+        const ls = byDayLines[dn] || []; const m = dayMeta(dn);
+        if (!ls.length && !m.fmt && !m.course) return;
+        h += '<div style="margin-top:8px"><div class="small-text" style="font-weight:700">Day ' + dn + (m.course ? ' · ' + t2esc(m.course) : '') + (m.fmt ? ' · ' + t2esc(m.fmt) : '') + (m.status === 'complete' ? ' · ✓ complete' : '') + '</div>';
+        ls.slice().sort((x, y) => (x.group || 0) - (y.group || 0)).forEach(l => {
+          h += '<div class="small-text" style="padding:1px 0 1px 8px;' + (l.final ? '' : 'color:var(--text-muted);') + '">G' + l.group + ' ' + dot(l.teamA) + '–' + dot(l.teamB) + ' ' + fmtPts(l.a) + '–' + fmtPts(l.b) + ': ' + t2esc(l.label) + (l.final ? '' : ' (live)') + '</div>';
+        });
+        h += '</div>';
+      });
+    }
+    return h;
+  } catch (e) { console.warn('_t2CupDayTableHtml', e); return ''; }
+}
+
+// v1154: the round-complete summary tells the group where the trip stands —
+// "Day 2 of 4", this day's course/format, the cup table, and what's next.
+async function fillSummaryT2Day(g) {
+  const el = document.getElementById('summary-t2day');
+  if (!el) return;
+  el.style.display = 'none'; el.innerHTML = '';
+  try {
+    const tid = g && g.t2 && g.t2.tournamentId;
+    if (!tid || (typeof bgIsDeadEvent === 'function' && bgIsDeadEvent(tid))) return;
+    const _r = await t2GetX(tid); const t = _r && _r.data; if (!t) return;
+    if (typeof t2IsOneDay === 'function' && t2IsOneDay(t)) return;
+    const cup = await t2LoadCupStandings(t);
+    const nDays = t.num_days || 1;
+    const dayN = Number((g.t2 && g.t2.day) || 1);
+    const dRec = cup.days.find(x => x.day_number === dayN) || {};
+    const fmtL = (T2_FORMATS.find(f => f[0] === dRec.format) || [])[1] || '';
+    const crs = (t.settings && t.settings.dayCourses && t.settings.dayCourses[dayN] && t.settings.dayCourses[dayN].name) || '';
+    let h = '<div class="card" style="margin:0 0 10px;padding:10px;border:2px solid var(--accent)">';
+    h += '<div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:800">🏆 ' + t2esc(t.name || 'Tournament') + '</div><div class="small-text" style="font-weight:700;color:var(--accent)">Day ' + dayN + ' of ' + nDays + '</div></div>';
+    if (crs || fmtL) h += '<div class="small-text" style="color:var(--text-muted)">' + t2esc([crs, fmtL].filter(Boolean).join(' · ')) + '</div>';
+    // this day's carts: finished / total
+    try {
+      const gs = cup.groupsByDay[dayN] || [];
+      let fin = 0, tot = 0;
+      for (const grp of gs) { if (!grp.game_code) continue; tot++; const gg = (state.game && state.game.code === grp.game_code) ? state.game : await loadGame(grp.game_code).catch(() => null); if (gg && gg.finishedAt) fin++; }
+      if (tot) h += '<div class="small-text" style="margin-top:2px">' + fin + ' of ' + tot + ' groups finished today' + (fin >= tot ? ' — day complete ✓' : '') + '</div>';
+    } catch (e) {}
+    const tbl = _t2CupDayTableHtml(t, cup.standings, cup.days, { noLines: true });
+    h += tbl ? '<div style="margin-top:6px">' + tbl + '</div>' : '<div class="small-text" style="color:var(--text-muted);margin-top:4px">No cup points yet.</div>';
+    if (dayN < nDays) {
+      const nx = cup.days.find(x => x.day_number === dayN + 1) || {};
+      const nfmt = (T2_FORMATS.find(f => f[0] === nx.format) || [])[1] || '';
+      const ncrs = (t.settings && t.settings.dayCourses && t.settings.dayCourses[dayN + 1] && t.settings.dayCourses[dayN + 1].name) || '';
+      h += '<div class="small-text" style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)"><strong>Next up — Day ' + (dayN + 1) + '</strong>' + (nx.play_date ? ' · ' + t2esc(nx.play_date) : '') + (ncrs ? ' · ' + t2esc(ncrs) : '') + (nfmt ? ' · ' + t2esc(nfmt) : '') + '</div>';
+    } else {
+      h += '<div class="small-text" style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)"><strong>Final day</strong> — the cup is decided when every group is in.</div>';
+    }
+    h += '</div>';
+    el.innerHTML = h; el.style.display = '';
+  } catch (e) { console.warn('fillSummaryT2Day', e); }
+}
+
+// v1154: when the LAST group of a tournament day finishes, mark the day complete
+// (tournament_days.status = 'complete') so the event home can point at the next
+// day. Best-effort; an RLS refusal just leaves the status alone.
+async function t2MaybeCompleteDay(g) {
+  try {
+    const tid = g && g.t2 && g.t2.tournamentId, dayId = g && g.t2 && g.t2.dayId;
+    if (!tid || !dayId || !supa) return;
+    const gs = await t2GetGroups(dayId).catch(() => []);
+    const started = (gs || []).filter(x => x && x.game_code);
+    if (!started.length) return;
+    for (const grp of started) {
+      if (state.game && state.game.code === grp.game_code) { if (!state.game.finishedAt) return; continue; }
+      const gg = await loadGame(grp.game_code).catch(() => null);
+      if (!gg || !gg.finishedAt) return;
+    }
+    const ok = await t2SetDayStatus(dayId, 'complete');
+    if (ok) {
+      try { _t2FieldRoundsCache[String(tid)] = null; delete _t2FieldRoundsCache[String(tid)]; } catch (e) {}
+      const dayN = Number(g.t2.day || 1);
+      let nDays = 1; try { const _r = await t2GetX(tid); if (_r && _r.data) nDays = _r.data.num_days || 1; } catch (e) {}
+      showToast(dayN < nDays ? ('Day ' + dayN + ' complete — Day ' + (dayN + 1) + ' is next') : ('Day ' + dayN + ' complete — final day in the books'), 4000);
+    }
+  } catch (e) { console.warn('t2MaybeCompleteDay', e); }
+}
+
 async function t2ComputeStandings(t, days, groupsByDay, storedMatches, membersByGroup) {
   const res = { aFinal: 0, bFinal: 0, aProj: 0, bProj: 0, lines: [], stroke: {}, anyLive: false, anyRounds: false,
                 // v1087: points per REAL team key. Every cart is a match between the
@@ -61294,96 +61584,43 @@ async function t2ComputeStandings(t, days, groupsByDay, storedMatches, membersBy
           res.stroke[key].holes += tot.count;
         });
       } catch (e) {}
-      // Cup points by format (team A in the round config = tournament Team A).
-      let aPts = null, bPts = null, label = '', decided = false;
-      try {
-        if (fmt === 'singles') {
-          const r = calcMatch(g);
-          const m = r && r.matches && r.matches[0];
-          if (m && m.played > 0) {
-            if (m.finalUp > 0) { aPts = 1; bPts = 0; }
-            else if (m.finalUp < 0) { aPts = 0; bPts = 1; }
-            else { aPts = 0.5; bPts = 0.5; }
-            decided = !!m.complete;
-            label = decided ? (m.winner === 'AS' ? 'halved' : (m.winner + ' ' + (m.closedScore || 'wins'))) : ('thru ' + m.played);
-          }
-        } else if (fmt === 'bestball') {
-          const r = calcTeamMatch(g);
-          const rr = r && r.result;
-          if (rr && rr.played > 0) {
-            if (rr.aHolesWon > rr.bHolesWon) { aPts = 1; bPts = 0; }
-            else if (rr.bHolesWon > rr.aHolesWon) { aPts = 0; bPts = 1; }
-            else { aPts = 0.5; bPts = 0.5; }
-            decided = !!rr.complete || finished;
-            label = (decided ? 'final ' : 'thru ' + rr.played + ' · ') + rr.aHolesWon + '–' + rr.bHolesWon;
-          }
-        } else if (fmt === 'scramble') {
-          const r = calcScramble(g);
-          if (r && r.holesComplete > 0) {
-            if (r.aHolesWon > r.bHolesWon) { aPts = 1; bPts = 0; }
-            else if (r.bHolesWon > r.aHolesWon) { aPts = 0; bPts = 1; }
-            else { aPts = 0.5; bPts = 0.5; }
-            decided = r.holesComplete >= _rHoles || finished;
-            label = (decided ? 'final ' : 'thru ' + r.holesComplete + ' · ') + r.aHolesWon + '–' + r.bHolesWon;
-          }
-        } else if (fmt === 'altshot' || fmt === 'rydercup') {
-          const r = calcRyderCup(g);
-          if (r) {
-            const playedH = (r.holeResults || []).filter(x => x.result !== null).length;
-            if (playedH > 0) {
-              if (r.aPoints > r.bPoints) { aPts = 1; bPts = 0; }
-              else if (r.bPoints > r.aPoints) { aPts = 0; bPts = 1; }
-              else { aPts = 0.5; bPts = 0.5; }
-              decided = playedH >= _rHoles || finished;
-              label = (decided ? 'final ' : 'thru ' + playedH + ' · ') + r.aPoints + '–' + r.bPoints;
-            }
-          }
-        } else if (fmt === 'teamquota') {
-          const r = calcTeamQuota(g);
-          if (r) {
-            const playedH = (r.holePoints || []).filter(x => x !== null).length;
-            if (playedH > 0) {
-              if (r.aTotal > r.bTotal) { aPts = 1; bPts = 0; }
-              else if (r.bTotal > r.aTotal) { aPts = 0; bPts = 1; }
-              else { aPts = 0.5; bPts = 0.5; }
-              decided = playedH >= _rHoles || finished;
-              label = (decided ? 'final ' : 'thru ' + playedH + ' · ') +
-                (r.aTotal > 0 ? '+' : '') + r.aTotal + ' / ' + (r.bTotal > 0 ? '+' : '') + r.bTotal;
-            }
-          }
-        }
-        // 'quota' and 'stroke' days are leaderboard-only — no cup points.
-      } catch (e) { console.warn('t2 standings calc', e); }
-      // Withdrawal forfeits: only when the match wasn't already decided.
-      // v985 (T3): this block used to run for EVERY format and overwrite aPts/bPts
-      // even when they were still null - so a stroke (or quota) day, which the
-      // switch above deliberately leaves as leaderboard-only, invented a whole cup
-      // point out of a withdrawal and t2SaveMatch wrote it as status 'final'. Only
-      // the cup formats can forfeit; and a group that has NO result and has played
-      // NO holes is a genuine no-show (that forfeit is real), while a group that
-      // played holes but produced no cup result has nothing to forfeit.
-      const _isCupFmt = (fmt === 'singles' || fmt === 'bestball' || fmt === 'scramble' || fmt === 'altshot' || fmt === 'rydercup' || fmt === 'teamquota');
+      // v1154 (Tyler, AZ trip): cup points come from the games ACTUALLY on the cart's
+      // round, not from the day's creation-time format. Since "Configure Day" became
+      // the source of truth, tournament_days.format stayed frozen at 'singles' /
+      // 'scramble', so a Best Ball, Team Quota or Stableford day scored NO cup
+      // points (calcMatch found no games.match and returned null). Rule: every
+      // match in the cart is worth 1 point, ½ each on a tie — a singles cart with
+      // two 1v1s is two points, a 2v2 cart is one. See _t2CartCupMatches.
+      const _gk = _grpTeams(grp.id);
+      let _cartMatches = [];
+      try { _cartMatches = _t2CartCupMatches(g, fmt, finished, _rHoles, _gk, (membersByGroup && membersByGroup[grp.id]) || [], (typeof t2IsOneDay === 'function') && t2IsOneDay(t)) || []; }
+      catch (e) { console.warn('t2 standings calc', e); _cartMatches = []; }
+      let decided = _cartMatches.length > 0 && _cartMatches.every(m => m.decided);
+      // Withdrawal forfeits: only when the match wasn't already decided. A cart with
+      // NO result and NO holes played is a genuine no-show (that forfeit is real).
+      const _isCupFmt = _cartMatches.length > 0 || (fmt === 'singles' || fmt === 'bestball' || fmt === 'scramble' || fmt === 'altshot' || fmt === 'rydercup' || fmt === 'teamquota' || fmt === 'stableford' || fmt === 'teamstableford');
       let _anyScored = false;
       try { _anyScored = (g.players || []).some(p => ((g.scores && g.scores[p.id]) || []).some(s => s != null)); } catch (e) {}
-      // v1087: the two REAL teams in this cart — the local a/b sides map onto these.
-      const _gk = _grpTeams(grp.id);
-      const fSide = (_isCupFmt && !decided && !finished && (aPts != null || !_anyScored)) ? forfeitSide(grp.id) : null;
+      const fSide = (_isCupFmt && !decided && !finished && (_cartMatches.length || !_anyScored)) ? forfeitSide(grp.id) : null;
       if (fSide) {
-        // Compare against the cart's ACTUAL team keys, not the literals 'A'/'B'.
-        if (fSide === 'both') { aPts = 0.5; bPts = 0.5; }
-        else if (fSide === _gk[0]) { aPts = 0; bPts = 1; }
-        else if (fSide === _gk[1]) { aPts = 1; bPts = 0; }
-        else { aPts = 0.5; bPts = 0.5; }   // withdrawn player isn't on either side here
+        let fa = 0.5, fb = 0.5;
+        if (fSide === 'both') { fa = 0.5; fb = 0.5; }
+        else if (fSide === _gk[0]) { fa = 0; fb = 1; }
+        else if (fSide === _gk[1]) { fa = 1; fb = 0; }
+        const _nM = Math.max(1, _cartMatches.length);
+        _cartMatches = [{ a: fa * _nM, b: fb * _nM, decided: true, label: 'forfeit (withdrawal)', fmt: fmt }];
         decided = true;
-        label = 'forfeit (withdrawal)';
       }
-      if (aPts != null) {
-        const isFinal = decided || finished;
-        if (isFinal) { res.aFinal += aPts; res.bFinal += bPts; }
-        else { res.anyLive = true; }
-        res.aProj += aPts; res.bProj += bPts;
-        _bump(_gk[0], aPts, isFinal); _bump(_gk[1], bPts, isFinal);
-        res.lines.push({ day: d.day_number, group: grp.group_number, dayId: d.id, groupId: grp.id, fmt: fmt, label: label, final: isFinal, a: aPts, b: bPts, teamA: _gk[0], teamB: _gk[1] });
+      if (_cartMatches.length) {
+        let aSum = 0, bSum = 0, allFinal = true; const labels = [];
+        _cartMatches.forEach(m => {
+          const isF = m.decided || finished;
+          if (isF) { res.aFinal += m.a; res.bFinal += m.b; } else { res.anyLive = true; allFinal = false; }
+          res.aProj += m.a; res.bProj += m.b;
+          _bump(_gk[0], m.a, isF); _bump(_gk[1], m.b, isF);
+          aSum += m.a; bSum += m.b; labels.push(m.label);
+        });
+        res.lines.push({ day: d.day_number, group: grp.group_number, dayId: d.id, groupId: grp.id, fmt: (_cartMatches[0] && _cartMatches[0].fmt) || fmt, label: labels.join(' · '), final: allFinal, a: aSum, b: bSum, teamA: _gk[0], teamB: _gk[1], matches: _cartMatches.length });
       }
     }
   }
@@ -62543,20 +62780,11 @@ async function renderT2Home() {
         : (t2LogoHtml(t2TeamLogo(t, 'A'), 30) + ' ' + t2esc(t.team_a_name) + ' <span style="color:var(--accent)">' + standings.aFinal + ' — ' + standings.bFinal + '</span> ' + t2esc(t.team_b_name) + ' ' + t2LogoHtml(t2TeamLogo(t, 'B'), 30))) +
       '</div>' +
       (projDiffers ? '<div class="small-text" style="color:var(--text-muted);margin-top:2px">projected with live matches: ' + standings.aProj + ' — ' + standings.bProj + '</div>' : '') +
-      (function () {
-        // Per-day subtotals (final points only)
-        const byDay = {};
-        standings.lines.forEach(l => {
-          if (!l.final) return;
-          if (!byDay[l.day]) byDay[l.day] = { a: 0, b: 0 };
-          byDay[l.day].a += l.a; byDay[l.day].b += l.b;
-        });
-        const parts = Object.keys(byDay).sort((x, y) => x - y).map(dn => 'Day ' + dn + ': ' + byDay[dn].a + '–' + byDay[dn].b);
-        return parts.length ? '<div class="small-text" style="margin-top:4px">' + parts.join(' &nbsp;·&nbsp; ') + '</div>' : '';
-      })() +
-      (standings.lines.length ? '<div style="text-align:left;margin-top:8px">' + standings.lines.map(l =>
-        '<div class="small-text" style="padding:2px 0;' + (l.final ? '' : 'color:var(--text-muted);') + '">D' + l.day + ' G' + l.group + ': ' + t2esc(l.label) + (l.final ? '' : ' (live)') + '</div>'
-      ).join('') + '</div>' : '') +
+      // v1154: per-day subtotals keyed by the REAL teams (the old a/b sums were
+      // cart-local sides), as a day-by-day table with the match lines under each day.
+      ((t.num_days || 1) > 1 || standings.lines.length
+        ? '<div style="text-align:left;margin-top:8px;font-weight:400">' + _t2CupDayTableHtml(t, standings, days) + '</div>'
+        : '') +
       '</div>';
     } // end cup card (team events only)
     const strokeRows = Object.values(standings.stroke).sort((a, b) => (a.net - b.net) || (a.gross - b.gross));
@@ -64640,6 +64868,16 @@ function _t2InvalidateFieldRounds(id) {
   } catch (e) {}
 }
 async function _t2FetchFieldRounds(t, cols) {
+  // v1154: a caller can ask for ONE day's rounds (per-day payouts) by passing a
+  // shallow copy of the event with _t2DayOnly set. The cache still holds the
+  // whole event; the filter is applied on the way out.
+  if (t && t._t2DayOnly != null) {
+    const _dOnly = Number(t._t2DayOnly);
+    const _t0 = Object.assign({}, t); delete _t0._t2DayOnly;
+    const _r0 = await _t2FetchFieldRounds(_t0, cols);
+    if (!_r0 || _r0.error || !Array.isArray(_r0.data)) return _r0;
+    return { data: _r0.data.filter(row => { const gg = row && row.data ? row.data : row; return Number((gg && gg.t2 && gg.t2.day) || 1) === _dOnly; }), error: null };
+  }
   const _id = (t && t.id) ? String(t.id) : '';
   if (_id) {
     const _c = _t2FieldRoundsCache[_id];
@@ -68831,6 +69069,23 @@ async function openEventLeaderboard(t, opts) {
       _fieldTQ = t2ComputeFieldTeamQuota(_rawRounds, t, _tqDay, _t2TeamMapFromPlayers(evPlayers));
     } catch (e) {}
     let html = '';
+    // v1154: the cup, day by day, at the top of Tournament Results (it only ever
+    // lived on the tournament home before). Team events only.
+    let _cupData = null;
+    try {
+      if (!(typeof t2IsOneDay === 'function' && t2IsOneDay(t))) {
+        _cupData = await t2LoadCupStandings(t);
+        const _cupH = _cupData && _t2CupDayTableHtml(t, _cupData.standings, _cupData.days);
+        if (_cupH) {
+          const _cs = _cupData.standings;
+          const _lead = (_cs.ranked && _cs.ranked[0]) || null;
+          const _tie = _cs.ranked && _cs.ranked.length > 1 && _cs.ranked[1].final === _lead.final;
+          html += '<h3 style="margin:6px 0 4px">🏆 Cup standings <span class="small-text" style="color:var(--text-muted)">1 point a match · ½ a tie</span></h3>';
+          html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">' + (_lead && _lead.final > 0 ? (_tie ? 'Tied at the top' : t2esc(_lead.name) + ' leads') : 'No points decided yet') + ' · ' + (t.num_days || 1) + ' day' + ((t.num_days || 1) === 1 ? '' : 's') + '</div>';
+          html += _cupH;
+        }
+      }
+    } catch (e) { console.warn('evlb cup', e); }
     if (_fieldTQ && Array.isArray(_fieldTQ.teams) && _fieldTQ.teams.length) {
       const _tqN = _fieldTQ.teams.length;
       // v1119: rank off the teams that have actually played — a no-card team sorts
@@ -68996,6 +69251,36 @@ async function openEventLeaderboard(t, opts) {
         }
       }
     }
+    // v1154 (Tyler, AZ trip): money BY DAY plus the event total, so after Day 1
+    // everyone can see what that day settled for without waiting on the whole trip.
+    // Each day is the normal combined-payout engine run on that day's rounds only
+    // (_t2DayOnly filter in _t2FetchFieldRounds) — no new money math.
+    try {
+      const _nD = t.num_days || 1;
+      if (_nD > 1 && _combinedPay && Array.isArray(_combinedPay.rows) && _combinedPay.rows.length) {
+        const _dayPays = [];
+        for (let _dn = 1; _dn <= _nD; _dn++) {
+          let _dp = null;
+          try { _dp = await t2ComputeCombinedPayouts(Object.assign({}, t, { _t2DayOnly: _dn })); } catch (e) { _dp = null; }
+          if (_dp && Array.isArray(_dp.rows) && _dp.rows.length && _dp.roundsTotal > 0) _dayPays.push({ day: _dn, pay: _dp });
+        }
+        if (_dayPays.length) {
+          html += '<h3 style="margin:14px 0 4px">💰 Money by day</h3>';
+          html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:6px">Each day\u2019s games and pots on their own, then everything combined. Tap a day to expand.</div>';
+          _dayPays.forEach(dp => {
+            const _crs = (t.settings && t.settings.dayCourses && t.settings.dayCourses[dp.day] && t.settings.dayCourses[dp.day].name) || '';
+            const _sub = dp.pay.allFinished ? 'all groups in' : (dp.pay.roundsFinished + ' of ' + dp.pay.roundsTotal + ' groups finished — provisional');
+            const _top = dp.pay.rows.slice().sort((a, b) => (b.net || 0) - (a.net || 0))[0];
+            html += '<details style="margin:0 0 6px;border:1px solid var(--border);border-radius:10px;padding:6px 10px"><summary style="cursor:pointer;font-weight:700">Day ' + dp.day + (_crs ? ' · ' + escapeHtml(_crs) : '') + ' <span class="small-text" style="font-weight:400;color:var(--text-muted)">' + escapeHtml(_sub) + (_top && (_top.net || 0) > 0.005 ? ' · top: ' + escapeHtml(_top.first || _top.name) + ' +$' + (Math.round(_top.net * 100) / 100).toFixed(2) : '') + '</span></summary>';
+            html += '<div style="margin-top:6px">' + _t2PayoutBoardRowsHtml(dp.pay.rows.map(r => ({ id: r.id, name: r.name, first: r.first, net: r.net || 0 })), {}) + '</div>';
+            if (dp.pay.byGame && dp.pay.byGame.length) html += '<div class="small-text" style="color:var(--text-muted);margin-top:4px">Games: ' + escapeHtml(dp.pay.byGame.map(gm => gm.key + (gm.pending ? ' (pending)' : '')).join(' · ')) + '</div>';
+            html += '</details>';
+          });
+          html += '<details style="margin:0 0 6px;border:2px solid var(--accent);border-radius:10px;padding:6px 10px"><summary style="cursor:pointer;font-weight:800">Event total <span class="small-text" style="font-weight:400;color:var(--text-muted)">' + escapeHtml(_combinedPay.allFinished ? 'everything combined' : (_combinedPay.roundsFinished + ' of ' + _combinedPay.roundsTotal + ' groups finished — provisional')) + '</span></summary>';
+          html += '<div style="margin-top:6px">' + _t2PayoutBoardRowsHtml(_combinedPay.rows.map(r => ({ id: r.id, name: r.name, first: r.first, net: r.net || 0 })), {}) + '</div></details>';
+        }
+      }
+    } catch (e) { console.warn('evlb money by day', e); }
     // Long Drive — ONE field-wide individual winner per day, set by the commissioner.
     const _amCommish = t2CanManage(t);
     const _ldDays = [];
@@ -71380,6 +71665,21 @@ async function init() {
       if (_cnm) { s.dayCourses = s.dayCourses || {}; s.dayCourses[cfg.dayNumber] = { id: _cid, name: _cnm }; }
     });
     if (!ok) { showToast('Save failed — check connection and try again'); return false; }
+    // v1154 (Tyler, AZ trip): the day's FORMAT now follows the games the director
+    // actually configured here (the visible format dropdown is long gone, so the
+    // stored format stayed at whatever creation picked — 'singles' — and Configure
+    // Carts paired every day as 1v1 twosomes, even a scramble or best-ball day).
+    try {
+      if (!(typeof t2IsOneDay === 'function' && t2IsOneDay(t))) {
+        const _nf = t2FormatFromGames(setup.games || {});
+        const _dys = await t2GetDays(t.id).catch(() => []);
+        const _dRec = (_dys || []).find(x => x.day_number === cfg.dayNumber) || null;
+        if (_nf && (!_dRec || _dRec.format !== _nf)) {
+          const _e = await t2SetDays(t.id, [{ dayNumber: cfg.dayNumber, format: _nf, playDate: (_dRec && _dRec.play_date) || null }]);
+          if (!_e) { try { showToast('Day ' + cfg.dayNumber + ' format: ' + ((T2_FORMATS.find(f => f[0] === _nf) || [])[1] || _nf)); } catch (e2) {} }
+        }
+      }
+    } catch (e) { console.warn('day format from games', e); }
     try { localStorage.removeItem('golf:draft:t2day:' + cfg.dayNumber); } catch (e) {} // saved — drop the draft (v216, Phase 1d)
     // Persist Kevin's scorecard + tee edits to the course library so the launched
     // rounds use them. Before this, Configure Day only stored a course REFERENCE, so
@@ -73045,6 +73345,7 @@ async function init() {
       // course wifi. Close the summary, go home, then finish the chores in the
       // background. _bgFinishCleanup is fire-and-forget and fully self-guarded.
       try { _bgReleaseSummaryUI(g); } catch (e) { console.warn('summary release failed:', e); }
+      try { if (g.t2 && g.t2.tournamentId) t2MaybeCompleteDay(g); } catch (e) {}   // v1154: last group in → day complete
       // v940: retire any invites still outstanding for this round — nobody should
       // be invited to a round that just ended.
       try { expireInvitesForRound(g.code); } catch (e) {}
