@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1151-->
+<!--BGVER=v2026.11.1152-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8170,7 +8170,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1151';
+const BG_BUILD = 'v2026.11.1152';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -71870,6 +71870,7 @@ async function init() {
   //     shares SOME of my scorecards, only I share all of them. Requires at least
   //     three of my own rounds so a brand-new account with one shared round cannot
   //     trip it, and the candidate must carry no other account's email.
+  const KEY_SETUP_ID_ASK = 'golf:setup-identity-ask';
   async function bgMaybeRelinkFromSetup(setup) {
     if (typeof isSignedIn !== 'function' || !isSignedIn() || !supa || !_authUser) return;
     if (!setup || !Array.isArray(setup.players) || !setup.players.length) return;
@@ -71883,32 +71884,68 @@ async function init() {
     let roster = [];
     try { roster = await getPlayerRoster(); } catch (e) { return; }
     if (!Array.isArray(roster) || !roster.length) return;
-    const codesOf = p => new Set((((p && p.scoreHistory) || [])).map(r => r && r.gameCode).filter(Boolean));
-    const mine = roster.find(x => x && norm(x.name) === meN) || null;
-    const myCodes = codesOf(mine);
     const myEmail = String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').trim().toLowerCase();
-    let target = null;
-    for (let i = 0; i < setup.players.length && !target; i++) {
-      const pn = norm(setup.players[i] && setup.players[i].name);
-      if (!pn || pn === meN) continue;
+
+    // Candidates: players in this round that map to a roster row NOT owned by some
+    // other account. A row carrying someone else's email is never offered — claiming
+    // it would hijack a registered player.
+    const cands = [];
+    setup.players.forEach(function (p) {
+      const pn = norm(p && p.name);
+      if (!pn || pn === meN) return;
       const row = roster.find(x => x && norm(x.name) === pn);
-      if (!row) continue;
+      if (!row) return;
       const rowEmail = String((row.email || '')).trim().toLowerCase();
-      if (rowEmail && rowEmail !== myEmail) continue;                   // belongs to another account — never touch it
-      if (rowEmail && rowEmail === myEmail) { target = row; continue; }  // definitive
-      if (myCodes.size < 3) continue;                                   // too little history to prove anything
-      const theirs = codesOf(row);
-      let coversAll = true;
-      myCodes.forEach(function (c) { if (!theirs.has(c)) coversAll = false; });
-      if (coversAll) target = row;
+      if (rowEmail && rowEmail !== myEmail) return;
+      if (cands.indexOf(row) < 0) cands.push(row);
+    });
+    if (!cands.length) return;
+
+    // ---- 1. THE DEFINITIVE CASE ---------------------------------------------
+    // A row already carrying THIS account's email is provably ours; just fix the
+    // pointer, no interrogation needed.
+    const owned = myEmail ? cands.find(r => String((r.email || '')).trim().toLowerCase() === myEmail) : null;
+
+    // ---- 2. EVERYTHING ELSE: ASK, NEVER INFER -------------------------------
+    // v1151 tried to infer it — offering any candidate whose round history was a
+    // strict superset of the linked player's, on the theory that a buddy shares SOME
+    // of your scorecards but only you share ALL of them. The library-wide audit
+    // disproved that: Tar Heel Boy has 6 rounds and 3 of them are with Kevin Wells,
+    // so Kevin's history covers his and he would have been asked "is Kevin Wells
+    // you?". Matt Irvine / Frank Lonigro, the same. And the rule could not even
+    // separate the case it was built for — "Simplistic Fishing" shares exactly one
+    // round with "Tyler OConnor", which is indistinguishable from Preston Waller,
+    // a different person entirely.
+    //
+    // A heuristic that mislabels real users is worse than no heuristic. So the app
+    // asks a question it has standing to ask — "are you in this round?" — and lets
+    // the person answer. One dismissal is remembered forever, so somebody who
+    // habitually keeps score for the group is asked exactly once, ever.
+    let target = owned || null;
+    if (!target) {
+      let asked = null;
+      try { asked = localStorage.getItem(KEY_SETUP_ID_ASK); } catch (e) {}
+      if (asked === 'off') return;
+      const playing = await uiConfirm(
+        'None of the players in this round matches your player name, "' + me + '".\n\n' +
+        'Are you playing in this round under a different name?',
+        { title: 'Are you in this round?', okLabel: 'Yes, I\u2019m playing', cancelLabel: 'No, just scoring', danger: false });
+      if (!playing) {
+        try { localStorage.setItem(KEY_SETUP_ID_ASK, 'off'); } catch (e) {}
+        return;                                                        // a scorer is never asked again
+      }
+      for (let i = 0; i < cands.length && !target; i++) {
+        const c = cands[i];
+        const n = ((c.scoreHistory || []).length);
+        const yes = await uiConfirm(
+          'Link this account to "' + c.name + '"? Your scores, handicap and saved rounds follow that name from now on' +
+          (n ? ' \u2014 including the ' + n + ' round' + (n === 1 ? '' : 's') + ' already on it' : '') + '.',
+          { title: 'Are you "' + c.name + '"?', okLabel: 'Yes, that\u2019s me', cancelLabel: (i + 1 < cands.length ? 'No, next' : 'Cancel'), danger: false });
+        if (yes) target = c;
+      }
+      if (!target) return;
     }
-    if (!target) return;
-    const n = ((target.scoreHistory || []).length);
-    const ok = await uiConfirm(
-      'You\u2019re about to play as "' + target.name + '", but your account is linked to "' + me + '".\n\n' +
-      'Make "' + target.name + '" your player? Your scores, handicap and saved rounds follow that name from now on \u2014 including the ' + n + ' round' + (n === 1 ? '' : 's') + ' already on it.',
-      { title: 'Is "' + target.name + '" you?', okLabel: 'Yes, that\u2019s me', cancelLabel: 'Keep ' + me, danger: false });
-    if (!ok) return;
+
     try {
       target.email = myEmail || target.email || '';
       target.claimedBy = myEmail || '';
