@@ -8187,7 +8187,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1175';
+const BG_BUILD = 'v2026.11.1176';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -54840,6 +54840,7 @@ async function t2FillSlotPrompt(pid) {
 async function t2GetPlayers(tid, opts) {
   // v1133: was the only reader with this contract hand-rolled. Same behaviour,
   // now expressed once — fail-soft [] by default, throws for { strict: true }.
+  if (!tid) { if (opts && opts.strict) throw new Error('t2GetPlayers: no tournament id'); return []; }   // v1176: eq.undefined was a 400
   return await _bgReadList(() => supa.from('tournament_players').select('*').eq('tournament_id', tid).order('created_at'), 't2GetPlayers', opts);
 }
 async function t2SetPlayerTeam(playerId, team) {
@@ -56345,6 +56346,7 @@ async function t2SetDays(tid, days) {
   } catch (e) { console.warn('t2SetDays', e); return (e && e.message) || 'save failed'; }
 }
 async function t2GetDays(tid, opts) {
+  if (!tid) { if (opts && opts.strict) throw new Error('t2GetDays: no tournament id'); return []; }   // v1176
   return await _bgReadList(() => supa.from('tournament_days').select('*').eq('tournament_id', tid).order('day_number'), 't2GetDays', opts);
 }
 
@@ -56359,6 +56361,7 @@ async function t2CreateGroup(dayId, g) {
   } catch (e) { return null; }
 }
 async function t2GetGroups(dayId, opts) {
+  if (!dayId) { if (opts && opts.strict) throw new Error('t2GetGroups: no day id'); return []; }   // v1176
   return await _bgReadList(() => supa.from('tournament_groups').select('*').eq('day_id', dayId).order('group_number'), 't2GetGroups', opts);
 }
 async function t2AddGroupMember(groupId, tournamentPlayerId, team, slot) {
@@ -57077,7 +57080,7 @@ async function _t2MyGroupInfo(t) {
             gamesSummary = Object.keys(_merged).length ? (t2DayGamesSummary(_merged) || '') : '';
           } catch (e) {}
           let _bkLine = ''; try { _bkLine = _t2BracketLineFor(t, d.day_number, mem.map(m => m.tournament_player_id), playerById, _rr); } catch (e) {}   // v1172
-          return { bracketLine: _bkLine, tid: t.id, gid: g.id, day: d.day_number, groupNumber: g.group_number, teeTime: g.tee_time || '', isScorer: isScorer, gameCode: g.game_code || '', started: !!g.game_code, finished: _finished, gamesSummary: gamesSummary };
+          return { bracketLine: _bkLine, dayId: d.id, tid: t.id, gid: g.id, day: d.day_number, groupNumber: g.group_number, teeTime: g.tee_time || '', isScorer: isScorer, gameCode: g.game_code || '', started: !!g.game_code, finished: _finished, gamesSummary: gamesSummary };
         }
       }
     }
@@ -57195,7 +57198,7 @@ async function _t2AllGroupsInfo(t) {
         Object.assign(_merged, _t2ExtraCrossBetLabels(_merged, e.memberNames, crossCandidates));
         gamesSummary = Object.keys(_merged).length ? (t2DayGamesSummary(_merged) || '') : '';
       } catch (err) {}
-      return { tid: t.id, gid: g.id, day: e.d.day_number, groupNumber: g.group_number, teeTime: g.tee_time || '', isScorer: e.isScorer, gameCode: g.game_code || '', started: !!g.game_code, finished: e.finished, gamesSummary: gamesSummary, isMine: e.isMine, bracketLine: e.bracketLine || '' };
+      return { dayId: e.d.id, tid: t.id, gid: g.id, day: e.d.day_number, groupNumber: g.group_number, teeTime: g.tee_time || '', isScorer: e.isScorer, gameCode: g.game_code || '', started: !!g.game_code, finished: e.finished, gamesSummary: gamesSummary, isMine: e.isMine, bracketLine: e.bracketLine || '' };
     });
     return out;
   } catch (e) { return []; }
@@ -57402,32 +57405,15 @@ async function renderT2List() {
   const _allFin = await Promise.all(list.map(async t => {
     if (String(t.status || '').toLowerCase() !== 'live') return false;
     let r = false; try { r = await t2AllGroupsFinished(t); } catch (e) { r = false; }
-    // v1168 (Tyler): "Now that day 1 is finished how do I start day two?" — the card
-    // said Finished. A bracket is finished when it has a CHAMPION, not when today's
-    // carts are in; until then it is waiting on the commissioner to build the next day.
+    // v1176 (Tyler: "I don't want our tourney tab getting jacked"): the list does
+    // NOTHING bracket-specific beyond this one cheap rule — a bracket is never
+    // "Finished" until its champion is stamped (bgBracketAutoBuildNext stamps
+    // settings.bracketChampion when the engine finds one). The next day is built
+    // from the event home / the last finished cart, never from here.
     try {
       const _fin = (r && typeof r === 'object') ? r.state === 'finished' : !!r;
-      const _waitingPending = !!(r && typeof r === 'object' && r.state === 'waiting');   // v1171: built carts, not started
-      if ((_fin || _waitingPending) && typeof t2IsBracket === 'function' && t2IsBracket(t)) {
-        let bk = null; try { bk = await bgBracketLoad(t); } catch (e) { bk = null; }
-        // v1174: a bracket that cannot be read is still not "Finished" — never collapse it.
-        if (!bk || !bk.st) return { state: 'waiting', pending: 0, bracketNext: true, nextDay: (t.num_days || 1) + 1 };
-        if (bk && bk.st && !bk.st.champion && !bk.st.complete) {
-          // v1169: build the next day automatically the moment the commissioner looks
-          // at the list (covers a day finished from a phone that could not build it).
-          let _tied = Object.values(bk.st.m).some(x => x.status === 'tied');
-          if (!_tied && t2CanManage(t)) { try { const _ab = await bgBracketAutoBuildNext(t); if (_ab && _ab.built) { try { const _tf = await t2GetX(t.id); if (_tf && _tf.data) { t.settings = _tf.data.settings; t.num_days = _tf.data.num_days; } } catch (e) {} } } catch (e) {} }
-          // is there a built-but-unstarted day? then it is "ready to start"
-          try {
-            const days = await t2GetDays(t.id).catch(() => []);
-            for (const d of (days || []).slice().sort((a, b) => a.day_number - b.day_number)) {
-              const gs = await t2GetGroups(d.id).catch(() => []);
-              if (gs.length && !gs.some(g => g.game_code)) return { state: 'waiting', pending: 0, bracketReady: true, nextDay: d.day_number, nextDayId: d.id };
-            }
-          } catch (e) {}
-          const _daysDone = (t.settings && t.settings.bracketDays) ? Object.keys(t.settings.bracketDays).length : (t.num_days || 1);
-          return { state: 'waiting', pending: 0, bracketNext: true, tied: _tied, nextDay: _daysDone + 1 };
-        }
+      if (_fin && typeof t2IsBracket === 'function' && t2IsBracket(t) && !(t.settings && t.settings.bracketChampion)) {
+        return { state: 'waiting', pending: 0, bracketOpen: true };
       }
     } catch (e) {}
     return r;
@@ -57514,7 +57500,7 @@ async function renderT2List() {
         (info.gamesSummary ? '<div class="small-text" style="margin-top:4px;color:var(--text-muted)">🎲 ' + t2esc(info.gamesSummary) + '</div>' : '') +
         (info.gameCode ? '<button class="full t2-open-round" data-code="' + t2esc(info.gameCode) + '" style="margin-top:6px;background:' + (info.finished ? 'var(--money-pos)' : 'var(--accent)') + ';color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">' + (info.finished ? '🏆 View results' : 'Join now') + '</button>' : '') +
         // v1171 (Tyler): in a bracket, either player in the match can start the cart's round.
-        ((!info.gameCode && info.isMine && _stl === 'live' && typeof t2IsBracket === 'function' && t2IsBracket(t))
+        ((!info.gameCode && info.isMine && String(t.status || '').toLowerCase() === 'live' && typeof t2IsBracket === 'function' && t2IsBracket(t))   // v1176: was `_stl` — declared further down, so this threw before initialization and killed the whole list
           ? '<button class="full t2-start-cart" data-id="' + t.id + '" data-gid="' + t2esc(info.gid) + '" data-day="' + info.day + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">▶ Start our round — Day ' + info.day + '</button>' : '') +
         // v1158 (Tyler, Kerbo Group 8/22): a group that was reopened (or never tapped
         // Finish) holds the whole event open — Total payout stays provisional and the
@@ -57539,7 +57525,11 @@ async function renderT2List() {
     const _allDone = _stl === 'live' && _finState === 'finished';
     const _waiting = _stl === 'live' && _finState === 'waiting';
     const _pillCls = (_allDone || _waiting) ? (_allDone ? 'bg-pill-final' : 'bg-pill-sched') : (_stl === 'live' ? 'bg-pill-live' : (/complete|completed|final|done/.test(_stl) ? 'bg-pill-final' : 'bg-pill-sched'));
-    const _pillLabel = _allDone ? 'Finished' : (_waiting ? ((_fin && _fin.bracketReady) ? ('Day ' + _fin.nextDay + ' ready') : (_fin && _fin.bracketNext) ? (_fin.tied ? 'Tied match — enter the playoff' : ('Day ' + (_fin.nextDay - 1) + ' done — build Day ' + _fin.nextDay)) : (_finPending + ' group' + (_finPending === 1 ? '' : 's') + ' not started')) : t2StatusLabel(t.status));   // v1168/v1169
+    // v1176: a built-but-unstarted bracket day is visible in the group infos the
+    // list already has (no extra reads): the lowest day with a cart that has no round.
+    let _bkReadyDay = null, _bkReadyDayId = null;
+    try { if (typeof t2IsBracket === 'function' && t2IsBracket(t)) { infoArr.forEach(i => { if (i && !i.started && i.day > 1 && (_bkReadyDay == null || i.day < _bkReadyDay)) { _bkReadyDay = i.day; _bkReadyDayId = i.dayId || null; } }); } } catch (e) {}
+    const _pillLabel = _allDone ? 'Finished' : (_waiting ? (_bkReadyDay ? ('Day ' + _bkReadyDay + ' ready') : (_fin && _fin.bracketOpen) ? 'Bracket in play — open Details' : (_finPending + ' group' + (_finPending === 1 ? '' : 's') + ' not started')) : t2StatusLabel(t.status));
     const _pill = '<span class="bg-pill ' + _pillCls + '" style="flex:0 0 auto;margin-left:6px">' + ((_stl === 'live' && !_allDone && !_waiting) ? '<span class="dot"></span>' : '') + t2esc(_pillLabel) + '</span>';
     return '<div class="card" style="margin-bottom:8px;padding:12px 14px">' +
       '<button class="full t2-row" data-id="' + t.id + '" style="text-align:left;display:flex;align-items:center;gap:10px;border:none;background:transparent;padding:0;width:100%">' +
@@ -57566,8 +57556,8 @@ async function renderT2List() {
         ? '<button class="full t2-row-start" data-id="' + t.id + '" style="margin-top:8px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:15px;padding:13px;border-radius:10px">Start tournament</button>'
         : '') +
       // v1169: bracket — the next day is built from the results; one tap starts it.
-      ((t2CanManage(t) && _fin && _fin.bracketReady)
-        ? '<button class="full t2-row-startday" data-id="' + t.id + '" data-dayid="' + t2esc(_fin.nextDayId) + '" data-day="' + _fin.nextDay + '" style="margin-top:8px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:15px;padding:13px;border-radius:10px">▶ Start Day ' + _fin.nextDay + '</button>'
+      ((t2CanManage(t) && _bkReadyDay && _bkReadyDayId)
+        ? '<button class="full t2-row-startday" data-id="' + t.id + '" data-dayid="' + t2esc(_bkReadyDayId) + '" data-day="' + _bkReadyDay + '" style="margin-top:8px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:15px;padding:13px;border-radius:10px">▶ Start Day ' + _bkReadyDay + '</button>'
         : '') +
       // Creator (commissioner) footer — quiet Edit link + muted trash (was two full-width bars).
       (t2CanManage(t) ? '<div class="bg-evfoot" style="justify-content:flex-end">' +
@@ -58049,6 +58039,20 @@ async function openBracketDayBuilder(dayNumber, dayId) {
 // results... all cart assignments and matches should be auto assigned." The day
 // builder's commit step, pulled out so the modal AND the automatic path share it.
 async function _bgBracketCommitDay(t, dn, dayId, plan) {
+  // v1176: one atomic server call that any MEMBER of the event may make, so the
+  // phone that finishes the last match can build the next day even when it is not
+  // the commissioner's. Falls back to the client-side path if the RPC is missing.
+  try {
+    const _p = { carts: (plan.carts || []).map(c => ({ members: c.members, matchIds: c.matchIds || [] })), matches: (plan.matches || []).map(x => ({ id: x.id, a: x.a, b: x.b })), idle: plan.idle || [] };
+    const { data, error } = await supa.rpc('bg_bracket_build_day', { p_tid: t.id, p_dn: dn, p_plan: _p });
+    if (!error && data && data.ok) {
+      try { _t2FieldRoundsCache[String(t.id)] = null; delete _t2FieldRoundsCache[String(t.id)]; } catch (e) {}
+      try { t.num_days = Math.max(t.num_days || 1, dn); if (_t2Current && _t2Current.id === t.id) _t2Current.num_days = t.num_days; } catch (e) {}
+      return { ok: true, dayId: data.dayId, dn: dn };
+    }
+    if (!error && data && data.ok === false) return { ok: false, why: data.why || 'Could not build the day' };
+    if (error) console.warn('bg_bracket_build_day', error);
+  } catch (e) { console.warn('bg_bracket_build_day', e); }
   let _dayId = dayId;
   if (!_dayId) {
     const e1 = await t2SetDays(t.id, [{ dayNumber: dn, format: 'stroke', playDate: null }]);
@@ -58083,14 +58087,17 @@ async function _bgBracketCommitDay(t, dn, dayId, plan) {
 window._bgBracketAutoBusy = window._bgBracketAutoBusy || {};
 async function bgBracketAutoBuildNext(t) {
   try {
-    if (!t || !t2IsBracket(t) || !t2CanManage(t)) return { built: false, reason: 'not-manager' };
+    if (!t || !t2IsBracket(t)) return { built: false, reason: 'not-bracket' };   // v1176: any member's phone may build (RPC checks membership)
     if (window._bgBracketAutoBusy[t.id]) return { built: false, reason: 'busy' };
     window._bgBracketAutoBusy[t.id] = true;
     try {
       const data = await bgBracketLoad(t);
       if (!data || !data.st) return { built: false, reason: 'no-bracket' };
       const st = data.st;
-      if (st.complete || st.champion) return { built: false, reason: 'complete' };
+      if (st.complete || st.champion) {
+        try { if (st.champion && !(t.settings && t.settings.bracketChampion)) { await t2MergeSettings(t.id, s => { s.bracketChampion = st.champion; }); t.settings = t.settings || {}; t.settings.bracketChampion = st.champion; } } catch (e) {}   // v1176
+        return { built: false, reason: 'complete' };
+      }
       if (Object.values(st.m).some(x => x.status === 'tied')) return { built: false, reason: 'tied' };
       if (Object.values(st.m).some(x => x.status === 'live')) return { built: false, reason: 'live' };
       // next day without carts — but NEVER while a built day is still waiting to be
@@ -63198,6 +63205,9 @@ async function renderT2Home() {
   // v1099: already in flight since the top of this function.
   try { t2StoredMatches = (await _pMatches) || []; } catch (e) { t2StoredMatches = []; }
   const standings = await t2ComputeStandings(t, days, groupsByDay, t2StoredMatches, membersByGroup);
+  // v1176 (Tyler): the next bracket day is built from HERE (event home / Details) or
+  // from the last cart finishing — never from the Tournaments list.
+  try { if (t2IsBracket(t)) { const _ab = await bgBracketAutoBuildNext(t); if (_ab && _ab.built) { try { const _tf = await t2GetX(t.id); if (_tf && _tf.data) { t.settings = _tf.data.settings; t.num_days = _tf.data.num_days; if (_t2Current && _t2Current.id === t.id) { _t2Current.settings = t.settings; _t2Current.num_days = t.num_days; } } } catch (e) {} } } } catch (e) {}
   let _bkData = null; try { if (t2IsBracket(t)) _bkData = await bgBracketLoad(t); } catch (e) { _bkData = null; }   // v1155
   try { t2MaybePostLeadChange(t, standings); } catch (e) {}
   // v986 (T31): nothing in the app ever set status='complete', so a finished
