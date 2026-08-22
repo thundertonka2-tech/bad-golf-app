@@ -8190,7 +8190,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1173';
+const BG_BUILD = 'v2026.11.1174';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -57412,7 +57412,9 @@ async function renderT2List() {
       const _fin = (r && typeof r === 'object') ? r.state === 'finished' : !!r;
       const _waitingPending = !!(r && typeof r === 'object' && r.state === 'waiting');   // v1171: built carts, not started
       if ((_fin || _waitingPending) && typeof t2IsBracket === 'function' && t2IsBracket(t)) {
-        let bk = await bgBracketLoad(t);
+        let bk = null; try { bk = await bgBracketLoad(t); } catch (e) { bk = null; }
+        // v1174: a bracket that cannot be read is still not "Finished" — never collapse it.
+        if (!bk || !bk.st) return { state: 'waiting', pending: 0, bracketNext: true, nextDay: (t.num_days || 1) + 1 };
         if (bk && bk.st && !bk.st.champion && !bk.st.complete) {
           // v1169: build the next day automatically the moment the commissioner looks
           // at the list (covers a day finished from a phone that could not build it).
@@ -58098,14 +58100,30 @@ async function bgBracketAutoBuildNext(t) {
       // started. v1172: on v1171 this ran again every time the list rendered and
       // re-planned the same "ready" matches into Day 3, 4, 5… because a match in a
       // built-but-unlaunched cart is still 'ready' to the bracket engine.
-      const days = await t2GetDays(t.id).catch(() => []);
+      // v1174: the real rule, independent of any read — every match of the LAST BUILT
+      // day must be decided before another day can exist. (v1173's guard leaned on
+      // the groups read; a dropped read returned [] and the scan walked straight past.)
+      const _bd = (t.settings && t.settings.bracketDays) || {};
+      const _builtDays = Object.keys(_bd).map(k => parseInt(k, 10)).filter(n => n > 0).sort((a, b) => a - b);
+      if (_builtDays.length) {
+        const _last = _builtDays[_builtDays.length - 1];
+        const _ms = (_bd[_last] && Array.isArray(_bd[_last].matches)) ? _bd[_last].matches : [];
+        const _open = _ms.filter(m => { const x = st.m[m.id]; return !x || (x.status !== 'final' && x.status !== 'bye'); });
+        if (_open.length) return { built: false, reason: 'prev-day-open', dn: _last, open: _open.length };
+      }
+      // strict reads: if we cannot see the days/groups, do NOT guess
+      let days = [];
+      try { days = await t2GetDays(t.id, { strict: true }); } catch (e) { return { built: false, reason: 'read-failed' }; }
       let target = null;
       for (let dn = 1; dn <= Math.max(t.num_days || 1, 1); dn++) {
         const d = days.find(x => x.day_number === dn);
-        const gs = d ? await t2GetGroups(d.id).catch(() => []) : [];
+        let gs = [];
+        if (d) { try { gs = await t2GetGroups(d.id, { strict: true }); } catch (e) { return { built: false, reason: 'read-failed' }; } }
         if (gs.length && !gs.some(g => g.game_code)) return { built: false, reason: 'day-waiting-to-start', dn: dn };
         if (!gs.length) { target = { dn: dn, id: d ? d.id : null }; break; }
       }
+      // and the target can only ever be the day right after the last built one
+      if (_builtDays.length && target && target.dn !== _builtDays[_builtDays.length - 1] + 1) return { built: false, reason: 'day-gap', dn: target.dn };
       if (!target) {
         const n = (t.num_days || 1) + 1;
         if (n > 14) return { built: false, reason: 'max-days' };
