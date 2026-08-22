@@ -8190,7 +8190,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1168';
+const BG_BUILD = 'v2026.11.1169';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -57390,10 +57390,22 @@ async function renderT2List() {
     try {
       const _fin = (r && typeof r === 'object') ? r.state === 'finished' : !!r;
       if (_fin && typeof t2IsBracket === 'function' && t2IsBracket(t)) {
-        const bk = await bgBracketLoad(t);
+        let bk = await bgBracketLoad(t);
         if (bk && bk.st && !bk.st.champion && !bk.st.complete) {
+          // v1169: build the next day automatically the moment the commissioner looks
+          // at the list (covers a day finished from a phone that could not build it).
+          let _tied = Object.values(bk.st.m).some(x => x.status === 'tied');
+          if (!_tied && t2CanManage(t)) { try { const _ab = await bgBracketAutoBuildNext(t); if (_ab && _ab.built) { try { const _tf = await t2GetX(t.id); if (_tf && _tf.data) { t.settings = _tf.data.settings; t.num_days = _tf.data.num_days; } } catch (e) {} } } catch (e) {} }
+          // is there a built-but-unstarted day? then it is "ready to start"
+          try {
+            const days = await t2GetDays(t.id).catch(() => []);
+            for (const d of (days || []).slice().sort((a, b) => a.day_number - b.day_number)) {
+              const gs = await t2GetGroups(d.id).catch(() => []);
+              if (gs.length && !gs.some(g => g.game_code)) return { state: 'waiting', pending: 0, bracketReady: true, nextDay: d.day_number, nextDayId: d.id };
+            }
+          } catch (e) {}
           const _daysDone = (t.settings && t.settings.bracketDays) ? Object.keys(t.settings.bracketDays).length : (t.num_days || 1);
-          return { state: 'waiting', pending: 0, bracketNext: true, nextDay: _daysDone + 1 };
+          return { state: 'waiting', pending: 0, bracketNext: true, tied: _tied, nextDay: _daysDone + 1 };
         }
       }
     } catch (e) {}
@@ -57502,7 +57514,7 @@ async function renderT2List() {
     const _allDone = _stl === 'live' && _finState === 'finished';
     const _waiting = _stl === 'live' && _finState === 'waiting';
     const _pillCls = (_allDone || _waiting) ? (_allDone ? 'bg-pill-final' : 'bg-pill-sched') : (_stl === 'live' ? 'bg-pill-live' : (/complete|completed|final|done/.test(_stl) ? 'bg-pill-final' : 'bg-pill-sched'));
-    const _pillLabel = _allDone ? 'Finished' : (_waiting ? ((_fin && _fin.bracketNext) ? ('Day ' + (_fin.nextDay - 1) + ' done — build Day ' + _fin.nextDay) : (_finPending + ' group' + (_finPending === 1 ? '' : 's') + ' not started')) : t2StatusLabel(t.status));   // v1168
+    const _pillLabel = _allDone ? 'Finished' : (_waiting ? ((_fin && _fin.bracketReady) ? ('Day ' + _fin.nextDay + ' ready') : (_fin && _fin.bracketNext) ? (_fin.tied ? 'Tied match — enter the playoff' : ('Day ' + (_fin.nextDay - 1) + ' done — build Day ' + _fin.nextDay)) : (_finPending + ' group' + (_finPending === 1 ? '' : 's') + ' not started')) : t2StatusLabel(t.status));   // v1168/v1169
     const _pill = '<span class="bg-pill ' + _pillCls + '" style="flex:0 0 auto;margin-left:6px">' + ((_stl === 'live' && !_allDone && !_waiting) ? '<span class="dot"></span>' : '') + t2esc(_pillLabel) + '</span>';
     return '<div class="card" style="margin-bottom:8px;padding:12px 14px">' +
       '<button class="full t2-row" data-id="' + t.id + '" style="text-align:left;display:flex;align-items:center;gap:10px;border:none;background:transparent;padding:0;width:100%">' +
@@ -57527,6 +57539,10 @@ async function renderT2List() {
       // t2StartEventNow so it runs the same readiness guards as the wizard. (Tyler, Jul 2026.)
       ((t2CanManage(t) && _stl !== 'live' && !/complete|completed|final|done/.test(_stl))
         ? '<button class="full t2-row-start" data-id="' + t.id + '" style="margin-top:8px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:15px;padding:13px;border-radius:10px">Start tournament</button>'
+        : '') +
+      // v1169: bracket — the next day is built from the results; one tap starts it.
+      ((t2CanManage(t) && _fin && _fin.bracketReady)
+        ? '<button class="full t2-row-startday" data-id="' + t.id + '" data-dayid="' + t2esc(_fin.nextDayId) + '" data-day="' + _fin.nextDay + '" style="margin-top:8px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:15px;padding:13px;border-radius:10px">▶ Start Day ' + _fin.nextDay + '</button>'
         : '') +
       // Creator (commissioner) footer — quiet Edit link + muted trash (was two full-width bars).
       (t2CanManage(t) ? '<div class="bg-evfoot" style="justify-content:flex-end">' +
@@ -57592,6 +57608,13 @@ async function renderT2List() {
     if (!tf) { showToast('Could not load the event'); return; }
     _t2Current = tf;
     try { await t2StartEventNow(); } catch (e) {}
+    try { await renderT2List(); } catch (e) {}
+  });
+  document.querySelectorAll('#t2-list .t2-row-startday').forEach(b => b.onclick = async () => {   // v1169
+    let tf = null; try { tf = await _fullT(b.dataset.id); } catch (e) {}
+    if (!tf) { showToast('Could not load the event'); return; }
+    _t2Current = tf;
+    try { await t2StartDay(b.dataset.dayid, parseInt(b.dataset.day, 10)); } catch (e) { console.error('Start day failed', e); showToast('Could not start the day'); }
     try { await renderT2List(); } catch (e) {}
   });
   document.querySelectorAll('#t2-list .t2-grp-config').forEach(b => b.onclick = async () => {
@@ -57977,20 +58000,8 @@ async function openBracketDayBuilder(dayNumber, dayId) {
   ov.querySelector('#bk-build').onclick = async () => {
     const b = ov.querySelector('#bk-build'); b.disabled = true; b.textContent = 'Building…';
     try {
-      let _dayId = dayId;
-      if (!_dayId) {
-        const e1 = await t2SetDays(t.id, [{ dayNumber: dn, format: 'stroke', playDate: null }]);
-        if (e1) { showToast('Could not create the day: ' + e1); b.disabled = false; b.textContent = 'Build carts'; return; }
-        const ds = await t2GetDays(t.id); const dr = ds.find(x => x.day_number === dn); _dayId = dr && dr.id;
-      }
-      if (!_dayId) { showToast('Could not find the day'); b.disabled = false; b.textContent = 'Build carts'; return; }
-      if (!(await t2ClearGroups(_dayId))) { showToast('Could not clear the old groups — nothing was changed'); b.disabled = false; b.textContent = 'Build carts'; return; }
-      const made = await t2CreateGroupsBulk(_dayId, plan.carts.map((c, gi) => ({ groupNumber: gi + 1, size: c.members.length })));
-      if (!made) { showToast('Could not create the carts'); b.disabled = false; b.textContent = 'Build carts'; return; }
-      const rows = [];
-      plan.carts.forEach((c, gi) => { const g = made[gi]; if (!g) return; c.members.forEach((pid, si) => rows.push({ group_id: g.id, tournament_player_id: pid, team: null, slot: si + 1 })); });
-      if (!(await t2AddGroupMembersBulk(rows))) { for (const r of rows) { try { await t2AddGroupMember(r.group_id, r.tournament_player_id, r.team, r.slot); } catch (e) {} } }
-      await t2MergeSettings(t.id, s => { s.bracketDays = s.bracketDays || {}; s.bracketDays[dn] = { matches: plan.matches.map(x => ({ id: x.id, a: x.a, b: x.b })), idle: plan.idle, builtAt: Date.now() }; });
+      const _r = await _bgBracketCommitDay(t, dn, dayId, plan);   // v1169: shared with the automatic build
+      if (!_r.ok) { showToast(_r.why || 'Could not build the day'); b.disabled = false; b.textContent = 'Build carts'; return; }
       close();
       showToast('Day ' + dn + ' built — ' + plan.matches.length + ' bracket match' + (plan.matches.length === 1 ? '' : 'es') + ' in ' + plan.carts.length + ' cart' + (plan.carts.length === 1 ? '' : 's'));
       try { _t2WizAdvance = true; await renderT2Home(); } catch (e) {}
@@ -57998,6 +58009,78 @@ async function openBracketDayBuilder(dayNumber, dayId) {
   };
 }
 
+// v1169 (Tyler): "It should automatically build the next day's events based on the
+// results... all cart assignments and matches should be auto assigned." The day
+// builder's commit step, pulled out so the modal AND the automatic path share it.
+async function _bgBracketCommitDay(t, dn, dayId, plan) {
+  let _dayId = dayId;
+  if (!_dayId) {
+    const e1 = await t2SetDays(t.id, [{ dayNumber: dn, format: 'stroke', playDate: null }]);
+    if (e1) return { ok: false, why: 'Could not create the day: ' + e1 };
+    const ds = await t2GetDays(t.id); const dr = ds.find(x => x.day_number === dn); _dayId = dr && dr.id;
+  }
+  if (!_dayId) return { ok: false, why: 'Could not find the day' };
+  if (!(await t2ClearGroups(_dayId))) return { ok: false, why: 'Could not clear the old groups — nothing was changed' };
+  const made = await t2CreateGroupsBulk(_dayId, plan.carts.map((c, gi) => ({ groupNumber: gi + 1, size: c.members.length })));
+  if (!made) return { ok: false, why: 'Could not create the carts' };
+  const rows = [];
+  plan.carts.forEach((c, gi) => { const g = made[gi]; if (!g) return; c.members.forEach((pid, si) => rows.push({ group_id: g.id, tournament_player_id: pid, team: null, slot: si + 1 })); });
+  if (!(await t2AddGroupMembersBulk(rows))) { for (const r of rows) { try { await t2AddGroupMember(r.group_id, r.tournament_player_id, r.team, r.slot); } catch (e) {} } }
+  await t2MergeSettings(t.id, s => {
+    s.bracketDays = s.bracketDays || {}; s.bracketDays[dn] = { matches: plan.matches.map(x => ({ id: x.id, a: x.a, b: x.b })), idle: plan.idle, builtAt: Date.now() };
+    // the new day plays the same course / rules / tracking / day games as the day before
+    // unless the director already set something for it — so "Start Day N" is one tap.
+    try {
+      const prev = dn - 1;
+      ['dayCourses', 'dayHcpRules', 'dayTracking', 'dayGames'].forEach(k => {
+        if (s[k] && s[k][prev] != null && s[k][dn] == null) s[k][dn] = JSON.parse(JSON.stringify(s[k][prev]));
+      });
+    } catch (e) {}
+  });
+  try { _t2FieldRoundsCache[String(t.id)] = null; delete _t2FieldRoundsCache[String(t.id)]; } catch (e) {}
+  return { ok: true, dayId: _dayId, dn: dn };
+}
+// Build the next bracket day with no UI. Safe to call any time: it does nothing
+// unless every match of the last built day is decided (no ties, nothing on the
+// course), the caller can manage the event, and the next day has no carts yet.
+// Returns { built, dn, dayId, reason }.
+window._bgBracketAutoBusy = window._bgBracketAutoBusy || {};
+async function bgBracketAutoBuildNext(t) {
+  try {
+    if (!t || !t2IsBracket(t) || !t2CanManage(t)) return { built: false, reason: 'not-manager' };
+    if (window._bgBracketAutoBusy[t.id]) return { built: false, reason: 'busy' };
+    window._bgBracketAutoBusy[t.id] = true;
+    try {
+      const data = await bgBracketLoad(t);
+      if (!data || !data.st) return { built: false, reason: 'no-bracket' };
+      const st = data.st;
+      if (st.complete || st.champion) return { built: false, reason: 'complete' };
+      if (Object.values(st.m).some(x => x.status === 'tied')) return { built: false, reason: 'tied' };
+      if (Object.values(st.m).some(x => x.status === 'live')) return { built: false, reason: 'live' };
+      // next day without carts
+      const days = await t2GetDays(t.id).catch(() => []);
+      let target = null;
+      for (let dn = 1; dn <= Math.max(t.num_days || 1, 1); dn++) {
+        const d = days.find(x => x.day_number === dn);
+        const gs = d ? await t2GetGroups(d.id).catch(() => []) : [];
+        if (!gs.length) { target = { dn: dn, id: d ? d.id : null }; break; }
+      }
+      if (!target) {
+        const n = (t.num_days || 1) + 1;
+        if (n > 14) return { built: false, reason: 'max-days' };
+        if (!(await t2Update(t.id, { num_days: n }))) return { built: false, reason: 'no-day' };
+        t.num_days = n; if (_t2Current && _t2Current.id === t.id) _t2Current.num_days = n;
+        target = { dn: n, id: null };
+      }
+      const plan = bgBracketPlanDay(t, data.players, st);
+      if (!plan || !plan.carts || !plan.carts.length) return { built: false, reason: 'nothing-ready' };
+      const r = await _bgBracketCommitDay(t, target.dn, target.id, plan);
+      if (!r.ok) return { built: false, reason: r.why };
+      try { showToast('Day ' + target.dn + ' built from the results — ' + plan.matches.length + ' match' + (plan.matches.length === 1 ? '' : 'es') + ' in ' + plan.carts.length + ' cart' + (plan.carts.length === 1 ? '' : 's'), 4000); } catch (e) {}
+      return { built: true, dn: target.dn, dayId: r.dayId };
+    } finally { window._bgBracketAutoBusy[t.id] = false; }
+  } catch (e) { console.warn('bgBracketAutoBuildNext', e); window._bgBracketAutoBusy[t.id] = false; return { built: false, reason: 'error' }; }
+}
 // Next day that has no carts yet (creating the day row if needed).
 async function bgBracketBuildNext(t) {
   const days = await t2GetDays(t.id).catch(() => []);
@@ -62376,6 +62459,8 @@ async function t2MaybeCompleteDay(g) {
       const dayN = Number(g.t2.day || 1);
       let nDays = 1; try { const _r = await t2GetX(tid); if (_r && _r.data) nDays = _r.data.num_days || 1; } catch (e) {}
       showToast(dayN < nDays ? ('Day ' + dayN + ' complete — Day ' + (dayN + 1) + ' is next') : ('Day ' + dayN + ' complete — final day in the books'), 4000);
+      // v1169: a bracket builds its next day from the results right here.
+      try { const _r = await t2GetX(tid); if (_r && _r.data && t2IsBracket(_r.data)) await bgBracketAutoBuildNext(_r.data); } catch (e) {}
     }
   } catch (e) { console.warn('t2MaybeCompleteDay', e); }
 }
