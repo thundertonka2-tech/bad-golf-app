@@ -6890,6 +6890,7 @@
         <option value="pairs">Small Teams (2-man)</option>
         <option value="group">4 Person Teams</option>
         <option value="oneday">Individual</option>
+        <option value="bracket">🏆 Bracket (March Madness)</option>
       </select>
       <div class="small-text" id="t2c-type-help" style="color:var(--text-muted);line-height:1.4;margin-top:4px"></div>
     </div>
@@ -8168,7 +8169,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1154';
+const BG_BUILD = 'v2026.11.1157';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -26399,11 +26400,22 @@ function playerGender(p) {
 //   19-20+: avg of lowest 8 (most recent 20 rounds only)
 // Returns { index: number | null, n: count, basis: string }
 function calcHandicapIndex(scoreHistory) {
-  // v1141: drop rounds whose tournament has been deleted (see bgLiveHistory). Filtering
-  // HERE covers every handicap consumer in one place — Stats, Home, the crew board, net
-  // scoring, the leaderboards, the tee-time sheet and the per-round archived stamp —
-  // instead of the ~20 individual call sites.
-  const _list = (typeof bgLiveHistory === 'function') ? bgLiveHistory(scoreHistory) : (Array.isArray(scoreHistory) ? scoreHistory : []);
+  // v1157 (Kevin, 22 Aug): the dead-event filter used to run HERE too, and that was
+  // wrong. Deleting a tournament deletes the EVENT — the standings, the leaderboard, the
+  // container. It does not un-play the ROUND: the gross score, the course rating and the
+  // slope are all still real, the player still walked it, and GHIN still counts it.
+  //
+  // Kevin read 11.6 against GHIN's 10.6 on identical scores. His best differential — 4.7,
+  // DIVOT64, 19 Aug at Firewheel — was being dropped because its event (c854418c) had been
+  // deleted, which also pulled a 21st-oldest round into the 20-round window. Best 8 went
+  // from {4.7, 7.5, 10.5, 11.4, 11.4, 12.3, 14.1, 14.1} = 10.75 to
+  // {7.5, 10.5, 11.4, 11.4, 11.4, 12.3, 14.1, 14.1} = 11.5875. Exactly the 0.85 he saw.
+  //
+  // v1141's filter is still right for what it was written for — Stats, the crew board and
+  // the leaderboards should not show a deleted event's rounds — and it stays in place at
+  // every one of those call sites. The handicap is the one consumer that must count a
+  // round the moment it was played, regardless of what happened to the event around it.
+  const _list = Array.isArray(scoreHistory) ? scoreHistory : [];
   // v924 (Tyler): the INDEX uses the RAW differential — no weather adjustment.
   // GHIN has no weather PCC, so weather-adjusted values drifted from GHIN.
   // The 🌦️ adjustment still displays on each round; rounds saved before
@@ -26446,7 +26458,14 @@ function calcHandicapIndex(scoreHistory) {
 
   const used = diffs.slice(0, useCount);
   const avg = used.reduce((sum, d) => sum + d, 0) / used.length;
-  const index = Math.round((avg + adjustment) * 10) / 10;
+  // v1157: TRUNCATE to one decimal, do not round. USGA Rule 5.2a: "the Handicap Index
+  // is truncated to one decimal place." Math.round pushed every average whose hundredths
+  // were >= .x5 up a tenth — always in the direction of reading higher than GHIN, and
+  // Kevin's 10.75 is exactly such a case (GHIN 10.7, this line 10.8).
+  // The +0.0001 absorbs binary float drift: an average that is mathematically 10.7 can
+  // land at 10.699999999999999, which floor() would take to 10.6.
+  const _raw = avg + adjustment;
+  const index = Math.floor(Math.abs(_raw) * 10 + 0.0001) / 10 * (_raw < 0 ? -1 : 1);
   // Fewer than 5 rounds → WHS leans on your single best round with a big downward
   // adjustment, so the index can read scratch/plus off one good round. Flag it
   // provisional so it's not mistaken for an established handicap.
@@ -50648,7 +50667,7 @@ async function openRoundBetsSheet(code, courseName) {
         const _st = calculateSettlements(_dict, _pl) || [];
         _evSettle = _st; _evNameOf = _nmOf; _evPlayerOf = _pOf;
         // v1113: the event's team ranking, from the same payout object as the money.
-        try { _evStdHtml = _t2TeamQuotaStandingsHtml(t, _pay.teamStandings) || ''; } catch (e) {}
+        try { _evStdHtml = (_t2TeamQuotaStandingsHtml(t, _pay.teamStandings) || '') + (_pay.bracketHtml || ''); } catch (e) {}   // v1155: bracket tree rides with the money
       // v1118 (Tyler): "the score card should show all players not just our group."
       // Same builder the Event Leaderboard uses, off the rounds already fetched above
       // — no extra query. evPlayers is skipped: anyone who has actually put a score in
@@ -57403,6 +57422,546 @@ async function t2CreateDaily() {
 
 // Individual ("one-day") events: no teams, leaderboard-only. Flag lives in
 // tournaments.settings so every screen can adapt.
+// ============================================================
+// v1155 — BRACKET EVENTS ("March Madness", Tyler 8/21/2026)
+// Up to 24 players, individual match or stroke play, winner moves on. Single
+// elimination (+ optional consolation ladder) or double elimination (true losers
+// bracket + grand final). With or without handicaps. One bracket round per day,
+// 18 holes; two matches per foursome; idle players (byes / eliminated) play a
+// normal round together for the side games only. Ties: sudden death entered
+// in-app (playoff holes) or a director override.
+//
+// Storage (tournaments.settings — jsonb, no schema change):
+//   settings.type     = 'oneday'  (no teams; leaderboard + field pots behave as an
+//                                  individual event everywhere else)
+//   settings.bracket  = { mode: 'single'|'consolation'|'double', play: 'match'|'stroke',
+//                         handicaps: bool, entry: $, split: '100'|'80/20'|'70/30',
+//                         stake: $, seeds: [tournament_player_id …] (slot 1 = #1 seed),
+//                         playoffs: { matchId: [{a, b} …] }, overrides: { matchId: tpid } }
+//   settings.bracketDays[N] = { matches: [{ id, a, b }], idle: [tpid…] }  (what Day N plays)
+// Each launched cart round carries g.bracket = [{ id, a: roundPid, b: roundPid, aT, bT }]
+// so the result scan can read the winner straight off the scorecard.
+// ============================================================
+function t2IsBracket(t) { return !!(t && t.settings && t.settings.bracket && typeof t.settings.bracket === 'object'); }
+const BG_BRACKET_DEFAULTS = { mode: 'consolation', play: 'match', handicaps: true, entry: 0, split: '70/30', stake: 0, holes: 18 };
+// v1156: 9-hole brackets — each bracket round is a 9-hole round; odd rounds play the
+// front nine, even rounds the back, so two bracket rounds fit in one 18-hole day.
+function bgBracketNineFor(cfg, dayNumber) { if (!cfg || Number(cfg.holes) !== 9) return null; return (parseInt(dayNumber, 10) % 2 === 1) ? 'front9' : 'back9'; }
+function bgBracketCfg(t) { return Object.assign({}, BG_BRACKET_DEFAULTS, (t && t.settings && t.settings.bracket) || {}); }
+
+// Standard seeding order for a power-of-two bracket: [1,16,8,9,4,13,5,12,2,15,7,10,3,14,6,11]
+// — #1 and #2 can only meet in the final, the top seeds get the byes.
+function bgBracketOrder(size) {
+  let order = [1];
+  let cur = 1;
+  while (cur < size) { cur *= 2; const next = []; order.forEach(s => { next.push(s, cur + 1 - s); }); order = next; }
+  return order;
+}
+function bgBracketRoundLabel(br, r, size, k) {
+  if (br === 'W') { const left = size / Math.pow(2, r - 1); return left === 2 ? 'Final' : (left === 4 ? 'Semifinals' : (left === 8 ? 'Quarterfinals' : 'Round of ' + left)); }
+  if (br === 'GF') return 'Grand final';
+  return (br === 'C' ? 'Consolation ' : 'Losers ') + 'R' + r;
+}
+// The bracket SHAPE for n players. matches[id] = { id, br, r, i, from: [src, src] }
+// src = { seed: n } | { w: matchId } | { l: matchId }. rounds[] lists ids per round in play order.
+function bgBracketSpec(n, mode) {
+  n = Math.max(2, Math.min(64, parseInt(n, 10) || 2));
+  let size = 2; while (size < n) size *= 2;
+  const k = Math.round(Math.log(size) / Math.LN2);
+  const matches = {}, rounds = [];
+  const lbr = (mode === 'double') ? 'L' : 'C';
+  const add = (br, r, i, from) => { const id = br + (br === 'GF' ? '' : r) + '-' + i; matches[id] = { id: id, br: br, r: r, i: i, from: from }; return id; };
+  const order = bgBracketOrder(size);
+  // Winners bracket
+  for (let r = 1; r <= k; r++) {
+    const cnt = size / Math.pow(2, r); const ids = [];
+    for (let i = 1; i <= cnt; i++) {
+      const from = (r === 1) ? [{ seed: order[2 * (i - 1)] }, { seed: order[2 * (i - 1) + 1] }]
+                             : [{ w: 'W' + (r - 1) + '-' + (2 * i - 1) }, { w: 'W' + (r - 1) + '-' + (2 * i) }];
+      ids.push(add('W', r, i, from));
+    }
+    rounds.push({ id: 'W' + r, br: 'W', r: r, label: bgBracketRoundLabel('W', r, size, k), ids: ids });
+  }
+  if ((mode === 'consolation' || mode === 'double') && k >= 2) {
+    // Losers / consolation ladder: L1 = W1 losers paired; L(2j) = L(2j-1) winners vs
+    // W(j+1) losers (reversed so early rematches are rare); L(2j+1) = L(2j) winners paired.
+    const lr = 2 * k - 2;
+    for (let r = 1; r <= lr; r++) {
+      const ids = [];
+      if (r === 1) {
+        const cnt = size / 4;
+        for (let i = 1; i <= cnt; i++) ids.push(add(lbr, 1, i, [{ l: 'W1-' + (2 * i - 1) }, { l: 'W1-' + (2 * i) }]));
+      } else if (r % 2 === 0) {
+        const j = r / 2; const cnt = size / Math.pow(2, j + 1);   // = W(j+1) match count
+        for (let i = 1; i <= cnt; i++) ids.push(add(lbr, r, i, [{ w: lbr + (r - 1) + '-' + i }, { l: 'W' + (j + 1) + '-' + (cnt + 1 - i) }]));
+      } else {
+        const prev = rounds[rounds.length - 1].ids.length; const cnt = prev / 2;
+        for (let i = 1; i <= cnt; i++) ids.push(add(lbr, r, i, [{ w: lbr + (r - 1) + '-' + (2 * i - 1) }, { w: lbr + (r - 1) + '-' + (2 * i) }]));
+      }
+      rounds.push({ id: lbr + r, br: lbr, r: r, label: bgBracketRoundLabel(lbr, r, size, k), ids: ids });
+    }
+    if (mode === 'double') {
+      const id = add('GF', 1, 1, [{ w: 'W' + k + '-1' }, { w: 'L' + lr + '-1' }]);
+      rounds.push({ id: 'GF', br: 'GF', r: 1, label: 'Grand final', ids: [id] });
+    }
+  }
+  return { n: n, size: size, k: k, mode: mode, matches: matches, rounds: rounds };
+}
+
+// Fill the shape with players + results. Each match → { a, b, aKnown, bKnown, winner, loser,
+// status: 'empty'|'bye'|'pending'|'ready'|'live'|'tied'|'final', label }.
+// results[id] = { winner: tpid|null, loser: tpid|null, label, live: bool, tied: bool }
+function bgBracketResolve(spec, seeds, results) {
+  const m = {}; results = results || {};
+  Object.keys(spec.matches).forEach(id => { m[id] = { id: id, a: null, b: null, aKnown: false, bKnown: false, winner: null, loser: null, status: 'pending', label: '', decided: false }; });
+  const side = (src) => {
+    if (src.seed != null) return { known: true, p: seeds[src.seed - 1] || null, seed: src.seed };
+    const ref = m[src.w || src.l]; if (!ref || !ref.decided) return { known: false, p: null };
+    return { known: true, p: src.w ? ref.winner : ref.loser };
+  };
+  for (let pass = 0; pass < 40; pass++) {
+    let changed = false;
+    Object.keys(spec.matches).forEach(id => {
+      const x = m[id]; if (x.decided) return;
+      const sp = spec.matches[id];
+      const A = side(sp.from[0]), B = side(sp.from[1]);
+      x.a = A.p; x.b = B.p; x.aKnown = A.known; x.bKnown = B.known; x.aSeed = A.seed; x.bSeed = B.seed;
+      if (!A.known || !B.known) return;
+      if (!A.p && !B.p) { x.status = 'empty'; x.decided = true; changed = true; return; }
+      if (!A.p || !B.p) { x.status = 'bye'; x.winner = A.p || B.p; x.loser = null; x.decided = true; x.label = 'bye'; changed = true; return; }
+      const r = results[id];
+      if (r && r.winner) { x.status = 'final'; x.winner = r.winner; x.loser = (r.winner === A.p) ? B.p : A.p; x.label = r.label || ''; x.decided = true; changed = true; return; }
+      x.status = r ? (r.tied ? 'tied' : (r.live ? 'live' : 'ready')) : 'ready'; x.label = (r && r.label) || '';
+    });
+    if (!changed) break;
+  }
+  // seeds for display
+  const seedOf = {}; (seeds || []).forEach((p, i) => { if (p) seedOf[p] = i + 1; });
+  return { m: m, seedOf: seedOf };
+}
+
+// Seeding: by handicap (low = #1), name as the tiebreak. Withdrawn players excluded.
+function bgBracketAutoSeeds(t, players) {
+  const wd = (typeof t2WithdrawnSet === 'function') ? t2WithdrawnSet(t) : new Set();
+  const h = p => (p.handicap == null || p.handicap === '') ? 999 : Number(p.handicap);
+  return (players || []).filter(p => p && !wd.has(p.id)).slice()
+    .sort((a, b) => (h(a) - h(b)) || String(a.display_name || '').localeCompare(String(b.display_name || '')))
+    .map(p => p.id);
+}
+
+// Read every bracket match's result off the actual scorecards (same source of truth
+// idea as cup standings) + in-app playoffs + director overrides.
+function bgBracketResultsFromRounds(t, rounds) {
+  const cfg = bgBracketCfg(t);
+  const res = {};
+  const playoffs = (t.settings && t.settings.bracket && t.settings.bracket.playoffs) || {};
+  const overrides = (t.settings && t.settings.bracket && t.settings.bracket.overrides) || {};
+  (rounds || []).forEach(row => {
+    const g = (row && row.data) ? row.data : row;
+    if (!g || !Array.isArray(g.bracket) || !g.bracket.length || !Array.isArray(g.players)) return;
+    const rH = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+    const finished = !!g.finishedAt;
+    let mr = null; try { mr = (cfg.play === 'match' && g.games && g.games.match) ? calcMatch(g) : null; } catch (e) { mr = null; }
+    let totals = null; try { totals = calcTotals(g); } catch (e) { totals = null; }
+    g.bracket.forEach(pr => {
+      if (!pr || !pr.id) return;
+      const pa = g.players.find(p => p.id === pr.a), pb = g.players.find(p => p.id === pr.b);
+      if (!pa || !pb) return;
+      const first = (p) => String(p.name || '').split(/\s+/)[0];
+      let out = { winner: null, loser: null, label: '', live: false, tied: false };
+      if (cfg.play === 'match') {
+        const inst = mr && (mr.matches || []).find(x => (x.aId === pr.a && x.bId === pr.b) || (x.aId === pr.b && x.bId === pr.a));
+        if (inst && inst.played > 0) {
+          const aUp = (inst.aId === pr.a) ? inst.finalUp : -inst.finalUp;
+          if (inst.complete) {
+            if (aUp > 0) { out.winner = pr.aT; out.loser = pr.bT; out.label = first(pa) + ' ' + (inst.closedScore || 'wins'); }
+            else if (aUp < 0) { out.winner = pr.bT; out.loser = pr.aT; out.label = first(pb) + ' ' + (inst.closedScore || 'wins'); }
+            else { out.tied = true; out.label = 'all square after ' + inst.played; }
+          } else { out.live = true; out.label = (aUp === 0 ? 'AS' : ((aUp > 0 ? first(pa) : first(pb)) + ' ' + Math.abs(aUp) + ' up')) + ' thru ' + inst.played; }
+        }
+      } else {
+        const ta = totals && totals[pr.a], tb = totals && totals[pr.b];
+        const na = ta ? ta.count : 0, nb = tb ? tb.count : 0;
+        if (na || nb) {
+          const va = ta ? (cfg.handicaps === false ? ta.gross : (ta.net != null ? ta.net : ta.gross)) : null;
+          const vb = tb ? (cfg.handicaps === false ? tb.gross : (tb.net != null ? tb.net : tb.gross)) : null;
+          const done = finished || (na >= rH && nb >= rH);
+          if (done && va != null && vb != null) {
+            if (va < vb) { out.winner = pr.aT; out.loser = pr.bT; out.label = first(pa) + ' ' + va + '–' + vb; }
+            else if (vb < va) { out.winner = pr.bT; out.loser = pr.aT; out.label = first(pb) + ' ' + vb + '–' + va; }
+            else { out.tied = true; out.label = 'tied ' + va + '–' + vb; }
+          } else { out.live = true; out.label = (va != null ? va : '–') + '–' + (vb != null ? vb : '–') + ' thru ' + Math.min(na || 0, nb || 0); }
+        }
+      }
+      // Sudden death entered in-app: first playoff hole with different scores decides.
+      if (out.tied && Array.isArray(playoffs[pr.id])) {
+        let hn = 0;
+        for (const ph of playoffs[pr.id]) {
+          hn++;
+          const sa = Number(ph && ph.a), sb = Number(ph && ph.b);
+          if (!isFinite(sa) || !isFinite(sb) || sa === sb) continue;
+          if (sa < sb) { out.winner = pr.aT; out.loser = pr.bT; out.label = first(pa) + ' wins in playoff (hole ' + hn + ')'; }
+          else { out.winner = pr.bT; out.loser = pr.aT; out.label = first(pb) + ' wins in playoff (hole ' + hn + ')'; }
+          out.tied = false; break;
+        }
+        if (out.tied) out.label += ' · playoff thru ' + hn + ', still tied';
+      }
+      if (overrides[pr.id] && (overrides[pr.id] === pr.aT || overrides[pr.id] === pr.bT)) {
+        out.winner = overrides[pr.id]; out.loser = (out.winner === pr.aT) ? pr.bT : pr.aT; out.tied = false; out.live = false;
+        out.label = first(out.winner === pr.aT ? pa : pb) + ' (director decision)';
+      }
+      if (out.winner || out.live || out.tied) res[pr.id] = out;
+    });
+  });
+  return res;
+}
+
+// Everything a screen needs: spec, seeds, resolved matches, champion etc.
+function bgBracketState(t, players, rounds) {
+  const cfg = bgBracketCfg(t);
+  const seeds = (Array.isArray(cfg.seeds) && cfg.seeds.length) ? cfg.seeds : bgBracketAutoSeeds(t, players);
+  const spec = bgBracketSpec(seeds.length, cfg.mode);
+  const results = bgBracketResultsFromRounds(t, rounds);
+  const rs = bgBracketResolve(spec, seeds, results);
+  const last = spec.rounds[spec.rounds.length - 1];
+  const wFinal = rs.m['W' + spec.k + '-1'];
+  const gf = rs.m['GF-1'];
+  const decider = gf || wFinal;
+  const champion = (decider && decider.status === 'final') ? decider.winner : null;
+  const runnerUp = champion ? decider.loser : null;
+  let consolationChamp = null;
+  if (cfg.mode === 'consolation') { const lr = spec.rounds.filter(r => r.br === 'C'); const lf = lr.length ? rs.m[lr[lr.length - 1].ids[0]] : null; if (lf && lf.status === 'final') consolationChamp = lf.winner; }
+  const pending = Object.values(rs.m).filter(x => x.status === 'ready' || x.status === 'live' || x.status === 'tied');
+  return { cfg: cfg, seeds: seeds, spec: spec, results: results, m: rs.m, seedOf: rs.seedOf, champion: champion, runnerUp: runnerUp, consolationChamp: consolationChamp,
+           complete: !!champion && !pending.length, pendingCount: pending.length, lastRound: last };
+}
+
+// Plan a day: every READY match whose players haven't already been scheduled today,
+// two matches per cart; everyone else (byes, eliminated, waiting) in foursomes.
+function bgBracketPlanDay(t, players, st) {
+  const wd = (typeof t2WithdrawnSet === 'function') ? t2WithdrawnSet(t) : new Set();
+  const used = new Set(); const matches = [];
+  st.spec.rounds.forEach(rd => rd.ids.forEach(id => {
+    const x = st.m[id];
+    if (!x || x.status !== 'ready') return;
+    if (!x.a || !x.b || used.has(x.a) || used.has(x.b) || wd.has(x.a) || wd.has(x.b)) return;
+    used.add(x.a); used.add(x.b); matches.push({ id: id, a: x.a, b: x.b, round: rd.label });
+  }));
+  const idle = (players || []).filter(p => p && !wd.has(p.id) && !used.has(p.id)).map(p => p.id);
+  const carts = [];
+  for (let i = 0; i < matches.length; i += 2) {
+    const c = [matches[i].a, matches[i].b]; if (matches[i + 1]) c.push(matches[i + 1].a, matches[i + 1].b);
+    carts.push({ members: c, matchIds: matches.slice(i, i + 2).map(x => x.id) });
+  }
+  // idle players: balanced groups of up to 4
+  if (idle.length) {
+    const nG = Math.ceil(idle.length / 4); const per = Math.ceil(idle.length / nG);
+    for (let i = 0; i < idle.length; i += per) carts.push({ members: idle.slice(i, i + per), matchIds: [] });
+  }
+  return { matches: matches, idle: idle, carts: carts };
+}
+
+// The pairs that belong to THIS cart's round (called at launch). gp = round players (with t2pid).
+function bgBracketCartPairs(t, dayNumber, gp) {
+  const bd = t.settings && t.settings.bracketDays && t.settings.bracketDays[dayNumber];
+  if (!bd || !Array.isArray(bd.matches)) return [];
+  const byT = {}; (gp || []).forEach(p => { if (p.t2pid) byT[p.t2pid] = p; });
+  const out = [];
+  bd.matches.forEach(mm => { const pa = byT[mm.a], pb = byT[mm.b]; if (pa && pb) out.push({ id: mm.id, a: pa.id, b: pb.id, aT: mm.a, bT: mm.b, aName: pa.name, bName: pb.name }); });
+  return out;
+}
+// Match-play brackets score as a normal Match Play game on the cart (so the scorer sees
+// holes won/lost live). $0 — the bracket's own money is settled on the Results screen.
+function bgBracketAttachMatchGame(games, pairs, cfg) {
+  const insts = pairs.map(pr => ({ value: 0, net: cfg.handicaps !== false, pair: [pr.aName, pr.bName], participants: [pr.a, pr.b], participantNames: [pr.aName, pr.bName], bracketId: pr.id }));
+  const existing = games.match && Array.isArray(games.match.instances) ? games.match.instances : (games.match ? [games.match] : []);
+  const all = insts.concat(existing.filter(si => !si.bracketId));
+  games.match = Object.assign({}, all[0], { instances: all });
+}
+
+// ---- persistence: bracket settings + day plans ----
+async function bgBracketLoad(t) {
+  const out = { players: [], rounds: [], st: null };
+  try {
+    const [players, rounds] = await Promise.all([t2GetPlayers(t.id).catch(() => []), loadTourneyRawRounds(t).catch(() => [])]);
+    out.players = players || []; out.rounds = rounds || [];
+    out.st = bgBracketState(t, out.players, out.rounds);
+  } catch (e) { console.warn('bgBracketLoad', e); }
+  return out;
+}
+async function bgBracketEnsureSeeds(t, players) {
+  const cfg = bgBracketCfg(t);
+  if (Array.isArray(cfg.seeds) && cfg.seeds.length) return cfg.seeds;
+  const seeds = bgBracketAutoSeeds(t, players);
+  await t2MergeSettings(t.id, s => { s.bracket = Object.assign({}, BG_BRACKET_DEFAULTS, s.bracket || {}); s.bracket.seeds = seeds; });
+  return seeds;
+}
+async function bgBracketReseed(t) {
+  const players = await t2GetPlayers(t.id).catch(() => []);
+  const seeds = bgBracketAutoSeeds(t, players);
+  const ok = await t2MergeSettings(t.id, s => { s.bracket = Object.assign({}, BG_BRACKET_DEFAULTS, s.bracket || {}); s.bracket.seeds = seeds; });
+  showToast(ok ? 'Re-seeded by handicap' : 'Could not save the seeding');
+  try { await renderT2Home(); } catch (e) {}
+}
+
+// "Build Day N": plan the ready matches, write the carts, remember the plan.
+async function openBracketDayBuilder(dayNumber, dayId) {
+  const t = _t2Current; if (!t) return;
+  if (!t2CanManage(t)) { showToast('Only the commissioner can build the bracket day'); return; }
+  const dn = parseInt(dayNumber, 10) || 1;
+  const data = await bgBracketLoad(t);
+  if (!data.st) { showToast('Could not load the bracket'); return; }
+  if (!(Array.isArray(bgBracketCfg(t).seeds) && bgBracketCfg(t).seeds.length)) { await bgBracketEnsureSeeds(t, data.players); return openBracketDayBuilder(dayNumber, dayId); }
+  const st = data.st;
+  // a day that already has live rounds is never rebuilt
+  let gs = []; try { gs = dayId ? await t2GetGroups(dayId) : []; } catch (e) {}
+  if ((gs || []).some(g => g.game_code)) { showToast('Day ' + dn + ' has already started — its carts are locked'); return; }
+  const ties = Object.values(st.m).filter(x => x.status === 'tied');
+  const live = Object.values(st.m).filter(x => x.status === 'live');
+  const plan = bgBracketPlanDay(t, data.players, st);
+  const pById = {}; data.players.forEach(p => pById[p.id] = p);
+  const nm = (id) => { const p = pById[id]; return p ? t2esc(String(p.display_name || '').split(/\s+/)[0]) : '?'; };
+  const sd = (id) => (st.seedOf[id] ? '#' + st.seedOf[id] + ' ' : '');
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100061';
+  const _nine = bgBracketNineFor(bgBracketCfg(t), dn);
+  let h = '<div class="modal" style="max-width:460px;width:94%;max-height:88vh;overflow-y:auto"><h2 style="margin-bottom:4px">🏆 Build Day ' + dn + (_nine ? ' <span style="font-size:13px;color:var(--text-muted)">(' + (_nine === 'front9' ? 'front' : 'back') + ' nine)</span>' : '') + '</h2>';
+  if (st.complete) h += '<div class="help-text" style="padding:10px">The bracket is complete — ' + nm(st.champion) + ' is your champion. Nothing left to build.</div>';
+  if (ties.length) h += '<div class="small-text" style="color:var(--danger);margin:6px 0">' + ties.length + ' match' + (ties.length === 1 ? ' is' : 'es are') + ' tied — enter the playoff holes (tap the match on the bracket) before building the next day: ' + ties.map(x => nm(x.a) + ' v ' + nm(x.b)).join(', ') + '</div>';
+  if (live.length) h += '<div class="small-text" style="color:var(--text-muted);margin:6px 0">' + live.length + ' match' + (live.length === 1 ? '' : 'es') + ' still on the course — finish those rounds first, or build anyway and they\'ll wait for a later day.</div>';
+  h += '<div class="small-text" style="margin:8px 0 4px;font-weight:700">Matches today (' + plan.matches.length + ')</div>';
+  if (!plan.matches.length) h += '<div class="small-text" style="color:var(--text-muted)">No match is ready yet.</div>';
+  plan.matches.forEach(mm => { h += '<div class="small-text" style="padding:2px 0">' + t2esc(mm.round) + ': ' + sd(mm.a) + nm(mm.a) + ' v ' + sd(mm.b) + nm(mm.b) + '</div>'; });
+  h += '<div class="small-text" style="margin:10px 0 4px;font-weight:700">Carts</div>';
+  plan.carts.forEach((c, i) => { h += '<div class="small-text" style="padding:2px 0">Cart ' + (i + 1) + ': ' + c.members.map(nm).join(', ') + (c.matchIds.length ? '' : ' <span style="color:var(--text-muted)">(side games only)</span>') + '</div>'; });
+  if (plan.idle.length) h += '<div class="small-text" style="color:var(--text-muted);margin-top:6px">' + plan.idle.length + ' player' + (plan.idle.length === 1 ? '' : 's') + ' with no bracket match today play a normal round for the side games.</div>';
+  h += '<div class="actions" style="margin-top:12px"><button id="bk-cancel" style="flex:1">Cancel</button><button class="primary" id="bk-build" style="flex:2"' + (plan.carts.length ? '' : ' disabled') + '>Build carts</button></div></div>';
+  ov.innerHTML = h; document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#bk-cancel').onclick = close;
+  ov.querySelector('#bk-build').onclick = async () => {
+    const b = ov.querySelector('#bk-build'); b.disabled = true; b.textContent = 'Building…';
+    try {
+      let _dayId = dayId;
+      if (!_dayId) {
+        const e1 = await t2SetDays(t.id, [{ dayNumber: dn, format: 'stroke', playDate: null }]);
+        if (e1) { showToast('Could not create the day: ' + e1); b.disabled = false; b.textContent = 'Build carts'; return; }
+        const ds = await t2GetDays(t.id); const dr = ds.find(x => x.day_number === dn); _dayId = dr && dr.id;
+      }
+      if (!_dayId) { showToast('Could not find the day'); b.disabled = false; b.textContent = 'Build carts'; return; }
+      if (!(await t2ClearGroups(_dayId))) { showToast('Could not clear the old groups — nothing was changed'); b.disabled = false; b.textContent = 'Build carts'; return; }
+      const made = await t2CreateGroupsBulk(_dayId, plan.carts.map((c, gi) => ({ groupNumber: gi + 1, size: c.members.length })));
+      if (!made) { showToast('Could not create the carts'); b.disabled = false; b.textContent = 'Build carts'; return; }
+      const rows = [];
+      plan.carts.forEach((c, gi) => { const g = made[gi]; if (!g) return; c.members.forEach((pid, si) => rows.push({ group_id: g.id, tournament_player_id: pid, team: null, slot: si + 1 })); });
+      if (!(await t2AddGroupMembersBulk(rows))) { for (const r of rows) { try { await t2AddGroupMember(r.group_id, r.tournament_player_id, r.team, r.slot); } catch (e) {} } }
+      await t2MergeSettings(t.id, s => { s.bracketDays = s.bracketDays || {}; s.bracketDays[dn] = { matches: plan.matches.map(x => ({ id: x.id, a: x.a, b: x.b })), idle: plan.idle, builtAt: Date.now() }; });
+      close();
+      showToast('Day ' + dn + ' built — ' + plan.matches.length + ' bracket match' + (plan.matches.length === 1 ? '' : 'es') + ' in ' + plan.carts.length + ' cart' + (plan.carts.length === 1 ? '' : 's'));
+      try { _t2WizAdvance = true; await renderT2Home(); } catch (e) {}
+    } catch (e) { console.warn('bracket build', e); showToast('Could not build the day'); b.disabled = false; b.textContent = 'Build carts'; }
+  };
+}
+
+// Next day that has no carts yet (creating the day row if needed).
+async function bgBracketBuildNext(t) {
+  const days = await t2GetDays(t.id).catch(() => []);
+  let target = null;
+  for (let dn = 1; dn <= Math.max(t.num_days || 1, 1); dn++) {
+    const d = days.find(x => x.day_number === dn);
+    const gs = d ? await t2GetGroups(d.id).catch(() => []) : [];
+    if (!gs.length) { target = { dn: dn, id: d ? d.id : null }; break; }
+  }
+  if (!target) {
+    const n = (t.num_days || 1) + 1;
+    if (n > 14) { showToast('14 days max'); return; }
+    if (!(await t2Update(t.id, { num_days: n }))) { showToast('Could not add a day'); return; }
+    t.num_days = n; if (_t2Current && _t2Current.id === t.id) _t2Current.num_days = n;
+    target = { dn: n, id: null };
+  }
+  return openBracketDayBuilder(target.dn, target.id);
+}
+
+// Tied match: enter a sudden-death hole, or the director picks the winner.
+async function bgBracketTieSheet(t, matchId) {
+  const data = await bgBracketLoad(t); if (!data.st) return;
+  const x = data.st.m[matchId]; if (!x) return;
+  const pById = {}; data.players.forEach(p => pById[p.id] = p);
+  const nm = (id) => { const p = pById[id]; return p ? String(p.display_name || '').split(/\s+/)[0] : '?'; };
+  const po = (t.settings.bracket.playoffs && t.settings.bracket.playoffs[matchId]) || [];
+  const ov = document.createElement('div'); ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100062';
+  let h = '<div class="modal" style="max-width:380px"><h2 style="margin-bottom:4px">⚖️ Playoff — ' + t2esc(nm(x.a)) + ' v ' + t2esc(nm(x.b)) + '</h2>';
+  h += '<div class="small-text" style="color:var(--text-muted);margin-bottom:8px">' + t2esc(x.label || 'tied') + '. Sudden death: enter each playoff hole\'s gross score; the first hole with a lower score wins.</div>';
+  po.forEach((ph, i) => { h += '<div class="small-text">Hole ' + (i + 1) + ': ' + t2esc(nm(x.a)) + ' ' + t2esc(String(ph.a)) + ' · ' + t2esc(nm(x.b)) + ' ' + t2esc(String(ph.b)) + '</div>'; });
+  h += '<div class="row" style="gap:8px;margin:10px 0"><div class="field" style="flex:1"><label>' + t2esc(nm(x.a)) + '</label><input type="number" id="bk-po-a" inputmode="numeric" min="1" max="15" style="width:100%"></div><div class="field" style="flex:1"><label>' + t2esc(nm(x.b)) + '</label><input type="number" id="bk-po-b" inputmode="numeric" min="1" max="15" style="width:100%"></div></div>';
+  h += '<div class="actions"><button id="bk-po-cancel" style="flex:1">Close</button><button class="primary" id="bk-po-save" style="flex:2">Add playoff hole</button></div>';
+  if (t2CanManage(t)) h += '<div class="small-text" style="margin-top:12px;color:var(--text-muted)">Director decision instead:</div><div class="row" style="gap:8px;margin-top:4px"><button class="small bk-po-pick" data-p="' + t2esc(x.a) + '" style="flex:1">' + t2esc(nm(x.a)) + ' wins</button><button class="small bk-po-pick" data-p="' + t2esc(x.b) + '" style="flex:1">' + t2esc(nm(x.b)) + ' wins</button></div>';
+  h += '</div>';
+  ov.innerHTML = h; document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#bk-po-cancel').onclick = close;
+  ov.querySelector('#bk-po-save').onclick = async () => {
+    const a = parseInt(ov.querySelector('#bk-po-a').value, 10), b = parseInt(ov.querySelector('#bk-po-b').value, 10);
+    if (!isFinite(a) || !isFinite(b) || a < 1 || b < 1) { showToast('Enter both scores'); return; }
+    const ok = await t2MergeSettings(t.id, s => { s.bracket = s.bracket || {}; s.bracket.playoffs = s.bracket.playoffs || {}; const arr = Array.isArray(s.bracket.playoffs[matchId]) ? s.bracket.playoffs[matchId].slice() : []; arr.push({ a: a, b: b }); s.bracket.playoffs[matchId] = arr; });
+    if (!ok) { showToast('Could not save'); return; }
+    close(); showToast(a === b ? 'Still tied — play another hole' : (nm(a < b ? x.a : x.b) + ' wins the playoff'));
+    try { _t2FieldRoundsCache[String(t.id)] = null; delete _t2FieldRoundsCache[String(t.id)]; } catch (e) {}
+    try { await renderT2Home(); } catch (e) {}
+  };
+  ov.querySelectorAll('.bk-po-pick').forEach(b => b.onclick = async () => {
+    if (!(await uiConfirm('Declare ' + nm(b.dataset.p) + ' the winner of this match?', { title: 'Director decision', okLabel: 'Declare', cancelLabel: 'Cancel' }))) return;
+    const ok = await t2MergeSettings(t.id, s => { s.bracket = s.bracket || {}; s.bracket.overrides = s.bracket.overrides || {}; s.bracket.overrides[matchId] = b.dataset.p; });
+    if (!ok) { showToast('Could not save'); return; }
+    close(); showToast(nm(b.dataset.p) + ' advances');
+    try { await renderT2Home(); } catch (e) {}
+  });
+}
+
+// Bracket settings sheet (mode / play / handicaps / entry / split / stake).
+async function openBracketSettings(t) {
+  t = t || _t2Current; if (!t) return;
+  const cfg = bgBracketCfg(t);
+  const locked = !!(t.settings && t.settings.bracketDays && Object.keys(t.settings.bracketDays).length);
+  const ov = document.createElement('div'); ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100061';
+  const sel = (id, opts, val) => '<select id="' + id + '" style="width:100%"' + (locked && (id === 'bk-mode' || id === 'bk-play' || id === 'bk-holes') ? ' disabled' : '') + '>' + opts.map(o => '<option value="' + o[0] + '"' + (String(o[0]) === String(val) ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
+  ov.innerHTML = '<div class="modal" style="max-width:420px"><h2 style="margin-bottom:4px">🏆 Bracket settings</h2>' +
+    (locked ? '<div class="small-text" style="color:var(--text-muted);margin-bottom:6px">Day 1 is built — the bracket shape and play style are locked; money can still change.</div>' : '') +
+    '<div class="field"><label>Elimination</label>' + sel('bk-mode', [['single', 'Single elimination (losers play side games only)'], ['consolation', 'Single elimination + consolation bracket'], ['double', 'Double elimination (losers bracket + grand final)']], cfg.mode) + '</div>' +
+    '<div class="field"><label>Matches are</label>' + sel('bk-play', [['match', 'Match play (holes won)'], ['stroke', 'Stroke play (lower 18-hole total)']], cfg.play) + '</div>' +
+    '<div class="field"><label>Holes per match</label>' + sel('bk-holes', [['18', '18 holes — one bracket round per day'], ['9', '9 holes — two bracket rounds per day (front nine, then back nine)']], String(Number(cfg.holes) === 9 ? 9 : 18)) + '</div>' +
+    '<div class="field"><label>Handicaps</label>' + sel('bk-hcp', [['1', 'With handicaps (net)'], ['0', 'No handicaps (gross)']], cfg.handicaps === false ? '0' : '1') + '</div>' +
+    '<div class="row" style="gap:8px"><div class="field" style="flex:1"><label>Entry fee $ / player</label><input type="number" id="bk-entry" inputmode="decimal" min="0" step="1" value="' + (Number(cfg.entry) || 0) + '" style="width:100%"></div>' +
+    '<div class="field" style="flex:1"><label>Pot split</label>' + sel('bk-split', [['100', '100% to the champion'], ['80/20', '80% / 20% runner-up'], ['70/30', '70% / 30% runner-up']], cfg.split) + '</div></div>' +
+    '<div class="field"><label>$ per match (loser pays winner, optional)</label><input type="number" id="bk-stake" inputmode="decimal" min="0" step="1" value="' + (Number(cfg.stake) || 0) + '" style="width:100%"></div>' +
+    '<div class="small-text" style="color:var(--text-muted)">Each bracket round is a "day" in the app; with 9-hole matches build and play two of them per calendar day (odd rounds = front nine, even = back nine). Two matches share a cart; players without a match that day play a normal round for the side games. Ties go to sudden death entered on the bracket.</div>' +
+    '<div class="actions" style="margin-top:12px"><button id="bk-s-cancel" style="flex:1">Cancel</button><button class="primary" id="bk-s-save" style="flex:2">Save</button></div></div>';
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#bk-s-cancel').onclick = close;
+  ov.querySelector('#bk-s-save').onclick = async () => {
+    const v = (id) => ov.querySelector('#' + id).value;
+    const ok = await t2MergeSettings(t.id, s => {
+      s.bracket = Object.assign({}, BG_BRACKET_DEFAULTS, s.bracket || {});
+      if (!locked) { s.bracket.mode = v('bk-mode'); s.bracket.play = v('bk-play'); s.bracket.holes = (v('bk-holes') === '9') ? 9 : 18; }
+      s.bracket.handicaps = v('bk-hcp') === '1';
+      s.bracket.entry = Math.max(0, parseFloat(v('bk-entry')) || 0);
+      s.bracket.split = v('bk-split');
+      s.bracket.stake = Math.max(0, parseFloat(v('bk-stake')) || 0);
+    });
+    if (!ok) { showToast('Could not save'); return; }
+    close(); showToast('Bracket settings saved');
+    try { await renderT2Home(); } catch (e) {}
+  };
+}
+
+// ---- rendering ----
+// The tree: one scrollable column per round, each match a little box; winners bold.
+// Later-round columns are space-around so each match sits between its two feeders.
+function _bgBracketTreeHtml(st, pById, opts) {
+  try {
+    const o = opts || {};
+    const nm = (id) => { const p = pById[id]; return p ? t2esc(String(p.display_name || '').split(/\s+/)[0] + (String(p.display_name || '').split(/\s+/)[1] ? ' ' + String(p.display_name).split(/\s+/)[1].charAt(0) + '.' : '')) : ''; };
+    const sd = (x, side) => { const s = side === 'a' ? x.aSeed : x.bSeed; const p = side === 'a' ? x.a : x.b; const n = s || (p && st.seedOf[p]); return n ? '<span style="color:var(--text-muted);font-size:10px;width:18px;display:inline-block">' + n + '</span>' : '<span style="width:18px;display:inline-block"></span>'; };
+    const row = (x, side) => {
+      const p = side === 'a' ? x.a : x.b; const known = side === 'a' ? x.aKnown : x.bKnown;
+      const won = p && x.winner === p && x.status === 'final';
+      const lost = p && x.loser === p && x.status === 'final';
+      const txt = p ? nm(p) : (known ? '<span style="color:var(--text-muted)">bye</span>' : '<span style="color:var(--text-muted)">–</span>');
+      return '<div style="display:flex;align-items:center;gap:2px;padding:1px 4px;' + (won ? 'font-weight:800;color:var(--accent);' : (lost ? 'color:var(--text-muted);text-decoration:line-through;' : '')) + '">' + sd(x, side) + '<span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + txt + '</span></div>';
+    };
+    const box = (x) => {
+      const tappable = o.tap && (x.status === 'tied' || (o.commish && (x.status === 'live' || x.status === 'ready') && x.a && x.b));
+      const bd = x.status === 'final' ? 'var(--accent)' : (x.status === 'tied' ? 'var(--danger)' : (x.status === 'live' ? 'var(--money-pos)' : 'var(--border)'));
+      return '<div class="bk-match' + (tappable ? ' bk-tap' : '') + '" data-mid="' + t2esc(x.id) + '" style="border:1.5px solid ' + bd + ';border-radius:8px;margin:3px 0;min-width:118px;max-width:150px;font-size:12px;background:var(--surface,#fff);' + (tappable ? 'cursor:pointer;' : '') + '">' +
+        row(x, 'a') + '<div style="border-top:1px solid var(--border)"></div>' + row(x, 'b') +
+        (x.label && x.status !== 'bye' ? '<div style="font-size:10px;color:' + (x.status === 'tied' ? 'var(--danger)' : 'var(--text-muted)') + ';padding:0 4px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + t2esc(x.label) + (x.status === 'tied' ? ' · tap' : '') + '</div>' : '') + '</div>';
+    };
+    const tree = (rounds, title) => {
+      if (!rounds.length) return '';
+      let h = '<div style="margin:6px 0 2px;font-weight:700;font-size:13px">' + title + '</div>';
+      h += '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><div style="display:flex;gap:10px;align-items:stretch;min-height:60px">';
+      rounds.forEach(rd => {
+        const ids = rd.ids.filter(id => { const x = st.m[id]; return x && x.status !== 'empty'; });
+        if (!ids.length) return;
+        h += '<div style="display:flex;flex-direction:column;justify-content:space-around;flex:0 0 auto"><div style="font-size:10px;color:var(--text-muted);text-align:center;text-transform:uppercase;letter-spacing:.04em">' + t2esc(rd.label) + '</div>' + ids.map(id => box(st.m[id])).join('') + '</div>';
+      });
+      h += '</div></div>';
+      return h;
+    };
+    let h = tree(st.spec.rounds.filter(r => r.br === 'W'), '🏆 ' + (st.cfg.mode === 'double' ? 'Winners bracket' : 'Bracket'));
+    const lbr = st.cfg.mode === 'double' ? 'L' : 'C';
+    if (st.cfg.mode !== 'single') h += tree(st.spec.rounds.filter(r => r.br === lbr), st.cfg.mode === 'double' ? '↩️ Losers bracket' : '🎯 Consolation bracket');
+    if (st.cfg.mode === 'double') h += tree(st.spec.rounds.filter(r => r.br === 'GF'), '🥇 Grand final');
+    return h;
+  } catch (e) { console.warn('_bgBracketTreeHtml', e); return ''; }
+}
+// The card: headline (champion / leader), the tree, and the director controls.
+function _bgBracketCardHtml(t, data, amCommish, opts) {
+  try {
+    const st = data && data.st; if (!st) return '';
+    const o = opts || {};
+    const pById = {}; (data.players || []).forEach(p => pById[p.id] = p);
+    const nm = (id) => { const p = pById[id]; return p ? t2esc(String(p.display_name || '').split(/\s+/)[0]) : '?'; };
+    const cfg = st.cfg;
+    const modeL = cfg.mode === 'double' ? 'Double elimination' : (cfg.mode === 'consolation' ? 'Single elim + consolation' : 'Single elimination');
+    const n = st.seeds.length;
+    const finals = Object.values(st.m).filter(x => x.status === 'final').length;
+    const real = Object.values(st.m).filter(x => x.status !== 'empty' && x.status !== 'bye').length;
+    let h = '<div class="card" style="margin:0 0 14px;padding:12px;border:2px solid var(--accent)">';
+    h += '<div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:800">🏆 Bracket</div><div class="small-text" style="color:var(--text-muted)">' + n + ' players · ' + t2esc(modeL) + ' · ' + (cfg.play === 'stroke' ? 'stroke' : 'match') + ' play · ' + (cfg.handicaps === false ? 'gross' : 'net') + (Number(cfg.holes) === 9 ? ' · 9-hole rounds' : '') + '</div></div>';
+    if (st.champion) h += '<div style="font-size:18px;font-weight:800;color:var(--accent);margin:4px 0">🥇 Champion: ' + nm(st.champion) + (st.runnerUp ? ' <span style="font-size:13px;color:var(--text-muted);font-weight:600">· runner-up ' + nm(st.runnerUp) + '</span>' : '') + '</div>';
+    else h += '<div class="small-text" style="margin:2px 0">' + finals + ' of ' + real + ' matches decided' + (st.pendingCount ? ' · ' + st.pendingCount + ' in play or ready' : '') + '</div>';
+    if (st.consolationChamp) h += '<div class="small-text">🎯 Consolation champion: ' + nm(st.consolationChamp) + '</div>';
+    if ((Number(cfg.entry) || 0) > 0) { const pot = (Number(cfg.entry) || 0) * n; const sp = cfg.split === '100' ? [100, 0] : (cfg.split === '80/20' ? [80, 20] : [70, 30]); h += '<div class="small-text" style="color:var(--text-muted)">Pot $' + pot + ' — champion $' + (Math.round(pot * sp[0]) / 100).toFixed(2) + (sp[1] ? ' · runner-up $' + (Math.round(pot * sp[1]) / 100).toFixed(2) : '') + ((Number(cfg.stake) || 0) > 0 ? ' · $' + cfg.stake + ' a match' : '') + '</div>'; }
+    h += _bgBracketTreeHtml(st, pById, { tap: true, commish: amCommish });
+    if (amCommish && !o.noControls) {
+      h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">';
+      if (!st.complete) h += '<button class="small" id="bk-build-next" style="background:var(--accent);color:#fff;border:none;font-weight:700">🛺 Build next day</button>';
+      h += '<button class="small" id="bk-settings">⚙️ Bracket settings</button>';
+      if (!(t.settings && t.settings.bracketDays && Object.keys(t.settings.bracketDays).length)) h += '<button class="small" id="bk-reseed">🔢 Re-seed by handicap</button>';
+      h += '</div>';
+    }
+    h += '</div>';
+    return h;
+  } catch (e) { console.warn('_bgBracketCardHtml', e); return ''; }
+}
+function bgBracketWire(root, t) {
+  try {
+    if (!root || !t) return;
+    const bn = root.querySelector('#bk-build-next'); if (bn) bn.onclick = () => bgBracketBuildNext(t);
+    const bs = root.querySelector('#bk-settings'); if (bs) bs.onclick = () => openBracketSettings(t);
+    const br = root.querySelector('#bk-reseed'); if (br) br.onclick = () => bgBracketReseed(t);
+    root.querySelectorAll('.bk-match.bk-tap').forEach(el => el.onclick = () => bgBracketTieSheet(t, el.dataset.mid));
+  } catch (e) {}
+}
+// Money: entry pot to champion / runner-up (only once the champion is decided) +
+// optional per-match stake on every decided head-to-head match. Keys = normalized names.
+function bgBracketMoney(t, st, players) {
+  const out = { pot: {}, stakes: {}, potPending: false, potLabel: 'Bracket pot', stakeLabel: 'Bracket matches' };
+  try {
+    const cfg = st.cfg; const nmK = s => normalizeNameSegment(String(s || ''));
+    const pById = {}; (players || []).forEach(p => pById[p.id] = p);
+    const key = (id) => { const p = pById[id]; return p ? nmK(p.display_name) : null; };
+    const n = st.seeds.length; const entry = Number(cfg.entry) || 0;
+    if (entry > 0 && n > 0) {
+      const pot = entry * n; const sp = cfg.split === '100' ? [100, 0] : (cfg.split === '80/20' ? [80, 20] : [70, 30]);
+      if (st.champion) {
+        st.seeds.forEach(id => { const k = key(id); if (k) out.pot[k] = (out.pot[k] || 0) - entry; });
+        const kc = key(st.champion); if (kc) out.pot[kc] = (out.pot[kc] || 0) + pot * sp[0] / 100;
+        if (sp[1] && st.runnerUp) { const kr = key(st.runnerUp); if (kr) out.pot[kr] = (out.pot[kr] || 0) + pot * sp[1] / 100; }
+        else if (sp[1] && kc) out.pot[kc] += pot * sp[1] / 100;
+      } else out.potPending = true;
+    }
+    const stake = Number(cfg.stake) || 0;
+    if (stake > 0) Object.values(st.m).forEach(x => { if (x.status !== 'final' || !x.winner || !x.loser) return; const kw = key(x.winner), kl = key(x.loser); if (kw) out.stakes[kw] = (out.stakes[kw] || 0) + stake; if (kl) out.stakes[kl] = (out.stakes[kl] || 0) - stake; });
+  } catch (e) { console.warn('bgBracketMoney', e); }
+  return out;
+}
+
 function t2IsOneDay(t) { return !!(t && t.settings && t.settings.type === 'oneday'); }
 function t2IsGroup(t) { return !!(t && t.settings && t.settings.type === 'group'); }
 // Can the current user MANAGE this tournament? True for the commissioner, any
@@ -58092,7 +58651,9 @@ function updateT2CreateType() {
   // nothing at all on screen.
   const h = document.getElementById('t2c-type-help');
   if (h) {
-    h.textContent = (val === 'team')
+    h.textContent = (val === 'bracket')
+      ? 'Up to 24 players seeded by handicap into a knockout bracket — match or stroke play, win and move on. Single elimination (with an optional consolation bracket) or double elimination; one round per day.'
+      : (val === 'team')
       ? 'Everyone is split into two big sides that play for a single team total across every day.'
       : (val === 'pairs'
         ? 'Up to 12 two-man teams, all playing for the same pot — e.g. 16 players as 8 pairs. Partners ride together and each cart is two whole teams.'
@@ -58111,7 +58672,8 @@ async function submitT2Create() {
   // keeps settings.type 'team' (everything downstream keys off that) and carries the
   // count in settings.teamCount.
   const _pairs = (_rawTy === 'pairs');
-  const type = (tyEl && (_rawTy === 'oneday' || _rawTy === 'group')) ? _rawTy : 'team';
+  const _isBracket = (_rawTy === 'bracket');   // v1155: a bracket is an individual (no-team) event + settings.bracket
+  const type = (tyEl && (_rawTy === 'oneday' || _rawTy === 'group')) ? _rawTy : (_isBracket ? 'oneday' : 'team');
   const _pairCount = _pairs
     ? Math.max(2, Math.min(T2_MAX_TEAMS, parseInt((document.getElementById('t2c-teamcount') || {}).value, 10) || 2))
     : 0;
@@ -58147,6 +58709,7 @@ async function submitT2Create() {
   // it carries real dayCourses / playerTees / dayGames, so it still merges.
   try {
     const _basics = { type: type, public: isPublic, location: location, numPlayers: numPlayers };
+    if (_isBracket) _basics.bracket = Object.assign({}, BG_BRACKET_DEFAULTS);
     if (_pairCount >= 2) _basics.teamCount = _pairCount;
     if (t._t2Adopted) {
       await t2MergeSettings(t.id, s => { Object.assign(s, _basics); });
@@ -58174,7 +58737,8 @@ async function submitT2Create() {
     }
   } catch (e) {}
   document.getElementById('t2-create-modal').classList.remove('show');
-  showToast(hasTeams ? 'Tournament created' : (isGroup ? 'Group event created' : 'Event created'));
+  showToast(hasTeams ? 'Tournament created' : (isGroup ? 'Group event created' : (_isBracket ? 'Bracket event created — set the bracket options next' : 'Event created')));
+  if (_isBracket) setTimeout(() => { try { openBracketSettings(_t2Current); } catch (e) {} }, 600);
   // v1099: this repaints the events LIST, which the wizard modal is about to cover
   // completely. Awaiting it just made the wizard appear one round trip later.
   try { renderT2List(); } catch (e) {}
@@ -59333,6 +59897,7 @@ async function t2AssignTeamsAndCarts(dayId, dayNumber, byHcp, opts) {
 // Configure Day form and the event home. dayId must already exist (day saved).
 async function openT2Carts(dayNumber, dayId) {
   const t = _t2Current; if (!t) return;
+  if (typeof t2IsBracket === 'function' && t2IsBracket(t)) return openBracketDayBuilder(dayNumber, dayId);   // v1155: bracket days are built from the bracket, not hand-paired
   if (!dayId) { showToast('Save this day first, then configure carts'); return; }
   const od = t2IsOneDay(t);
   const amCommish = t2CanManage(t);
@@ -60751,10 +61316,22 @@ async function t2LaunchDayRounds(courseId) {
       }
     } catch (e) { /* fall back to Standard Par 72 below */ }
   }
-  const pars = cs ? cs.pars.slice() : STANDARD_PARS.slice();
-  const sis  = cs ? cs.sis.slice()  : DEFAULT_SI.slice();
-  const tees = (cs && Array.isArray(cs.tees)) ? cs.tees.slice() : [];
+  let pars = cs ? cs.pars.slice() : STANDARD_PARS.slice();
+  let sis  = cs ? cs.sis.slice()  : DEFAULT_SI.slice();
+  let tees = (cs && Array.isArray(cs.tees)) ? cs.tees.slice() : [];
   const courseName = cs ? cs.name : 'Standard Par 72';
+  // v1156: 9-hole bracket rounds — slice the card to one nine exactly like a normal
+  // front9/back9 round (roundHoles() then reports 9 and every 9-hole path engages).
+  let _bkNine = null;
+  try {
+    if (t2IsBracket(t)) _bkNine = bgBracketNineFor(bgBracketCfg(t), ctx.dayNumber);
+    if (_bkNine && Array.isArray(pars) && pars.length >= 18) {
+      const _from = (_bkNine === 'front9') ? 0 : 9;
+      pars = pars.slice(_from, _from + 9); sis = sis.slice(_from, _from + 9);
+      const _half18 = (r) => (typeof r === 'number' && isFinite(r) && r > 46) ? Math.round((r / 2) * 10) / 10 : r;
+      tees = tees.map(te => Object.assign({}, te, { rating: _half18(te.rating), ratingW: _half18(te.ratingW), yardage: (te.yardage != null ? Math.round(te.yardage / 2) : te.yardage) }));
+    } else _bkNine = null;
+  } catch (e) { _bkNine = null; }
   const days = await t2GetDays(t.id);
   const dRec = days.find(d => d.id === ctx.dayId);
   const fmt = (dRec && dRec.format) || 'singles';
@@ -60841,7 +61418,9 @@ async function t2LaunchDayRounds(courseId) {
     // rawHcp deliberately stays the un-allowanced number so the per-pot handicap
     // percentages (field skins, Low Net) still measure off the full handicap and
     // can never double-reduce.
-    const _dayRules = _t2DayHcpRules(t, ctx.dayNumber, pars);
+    let _dayRules = _t2DayHcpRules(t, ctx.dayNumber, pars);
+    // v1155: a gross bracket plays every game on the cart with no strokes.
+    try { if (t2IsBracket(t) && bgBracketCfg(t).handicaps === false) _dayRules = Object.assign({}, _dayRules || {}, { noHandicaps: true }); } catch (e) {}
     (function () {
       const _min = Math.min.apply(null, gp.map(p => p.hcp));
       const _pct = _dayRules.noHandicaps ? 0 : (_dayRules.pct != null ? (Number(_dayRules.pct) || 0) : 100);
@@ -60941,6 +61520,17 @@ async function t2LaunchDayRounds(courseId) {
     // v986 (T21): was `const code = generateCode();` — no cloud check, no
     // tombstone check, and no memory of the codes this very loop already handed
     // out. See the _issuedCodes comment above for the measured collision rates.
+    // v1155: bracket matches in this cart — stamped on the round (g.bracket) so the
+    // result scan reads winners off the scorecard; match play also gets the 1v1s as a
+    // $0 Match Play game so the scorer sees holes up/down live.
+    let _bkPairs = null;
+    try {
+      if (t2IsBracket(t)) {
+        _bkPairs = bgBracketCartPairs(t, ctx.dayNumber, gp);
+        if (_bkPairs && _bkPairs.length && bgBracketCfg(t).play !== 'stroke') bgBracketAttachMatchGame(games, _bkPairs, bgBracketCfg(t));
+        if (!_bkPairs || !_bkPairs.length) _bkPairs = null;
+      }
+    } catch (e) { _bkPairs = null; }
     let code = await ensureUniqueGameCode(generateCode());
     for (let _try = 0; _try < 12 && _issuedCodes.has(code); _try++) code = await ensureUniqueGameCode(generateCode());
     if (_issuedCodes.has(code)) code = code + (Math.floor(Math.random() * 900) + 100);   // unlucky streak — force uniqueness the same way ensureUniqueGameCode does
@@ -60956,6 +61546,9 @@ async function t2LaunchDayRounds(courseId) {
       pars: pars, sis: sis, tees: tees,
       players: gp.map(p => { const c2 = Object.assign({}, p); delete c2._team; return c2; }),
       games: games,
+      bracket: _bkPairs || undefined,   // v1155
+      holes: _bkNine ? 9 : undefined,    // v1156: 9-hole bracket round
+      nineMode: _bkNine || undefined,
       groupGames: (groupGamesObj && Object.keys(groupGamesObj).length) ? groupGamesObj : undefined,
       hcpRules: _dayRules,
       trackPutts: _dTrk.putts !== false, trackGirs: _dTrk.girs !== false, trackFairways: _dTrk.fairways !== false,
@@ -61423,6 +62016,16 @@ async function fillSummaryT2Day(g) {
     const tid = g && g.t2 && g.t2.tournamentId;
     if (!tid || (typeof bgIsDeadEvent === 'function' && bgIsDeadEvent(tid))) return;
     const _r = await t2GetX(tid); const t = _r && _r.data; if (!t) return;
+    if (t2IsBracket(t)) {   // v1155: bracket summary — this cart's matches + what's next
+      const bk = await bgBracketLoad(t); if (!bk.st) return;
+      const pById = {}; bk.players.forEach(p => pById[p.id] = p);
+      const nm = (id) => { const p = pById[id]; return p ? t2esc(String(p.display_name || '').split(/\s+/)[0]) : '?'; };
+      let h = '<div class="card" style="margin:0 0 10px;padding:10px;border:2px solid var(--accent)"><div style="font-weight:800">🏆 ' + t2esc(t.name || 'Bracket') + '</div>';
+      (Array.isArray(g.bracket) ? g.bracket : []).forEach(pr => { const x = bk.st.m[pr.id]; if (!x) return; h += '<div class="small-text" style="margin-top:4px">' + nm(pr.aT) + ' v ' + nm(pr.bT) + ': <strong>' + t2esc(x.label || x.status) + '</strong>' + (x.status === 'tied' ? ' — <span style="color:var(--danger)">tied: open the bracket to play it off</span>' : (x.winner ? ' · ' + nm(x.winner) + ' advances' : '')) + '</div>'; });
+      if (!(Array.isArray(g.bracket) && g.bracket.length)) h += '<div class="small-text" style="color:var(--text-muted)">No bracket match in this cart today — side games only.</div>';
+      h += '<div class="small-text" style="margin-top:6px;color:var(--text-muted)">' + (bk.st.champion ? 'Champion: ' + nm(bk.st.champion) : (bk.st.pendingCount + ' match' + (bk.st.pendingCount === 1 ? '' : 'es') + ' still to play — the commissioner builds the next day from the bracket')) + '</div></div>';
+      el.innerHTML = h; el.style.display = ''; return;
+    }
     if (typeof t2IsOneDay === 'function' && t2IsOneDay(t)) return;
     const cup = await t2LoadCupStandings(t);
     const nDays = t.num_days || 1;
@@ -62154,6 +62757,7 @@ async function renderT2Home() {
   // v1099: already in flight since the top of this function.
   try { t2StoredMatches = (await _pMatches) || []; } catch (e) { t2StoredMatches = []; }
   const standings = await t2ComputeStandings(t, days, groupsByDay, t2StoredMatches, membersByGroup);
+  let _bkData = null; try { if (t2IsBracket(t)) _bkData = await bgBracketLoad(t); } catch (e) { _bkData = null; }   // v1155
   try { t2MaybePostLeadChange(t, standings); } catch (e) {}
   // v986 (T31): nothing in the app ever set status='complete', so a finished
   // public event stayed joinable forever. Fire-and-forget; no-ops in every case
@@ -62289,7 +62893,7 @@ async function renderT2Home() {
     } catch (e) { return ''; }
   }
   const _wfA = _wfDayState(_teeDay);
-  const _wfEventReady = _wfPlayersDone && days.length > 0 && days.every(d => _wfDayState(d.day_number).allDone);
+  const _wfEventReady = _wfPlayersDone && days.length > 0 && ((typeof t2IsBracket === 'function' && t2IsBracket(t)) ? _wfDayState(1).allDone : days.every(d => _wfDayState(d.day_number).allDone));   // v1155
   // od (individual) events are never gated -> the helpers become no-ops for them.
   const _wfDis = (ok) => (od || ok) ? '' : ' disabled';
   const _wfLk  = (ok) => (od || ok) ? '' : ' t2-wf-locked';
@@ -62311,7 +62915,7 @@ async function renderT2Home() {
     const wSteps = [];
     if (t2Type === 'team') wSteps.push({ k: 'team', d: 0 });
     wSteps.push({ k: 'players', d: 0 });
-    for (let _wd = 1; _wd <= _numDays; _wd++) {
+    for (let _wd = 1; _wd <= ((typeof t2IsBracket === 'function' && t2IsBracket(t)) ? 1 : _numDays); _wd++) {   // v1155: a bracket sets up Day 1 only — later days are built from results
       { const _dRow = (days || []).find(x => x.day_number === _wd) || {}; wSteps.push({ k: 'course', d: _wd }); if (!_dRow.play_date) wSteps.push({ k: 'date', d: _wd }); wSteps.push({ k: 'tees', d: _wd }, { k: 'carts', d: _wd }, { k: 'scorer', d: _wd }, { k: 'games', d: _wd }); }
     }
     // (Review step dropped v477 — its Start/Save/Invite/Manage fold onto the last setup step.)
@@ -62491,6 +63095,7 @@ async function renderT2Home() {
           '<div style="color:var(--text-muted)">' + (_dc && _dc.name ? t2esc(_dc.name) : 'no course') + ' · ' + (_do.play_date || 'no date') + ' · ' + _dgN + ' games · ' + _gs.length + ' groups</div></div>';
       }
       sb += '</div>';
+      if (_bkData) { try { sb += _bgBracketCardHtml(t, _bkData, amCommish); } catch (e) {} }   // v1155
       if (!_wfEventReady) sb += '<div class="small-text" style="color:var(--danger);margin-bottom:8px">Finish the ⚠️ items (tap a step dot above) before starting.</div>';
       sb += '<button class="full" id="t2-wiz-start" style="margin-bottom:10px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:16px;padding:15px' + (_wfEventReady ? '' : ';opacity:.5') + '">Start Event</button>';
       sb += '<button class="full" id="t2-evlb-btn" style="margin-bottom:8px;font-weight:700;background:linear-gradient(135deg,#1d6fd6,var(--accent));color:#fff;border:none;border-radius:12px;padding:12px">🏆 Event Leaderboard</button>';
@@ -62681,6 +63286,7 @@ async function renderT2Home() {
         } catch (err) { console.error('Start event failed', err); showToast("Couldn't start: " + ((err && err.message) || err)); }
       }; }
       { const eb = document.getElementById('t2-evlb-btn'); if (eb) eb.onclick = () => openEventLeaderboard(_t2Current); }
+      try { if (_bkData) bgBracketWire(body, t); } catch (e) {}   // v1155
       { const _mh = document.getElementById('t2-wiz-manage'); if (_mh) _mh.onclick = () => openT2AdminHub(); }
       { const su = document.getElementById('t2-summary-btn'); if (su) su.onclick = () => openT2Summary(_t2Current); }
       { const aa = document.getElementById('t2-assign-admins'); if (aa) aa.onclick = () => openT2AdminPicker(); }
@@ -62756,6 +63362,8 @@ async function renderT2Home() {
     html += '<div class="small-text" style="color:var(--text-muted);margin-top:8px">Tap a step to set it up — finish each to unlock the next.' + (_numDays > 1 ? ' Repeat for every day.' : '') + ' “🚀 Start Event” lights up when all steps show ✓.</div></div>';
   }
 
+  // v1155: the bracket card (tree + director controls) leads the page on a bracket event.
+  if (_bkData) { try { html += _bgBracketCardHtml(t, _bkData, amCommish); } catch (e) {} }
   // ---- Cup standings (team events only) + stroke leaderboard ----
   if (standings.anyRounds) {
     if (!od || (standings.lines && standings.lines.length)) {
@@ -63281,6 +63889,7 @@ async function renderT2Home() {
       });
     } catch (e) { box.innerHTML = '<div class="help-text">Could not load friends — check your connection.</div>'; }
   };
+    try { if (_bkData) bgBracketWire(body, t); } catch (e) {}   // v1155
     body.querySelectorAll('.t2-start-day').forEach(b => b.onclick = () => { Promise.resolve(t2StartDay(b.dataset.dayid, parseInt(b.dataset.day, 10))).catch(err => { console.error('Start day failed', err); showToast("Couldn't start the day: " + ((err && err.message) || err)); }); });
     body.querySelectorAll('.t2-swap-chip').forEach(ch => ch.onclick = () => t2SwapTap(ch));
   }
@@ -66934,6 +67543,21 @@ async function t2ComputeCombinedPayouts(t) {
     if (fieldQuota && fieldQuota.money && fieldQuota.complete) {
       Object.keys(fieldQuota.money).forEach(k => { const s = (fieldQuota.standings || []).find(x => nm(x.name) === k); bump(k, fieldQuota.money[k], s && s.name, s && s.first); bumpGame('Quota (field)', k, fieldQuota.money[k]); });
     }
+    // v1155: bracket money — entry pot to the champion / runner-up once decided, plus
+    // the optional per-match stake on every decided match. The tree rides along so
+    // every payout surface can show where the money came from.
+    let _bkPotPending = false, _bkStakeOn = false, _bkHtml = '';
+    try {
+      if (t2IsBracket(t)) {
+        const _bkSt = bgBracketState(t, evPlayers, raw);
+        const _bkM = bgBracketMoney(t, _bkSt, evPlayers);
+        Object.keys(_bkM.pot).forEach(k => { bump(k, _bkM.pot[k]); bumpGame(_bkM.potLabel, k, _bkM.pot[k]); });
+        Object.keys(_bkM.stakes).forEach(k => { bump(k, _bkM.stakes[k]); bumpGame(_bkM.stakeLabel, k, _bkM.stakes[k]); });
+        _bkPotPending = !!_bkM.potPending; _bkStakeOn = (Number(_bkSt.cfg.stake) || 0) > 0;
+        const _pb = {}; (evPlayers || []).forEach(p => _pb[p.id] = p);
+        _bkHtml = _bgBracketCardHtml(t, { st: _bkSt, players: evPlayers }, false, { noControls: true });
+      }
+    } catch (e) { console.warn('bracket payouts', e); }
 
     // v866 (Tyler): "Long putt was one of the games, it is missing from the
     // total... make this fix apply to all [games]." Root cause: a whole-field
@@ -66953,6 +67577,7 @@ async function t2ComputeCombinedPayouts(t) {
     // has not finished yet is PENDING -- not $0.00. Flagged per column so the
     // payout screen can say so instead of showing a live pot as zeros.
     const _pendingGameLabels = new Set();
+    try { if (_bkPotPending) { _pendingGameLabels.add('Bracket pot'); gameTotals['Bracket pot'] = gameTotals['Bracket pot'] || {}; } if (_bkStakeOn) gameTotals['Bracket matches'] = gameTotals['Bracket matches'] || {}; } catch (e) {}   // v1155
     try {
       if (skins && Array.isArray(skins.perDay) && skins.perDay.some(d => d.complete === false)) _pendingGameLabels.add('Skins won');
       if (ctp && Array.isArray(ctp.perDay) && ctp.perDay.some(d => d.complete === false)) _pendingGameLabels.add('Closest to Pin');
@@ -67044,7 +67669,7 @@ async function t2ComputeCombinedPayouts(t) {
     // v1113: carry the team standings through so every payout surface can render the
     // SAME ranking that produced these dollars.
     return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame, pendingPots: Array.from(_pendingGameLabels),
-             teamStandings: (money && money.teamStandings) || null };
+             teamStandings: (money && money.teamStandings) || null, bracketHtml: _bkHtml || '' };
   } catch (e) { return null; }
 }
 
@@ -67257,6 +67882,21 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     if (fieldQuota && fieldQuota.money && fieldQuota.complete) {
       Object.keys(fieldQuota.money).forEach(k => { const s = (fieldQuota.standings || []).find(x => nm(x.name) === k); bump(k, fieldQuota.money[k], s && s.name, s && s.first); bumpGame('Quota (field)', k, fieldQuota.money[k]); });
     }
+    // v1155: bracket money — entry pot to the champion / runner-up once decided, plus
+    // the optional per-match stake on every decided match. The tree rides along so
+    // every payout surface can show where the money came from.
+    let _bkPotPending = false, _bkStakeOn = false, _bkHtml = '';
+    try {
+      if (t2IsBracket(t)) {
+        const _bkSt = bgBracketState(t, evPlayers, raw);
+        const _bkM = bgBracketMoney(t, _bkSt, evPlayers);
+        Object.keys(_bkM.pot).forEach(k => { bump(k, _bkM.pot[k]); bumpGame(_bkM.potLabel, k, _bkM.pot[k]); });
+        Object.keys(_bkM.stakes).forEach(k => { bump(k, _bkM.stakes[k]); bumpGame(_bkM.stakeLabel, k, _bkM.stakes[k]); });
+        _bkPotPending = !!_bkM.potPending; _bkStakeOn = (Number(_bkSt.cfg.stake) || 0) > 0;
+        const _pb = {}; (evPlayers || []).forEach(p => _pb[p.id] = p);
+        _bkHtml = _bgBracketCardHtml(t, { st: _bkSt, players: evPlayers }, false, { noControls: true });
+      }
+    } catch (e) { console.warn('bracket payouts', e); }
 
     // v866 (Tyler): "Long putt was one of the games, it is missing from the
     // total... make this fix apply to all [games]." Same fix as
@@ -67270,6 +67910,7 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     // has not finished yet is PENDING -- not $0.00. Flagged per column so the
     // payout screen can say so instead of showing a live pot as zeros.
     const _pendingGameLabels = new Set();
+    try { if (_bkPotPending) { _pendingGameLabels.add('Bracket pot'); gameTotals['Bracket pot'] = gameTotals['Bracket pot'] || {}; } if (_bkStakeOn) gameTotals['Bracket matches'] = gameTotals['Bracket matches'] || {}; } catch (e) {}   // v1155
     try {
       if (skins && Array.isArray(skins.perDay) && skins.perDay.some(d => d.complete === false)) _pendingGameLabels.add('Skins won');
       if (ctp && Array.isArray(ctp.perDay) && ctp.perDay.some(d => d.complete === false)) _pendingGameLabels.add('Closest to Pin');
@@ -67347,7 +67988,7 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     });
     const byGame = Object.keys(gameTotals).map(label => ({ key: label, money: gameTotals[label], counts: gameCounts[label], marks: gameMarks[label], pending: _pendingGameLabels.has(label) })).filter(gm => _alwaysShowGameLabels.has(gm.key) || gm.pending || Object.values(gm.money).some(v => Math.abs(v || 0) >= 0.005));
 
-    return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame, pendingPots: Array.from(_pendingGameLabels) };
+    return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame, pendingPots: Array.from(_pendingGameLabels), bracketHtml: _bkHtml || '' };
   } catch (e) { return null; }
 }
 
@@ -68986,7 +69627,7 @@ async function _t2RepaintMoneyBoardForScope(g, scope) {
       // v1113: the event's team ranking leads the breakdown on Tournament total —
       // it is the headline of a team-format event, and money alone never said who won.
       let _stdHtml = '';
-      try { _stdHtml = _t2TeamQuotaStandingsHtml(t, pay.teamStandings) || ''; } catch (e) {}
+      try { _stdHtml = (_t2TeamQuotaStandingsHtml(t, pay.teamStandings) || '') + (pay.bracketHtml || ''); } catch (e) {}   // v1155
       const tblHtml = _t2BreakdownTableHtml(pay.byGame, pay.rows);
       if (_stdHtml || tblHtml) { bd.innerHTML = _stdHtml + (tblHtml || ''); bd.style.display = 'block'; }
       else { bd.style.display = 'none'; }
@@ -69086,6 +69727,8 @@ async function openEventLeaderboard(t, opts) {
         }
       }
     } catch (e) { console.warn('evlb cup', e); }
+    // v1155: the bracket tree leads Tournament Results on a bracket event.
+    try { if (t2IsBracket(t)) { const _bk = await bgBracketLoad(t); const _bh = _bgBracketCardHtml(t, _bk, false, { noControls: true }); if (_bh) html += _bh; } } catch (e) { console.warn('evlb bracket', e); }
     if (_fieldTQ && Array.isArray(_fieldTQ.teams) && _fieldTQ.teams.length) {
       const _tqN = _fieldTQ.teams.length;
       // v1119: rank off the teams that have actually played — a no-card team sorts
