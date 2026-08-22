@@ -8169,7 +8169,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1161';
+const BG_BUILD = 'v2026.11.1162';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -54781,8 +54781,39 @@ async function t2SetPlayerHcp(playerId, hcp) {
   const _h = t2ClampHcp(hcp);
   // v1025: this one matters most of the lot — "handicaps were gone again" is a
   // recurring report, and a blocked write here reported saved and then wasn't.
-  try { return _bgWrote(await supa.from('tournament_players').update({ handicap: _h }).eq('id', playerId).select('id')); }
-  catch (e) { return false; }
+  let _ok = false;
+  try { _ok = _bgWrote(await supa.from('tournament_players').update({ handicap: _h }).eq('id', playerId).select('id')); }
+  catch (e) { _ok = false; }
+  // v1162 (Tyler, Kerbo 8/22): "any HCP entered when the round is set up should be
+  // used for the scores." A round copies the event handicap at LAUNCH; an edit after
+  // that only lived in the event list. Push it into any started, unfinished round
+  // that seats this player so the scorecard plays the number the commissioner set.
+  if (_ok) { try { await t2PushHcpToLiveRounds(playerId, _h); } catch (e) {} }
+  return _ok;
+}
+async function t2PushHcpToLiveRounds(playerId, hcp) {
+  try {
+    if (!supa || !playerId || hcp == null) return;
+    const { data: mem } = await supa.from('tournament_group_members').select('group_id').eq('tournament_player_id', playerId);
+    const gids = (mem || []).map(m => m.group_id).filter(Boolean);
+    if (!gids.length) return;
+    const { data: grps } = await supa.from('tournament_groups').select('game_code').in('id', gids);
+    const codes = (grps || []).map(g => g.game_code).filter(Boolean);
+    for (const code of codes) {
+      let g = null;
+      if (state.game && state.game.code === code) g = state.game;
+      else { try { g = await loadGame(code); } catch (e) { g = null; } }
+      if (!g || g.finishedAt || !Array.isArray(g.players)) continue;
+      const p = g.players.find(x => x && x.t2pid === playerId);
+      if (!p) continue;
+      const h = Math.round(Number(hcp));
+      if (p.hcp === h && p.rawHcp === h && p.baseHcp === h) continue;
+      p.hcp = h; p.rawHcp = h; p.baseHcp = h;
+      try { state._configEditedAt = Date.now(); } catch (e) {}   // local players win the merge for 60s
+      try { await saveGame(g); } catch (e) {}
+      try { if (state.game && state.game.code === code) renderScoreEntry(); } catch (e) {}
+    }
+  } catch (e) { console.warn('t2PushHcpToLiveRounds', e); }
 }
 // Safety net for the recurring "handicaps were gone again": write EVERY handicap
 // input's current value to the cloud before we leave the Players screen, so a
@@ -60684,13 +60715,30 @@ async function openT2HcpEditor(t) {
     '<div id="t2he-list" style="max-height:60vh;overflow-y:auto"><div class="help-text">Loading…</div></div>' +
     '<div class="actions" style="margin-top:10px"><button id="t2he-add" style="flex:1">+ Add player</button><button id="t2he-done" class="primary" style="flex:1">Done</button></div></div>';
   document.body.appendChild(ov);
-  const close = () => { try { ov.remove(); } catch (e) {} };
+  // v1162 (Tyler, Kerbo 8/22): he set himself to 7 here, tapped Done, and the round
+  // launched on the old 4. The save here was a 700ms debounce / blur — tapping Done
+  // removed the overlay before either fired, so the value never reached the cloud
+  // (the main Players screen had a flush; this popup did not). Track every edit
+  // and flush it before the popup goes away or re-renders.
+  const _pending = {};
+  const _flush = async () => {
+    const keys = Object.keys(_pending);
+    let bad = 0;
+    for (const pid of keys) {
+      const v = _pending[pid]; delete _pending[pid];
+      try { const ok = await t2SetPlayerHcp(pid, v !== '' ? parseFloat(v) : null); if (!ok) bad++; } catch (e) { bad++; }
+    }
+    if (bad) { try { showToast('Could not save ' + bad + ' handicap' + (bad > 1 ? 's' : '') + ' — check your connection'); } catch (e) {} }
+    else if (keys.length) { try { showToast('Handicaps saved ✓'); } catch (e) {} }
+  };
+  const close = async () => { try { await _flush(); } catch (e) {} try { ov.remove(); } catch (e) {} };
   ov.onclick = (e) => { if (e.target === ov) close(); };
   ov.querySelector('#t2he-x').onclick = close;
   ov.querySelector('#t2he-done').onclick = close;
   const list = ov.querySelector('#t2he-list');
   const _fmtNm = (dn) => { if (!dn) return '?'; const pp = String(dn).trim().split(/\s+/); return pp[0] + (pp.length > 1 ? ' ' + pp[pp.length - 1].charAt(0).toUpperCase() + '.' : ''); };
   async function renderList() {
+    try { await _flush(); } catch (e) {}   // v1162: land any typed value before the rows are rebuilt
     let players = []; try { players = await t2GetPlayers(t.id); } catch (e) {}
     if (!players.length) { list.innerHTML = '<div class="help-text">No players yet — tap “+ Add player”.</div>'; return; }
     list.innerHTML = players.map(p => {
@@ -60705,9 +60753,9 @@ async function openT2HcpEditor(t) {
     }).join('');
     if (canEdit) {
       list.querySelectorAll('.t2he-input').forEach(inp => {
-        const _save = async () => { const v = inp.value; try { await t2SetPlayerHcp(inp.dataset.pid, v !== '' ? parseFloat(v) : null); } catch (e) {} };
-        let _tm; inp.oninput = () => { clearTimeout(_tm); _tm = setTimeout(_save, 700); };
-        inp.onchange = () => { clearTimeout(_tm); _save(); };
+        const _save = async () => { const v = inp.value; delete _pending[inp.dataset.pid]; try { const ok = await t2SetPlayerHcp(inp.dataset.pid, v !== '' ? parseFloat(v) : null); if (!ok) _pending[inp.dataset.pid] = v; } catch (e) { _pending[inp.dataset.pid] = v; } };
+        let _tm; inp.oninput = () => { _pending[inp.dataset.pid] = inp.value; clearTimeout(_tm); _tm = setTimeout(_save, 700); };   // v1162: tracked until it lands
+        inp.onchange = () => { _pending[inp.dataset.pid] = inp.value; clearTimeout(_tm); _save(); };
       });
       list.querySelectorAll('.t2he-step').forEach(b => b.onclick = () => { try { const wrap = b.parentNode; const inp = wrap && wrap.querySelector('.t2he-input'); if (!inp) return; let v = parseFloat(inp.value); if (!isFinite(v)) v = 0; v = Math.max(-9, Math.min(54, v + (b.dataset.dir === '-1' ? -1 : 1))); inp.value = String(v); inp.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {} });
       list.querySelectorAll('.t2he-rm').forEach(b => b.onclick = async () => { if (!(await uiConfirm('Remove ' + (b.dataset.nm || 'this player') + ' from the event?', { title: 'Remove player?', okLabel: 'Remove', cancelLabel: 'Cancel', danger: true }))) return; b.disabled = true; let _ok = false; try { _ok = await t2RemovePlayer(b.dataset.pid); } catch (e) {} showToast(_ok ? 'Player removed \u2713' : 'Couldn\u2019t remove \u2014 try again'); await renderList(); });
