@@ -5623,7 +5623,7 @@
       <!-- Tournament 2.0 — big-group events: team cup OR individual leaderboard -->
       <div class="card" id="t2-card">
         <h2 style="margin:0 0 4px">Tournaments</h2>
-        <p class="help-text" style="margin-bottom:12px">Big-group events for more than 8 players. Pick <strong>team cup</strong> (two teams, match points) or <strong>individual</strong> (one combined leaderboard), over one or several days. Build cart groups, set each day's course &amp; format, and invite players with a tap.</p>
+        <p class="help-text" style="margin-bottom:12px">Group events for more than 5 players. Pick <strong>team cup</strong> (two teams, match points) or <strong>individual</strong> (one combined leaderboard), over one or several days. Build cart groups, set each day's course &amp; format, and invite players with a tap.</p>
         <button class="primary full" id="t2-new-btn">+ New tournament</button>
         <div id="t2-list" style="margin-top:12px"></div>
       </div>
@@ -6905,7 +6905,7 @@
         <option value="pairs">Small Teams (2-man)</option>
         <option value="group">4 Person Teams</option>
         <option value="oneday">Individual</option>
-        <option value="bracket">🏆 Bracket (Bad Golf Madness)</option>
+        <option value="bracket">🏆 Bracket Play</option>
       </select>
       <div class="small-text" id="t2c-type-help" style="color:var(--text-muted);line-height:1.4;margin-top:4px"></div>
     </div>
@@ -8190,7 +8190,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1169';
+const BG_BUILD = 'v2026.11.1171';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -57389,7 +57389,8 @@ async function renderT2List() {
     // carts are in; until then it is waiting on the commissioner to build the next day.
     try {
       const _fin = (r && typeof r === 'object') ? r.state === 'finished' : !!r;
-      if (_fin && typeof t2IsBracket === 'function' && t2IsBracket(t)) {
+      const _waitingPending = !!(r && typeof r === 'object' && r.state === 'waiting');   // v1171: built carts, not started
+      if ((_fin || _waitingPending) && typeof t2IsBracket === 'function' && t2IsBracket(t)) {
         let bk = await bgBracketLoad(t);
         if (bk && bk.st && !bk.st.champion && !bk.st.complete) {
           // v1169: build the next day automatically the moment the commissioner looks
@@ -57491,6 +57492,9 @@ async function renderT2List() {
         ' · <span style="color:' + (info.finished ? 'var(--money-pos)' : (info.started ? 'var(--accent)' : 'var(--text-muted)')) + '">' + (info.finished ? 'finished' : (info.started ? 'live' : 'scheduled')) + '</span>' +
         (info.gamesSummary ? '<div class="small-text" style="margin-top:4px;color:var(--text-muted)">🎲 ' + t2esc(info.gamesSummary) + '</div>' : '') +
         (info.gameCode ? '<button class="full t2-open-round" data-code="' + t2esc(info.gameCode) + '" style="margin-top:6px;background:' + (info.finished ? 'var(--money-pos)' : 'var(--accent)') + ';color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">' + (info.finished ? '🏆 View results' : 'Join now') + '</button>' : '') +
+        // v1171 (Tyler): in a bracket, either player in the match can start the cart's round.
+        ((!info.gameCode && info.isMine && _stl === 'live' && typeof t2IsBracket === 'function' && t2IsBracket(t))
+          ? '<button class="full t2-start-cart" data-id="' + t.id + '" data-gid="' + t2esc(info.gid) + '" data-day="' + info.day + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">▶ Start our round — Day ' + info.day + '</button>' : '') +
         // v1158 (Tyler, Kerbo Group 8/22): a group that was reopened (or never tapped
         // Finish) holds the whole event open — Total payout stays provisional and the
         // card never flips to Finished. The commissioner / tourney admin can now force
@@ -57608,6 +57612,17 @@ async function renderT2List() {
     if (!tf) { showToast('Could not load the event'); return; }
     _t2Current = tf;
     try { await t2StartEventNow(); } catch (e) {}
+    try { await renderT2List(); } catch (e) {}
+  });
+  document.querySelectorAll('#t2-list .t2-start-cart').forEach(b => b.onclick = async () => {   // v1171
+    let tf = null; try { tf = await _fullT(b.dataset.id); } catch (e) {}
+    if (!tf) { showToast('Could not load the event'); return; }
+    _t2Current = tf;
+    try {
+      const days = await t2GetDays(tf.id); const d = (days || []).find(x => x.day_number === parseInt(b.dataset.day, 10));
+      if (!d) { showToast('Could not find that day'); return; }
+      await t2StartDay(d.id, d.day_number, { onlyGroupId: b.dataset.gid });
+    } catch (e) { console.error('Start cart failed', e); showToast('Could not start the round'); }
     try { await renderT2List(); } catch (e) {}
   });
   document.querySelectorAll('#t2-list .t2-row-startday').forEach(b => b.onclick = async () => {   // v1169
@@ -59916,13 +59931,13 @@ async function t2NotifyAllPlayers(t) {
     for (const uid of linked) { if (already.has(uid)) continue; try { await sendTournamentInvite(uid, { id: t.id, name: t.name }); } catch (e) {} }
   } catch (e) {}
 }
-async function t2StartDay(dayId, dayNumber) {
+async function t2StartDay(dayId, dayNumber, opts) {
   // Starting a tournament day while a real round is still in session on THIS
   // device: don't silently run both. Show the standard "active round in progress"
   // box; once they Save or Discard that round, resume starting this day.
   try {
     if (state.game && state.game.code && !state.viewOnlyMode && (await gameHasMe(state.game))) {
-      state._afterActiveResolve = () => { try { t2StartDay(dayId, dayNumber); } catch (e) {} };
+      state._afterActiveResolve = () => { try { t2StartDay(dayId, dayNumber, opts); } catch (e) {} };
       const _c = state.game.course || 'your current round';
       $('new-round-confirm-text').innerHTML =
         'You have a round in progress at <strong>' + escapeHtml(String(_c == null ? '' : _c)) + '</strong>. Save or discard it before starting this tournament day.';
@@ -59930,9 +59945,9 @@ async function t2StartDay(dayId, dayNumber) {
       return;
     }
   } catch (e) {}
-  _t2StartCtx = { dayId: dayId, dayNumber: dayNumber };
+  _t2StartCtx = { dayId: dayId, dayNumber: dayNumber, onlyGroupId: (opts && opts.onlyGroupId) || null };   // v1171
   const t = _t2Current;
-  try { t2NotifyAllPlayers(t); } catch (e) {}   // invite all linked players now the event is starting (v520 #2)
+  try { if (!(opts && opts.onlyGroupId)) t2NotifyAllPlayers(t); } catch (e) {}   // invite all linked players now the event is starting (v520 #2)
   // Per-day course chosen in the setup screen? Launch straight from it (no prompt).
   const dc = (t && t.settings && t.settings.dayCourses) ? t.settings.dayCourses[dayNumber] : null;
   if (dc && dc.id !== undefined && dc.id !== null) { showToast('Course: ' + (dc.name || 'course')); return t2LaunchDayRounds(dc.id); }
@@ -61720,7 +61735,10 @@ async function t2LaunchDayRounds(courseId) {
   let made = 0;
   // v858 (Tyler): batch every eligible group's members in one query instead of
   // one query per group.
-  const _eligibleGroups = groups.filter(grp => !grp.game_code);
+  // v1171 (Tyler): "either player for that match should be able to start it." A
+  // player launches ONLY their own cart (ctx.onlyGroupId); the commissioner's
+  // Start Day still launches every cart that has not started.
+  const _eligibleGroups = groups.filter(grp => !grp.game_code && (!(ctx && ctx.onlyGroupId) || grp.id === ctx.onlyGroupId));
   const _eligibleGroupIds = _eligibleGroups.map(g => g.id).filter(Boolean);
   let _allLaunchMembers = [];
   // v1138: a dropped read left _allLaunchMembers empty, so EVERY group built
