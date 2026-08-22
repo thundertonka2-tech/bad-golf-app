@@ -8169,7 +8169,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1160';
+const BG_BUILD = 'v2026.11.1161';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -14963,6 +14963,21 @@ async function _mergeGameForWrite(local, opts) {
     // it — which is why the Greenie loss was permanent while Banker/Wolf were not.
     _unionHoleMap(local, 'p3greenieData', null, cloud);
     _unionHoleMap(local, 'ctpData', null, cloud);
+    // v1161 (Tyler, Kerbo 8/22): "I had to add [the long putt] two or three times
+    // to get it to take." longPuttData was not in this merge at all, so the next
+    // routine save from ANY phone whose copy still held the old putt wrote it
+    // straight back over the new one. Newest stamped entry wins (`at`, stamped on
+    // every edit from v1161); with no stamps on either side, the longer putt wins —
+    // the only thing this pot ever cares about.
+    try {
+      const L = local.longPuttData, C = cloud.longPuttData;
+      const _lpIn = d => (d && d.pid && d.ft != null) ? (Number(d.ft) * 12 + (Number(d.in) || 0)) : -1;
+      if (C && (C.pid || C.ft != null)) {
+        if (!L || !(L.pid || L.ft != null)) { if (!(L && L.at && (!C.at || L.at > C.at))) local.longPuttData = C; }
+        else if (L.at || C.at) { if ((C.at || 0) > (L.at || 0)) local.longPuttData = C; }
+        else if (_lpIn(C) > _lpIn(L)) local.longPuttData = C;
+      }
+    } catch (e) {}
     // players + config: the cloud wins UNLESS this device edited settings in the last
     // 60s (set in applyLiveEditMerge). This is what stops a plain scoring save from
     // reverting a handicap/bet change made on another phone.
@@ -32749,6 +32764,29 @@ function gatherSetup() {
 // Returns true when all required scores for hole h are entered, accounting
 // for team formats (Scramble, Ryder Cup) that use team scores instead of
 // individual player scores.
+// v1161 (Tyler, Kerbo 8/22): "once all users' scores are in it automatically
+// saves ... just in case they click the next hole at the top instead of All
+// scores in." Every tap already saves, but a save can fail quietly (signal drop
+// in a valley) and the top ‹ › arrows never re-check. This is a belt-and-braces
+// save that fires the moment a hole is fully scored AND again when the scorer
+// leaves a fully-scored hole by any route. It is awaited, retried once, and
+// says so out loud if it still cannot reach the cloud. Nothing else changes.
+async function bgHoleCompleteAutoSave(g, h, why) {
+  try {
+    if (!g || !h || state.viewOnlyMode) return;
+    if (!isHoleComplete(g, h)) return;
+    g.holeDoneAt = g.holeDoneAt || {};
+    g.holeDoneAt[h] = Date.now();
+    let ok = false;
+    try { ok = (await saveGame(g)) !== false; } catch (e) { ok = false; }
+    if (!ok) {
+      await new Promise(r => setTimeout(r, 1500));
+      try { ok = (await saveGame(g)) !== false; } catch (e) { ok = false; }
+    }
+    if (!ok) { try { showToast('Hole ' + h + ' scores may not have saved — check your signal and tap Refresh', 'warn'); } catch (e) {} }
+    else if (why === 'nav') { try { if (typeof flashAutoSaved === 'function') flashAutoSaved(); } catch (e) {} }
+  } catch (e) { console.warn('bgHoleCompleteAutoSave', e); }
+}
 function isHoleComplete(g, h) {
   if (!g) return false;
   // Scramble: both team scores must be entered
@@ -34977,6 +35015,9 @@ function renderLongPuttEntry() {
   const g = state.game;
   const ctr = $('longputt-entry-section');
   if (!ctr) return;
+  // v1161: a field-leader refresh or live sync re-rendered this section while the
+  // scorer was still typing the distance, throwing the half-typed number away.
+  try { const _ae = document.activeElement; if (_ae && (_ae.id === 'lp-ft' || _ae.id === 'lp-in') && ctr.contains(_ae)) return; } catch (e) {}
   ctr.innerHTML = '';
   const _lpcfg = bgSideCfg(g, 'longPutt');   // v912: group bets live in g.groupGames
   if (!_lpcfg) return;
@@ -35019,15 +35060,20 @@ function renderLongPuttEntry() {
       const pid = chip.dataset.lpPid;
       g.longPuttData.pid = (g.longPuttData.pid === pid) ? null : pid;
       if (!g.longPuttData.pid) { g.longPuttData.ft = null; g.longPuttData.in = null; }
+      g.longPuttData.at = Date.now();   // v1161
       await saveGame(g);
       renderLongPuttEntry();
     };
   });
   const ftInp = ctr.querySelector('#lp-ft'), inInp = ctr.querySelector('#lp-in');
   const saveDist = async () => {
-    const ft = ftInp && ftInp.value !== '' ? Math.max(0, parseInt(ftInp.value, 10) || 0) : null;
-    const inch = inInp && inInp.value !== '' ? Math.min(11, Math.max(0, parseInt(inInp.value, 10) || 0)) : (ft != null ? 0 : null);
+    // v1161: "15.5" used to parseInt to 15. A decimal foot now rolls into inches.
+    let ft = ftInp && ftInp.value !== '' ? Math.max(0, parseFloat(ftInp.value) || 0) : null;
+    let inch = inInp && inInp.value !== '' ? Math.min(11, Math.max(0, parseInt(inInp.value, 10) || 0)) : (ft != null ? 0 : null);
+    if (ft != null && ft !== Math.floor(ft)) { inch = Math.min(11, (inch || 0) + Math.round((ft - Math.floor(ft)) * 12)); ft = Math.floor(ft); if (inch > 11) inch = 11; }
     g.longPuttData.ft = ft; g.longPuttData.in = inch;
+    g.longPuttData.at = Date.now();   // v1161: newest edit wins the cross-phone merge
+    if (ftInp && ft != null) ftInp.value = ft; if (inInp && inch != null) inInp.value = inch;
     await saveGame(g);
     // v679: tournament long-putt notification (deduped per round+player+distance).
     try {
@@ -35554,6 +35600,7 @@ async function handleScoreChange(pid, action) {
 
   // Show auto-advance buttons if all scored on this hole
   const allScored = isHoleComplete(g, h);
+  if (allScored) { try { bgHoleCompleteAutoSave(g, h, 'complete'); } catch (e) {} }   // v1161
   const advBtn = $('auto-advance-btn');
   if (advBtn) advBtn.style.display = (allScored && h < 18) ? 'block' : 'none';
   const advScoreBtn = $('auto-advance-score-btn');
@@ -42492,7 +42539,12 @@ async function _settleUpLinesFor(settlements, nameOf, findPlayerById, opts) {
     lines.push('All square — nobody owes anybody. 🍻');
     return lines;
   }
-  for (const s of settlements) {
+  for (let _i = 0; _i < settlements.length; _i++) {
+    const s = settlements[_i];
+    // v1161 (Tyler, 8/22): "add spacing so it's easy on the eyes" — in the TEXT a
+    // blank line separates each payment from the next (the Venmo URL otherwise runs
+    // straight into the next name). On-screen (noPay) stays compact.
+    if (_i > 0 && !(opts && opts.noPay)) lines.push('');
     lines.push(nameOf(s.fromId) + ' → ' + nameOf(s.toId) + '  $' + s.amount.toFixed(2));
     if (!(opts && opts.noPay)) {
       try { const _cred = findPlayerById(s.toId); (await _settlePayLines(_cred, s.amount)).forEach(l => lines.push(l)); } catch (e) {}
@@ -42588,7 +42640,7 @@ async function buildCombinedSettleUpText(t, combinedPay, opts) {
   // table never survives a messaging app's proportional font -- that is the whole
   // reason the image exists. The text keeps only what a reader actually acts on:
   // who owes who, and how to pay them. (fmtMoney went with them.)
-  lines.push('Settle up:');
+  lines.push('Settle up:', '');   // v1161: blank line after the header
   (await _settleUpLinesFor(settlements, nm, findPlayer)).forEach(l => lines.push(l));
   return lines.join('\n');
 }
@@ -42808,7 +42860,9 @@ async function buildRoundShareText() {
   if (settlements.length) {
     const nm = id => { const p = g.players.find(pp => pp.id === id); return p ? displayFull(p) : '?'; };
     lines.push('', 'Settle up:');
-    for (const s of settlements) {
+    for (let _i = 0; _i < settlements.length; _i++) {
+      const s = settlements[_i];
+      if (_i > 0) lines.push('');   // v1161: breathing room between payments
       lines.push(nm(s.fromId) + ' → ' + nm(s.toId) + '  $' + s.amount.toFixed(2));
       try { const _cred = g.players.find(pp => pp.id === s.toId); (await _settlePayLines(_cred, s.amount)).forEach(l => lines.push(l)); } catch (e) {}
     }
@@ -50803,7 +50857,7 @@ async function openRoundBetsSheet(code, courseName) {
           _txtPay = await _settleUpLinesFor(calculateSettlements(money.combined, g.players),
                                             nameOf, id => g.players.find(pp => pp.id === id));
         } catch (e) { _txtPay = payLines; }
-        if (_txtPay.length) { lines.push(''); lines.push(t ? 'This group:' : 'Settle up:'); _txtPay.forEach(l => lines.push(l)); }
+        if (_txtPay.length) { lines.push(''); lines.push(t ? 'This group:' : 'Settle up:'); lines.push(''); _txtPay.forEach(l => lines.push(l)); }   // v1161 spacing
         // v1109: a tournament round texts the WHOLE-EVENT who-pays-who as well --
         // same rule v1086 set for the Board's settle-up text ("the final settle up
         // text should always include both"), and the same lines this sheet shows.
@@ -66473,14 +66527,16 @@ function t2ComputeFieldSkins(rows, cfg) {
       if (!p || !p.name) return;
       const sc = (g.scores && g.scores[p.id]) || [];
       const net = new Array(18).fill(null); let thru = 0;
+      const gross = new Array(18).fill(null), parArr = new Array(18).fill(null);   // v1161: natural-beats-net tiebreak
       for (let h = 0; h < 18; h++) {
         const s = sc[h]; if (s == null) continue;
         const par = parFor(g, p.id, h); // v1065: this player's tee par
         net[h] = netHoleScore(s, _skHcp(p, rules), siFor(g, p.id, h), par, rules, _nH); thru++;
+        gross[h] = Number(s); parArr[h] = Number(par);
       }
       if (!thru) return;
       const k = nmk(p.name); const cur = byDay[day].parts[k];
-      if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), hcp: _skHcp(p, rules), net: net, thru: thru };
+      if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), hcp: _skHcp(p, rules), net: net, gross: gross, par: parArr, thru: thru };
     });
   });
   const perDay = []; const totalsByName = {};
@@ -66514,7 +66570,23 @@ function t2ComputeFieldSkins(rows, cfg) {
       const _liveDay = (byDay[day].rounds === 1 && byDay[day].finished === 0);
       if (c.length < 2 || (_liveDay && c.length < N)) { holeResults.push({ hole: h + 1, winnerKey: null, tied: false, incomplete: true }); continue; }
       let best = Infinity; c.forEach(p => { if (p.net[h] < best) best = p.net[h]; });
-      const tied = c.filter(p => p.net[h] === best);
+      let tied = c.filter(p => p.net[h] === best);
+      // v1161 (Tyler, 8/22): "a natural birdie or eagle should always beat a net
+      // eagle or birdie by default." When the low NET is shared, anyone who got
+      // there with a natural birdie-or-better (gross ≤ par−1) outranks anyone who
+      // needed a stroke; among naturals the lower gross wins (natural eagle beats
+      // natural birdie). Two naturals on the same gross still tie. Off via
+      // cfg.naturalWins === false; on for every event otherwise.
+      if (tied.length > 1 && cfg.naturalWins !== false) {
+        try {
+          const nat = tied.filter(p => p.gross && p.gross[h] != null && p.par && p.par[h] != null && p.gross[h] <= p.par[h] - 1);
+          if (nat.length) {
+            let lowG = Infinity; nat.forEach(p => { if (p.gross[h] < lowG) lowG = p.gross[h]; });
+            const lowNat = nat.filter(p => p.gross[h] === lowG);
+            if (lowNat.length === 1) tied = lowNat;
+          }
+        } catch (e) {}
+      }
       if (tied.length === 1) {
         skins[nmk(tied[0].name)] += 1 + _skCarry;
         holeResults.push({ hole: h + 1, winnerKey: nmk(tied[0].name), winnerFirst: tied[0].first, winnerName: tied[0].name, tied: false, carried: _skCarry });
@@ -70175,6 +70247,7 @@ function openTourneySkinsConfig(t, onDone) {
       '<label class="help-text" style="font-weight:700;display:block;margin:10px 0 4px">Tied holes</label>' +
       '<div class="ep-seg" id="tsk-ties-seg"><button type="button" data-v="none" class="' + (cur.ties === 'void' || cur.ties === 'none' ? 'on' : '') + '">No carry overs</button><button type="button" data-v="carry" class="' + (cur.ties === 'void' || cur.ties === 'none' ? '' : 'on') + '">Carry overs</button></div>' +
       '<div class="help-text" id="tsk-ties-note" style="margin-top:4px">' + (cur.ties === 'void' || cur.ties === 'none' ? 'A tied hole pays nobody — that skin is gone.' : 'A tied hole rolls its skin onto the next hole with an outright winner.') + '</div>' +
+      '<label class="help-text" style="display:flex;align-items:center;gap:8px;margin:10px 0 0;cursor:pointer"><input type="checkbox" id="tsk-natural"' + (cur.naturalWins === false ? '' : ' checked') + '> <span><strong>Natural beats net</strong> — a real birdie/eagle wins a tied hole over a net birdie/eagle</span></label>' +   // v1161
     '</div></div>' +
     '<div class="actions" style="margin-top:10px"><button id="tsk-cancel" style="flex:1">Cancel</button><button class="primary" id="tsk-save" style="flex:1">Save</button></div></div>';
   document.body.appendChild(ov);
@@ -70195,8 +70268,9 @@ function openTourneySkinsConfig(t, onDone) {
     const value = parseFloat(ov.querySelector('#tsk-val').value) || 0;
     const hcpPct = parseInt(segV('tsk-hcp-seg'), 10) || 100;
     const ties = segV('tsk-ties-seg') === 'none' ? 'none' : 'carry';
-    const ok = await t2MergeSettings(t.id, s => { s.tourneySkins = { on: on, mode: mode, value: value, hcpPct: hcpPct, ties: ties }; });
-    if (ok) { try { _t2Current.settings = _t2Current.settings || {}; _t2Current.settings.tourneySkins = { on: on, mode: mode, value: value, hcpPct: hcpPct, ties: ties }; if (typeof _syncTourneyPotTiles === 'function') _syncTourneyPotTiles(); } catch (e) {} }
+    const _natEl = ov.querySelector('#tsk-natural'); const naturalWins = _natEl ? !!_natEl.checked : true;   // v1161
+    const ok = await t2MergeSettings(t.id, s => { s.tourneySkins = { on: on, mode: mode, value: value, hcpPct: hcpPct, ties: ties, naturalWins: naturalWins }; });
+    if (ok) { try { _t2Current.settings = _t2Current.settings || {}; _t2Current.settings.tourneySkins = { on: on, mode: mode, value: value, hcpPct: hcpPct, ties: ties, naturalWins: naturalWins }; if (typeof _syncTourneyPotTiles === 'function') _syncTourneyPotTiles(); } catch (e) {} }
     showToast(ok ? 'Tournament Skins saved ✓' : 'Couldn’t save — try again');
     close(); if (typeof onDone === 'function') onDone();
   };
@@ -73590,6 +73664,7 @@ async function init() {
 
   // Hole nav
   $('prev-hole').onclick = () => {
+    try { bgHoleCompleteAutoSave(state.game, state.currentHole, 'nav'); } catch (e) {}   // v1161
     state.currentHole = state.currentHole <= 1 ? 18 : state.currentHole - 1; // wrap 1 → 18
     renderScoreEntry();
   };
@@ -73618,6 +73693,7 @@ async function init() {
   $('next-hole').onclick = async () => {
     if (!(await checkWolfPickGate())) return;
     const leaving = state.currentHole;
+    try { bgHoleCompleteAutoSave(state.game, leaving, 'nav'); } catch (e) {}   // v1161: top arrow = same save as "All scores in"
     state.currentHole = leaving >= roundHoles(state.game) ? 1 : leaving + 1; // wrap N → 1
     renderScoreEntry();
     // next-hole is a GPS-view control → the scorer is on GPS, so show pop-ups.
@@ -73645,6 +73721,7 @@ async function init() {
       : (state.currentHole >= roundHoles(state.game) ? null : state.currentHole + 1);
     if (next == null) return;
     const leaving = state.currentHole;
+    try { bgHoleCompleteAutoSave(state.game, leaving, 'nav'); } catch (e) {}   // v1161
     state.currentHole = next;
     renderScoreEntry();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -77201,7 +77278,19 @@ const gpsView = (() => {
       // Re-prompt with a clear explainer + how to switch it on, instead of a toast
       // they'll miss. Position-unavailable / timeout just get a gentle toast.
       if (err && err.code === 1) { stopWatch(); showGpsDeniedPrompt(); }
-      else { gToast('GPS error: ' + (err && err.message ? err.message : 'unavailable')); }
+      else {
+        // v1161 (Tyler, 8/22): "a message popped up at the bottom in blue saying
+        // something about GPS error... no one had issues with GPS." A timeout or a
+        // momentary position-unavailable between fixes is normal under trees and
+        // self-heals on the next fix. Log it; only say something if we have gone a
+        // full 90s with no fix at all, and then at most once every 2 minutes.
+        try { console.warn('[GPS] transient error', err && err.code, err && err.message); } catch (e) {}
+        try {
+          const _sinceFix = Date.now() - (window._gpsLastFixAt || 0);
+          const _sinceNag = Date.now() - (window._gpsErrNagAt || 0);
+          if (window._gpsLastFixAt && _sinceFix > 90000 && _sinceNag > 120000) { window._gpsErrNagAt = Date.now(); gToast('Waiting for GPS signal…'); }
+        } catch (e) {}
+      }
     }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
   }
   // Shown when location permission is OFF/denied while the GPS view is open, so a
