@@ -8169,7 +8169,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1162';
+const BG_BUILD = 'v2026.11.1163';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -54791,6 +54791,38 @@ async function t2SetPlayerHcp(playerId, hcp) {
   if (_ok) { try { await t2PushHcpToLiveRounds(playerId, _h); } catch (e) {} }
   return _ok;
 }
+// v1163 (Tyler, 8/22): "once I set the HCP in the game setup screen it needs to be
+// set for that round and that tourney for everything." Every setup form that shows
+// a handicap box inside a tournament — Configure Day, "Your group's bets", and the
+// live round's Edit settings — used to save its games and drop the handicaps.
+// This takes the form's players, matches them to the event roster by name, and
+// writes any changed handicap through t2SetPlayerHcp (which in turn pushes it into
+// every launched, unfinished round). Only writes when the number actually changed.
+async function t2SyncSetupHcpsToEvent(tid, setupPlayers) {
+  try {
+    if (!tid || !supa || !Array.isArray(setupPlayers) || !setupPlayers.length) return 0;
+    const ev = await t2GetPlayers(tid).catch(() => []);
+    if (!ev || !ev.length) return 0;
+    const byKey = {}; ev.forEach(p => { if (p && p.display_name) byKey[_t2NameKey(p.display_name)] = p; });
+    let n = 0;
+    for (const sp of setupPlayers) {
+      if (!sp || !sp.name) continue;
+      const tp = byKey[_t2NameKey(sp.name)]; if (!tp) continue;
+      // the typed course handicap: baseHcp is pre-percentage; rawHcp carries a
+      // decimal index when the row was auto-filled from one.
+      let v = (sp.rawHcp != null && !isNaN(Number(sp.rawHcp))) ? Number(sp.rawHcp)
+            : (sp.baseHcp != null && !isNaN(Number(sp.baseHcp))) ? Number(sp.baseHcp)
+            : (sp.hcp != null && !isNaN(Number(sp.hcp))) ? Number(sp.hcp) : null;
+      if (v == null) continue;
+      v = t2ClampHcp(v);
+      const cur = (tp.handicap != null && tp.handicap !== '') ? t2ClampHcp(tp.handicap) : null;
+      if (cur === v) continue;
+      try { if (await t2SetPlayerHcp(tp.id, v)) n++; } catch (e) {}
+    }
+    if (n) { try { showToast('Handicap' + (n > 1 ? 's' : '') + ' saved to the event ✓'); } catch (e) {} }
+    return n;
+  } catch (e) { console.warn('t2SyncSetupHcpsToEvent', e); return 0; }
+}
 async function t2PushHcpToLiveRounds(playerId, hcp) {
   try {
     if (!supa || !playerId || hcp == null) return;
@@ -61164,6 +61196,7 @@ async function saveT2GroupGames() {
   const setup = gatherSetup(); if (!setup) return false;   // validates participant counts etc.
   const ok = await t2MergeSettings(gc.tid, s => { s.groupGames = s.groupGames || {}; s.groupGames[gc.gid] = setup.games || {}; });
   if (!ok) { showToast('Save failed — check your connection'); return false; }
+  try { await t2SyncSetupHcpsToEvent(gc.tid, setup.players); } catch (e) {}   // v1163: handicaps typed here reach the event + live round
   // v841 (Tyler): if this group's round already launched, push the edit into
   // it right now instead of silently leaving the old bets baked in — see
   // t2ResyncLaunchedGroupsForDay above for the full story on why this was
@@ -71928,6 +71961,13 @@ function liveEditAutoSaveNow() {
   } catch (e) {}
   try { applyLiveEditMerge(g, setup); } catch (e) { return; }
   (async () => { try { await saveGame(g); } catch (e) { console.warn('auto-save failed', e); } })();
+  // v1163: auto-save path too — only when the handicap set actually changed.
+  try {
+    if (g && g.t2 && g.t2.tournamentId) {
+      const _sig = (setup.players || []).map(p => _t2NameKey(p.name) + '=' + (p.rawHcp != null ? p.rawHcp : (p.baseHcp != null ? p.baseHcp : p.hcp))).join('|');
+      if (_sig !== window._t2HcpSyncSig) { window._t2HcpSyncSig = _sig; t2SyncSetupHcpsToEvent(g.t2.tournamentId, setup.players).catch(() => {}); }
+    }
+  } catch (e) {}
   flashAutoSaved();
 }
 function flashAutoSaved() {
@@ -72513,6 +72553,7 @@ async function init() {
       if (_cnm) { s.dayCourses = s.dayCourses || {}; s.dayCourses[cfg.dayNumber] = { id: _cid, name: _cnm }; }
     });
     if (!ok) { showToast('Save failed — check connection and try again'); return false; }
+    try { await t2SyncSetupHcpsToEvent(t.id, setup.players); } catch (e) {}   // v1163
     // v1154 (Tyler, AZ trip): the day's FORMAT now follows the games the director
     // actually configured here (the visible format dropdown is long gone, so the
     // stored format stayed at whatever creation picked — 'singles' — and Configure
@@ -73452,6 +73493,8 @@ async function init() {
     // Merge new config into the running round (shared with the auto-saver). Keeps
     // players + their scores intact, reuses IDs, and cleans up switched-off games.
     applyLiveEditMerge(g, setup);
+    // v1163: a handicap changed inside a tournament round is the event's handicap too.
+    try { if (g && g.t2 && g.t2.tournamentId) t2SyncSetupHcpsToEvent(g.t2.tournamentId, setup.players).catch(() => {}); } catch (e) {}
 
     // The merge above already updated state.game in memory, so the scoring screen
     // can render the new settings immediately. Return to it NOW and push the two
