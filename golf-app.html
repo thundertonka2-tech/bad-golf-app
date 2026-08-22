@@ -8169,7 +8169,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1157';
+const BG_BUILD = 'v2026.11.1158';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -57253,6 +57253,13 @@ async function renderT2List() {
         ' · <span style="color:' + (info.finished ? 'var(--money-pos)' : (info.started ? 'var(--accent)' : 'var(--text-muted)')) + '">' + (info.finished ? 'finished' : (info.started ? 'live' : 'scheduled')) + '</span>' +
         (info.gamesSummary ? '<div class="small-text" style="margin-top:4px;color:var(--text-muted)">🎲 ' + t2esc(info.gamesSummary) + '</div>' : '') +
         (info.gameCode ? '<button class="full t2-open-round" data-code="' + t2esc(info.gameCode) + '" style="margin-top:6px;background:' + (info.finished ? 'var(--money-pos)' : 'var(--accent)') + ';color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">' + (info.finished ? '🏆 View results' : 'Join now') + '</button>' : '') +
+        // v1158 (Tyler, Kerbo Group 8/22): a group that was reopened (or never tapped
+        // Finish) holds the whole event open — Total payout stays provisional and the
+        // card never flips to Finished. The commissioner / tourney admin can now force
+        // a started-but-unfinished group closed from here without that phone.
+        ((info.gameCode && info.started && !info.finished && t2CanManage(t)) ?
+          '<button class="full t2-force-finish" data-code="' + t2esc(info.gameCode) + '" style="margin-top:6px;background:transparent;border:1px solid var(--gold);color:var(--gold);font-weight:700;padding:9px;border-radius:10px">🔒 Force finish this group</button>' +
+          '<div class="small-text" style="color:var(--text-muted);margin-top:2px">Admin only — closes the round as-is so the event can total up. Scores can still be fixed with Reopen.</div>' : '') +
         ((info.finished || !info.isMine) ? '' :
         ('<button class="full t2-grp-config" data-code="' + t2esc(info.gameCode) + '" data-tid="' + t2esc(info.tid) + '" data-gid="' + t2esc(info.gid) + '" data-day="' + info.day + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:600;padding:8px">Your group\'s bets</button>' +
           '<div class="small-text" style="color:var(--text-muted);margin-top:2px">' + (info.isScorer ? 'You\'re the scorer — set your group\'s own games here.' : 'Your foursome\'s own side games — separate from the tournament games.') + '</div>')) +
@@ -57353,6 +57360,7 @@ async function renderT2List() {
   // event is still scheduled, warn that re-teaming resets bets, then open the
   // pre-launch config (saved to the event and applied when the round is created).
   document.querySelectorAll('#t2-list .t2-open-round').forEach(b => b.onclick = () => openT2Round(b.dataset.code));
+  document.querySelectorAll('#t2-list .t2-force-finish').forEach(b => b.onclick = () => t2ForceFinishRound(b.dataset.code));
   document.querySelectorAll('#t2-list .t2-row-start').forEach(b => b.onclick = async () => {
     let tf = null; try { tf = await _fullT(b.dataset.id); } catch (e) {}
     if (!tf) { showToast('Could not load the event'); return; }
@@ -57967,6 +57975,41 @@ function t2IsGroup(t) { return !!(t && t.settings && t.settings.type === 'group'
 // Can the current user MANAGE this tournament? True for the commissioner, any
 // assigned tourney admin (settings.admins = account user_ids — same rights as the
 // director), or a global app admin. (Tyler, June 2026.)
+// v1158: admin force-finish for a tournament group round. Stamps finishedAt on the
+// round (now, so it is newer than any reopenedAt and _mergeGameForWrite keeps it
+// even if the scorer's phone still has the round open), saves through the normal
+// merge path, then lets t2MaybeCompleteDay flip the day. Nothing else is touched —
+// scores/bets recalc live from the data, and Reopen still works afterwards.
+async function t2ForceFinishRound(code) {
+  try {
+    if (!code) return;
+    let g = null;
+    if (state.game && state.game.code === code) g = state.game;
+    else { try { g = await loadGame(code); } catch (e) { g = null; } }
+    if (!g) { showToast('Could not load that group\'s round'); return; }
+    if (g.finishedAt) { showToast('That group is already finished'); try { renderT2List(); } catch (e) {} return; }
+    let _mgr = false;
+    try { _mgr = roundManagedByMe(g); } catch (e) {}
+    if (!_mgr) {
+      try { const _r = await t2GetX(g.t2 && g.t2.tournamentId); _mgr = !!(_r && _r.data && t2CanManage(_r.data)); } catch (e) {}
+    }
+    if (!_mgr) { showToast('Only the commissioner or a tourney admin can force-finish a group'); return; }
+    const _holes = (() => { try { let n = 0; Object.keys(g.scores || {}).forEach(pid => { (g.scores[pid] || []).forEach(v => { if (v != null && v !== '') n++; }); }); return n; } catch (e) { return 0; } })();
+    const ok = await uiConfirm('This closes Group ' + ((g.t2 && g.t2.group) || '') + '\'s round as it stands right now' + (_holes ? ' (' + _holes + ' scores entered)' : ' — NO scores have been entered yet') + '. The event can then total up. You can still Reopen it later to fix a score.', { title: 'Force finish this group?', okLabel: 'Finish it', cancelLabel: 'Cancel', danger: true });
+    if (!ok) return;
+    const now = Date.now();
+    g.finishedAt = now;
+    g.updatedAt = now;
+    g.forceFinishedBy = (_authUser && _authUser.id) || null;
+    let saved = false;
+    try { saved = await saveGame(g); } catch (e) { console.warn('t2ForceFinishRound save', e); }
+    if (saved === false) { showToast('Could not save — check your connection and try again'); return; }
+    try { if (typeof t2MaybeCompleteDay === 'function') await t2MaybeCompleteDay(g); } catch (e) {}
+    try { if (state.game && state.game.code === code) state.viewOnlyMode = true; } catch (e) {}
+    showToast('Group ' + ((g.t2 && g.t2.group) || '') + ' finished');
+    try { renderT2List(); } catch (e) {}
+  } catch (e) { console.warn('t2ForceFinishRound', e); showToast('Could not force-finish'); }
+}
 function t2CanManage(t) {
   if (typeof isAdmin === 'function' && isAdmin()) return true;
   if (!_authUser || !t) return false;
