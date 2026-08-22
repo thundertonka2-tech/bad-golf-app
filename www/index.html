@@ -8172,7 +8172,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1158';
+const BG_BUILD = 'v2026.11.1159';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -38178,6 +38178,7 @@ function openHuckleModal(eligible) {
 function calcStroke(g) {
   if (!g.games.stroke) return null;
   const cfg = g.games.stroke;
+  if (cfg.fieldOnly) return null;   // v1159: tournament-wide Low Net — settles across the field (t2ComputeFieldSidePots), never per-group
   const participants = getParticipants(g, cfg);
   if (participants.length < 2) return null;
   const totals = calcTotals(g);
@@ -61500,6 +61501,8 @@ async function t2LaunchDayRounds(courseId) {
       // fieldOnly so the scorer can still LOG a winner per hole, but it never settles
       // per-group — t2ComputeFieldCtp settles it across the field. (Tyler, Jul 2026)
       if (games.ctp) { games.ctp.fieldOnly = true; }
+      // v1159: a day-level Stroke game is the whole-field Low Net pot — never per-group.
+      if (games.stroke) { games.stroke.fieldOnly = true; }
       // v863 (Tyler): Quota configured as the DAY's whole-field pool (via Configure
       // Day) settles across every group at the end -- same _t2field convention as
       // Stableford above. A group's OWN locally-configured Quota (added via "Your
@@ -61698,6 +61701,13 @@ async function openT2Round(code) {
         }
       } catch (e) {}
       try { if (g.games && g.games.ctp && !g.games.ctp.fieldOnly) { g.games.ctp.fieldOnly = true; try { await saveGame(g); } catch (e) {} } } catch (e) {}
+      // v1159: self-heal rounds launched before this build — a Stroke game that came from
+      // Configure Day (the day config has one) is field-only, not a group pot.
+      try {
+        const _skDay = (g.t2 && g.t2.day) || 1;
+        const _skCfg = (_tt && _tt.settings && _tt.settings.dayGames && _tt.settings.dayGames[_skDay] && _tt.settings.dayGames[_skDay].stroke) || null;
+        if (_skCfg && g.games && g.games.stroke && !g.games.stroke.fieldOnly) { g.games.stroke.fieldOnly = true; try { await saveGame(g); } catch (e) {} }
+      } catch (e) {}
     }
   } catch (e) {}
   state.viewOnlyMode = !!g.finishedAt;
@@ -66687,6 +66697,33 @@ function t2ComputeFieldCtp(rows) {
 // tracked putts (score − putts ≤ par − 2) or the manual GIR chip; Fewest Putts
 // requires putts logged on every scored hole so missing data can never "win".
 // Money moves only once every player in the day's field has finished 18.
+// v1159 (Tyler, Kerbo Group 8/22): "the stroke play net should have been tourney
+// wide — I set it up in the tourney and did not have any group games configured."
+// A Stroke game chosen in Configure Day (settings.dayGames[d].stroke) was being
+// stamped onto every group round and settled PER GROUP (two $4 pots) while the
+// Event Pots "Low Net" tile sat off. Anything configured at the tournament level is
+// a whole-field pot, so: the effective side-pot config treats a day Stroke game as
+// Low Net ON at that buy-in (carrying its net/gross + handicap % choice) unless the
+// Low Net tile is already on, and the group round tags it fieldOnly (below) so it
+// never settles per group. Additive — events with no day Stroke game are unchanged.
+function t2EffectiveSidePots(t) {
+  try {
+    const st = (t && t.settings) || {};
+    const base = st.tourneySidePots || {};
+    const out = { lowNet: Object.assign({}, base.lowNet || {}), girs: Object.assign({}, base.girs || {}), putts: Object.assign({}, base.putts || {}) };
+    if (out.lowNet.on && Number(out.lowNet.value) > 0) return out;
+    const dg = st.dayGames || {};
+    const days = Object.keys(dg).sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+    for (const d of days) {
+      const sk = dg[d] && dg[d].stroke;
+      if (sk && Number(sk.buyin) > 0) {
+        out.lowNet = { on: true, value: Number(sk.buyin), hcpPct: (sk.hcpPct != null ? Number(sk.hcpPct) : 100), gross: sk.net === false, fromDayStroke: true };
+        break;
+      }
+    }
+    return out;
+  } catch (e) { return (t && t.settings && t.settings.tourneySidePots) || null; }
+}
 function t2ComputeFieldSidePots(rows, cfg) {
   try {
     if (!cfg || !Array.isArray(rows) || !rows.length) return null;
@@ -66716,12 +66753,15 @@ function t2ComputeFieldSidePots(rows, cfg) {
         // bgFullCourseHcp) -- Low Net was scored ~2 strokes light for everyone.
         let fullHcp = bgFullCourseHcp(p, g.hcpRules);
         try { if ((g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true) fullHcp = 0; } catch (e) {}
+        // v1159: Low Net from a day Stroke game carries that game's gross/net + hcp %.
+        let lnHcp = fullHcp;
+        try { const _ln = cfg.lowNet || {}; if (_ln.gross) lnHcp = 0; else if (_ln.hcpPct != null && Number(_ln.hcpPct) !== 100) lnHcp = Math.round(fullHcp * (Number(_ln.hcpPct) / 100)); } catch (e) {}
         let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
         for (let h = 0; h < 18; h++) {
           const s = sc[h]; if (s == null) continue;
           scored++;
           const par = parFor(g, p.id, h); // v1065: this player's tee par
-          net += (sis ? netHoleScore(s, fullHcp, siFor(g, p.id, h), par, g.hcpRules || null, _nH) : s);
+          net += (sis ? netHoleScore(s, lnHcp, siFor(g, p.id, h), par, g.hcpRules || null, _nH) : s);
           const pu = (g.puttsData && g.puttsData[p.id]) ? g.puttsData[p.id][h] : null;
           if (pu != null) {
             putts += Number(pu) || 0; puttHoles++;
@@ -67390,7 +67430,7 @@ async function t2ComputeCombinedPayouts(t) {
     const skinsCfg = t.settings && t.settings.tourneySkins;
     const nassauCfg = t.settings && t.settings.tourneyNassau;
     const longPuttCfg = t.settings && t.settings.tourneyLongPutt;
-    const sidePotsCfg = t.settings && t.settings.tourneySidePots;
+    const sidePotsCfg = t2EffectiveSidePots(t);   // v1159: day Stroke game = field Low Net
     let skins = null; try { skins = (skinsCfg && skinsCfg.on) ? t2ComputeFieldSkins(raw, skinsCfg) : null; } catch (e) {}
     let fNassau = null; try { fNassau = (nassauCfg && nassauCfg.on) ? t2ComputeFieldNassau(raw, nassauCfg) : null; } catch (e) {}
     let longPutt = null; try { longPutt = (longPuttCfg && longPuttCfg.on) ? t2ComputeFieldLongPutt(raw, longPuttCfg) : null; } catch (e) {}
@@ -67747,7 +67787,7 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     const skinsCfg = t.settings && t.settings.tourneySkins;
     const nassauCfg = t.settings && t.settings.tourneyNassau;
     const longPuttCfg = t.settings && t.settings.tourneyLongPutt;
-    const sidePotsCfg = t.settings && t.settings.tourneySidePots;
+    const sidePotsCfg = t2EffectiveSidePots(t);   // v1159: day Stroke game = field Low Net
     let skins = null; try { skins = (skinsCfg && skinsCfg.on) ? t2ComputeFieldSkins(raw, skinsCfg) : null; } catch (e) {}
     let fNassau = null; try { fNassau = (nassauCfg && nassauCfg.on) ? t2ComputeFieldNassau(raw, nassauCfg) : null; } catch (e) {}
     let longPutt = null; try { longPutt = (longPuttCfg && longPuttCfg.on) ? t2ComputeFieldLongPutt(raw, longPuttCfg) : null; } catch (e) {}
@@ -68304,7 +68344,7 @@ function bgPotRowsForEvent(t, raw) {
     } catch (e) {}
     // Side pots — Low Net / Most GIRs / Fewest Putts
     try {
-      const cfg = s.tourneySidePots;
+      const cfg = t2EffectiveSidePots(t);   // v1159
       if (cfg) {
         const PLAIN = { lowNet: 'Low Net', girs: 'Most greens in regulation', putts: 'Fewest putts' };
         const UNIT = { lowNet: 'net', girs: 'GIRs', putts: 'putts' };
