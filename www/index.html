@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1185-->
+<!--BGVER=v2026.11.1186-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8227,7 +8227,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1185';
+const BG_BUILD = 'v2026.11.1186';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -36742,6 +36742,19 @@ async function resolvePayHandles(payeePlayer){
     if (rp && _payHasAny(rp.pay)) return rp.pay;
     const me = await getMeName();
     if (me && rosterPlayerKey({ name: me }) === key){ const mine = getMyPay(); if (_payHasAny(mine)) return mine; }
+    // v1186 (Tyler, 8/23): "Frank said he added his venmo... when I sent out the
+    // text I did not see it." Frank's Venmo WAS saved — but only into HIS OWN
+    // per-user roster row (roster:<his uid>). Rosters went per-account in v603;
+    // the legacy shared row below was kept as a compatibility mirror and its
+    // dual-write was later retired (ROSTER_DUAL_WRITE_LEGACY = false) — but THIS
+    // resolver's cloud fallback still read ONLY that dead row. So every handle
+    // saved since the retirement, and every NEW user (who never existed in the
+    // legacy row at all — Ken Ford, Kevin Wright), was invisible to other
+    // phones' settle-ups. The payee's OWN roster is where a self-saved handle is
+    // guaranteed to live and always current, so it now outranks the legacy row:
+    // map name → account (profiles.my_player / display_name) → roster:<uid>.
+    const own = await _payFromOwnersRoster(payeePlayer);
+    if (_payHasAny(own)) return own;
     // v638: CLOUD fallback — the legacy shared roster row. Rosters are per-user
     // now (v603), but every handle save still dual-writes (merged) into the
     // shared row, so a player who set his Venmo on HIS OWN phone is found here
@@ -36759,6 +36772,44 @@ async function resolvePayHandles(payeePlayer){
     }
   } catch(e){}
   return {};
+}
+
+// v1186: look the payee's handles up in THEIR OWN per-user roster row (see
+// resolvePayHandles). Read-only, best-effort, cached per name for 60s so an
+// 8-payment settle-up costs at most one profiles + one roster read per payee.
+let _payOwnCache = {};
+async function _payFromOwnersRoster(payeePlayer) {
+  try {
+    if (!(typeof isSignedIn === 'function' && isSignedIn())) return null;
+    if (!supaReady) await initSupabase();
+    if (!(supa && supaOnline)) return null;
+    const raw = String(displayFull(payeePlayer) || payeePlayer.name || '').trim();
+    const nn = normalizeNameSegment(raw);
+    if (!nn) return null;
+    const c = _payOwnCache[nn];
+    if (c && (Date.now() - c.at) < 60000) return c.pay;
+    let uid = null;
+    try {
+      let { data } = await supa.from('profiles').select('id,my_player,display_name').ilike('my_player', raw).limit(3);
+      let rows = data || [];
+      if (!rows.length) { const r2 = await supa.from('profiles').select('id,my_player,display_name').ilike('display_name', raw).limit(3); rows = (r2 && r2.data) || []; }
+      const hit = rows.find(r => r && (normalizeNameSegment(r.my_player || '') === nn || normalizeNameSegment(r.display_name || '') === nn));
+      if (hit) uid = hit.id;
+    } catch (e) {}
+    let pay = null;
+    if (uid) {
+      try {
+        const { data } = await supa.from('games').select('data').eq('code', 'roster:' + uid).maybeSingle();
+        const arr = (data && Array.isArray(data.data)) ? data.data : [];
+        const key = rosterPlayerKey(payeePlayer);
+        let rp = arr.find(x => x && _payHasAny(x.pay) && rosterPlayerKey(x) === key);
+        if (!rp) rp = arr.find(x => x && _payHasAny(x.pay) && normalizeNameSegment(x.name || '') === nn);
+        if (rp) pay = rp.pay;
+      } catch (e) {}
+    }
+    _payOwnCache[nn] = { at: Date.now(), pay: pay };
+    return pay;
+  } catch (e) { return null; }
 }
 
 // v638: read (and cache 60s) the legacy shared roster PURELY for payment-handle
@@ -36790,6 +36841,26 @@ async function savePayHandlesForPlayer(payeePlayer, handles){
     const me = await getMeName();
     if (me && rosterPlayerKey({ name: me }) === key){ try { localStorage.setItem(KEY_MY_PAY, JSON.stringify(rp.pay)); } catch(e){} }
   } catch(e){ console.warn('savePayHandlesForPlayer', e); }
+  // v1186: mirror JUST this player's handles into the legacy shared row too.
+  // The full-roster dual-write stays retired — this is a targeted, read-first
+  // (v970 rule: no read, no write) pay-only merge so phones still on a build
+  // older than v1186 (whose settle-up only checks the legacy row) keep finding
+  // freshly saved handles. Best-effort; failure never blocks the real save above.
+  try {
+    if (supa && supaOnline && typeof isSignedIn === 'function' && isSignedIn()) {
+      const { data, error } = await supa.from('games').select('data').eq('code', LEGACY_ROSTER_ROW).maybeSingle();
+      if (!error && data && Array.isArray(data.data)) {
+        const arr = data.data;
+        const key2 = rosterPlayerKey(payeePlayer);
+        const nn = normalizeNameSegment(displayFull(payeePlayer) || payeePlayer.name || '');
+        let idx = arr.findIndex(x => x && rosterPlayerKey(x) === key2);
+        if (idx < 0 && nn) idx = arr.findIndex(x => x && normalizeNameSegment(x.name || '') === nn);
+        if (idx >= 0) arr[idx] = Object.assign({}, arr[idx], { pay: Object.assign({}, arr[idx].pay, handles) });
+        else arr.push({ name: displayFull(payeePlayer) || payeePlayer.name || '', firstName: payeePlayer.firstName || '', lastName: payeePlayer.lastName || '', pay: Object.assign({}, handles), scoreHistory: [] });
+        await supa.from('games').upsert({ code: LEGACY_ROSTER_ROW, data: arr, updated_at: new Date().toISOString() });
+      }
+    }
+  } catch(e){}
   try { if (state && state.game && Array.isArray(state.game.players)){ const gp = state.game.players.find(p => rosterPlayerKey(p) === rosterPlayerKey(payeePlayer)); if (gp) gp.pay = Object.assign({}, gp.pay, handles); } } catch(e){}
 }
 
