@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1181-->
+<!--BGVER=v2026.11.1182-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8196,7 +8196,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1181';
+const BG_BUILD = 'v2026.11.1182';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -14112,7 +14112,15 @@ async function _mergeSharedSingletonValue(key, local) {
       const idOf = x => (x && (x.id != null ? x.id : (x.code != null ? x.code : (x.courseId != null ? x.courseId : null))));
       const map = new Map();
       a.forEach(x => { const id = idOf(x); if (id != null) map.set(id, x); });
-      b.forEach(x => { const id = idOf(x); if (id != null) map.set(id, x); }); // local wins per id
+      // v1182 (Tyler, 8/23): "local wins" let a STALE device clobber a scheduled
+      // round somebody had just re-saved (tees White -> Blue, handicaps reverting).
+      // When BOTH copies carry a numeric updatedAt the NEWER one wins; entries
+      // where the cloud copy has no stamp keep the old local-wins behaviour; a stamped
+      // cloud copy beats an UNSTAMPED local one (every local edit gets stamped, so
+      // unstamped local = never edited on this device).
+      b.forEach(x => { const id = idOf(x); if (id == null) return; const c = map.get(id);
+        if (c && typeof c.updatedAt === 'number' && (typeof x.updatedAt !== 'number' || c.updatedAt > x.updatedAt)) return;   // cloud is newer (or local was never edited here) — keep it
+        map.set(id, x); });
       const out = Array.from(map.values());
       b.forEach(x => { if (idOf(x) == null) out.push(x); });                    // keep id-less locals
       return out;
@@ -15701,11 +15709,16 @@ async function addDeletedTourneyId(id) {
     await safeSet(KEY_DELETED_TOURNEYS, JSON.stringify(Array.from(cur).slice(-4000)), true);
   } catch (e) {}
 }
+// v1182: snapshot of each scheduled round as last READ, so saveTourneys can stamp
+// updatedAt on exactly the entries this device changed (stamping everything would
+// make a stale list look newest and defeat the newest-wins merge).
+function _bgTourneyFingerprint(t) { try { const c = Object.assign({}, t); delete c.updatedAt; return JSON.stringify(c); } catch (e) { return ''; } }
 async function getTourneys() {
   const v = await safeGet(KEY_TOURNEYS, true);
   let arr = [];
   if (v) { try { arr = JSON.parse(v); } catch (e) { arr = []; } }
   if (!Array.isArray(arr)) arr = [];
+  try { const snap = {}; arr.forEach(t => { if (t && t.id != null) snap[t.id] = _bgTourneyFingerprint(t); }); window._bgTourneySnap = snap; } catch (e) {}
   // Drop tombstoned ids so a cloud-merge union can never resurrect a deleted round.
   // Fail SAFE: if the tombstone read fails, show the rounds rather than hide them.
   try {
@@ -15716,6 +15729,11 @@ async function getTourneys() {
 }
 
 async function saveTourneys(list) {
+  try {   // v1182: stamp only the entries that changed since they were read
+    const snap = window._bgTourneySnap || {}; const now = Date.now();
+    (Array.isArray(list) ? list : []).forEach(t => { if (!t || t.id == null) return; const fp = _bgTourneyFingerprint(t); if (snap[t.id] !== fp) { t.updatedAt = now; snap[t.id] = _bgTourneyFingerprint(t); } });
+    window._bgTourneySnap = snap;
+  } catch (e) {}
   return await safeSet(KEY_TOURNEYS, JSON.stringify(list), true);
 }
 
@@ -74850,8 +74868,11 @@ async function init() {
     }
     state.editingTourneyId = t.id;
     try { state._schedStartPids = true; } catch (e) {}   // pre-set wagers settle via stable ids
+    // v1182 (Tyler): this path left the bottom button reading "Schedule for later" even
+    // though it edits an EXISTING round (and saves in place via saveScheduledRoundEdits).
+    try { const sb = $('btn-save-tourney'); if (sb) sb.innerHTML = (t && !t.isTemplate) ? '💾 Save' : '📅 Schedule for later'; } catch (e) {}
     switchTab('setup', { skipActivePrompt: true });
-    showToast(t.savedConfig ? 'Loaded — review and tap Start round' : 'Fill in the setup, then start');
+    showToast(t.savedConfig ? 'Loaded — review, then Save or Start round' : 'Fill in the setup, then start');
   };
   $('tam-edit').onclick = () => {
     const t = state.activeTourneyForActions;
