@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1206-->
+<!--BGVER=v2026.11.1207-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -6601,6 +6601,12 @@
         <h2>Feedback inbox <span class="small-text" style="color:var(--text-muted)">(admins)</span></h2>
         <div id="feedback-inbox-list"><div class="help-text">Loading…</div></div>
       </div>
+      <!-- v1207 (Tyler): force-update gate — set the minimum required app version.
+           The gate NEVER demands more than the App Store actually has live. -->
+      <div class="card" id="update-gate-card" style="display:none;margin-top:14px">
+        <h2>App update gate <span class="small-text" style="color:var(--text-muted)">(admins)</span></h2>
+        <div id="update-gate-body"><div class="help-text">Loading…</div></div>
+      </div>
     </div>
 
     <!-- ============ WAGER PANEL ============ -->
@@ -8269,7 +8275,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1206';
+const BG_BUILD = 'v2026.11.1207';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -72626,7 +72632,7 @@ window.switchTab = function(name, opts) {
   if (name === 'crew') { renderCrew(); }
   if (name === 'bets') { try { const a = document.getElementById('doc-admin-row'); if (a) a.style.display = (typeof isAdmin === 'function' && isAdmin()) ? 'block' : 'none'; } catch (e) {} }
   if (name === 'wager' && WAGER_ENABLED) { try { renderWagerTab(); } catch (e) { console.warn('renderWagerTab', e); } }
-  if (name === 'admin') { try { window.scrollTo(0, 0); } catch (e) {} try { renderAdmin(); } catch (e) { console.warn('renderAdmin', e); } try { renderFeedbackInbox(); } catch (e) {} }
+  if (name === 'admin') { try { window.scrollTo(0, 0); } catch (e) {} try { renderAdmin(); } catch (e) { console.warn('renderAdmin', e); } try { renderFeedbackInbox(); } catch (e) {} try { renderUpdateGateCard(); } catch (e) {} }
   // Setup tab with a round in progress: don't silently drop into edit-live mode.
   // Ask first — continue the round, edit its settings, or start a new game
   // (which gives a clean "Start round" form). Reset the form behind the prompt
@@ -75975,6 +75981,7 @@ async function init() {
     try { await handleTournamentJoinLink(); } catch (e) { console.warn('tjoin', e); }
     try { await tryRestore(); } catch (e) { console.warn('restore', e); }
     try { await renderHome(); } catch (e) { console.warn('home', e); }
+    try { bgUpdateGateCheck(); } catch (e) {}   // v1207: force-update gate (native only, fails open)
     try { if (typeof timesHandlePendingCal === 'function') timesHandlePendingCal(); } catch (e) {}
   })();
 }
@@ -82292,6 +82299,172 @@ async function improveUploadOne(item, uid) {
     }
   };
 })();
+
+// ===================== v1207: FORCE-UPDATE GATE =====================
+// Tyler: "is there a way to force all users to update on a future build with
+// apple?" Apple has no store-side force switch, so the gate lives in the app:
+// on launch (native builds only — the web build is always current by deploy)
+// the app asks Apple's public lookup API what version is LIVE on the App Store
+// and compares it to its own BG_BUILD.
+//   · Installed >= store live: normal state (we always run ahead of Apple's
+//     review) — nothing shows.
+//   · Installed < store live: a dismissible "update available" banner...
+//   · ...unless the admin floor (shared:app-update row, set from the Admin tab)
+//     says this installed version is TOO OLD — then a full-screen, undismissable
+//     "Update required" with one button to the store.
+// THE KEY RULE (Tyler): the effective floor is capped at the STORE-LIVE version,
+// never our own numbers — we are always ahead of Apple due to review delays, so
+// a floor above the store clamps down to the store. The gate can never demand a
+// version nobody can download.
+// Android: Play has no public version API, so Android uses the same Apple-live
+// cap (conservative — Play approvals land faster than Apple's) and its Update
+// button opens the Play Store. Every failure path fails OPEN (no block).
+const KEY_UPDATE_GATE = 'golf:app-update';                     // row: shared:app-update
+const BG_APPSTORE_LOOKUP = 'https://itunes.apple.com/lookup?id=6779399027&country=us';
+function bgVerNum(s) {
+  const m = String(s || '').trim().replace(/^v/i, '').split('.').map(x => parseInt(x, 10));
+  return (m.length && m.every(n => !isNaN(n))) ? m : null;
+}
+function bgVerCmp(a, b) {   // -1: a<b · 0: equal/unparseable · 1: a>b
+  const A = bgVerNum(a), B = bgVerNum(b);
+  if (!A || !B) return 0;
+  for (let i = 0; i < Math.max(A.length, B.length); i++) {
+    const x = A[i] || 0, y = B[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+// Live App Store version — cached 6h so launches don't hammer Apple; force=true
+// (the Admin card's refresh) bypasses the cache.
+async function bgStoreLiveVersion(force) {
+  try {
+    const c = JSON.parse(localStorage.getItem('golf:store-version') || 'null');
+    if (!force && c && c.v && (Date.now() - (c.at || 0)) < 6 * 3600 * 1000) return c;
+  } catch (e) {}
+  try {
+    const r = await fetch(BG_APPSTORE_LOOKUP + '&_=' + Date.now());
+    const j = await r.json();
+    const res = j && j.results && j.results[0];
+    if (res && res.version) {
+      const out = { v: String(res.version), url: res.trackViewUrl || BG_APPSTORE_URL, at: Date.now() };
+      try { localStorage.setItem('golf:store-version', JSON.stringify(out)); } catch (e) {}
+      return out;
+    }
+  } catch (e) {}
+  return null;   // unreachable / CORS / offline → caller fails open
+}
+async function _bgUpdateGateRow(fresh) {
+  try {
+    if (fresh) {
+      if (!supaReady) await initSupabase();
+      if (supa && supaOnline) {
+        const r = await supa.from('games').select('data').eq('code', 'shared:app-update').maybeSingle();
+        if (r && !r.error && r.data && r.data.data) { try { bgLsSet(KEY_UPDATE_GATE, JSON.stringify(r.data.data)); } catch (e) {} return r.data.data; }
+        if (r && !r.error) return null;   // row simply doesn't exist yet
+      }
+    }
+  } catch (e) {}
+  try { return JSON.parse(localStorage.getItem(KEY_UPDATE_GATE) || 'null'); } catch (e) { return null; }
+}
+function _bgHideUpdateUi() {
+  try { const b = document.getElementById('bg-update-banner'); if (b) b.remove(); } catch (e) {}
+  try { const d = document.getElementById('bg-update-block'); if (d) d.remove(); } catch (e) {}
+}
+function _bgShowUpdateBlock(storeV, url) {
+  if (document.getElementById('bg-update-block')) return;
+  try { const b = document.getElementById('bg-update-banner'); if (b) b.remove(); } catch (e) {}
+  const d = document.createElement('div');
+  d.id = 'bg-update-block';
+  d.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9500;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px 24px;background:radial-gradient(120% 80% at 50% 22%, #3b8ad6 0%, #185fa5 38%, #185fa5 60%, #0c447c 100%);color:#fff';
+  d.innerHTML = '<div style="font-size:56px;margin-bottom:10px">\u26f3</div>' +
+    '<h2 style="margin:0 0 8px;color:#fff">Update required</h2>' +
+    '<p style="max-width:340px;margin:0 0 6px;font-weight:500;line-height:1.5;text-shadow:0 1px 6px rgba(0,0,0,.4)">A new version of Bad Golf (' + escapeHtml(String(storeV)) + ') is ready. This version is too old to keep playing \u2014 grab the update and jump right back in.</p>' +
+    '<button id="bg-update-block-btn" style="margin-top:16px;padding:14px 28px;font-size:16px;font-weight:800;background:#fff;color:#0c447c;border:none;border-radius:12px;box-shadow:0 4px 14px rgba(0,0,0,.3);cursor:pointer">Update now</button>';
+  document.body.appendChild(d);
+  const b = d.querySelector('#bg-update-block-btn');
+  if (b) b.onclick = () => { try { window.open(url, '_blank'); } catch (e) { try { location.href = url; } catch (e2) {} } };
+}
+function _bgShowUpdateBanner(storeV, url) {
+  try { if ((localStorage.getItem('golf:update-nudge-dismissed') || '') === String(storeV)) return; } catch (e) {}
+  if (document.getElementById('bg-update-banner') || document.getElementById('bg-update-block')) return;
+  const d = document.createElement('div');
+  d.id = 'bg-update-banner';
+  d.style.cssText = 'position:fixed;left:12px;right:12px;bottom:calc(78px + env(safe-area-inset-bottom,0px));z-index:940;display:flex;align-items:center;gap:10px;background:#0c447c;color:#fff;border-radius:14px;padding:12px 14px;box-shadow:0 6px 20px rgba(0,0,0,.35)';
+  d.innerHTML = '<div style="flex:1;min-width:0;font-size:13px;font-weight:600;line-height:1.4">\ud83d\udd14 Bad Golf ' + escapeHtml(String(storeV)) + ' is out \u2014 update when you get a sec.</div>' +
+    '<button id="bg-update-go" style="flex:0 0 auto;background:#fff;color:#0c447c;border:none;border-radius:10px;padding:8px 12px;font-weight:800;font-size:13px;cursor:pointer">Update</button>' +
+    '<button id="bg-update-x" title="Dismiss" style="flex:0 0 auto;background:transparent;color:#fff;border:none;font-size:17px;font-weight:700;padding:4px 6px;cursor:pointer">\u2715</button>';
+  document.body.appendChild(d);
+  const go = d.querySelector('#bg-update-go');
+  if (go) go.onclick = () => { try { window.open(url, '_blank'); } catch (e) { try { location.href = url; } catch (e2) {} } };
+  const x = d.querySelector('#bg-update-x');
+  if (x) x.onclick = () => { try { localStorage.setItem('golf:update-nudge-dismissed', String(storeV)); } catch (e) {} try { d.remove(); } catch (e) {} };
+}
+let _bgUpdGateLastRun = 0;
+async function bgUpdateGateCheck(force) {
+  try {
+    if (!isNativeApp()) return;                       // web (Pages) is always current
+    _bgUpdGateLastRun = Date.now();
+    const store = await bgStoreLiveVersion(force);
+    if (!store || !store.v) return;                   // can't verify — fail OPEN, never block
+    if (bgVerCmp(BG_BUILD, store.v) >= 0) { _bgHideUpdateUi(); return; }   // at/ahead of the store: normal
+    let required = null;
+    try { const row = await _bgUpdateGateRow(true); if (row && row.requiredBuild) required = row.requiredBuild; } catch (e) {}
+    // THE CAP: never require more than the store can deliver (Tyler's rule).
+    let effReq = null;
+    if (required) effReq = (bgVerCmp(required, store.v) > 0) ? store.v : required;
+    let platform = 'ios';
+    try { platform = (window.Capacitor && window.Capacitor.getPlatform) ? window.Capacitor.getPlatform() : 'ios'; } catch (e) {}
+    const url = (platform === 'android') ? BG_PLAYSTORE_URL : (store.url || BG_APPSTORE_URL);
+    if (effReq && bgVerCmp(BG_BUILD, effReq) < 0) { _bgShowUpdateBlock(store.v, url); return; }
+    _bgShowUpdateBanner(store.v, url);
+  } catch (e) {}
+}
+// Re-check when the app comes back to the foreground (a round can outlast a
+// review cycle), throttled to once per 30 minutes.
+document.addEventListener('visibilitychange', () => {
+  try { if (document.visibilityState === 'visible' && (Date.now() - _bgUpdGateLastRun) > 30 * 60 * 1000) bgUpdateGateCheck(); } catch (e) {}
+});
+// Admin tab card: view installed / store-live / floor, set or clear the floor.
+async function renderUpdateGateCard() {
+  const card = document.getElementById('update-gate-card');
+  const body = document.getElementById('update-gate-body');
+  if (!card || !body) return;
+  if (typeof isAdmin !== 'function' || !isAdmin()) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  body.innerHTML = '<div class="help-text">Checking the App Store\u2026</div>';
+  const store = await bgStoreLiveVersion(true);
+  const row = await _bgUpdateGateRow(true);
+  const floor = (row && row.requiredBuild) ? String(row.requiredBuild) : '';
+  const line = (l, v) => '<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)"><span class="small-text" style="color:var(--text-muted)">' + l + '</span><span style="font-weight:700">' + v + '</span></div>';
+  body.innerHTML =
+    line('Installed (this device)', escapeHtml(BG_BUILD)) +
+    line('App Store live', store && store.v ? escapeHtml(store.v) : '<span style="color:var(--warn)">unreachable</span>') +
+    line('Required floor', floor ? escapeHtml(floor) : '<span style="color:var(--text-muted)">not set</span>') +
+    '<div class="help-text" style="margin:10px 0 8px">Users on a build BELOW the floor get a full-screen \u201cUpdate required\u201d and can\u2019t play until they update. The floor is automatically capped at whatever the App Store has LIVE \u2014 it can never demand a version people can\u2019t download yet, no matter what you type here. Users merely behind the store (but at/above the floor) just see a dismissible banner.</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<input id="upd-gate-floor" placeholder="e.g. 2026.11.1207" value="' + escapeHtml(floor) + '" style="flex:1 1 160px;min-width:0">' +
+      '<button id="upd-gate-save" class="small">Save floor</button>' +
+      '<button id="upd-gate-clear" class="small">Clear</button>' +
+    '</div>';
+  const save = document.getElementById('upd-gate-save');
+  if (save) save.onclick = async () => {
+    const inp = document.getElementById('upd-gate-floor');
+    const v = inp ? String(inp.value || '').trim().replace(/^v/i, '') : '';
+    if (!bgVerNum(v)) { try { showToast('Version should look like 2026.11.1207'); } catch (e) {} return; }
+    let by = ''; try { by = (await getMeName()) || ''; } catch (e) {}
+    const ok = await writeSharedSingleton(KEY_UPDATE_GATE, JSON.stringify({ requiredBuild: v, updatedAt: Date.now(), by: by }));
+    try { showToast(ok ? 'Update floor set to ' + v : 'Saved locally \u2014 will sync when online'); } catch (e) {}
+    renderUpdateGateCard();
+  };
+  const clear = document.getElementById('upd-gate-clear');
+  if (clear) clear.onclick = async () => {
+    let by = ''; try { by = (await getMeName()) || ''; } catch (e) {}
+    const ok = await writeSharedSingleton(KEY_UPDATE_GATE, JSON.stringify({ requiredBuild: null, updatedAt: Date.now(), by: by }));
+    try { showToast(ok ? 'Update floor cleared' : 'Cleared locally \u2014 will sync when online'); } catch (e) {}
+    renderUpdateGateCard();
+  };
+}
+// ===================== end v1207 force-update gate =====================
 
 async function renderFeedbackInbox() {
   const card = document.getElementById('feedback-inbox-card');
