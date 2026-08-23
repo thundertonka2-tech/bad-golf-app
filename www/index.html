@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1180-->
+<!--BGVER=v2026.11.1181-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8196,7 +8196,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1180';
+const BG_BUILD = 'v2026.11.1181';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -54734,9 +54734,46 @@ async function t2Delete(id) {
       // deleted -- they simply stop being listed under a tournament that no longer
       // exists. (Deleting the round itself from the Rounds tab still works as before.)
       try { bgMarkEventGone(id); } catch (e) {}
+      // v1181 (Tyler, 8/23): REVERSES the v1140 stance above. The deleted "Team Quota
+      // Test" event left its 4 launched cart rounds behind, and their scores + money
+      // had already been copied into 12 players' histories (Kevin +$21.67, etc.).
+      // A deleted tournament now VOIDS the rounds it launched: each code is
+      // tombstoned globally (the same shared tombstone the Rounds-tab delete writes,
+      // so every device drops it from Rounds, Stats, Lifetime bets and the stats
+      // backup on its next sync), the scorecard rows I own are deleted, and they
+      // leave my Rounds list right away. Best-effort; never blocks the delete.
+      try { await t2VoidLaunchedRounds(id); } catch (e) { console.warn('t2VoidLaunchedRounds', e); }
     } catch (e) {}
     return true;
   } catch (e) { console.warn('t2Delete', e); return false; }
+}
+// v1181: void every cart round launched by tournament `tid` (stamped as
+// data.t2.tournamentId, or the legacy data.tourneyId). Returns the codes voided.
+async function t2VoidLaunchedRounds(tid) {
+  const voided = [];
+  if (!tid || !supa) return voided;
+  const _r = await supa.from('games').select('code,owner_uid')
+    .or('data->t2->>tournamentId.eq.' + tid + ',data->>tourneyId.eq.' + tid);
+  if (_r.error) { console.warn('t2VoidLaunchedRounds select', _r.error); return voided; }
+  const rows = (_r.data || []).filter(x => x && x.code);
+  if (!rows.length) return voided;
+  const myId = (_authUser && _authUser.id) || null;
+  for (const row of rows) {
+    const code = row.code;
+    try { if (typeof tombstoneRound === 'function') tombstoneRound(code); } catch (e) {}   // global: every device drops it
+    try { if (!row.owner_uid || row.owner_uid === myId) { const _d = await supa.from('games').delete().eq('code', code); if (_d && _d.error) console.warn('t2VoidLaunchedRounds delete', code, _d.error); } } catch (e) {}
+    try { localStorage.removeItem('game:' + code); } catch (e) {}
+    voided.push(code);
+  }
+  // Drop them from MY Rounds list and MY history now (other devices self-heal from the tombstone).
+  try { const v = await safeGet(KEY_RECENT, true); if (v) { let rec = JSON.parse(v); if (Array.isArray(rec)) { const n = rec.length; rec = rec.filter(g => g && voided.indexOf(g.code) < 0); if (rec.length !== n) await safeSet(KEY_RECENT, JSON.stringify(rec), true); } } } catch (e) {}
+  try {
+    const roster = await getPlayerRoster(); let changed = false;
+    (roster || []).forEach(p => { if (p && Array.isArray(p.scoreHistory)) { const n = p.scoreHistory.length; p.scoreHistory = p.scoreHistory.filter(h => !(h && h.gameCode && voided.indexOf(h.gameCode) >= 0)); if (p.scoreHistory.length !== n) changed = true; } });
+    if (changed) { await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false); try { await syncMyStatsToCloud(roster); } catch (e) {} }
+  } catch (e) {}
+  if (voided.length) { try { showToast('Voided ' + voided.length + ' round' + (voided.length === 1 ? '' : 's') + ' from that event'); } catch (e) {} }
+  return voided;
 }
 
 // ---- players / teams ----
@@ -57622,7 +57659,7 @@ async function renderT2List() {
   document.querySelectorAll('#t2-list .t2-row-gps').forEach(b => b.onclick = (e) => { e.stopPropagation(); if (b.dataset.cid) { try { window.previewCourseGps(b.dataset.cid); } catch (err) {} } });
   document.querySelectorAll('#t2-list .t2-row-card').forEach(b => b.onclick = (e) => { e.stopPropagation(); if (b.dataset.cid) { try { window.renderPreviewScorecard(b.dataset.cid); } catch (err) {} } });
   document.querySelectorAll('#t2-list .t2-row-del').forEach(b => b.onclick = async () => {
-    if (!(await uiConfirm('Delete "' + b.dataset.name + '"? This removes the tournament for everyone — can\'t be undone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
+    if (!(await uiConfirm('Delete "' + b.dataset.name + '"? This removes the tournament AND the rounds it launched (scores and bets) for everyone — can\'t be undone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
     const ok = await t2Delete(b.dataset.id);
     // v1023: "it said it deleted it but the screen stayed on it." Only the
     // organizer can remove an event for everyone; for anyone else this hides it
@@ -58517,7 +58554,7 @@ async function renderT2SettingsHub(t) {
   ov.querySelector('#t2sh-save').onclick = () => { close(); showToast('Saved ✓'); try { renderT2List(); } catch (e) {} };
   { const _sb = ov.querySelector('#t2sh-start'); if (_sb) _sb.onclick = async () => { _t2Current = t; try { close(); } catch (e) {} try { await t2StartEventNow(); } catch (e) {} }; }
   ov.querySelector('#t2sh-del').onclick = async () => {
-    if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament for everyone — can’t be undone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
+    if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament AND the rounds it launched (scores and bets) for everyone — can’t be undone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
     const ok = await t2Delete(t.id); close();
     try { switchTab('tourneys'); } catch (e) {}
     showToast(ok ? 'Deleted' : 'Could not delete'); try { renderT2List(); } catch (e) {}
@@ -58654,7 +58691,7 @@ async function openT2AdminHub() {
       if (act === 'invite') { close(); return openT2InviteSheet(); }
       if (act === 'finish') { close(); return t2FinishEvent(); }   // v986 (T31)
       if (act === 'delete') {
-        if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
+        if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament AND the rounds it launched (scores and bets) for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
         await t2Delete(t.id); close(); try { document.getElementById('t2-home-modal').classList.remove('show'); t2UnsubscribeHome(); } catch (e) {} switchTab('tourneys'); showToast('Deleted'); return renderT2List();
       }
     } catch (e) { console.error('admin hub action', act, e); showToast('Could not open that'); }
@@ -63671,7 +63708,7 @@ async function renderT2Home() {
             }
           }
         } catch (e) {} try { document.getElementById('t2-home-modal').classList.remove('show'); } catch (e) {} try { t2UnsubscribeHome(); } catch (e) {} switchTab('tourneys'); }; }
-    { const _dl2 = body.querySelector('.t2-wiz-delete'); if (_dl2) _dl2.onclick = async () => { if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return; await t2Delete(t.id); try { document.getElementById('t2-home-modal').classList.remove('show'); } catch (e) {} try { t2UnsubscribeHome(); } catch (e) {} switchTab('tourneys'); showToast('Deleted'); await renderT2List(); }; }
+    { const _dl2 = body.querySelector('.t2-wiz-delete'); if (_dl2) _dl2.onclick = async () => { if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament AND the rounds it launched (scores and bets) for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return; await t2Delete(t.id); try { document.getElementById('t2-home-modal').classList.remove('show'); } catch (e) {} try { t2UnsubscribeHome(); } catch (e) {} switchTab('tourneys'); showToast('Deleted'); await renderT2List(); }; }
     { const _sv2 = body.querySelector('.t2-wiz-savebtn'); if (_sv2) _sv2.onclick = async () => { if (!_wfEventReady) { showToast('Finish the remaining steps first'); return; } try { await t2FlushHcpInputs(); } catch (e) {} try { document.getElementById('t2-home-modal').classList.remove('show'); } catch (e) {} try { t2UnsubscribeHome(); } catch (e) {} switchTab('tourneys'); showToast('Saved ✓'); }; }
     { const _st2 = body.querySelector('.t2-wiz-startbtn'); if (_st2) _st2.onclick = () => {
         if (!od && !_wfEventReady) {
@@ -63795,7 +63832,7 @@ async function renderT2Home() {
       { const su = document.getElementById('t2-summary-btn'); if (su) su.onclick = () => openT2Summary(_t2Current); }
       { const aa = document.getElementById('t2-assign-admins'); if (aa) aa.onclick = () => openT2AdminPicker(); }
       { const ad = document.getElementById('t2-add-day'); if (ad) ad.onclick = () => t2AddDay(t); }
-      { const dl = document.getElementById('t2-delete'); if (dl) dl.onclick = async () => { if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return; await t2Delete(t.id); document.getElementById('t2-home-modal').classList.remove('show'); t2UnsubscribeHome(); switchTab('tourneys'); showToast('Deleted'); await renderT2List(); }; }
+      { const dl = document.getElementById('t2-delete'); if (dl) dl.onclick = async () => { if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament AND the rounds it launched (scores and bets) for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return; await t2Delete(t.id); document.getElementById('t2-home-modal').classList.remove('show'); t2UnsubscribeHome(); switchTab('tourneys'); showToast('Deleted'); await renderT2List(); }; }
       { const sh = document.getElementById('t2-share-claim-link'); if (sh) sh.onclick = async () => { const link = BG_PUBLIC_URL + '?tclaim=' + t.id; const text = 'Join my Bad Golf event "' + (t.name || 'tournament') + '": ' + link + '\n\nSign in and tap your name to join.'; try { if (navigator.share) { await navigator.share({ text: text }); return; } } catch (e) { if (e && e.name === 'AbortError') return; } try { await navigator.clipboard.writeText(text); showToast('Join link copied — send it to everyone 📋'); } catch (e) { showToast(text, 6000); } }; }
     }
     return;
@@ -64250,7 +64287,7 @@ async function renderT2Home() {
     document.querySelectorAll('.t2-day-config-btn').forEach(b => b.onclick = () => openT2DayConfig(parseInt(b.dataset.day, 10)));
     const del = document.getElementById('t2-delete');
     if (del) del.onclick = async () => {
-      if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
+      if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament AND the rounds it launched (scores and bets) for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
       await t2Delete(t.id);
       document.getElementById('t2-home-modal').classList.remove('show');
       t2UnsubscribeHome();
