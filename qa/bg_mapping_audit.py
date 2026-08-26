@@ -403,6 +403,13 @@ def build(argv=None):
     for key, ids in sig.items():
         if len(ids) > 1:
             live = [i for i in ids if i in lib or "#" in i]
+            # A three-nine's base row and its own base#nine rows are the SAME holes by
+            # construction - the nine rows were split out of the base row. That is one
+            # facility, not two courses sharing a mapping, so it is not a finding.
+            # Same family of mistake as the three-nine blindness this script was written
+            # to end: a checker that does not know about the nine wiring cries wolf.
+            if len({i.split("#", 1)[0] for i in live}) < 2:
+                continue
             if len(live) > 1:
                 findings["shared_gps"].append({
                     "ids": ", ".join(sorted(live)),
@@ -480,12 +487,42 @@ def build(argv=None):
         sys.stderr.write("NOTE: Kevin Queue tab left empty - %s\n" % exc)
         findings["kevin_note"] = str(exc)
 
+    # ---- metrics: the size of the work, not the number of rows it lands on --
+    nines_missing = greens_missing = 0
+    vshort = vshort_greens = 0
+    recovered = sum(1 for r in gps_rows
+                    if str(r.get("source") or "").startswith("ninesplit-")) * 9
+    for cid in lib:
+        if cid not in tn:
+            continue
+        nines = tn[cid]["nines"]
+        short = [n for n in nines
+                 if len(greens_of((per_nine.get(cid, {}).get(n) or {}).get("holes"))) < 9]
+        if not short:
+            continue
+        got = sum(len(greens_of((per_nine.get(cid, {}).get(n) or {}).get("holes")))
+                  for n in nines)
+        if cid in verified:
+            vshort += 1
+            vshort_greens += len(nines) * 9 - got
+            continue
+        nines_missing += len(short)
+        greens_missing += len(nines) * 9 - got
+
     summary = {
         "generated": today,
         "live_courses": len(lib),
         "gps_rows": len(gps),
         "three_nine_facilities": len(tn),
         "counts": {k: len(v) for k, v in findings.items() if isinstance(v, list)},
+        "metrics": {
+            "nines_missing": nines_missing,
+            "greens_missing": greens_missing,
+            "greens_recovered": recovered,
+            "verified_short": vshort,
+            "verified_short_greens": vshort_greens,
+            "reconciled": len(findings.get("kevin", [])),
+        },
     }
     return summary, findings, tn, out_path, args
 
@@ -558,8 +595,39 @@ def write_xlsx(summary, findings, tn, out_path, previous=None):
             delta = ("%+d" % (n - prev))
         ws.append([i, tab, n, prev if prev is not None else "", delta,
                    SEVERITY.get(key, ""), tab, NOTES.get(key, "")])
+    # ---- the numbers that actually move ----------------------------------
+    # A facility short of ONE nine and a facility with nothing mapped both count
+    # as exactly 1 row on line 3, so a day that recovers 981 greens can read "no
+    # change". These lines measure the work itself, not the number of courses it
+    # is spread across, and they are carried in the JSON so --prev tracks them.
+    #
+    # The two sign-off lines are NOT a backlog and must never be read as one.
+    # Those facilities were signed off as 18-hole courses, correctly, with 18
+    # greens and their fairway targets. Three-nine wiring was added afterwards
+    # and raised the expectation to 27 without anyone asking the mapper for a
+    # third nine. The sign-off stands; the extra nine is new work the wiring
+    # created. Counting it against the sign-off is how you end up asking someone
+    # to redo a job they already did right.
+    m = summary.get("metrics") or {}
+    pm = (previous or {}).get("_metrics") or {}
+    if m:
+        ws.append([])
+        ws.append(["Work outstanding", "Now", "Prev", "Change", "", "", "", ""])
+        [setattr(c, "font", bold) for c in ws[ws.max_row]]
+        for label, key in (("Nines still to map", "nines_missing"),
+                           ("Greens still to map", "greens_missing"),
+                           ("Greens recovered by nine-split today", "greens_recovered"),
+                           ("Signed off at 18, wiring later made it 27 (facilities)", "verified_short"),
+                           ("  ... greens the wiring added after that sign-off", "verified_short_greens"),
+                           ("Kevin queue = Incomplete chip", "reconciled")):
+            if key not in m:
+                continue
+            p = pm.get(key)
+            d = "" if p is None else ("no change" if p == m[key] else "%+d" % (m[key] - p))
+            ws.append([label, m[key], p if p is not None else "", d])
     for col, w in zip("ABCDEFGH", (5, 22, 8, 8, 14, 10, 22, 96)):
         ws.column_dimensions[col].width = w
+    ws.column_dimensions["A"].width = 42
 
     for key, tab, cols in TABS:
         s = wb.create_sheet(tab[:31])
@@ -593,7 +661,10 @@ def load_previous(path):
     if not path or not os.path.exists(path):
         return None
     try:
-        return json.load(open(path)).get("summary", {}).get("counts")
+        prev = json.load(open(path)).get("summary", {})
+        out = dict(prev.get("counts") or {})
+        out["_metrics"] = prev.get("metrics") or {}
+        return out
     except Exception:
         return None
 
