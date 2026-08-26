@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+"""
+Bad Golf — course mapping audit.  THREE-NINE AWARE.
+
+Run:  python3 qa/bg_mapping_audit.py [-o BadGolf_Mapping_Audit_YYYY-MM-DD.xlsx]
+
+Why this file exists
+--------------------
+Every mapping audit before 2026-08-26 was written ad hoc inside a chat session and
+thrown away afterwards, so the same wrong assumption got re-derived every time:
+that a course's scorecard lives in `shared:courses` and its rating lives in a
+`tees[]` entry on that card.
+
+For a wired three-nine facility BOTH are false.  Its pars, stroke indexes, tee
+yardages and course ratings live in the `THREE_NINE_COURSES` constant inside
+golf-app.html (and, for later additions, in `shared:multinine-configs`), stored
+PER NINE, with the rating attached to the 18-hole COMBINATION -- because that is
+how a 27-hole facility is actually rated.  Its GPS greens live under per-nine ids
+(`base#nine`), never under the base id.
+
+An audit that does not know this reports, every single run:
+  * "no scorecard at all"        -- for facilities that are fully carded
+  * "card but no rated tee"      -- for facilities that are fully rated
+  * "not mapped / partially mapped" -- for facilities that are fully mapped
+  * "GPS pars disagree with the scorecard" -- comparing two things that are both
+    superseded by the config
+
+On 2026-08-26 that was 15 courses flagged across items 11 and 12, every one of
+them a false positive, plus a large share of items 7, 8 and 9.  Acting on the
+report as written would have DESTROYED data: writing an 18-hole card into
+`shared:courses` for a three-nine shadows the per-nine config.
+
+The app itself has been right about this since v882 (`bgCourseStatus()` reads
+`hasCard = !!parArr || isTN` and `hasRS = isTN || ...`).  Only the offline audit
+was wrong.  Keep it that way: if you add a check here, ask first what a
+three-nine facility looks like to it.
+"""
+
+import argparse, base64, datetime, json, math, os, re, sys, urllib.request, urllib.error
+from collections import defaultdict
+
+SUPABASE_URL = os.environ.get("BG_SUPABASE_URL", "https://ojclesuwxhtzvrymqrwg.supabase.co")
+ANON_KEY = os.environ.get("BG_SUPABASE_ANON_KEY", "")
+APP_HTML = os.environ.get("BG_APP_HTML", "golf-app.html")
+
+# ----------------------------------------------------------------- fetch ----
+
+def _get(path, params=None, tries=4):
+    url = SUPABASE_URL.rstrip("/") + path
+    if params:
+        url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
+    last = None
+    for attempt in range(tries):
+        req = urllib.request.Request(url, headers={
+            "apikey": ANON_KEY, "Authorization": "Bearer " + ANON_KEY,
+            "Accept": "application/json", "Accept-Encoding": "gzip",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                raw = r.read()
+                if r.headers.get("Content-Encoding") == "gzip":
+                    import gzip
+                    raw = gzip.decompress(raw)
+                return json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code in (500, 502, 503, 504, 520, 544):
+                import time
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+        except Exception as e:      # transient socket/timeout
+            last = e
+            import time
+            time.sleep(1.5 * (attempt + 1))
+    raise last
+
+def singleton(code):
+    rows = _get("/rest/v1/games", {"code": f"eq.{code}", "select": "data"})
+    return rows[0]["data"] if rows else None
+
+def fetch_course_gps(page=150):
+    """Page course_gps in small slices.
+
+    `holes` carries the full per-hole geometry (tee/green polygons, centrelines),
+    so a 1,000-row page is tens of megabytes and PostgREST answers 500. 150 is a
+    size the gateway reliably serves; it halves automatically if a page still fails.
+    """
+    out, off = [], 0
+    while True:
+        try:
+            rows = _get("/rest/v1/course_gps", {
+                "select": "course_id,name,city,holes,source",
+                "limit": page, "offset": off, "order": "course_id",
+            })
+        except Exception:
+            if page <= 25:
+                raise
+            page //= 2
+            sys.stderr.write(f"  course_gps page too large; retrying at {page}\n")
+            continue
+        out.extend(rows)
+        sys.stderr.write(f"\r  course_gps {len(out)} rows")
+        if len(rows) < page:
+            sys.stderr.write("\n")
+            return out
+        off += len(rows)
+
+# ------------------------------------------------- three-nine config load ----
+
+def _match_brace(s, start):
+    d = 0
+    for i in range(start, len(s)):
+        if s[i] == "{":
+            d += 1
+        elif s[i] == "}":
+            d -= 1
+            if d == 0:
+                return i
+    raise ValueError("unbalanced braces")
+
+def load_three_nine_from_app(path=APP_HTML):
+    """Parse THREE_NINE_COURSES out of golf-app.html.
+
+    Returns {course_id: {"nines": {nine: {"pars": [...], "rated": bool}},
+                         "rated": bool}}
+    `rated` is true when the facility carries ANY course rating -- either
+    per-nine `tees[].rating` or, far more commonly, a `combos` block giving the
+    rating for each 18-hole pairing.  Both shapes count.  105 of the 110 wired
+    facilities use the combos shape.
+    """
+    if not os.path.exists(path):
+        sys.stderr.write(f"WARN: {path} not found; three-nine exemptions from code will be EMPTY\n")
+        return {}
+    src = open(path, encoding="utf-8", errors="replace").read()
+    m = re.search(r"const\s+THREE_NINE_COURSES\s*=\s*\{", src)
+    if not m:
+        sys.stderr.write("WARN: THREE_NINE_COURSES not found in app html\n")
+        return {}
+    start = src.index("{", m.start())
+    blob = src[start:_match_brace(src, start) + 1]
+
+    out = {}
+    for cid, const in re.findall(r"'([a-z0-9\-]+)'\s*:\s*([A-Z][A-Z0-9_]*)", blob):
+        cm = re.search(r"(?:const|var|let)\s+" + const + r"\s*=\s*", src)
+        if not cm:
+            continue
+        cs = src.index("{", cm.end())
+        cfg_txt = src[cs:_match_brace(src, cs) + 1]
+        cfg = _loose_js_object(cfg_txt)
+        if cfg is None:
+            continue
+        out[cid] = _summarise_cfg(cfg)
+    return out
+
+def _loose_js_object(txt):
+    """Parse a JS object literal that may use unquoted keys and trailing commas."""
+    try:
+        return json.loads(txt)
+    except Exception:
+        pass
+    t = re.sub(r"//[^\n]*", "", txt)
+    t = re.sub(r"/\*.*?\*/", "", t, flags=re.S)
+    t = re.sub(r"([{,]\s*)([A-Za-z_$][\w$]*)\s*:", r'\1"\2":', t)
+    t = re.sub(r"'([^'\\]*)'", lambda mm: json.dumps(mm.group(1)), t)
+    t = re.sub(r",\s*([}\]])", r"\1", t)
+    try:
+        return json.loads(t)
+    except Exception:
+        return None
+
+def _summarise_cfg(cfg):
+    nines = {}
+    for k, v in cfg.items():
+        if k.startswith("_") or k in ("searchCombos", "combos"):
+            continue
+        if isinstance(v, dict) and isinstance(v.get("pars"), list):
+            rated = any(
+                isinstance(t, dict) and t.get("rating") is not None and t.get("slope") is not None
+                for t in (v.get("tees") or [])
+            )
+            nines[k] = {"pars": v["pars"], "rated": rated}
+    combo_rated = False
+    combos = cfg.get("combos")
+    if isinstance(combos, dict):
+        for arr in combos.values():
+            if isinstance(arr, list) and any(
+                isinstance(t, dict) and t.get("rating") is not None for t in arr
+            ):
+                combo_rated = True
+                break
+    return {
+        "nines": nines,
+        "rated": combo_rated or any(n["rated"] for n in nines.values()),
+        "source": "app",
+    }
+
+def load_three_nine_from_db():
+    cfgs = singleton("shared:multinine-configs") or {}
+    out = {}
+    for cid, cfg in cfgs.items():
+        if isinstance(cfg, dict):
+            out[cid] = _summarise_cfg(cfg)
+            out[cid]["source"] = "db"
+    return out
+
+# ------------------------------------------------------------- geometry ----
+
+def km(lat1, lng1, lat2, lng2):
+    if None in (lat1, lng1, lat2, lng2):
+        return None
+    r = math.radians
+    a = math.sin(r(lat2 - lat1) / 2) ** 2 + math.cos(r(lat1)) * math.cos(r(lat2)) * math.sin(r(lng2 - lng1) / 2) ** 2
+    return round(6371 * 2 * math.asin(min(1, math.sqrt(a))), 3)
+
+def greens_of(holes):
+    if not isinstance(holes, dict):
+        return {}
+    return {h: v for h, v in holes.items() if isinstance(v, dict) and v.get("mid")}
+
+# ----------------------------------------------------------------- audit ----
+
+def build(argv=None):
+    ap = argparse.ArgumentParser(description="Bad Golf mapping audit (three-nine aware)")
+    ap.add_argument("-o", "--out", default=None, help="xlsx output path")
+    ap.add_argument("--app", default=APP_HTML, help="path to golf-app.html")
+    ap.add_argument("--json", action="store_true", help="also dump findings as JSON")
+    args = ap.parse_args(argv)
+
+    if not ANON_KEY:
+        sys.exit("Set BG_SUPABASE_ANON_KEY (read-only anon key from golf-app.html).")
+
+    today = datetime.date.today().isoformat()
+    out_path = args.out or f"BadGolf_Mapping_Audit_{today}.xlsx"
+
+    # ---- load -------------------------------------------------------------
+    additions = singleton("shared:course-library-additions") or []
+    deletes = set(singleton("shared:course-deletes") or [])
+    verified = set(singleton("shared:course-verified") or [])
+    gps_rows = fetch_course_gps()
+
+    cards = {}
+    base = singleton("shared:courses") or {}
+    if isinstance(base, dict):
+        cards.update(base)
+    for i in range(64):                     # shards win over the base blob
+        shard = singleton("shared:courses:%02x" % i)
+        if isinstance(shard, dict):
+            cards.update(shard)
+
+    tn = load_three_nine_from_app(args.app)
+    tn.update(load_three_nine_from_db())    # DB-wired facilities added later
+    def is_tn(cid):
+        return cid in tn
+
+    lib = {}
+    for e in additions:
+        if isinstance(e, dict) and e.get("id") and e["id"] not in deletes:
+            lib[e["id"]] = e
+
+    gps = {r["course_id"]: r for r in gps_rows}
+    # per-nine rollup: a three-nine's greens live under `base#nine`, never the base id
+    per_nine = defaultdict(dict)
+    for cid, row in gps.items():
+        if "#" in cid:
+            b, n = cid.split("#", 1)
+            per_nine[b][n] = row
+
+    findings = defaultdict(list)
+
+    # ---- 1. no scorecard ---------------------------------------------------
+    #   THREE-NINE EXEMPT: pars live in the config, per nine.
+    for cid, e in lib.items():
+        if is_tn(cid):
+            continue
+        c = cards.get(cid)
+        pars = (c or {}).get("pars")
+        if not isinstance(pars, list) or len(pars) not in (9, 18):
+            findings["no_card"].append({
+                "id": cid, "name": e.get("name"), "city": e.get("city"), "st": e.get("st"),
+                "issue": "No scorecard at all",
+            })
+
+    # ---- 2. card but no rated tee -----------------------------------------
+    #   THREE-NINE EXEMPT: ratings hang off the 18-hole combination in `combos`,
+    #   not off a tees[] entry.  105 of 110 wired facilities use that shape.
+    for cid, e in lib.items():
+        if is_tn(cid):
+            continue
+        c = cards.get(cid)
+        if not c:
+            continue
+        tees = c.get("tees") or []
+        rated = any(
+            isinstance(t, dict) and t.get("rating") is not None and t.get("slope") is not None
+            for t in tees
+        ) or (c.get("rating") is not None and c.get("slope") is not None)
+        if not rated:
+            findings["no_rating"].append({
+                "id": cid, "name": e.get("name"), "city": e.get("city"), "st": e.get("st"),
+                "issue": "Card but no rated tee",
+            })
+
+    # ---- 3. mapping coverage ----------------------------------------------
+    #   THREE-NINE: expected = nines x 9, counted across the per-nine rows.
+    #   Counting the base id here is what produced "Shangri La 0/18" for months.
+    for cid, e in lib.items():
+        if is_tn(cid):
+            cfg = tn[cid]
+            nines = cfg["nines"]
+            exp = len(nines) * 9
+            got = sum(len(greens_of((per_nine[cid].get(n) or {}).get("holes"))) for n in nines)
+            missing = [n for n in nines
+                       if len(greens_of((per_nine[cid].get(n) or {}).get("holes"))) < 9]
+            legacy = len(greens_of((gps.get(cid) or {}).get("holes")))
+            if got < exp:
+                findings["coverage"].append({
+                    "id": cid, "name": e.get("name"), "city": e.get("city"), "st": e.get("st"),
+                    "greens": got, "expected": exp,
+                    "issue": "Not mapped" if got == 0 else "Partially mapped",
+                    "nines_missing": ", ".join(sorted(missing)),
+                    "legacy_base_greens": legacy,
+                    "note": ("%d greens sit under the BASE id where the app cannot see them - "
+                             "try splitting them into nines by par match before re-mapping" % legacy)
+                            if legacy else "",
+                })
+            continue
+        row = gps.get(cid)
+        got = len(greens_of((row or {}).get("holes")))
+        c = cards.get(cid) or {}
+        pars = c.get("pars") if isinstance(c.get("pars"), list) else None
+        exp = e.get("holes") or (len(pars) if pars else 18)
+        if got < exp:
+            findings["coverage"].append({
+                "id": cid, "name": e.get("name"), "city": e.get("city"), "st": e.get("st"),
+                "greens": got, "expected": exp,
+                "issue": "Not mapped" if got == 0 else "Partially mapped",
+                "nines_missing": "", "legacy_base_greens": 0, "note": "",
+            })
+
+    # ---- 4. GPS pars vs scorecard pars ------------------------------------
+    #   THREE-NINE: compare each nine's mapping against the CONFIG's pars.
+    #   Comparing a base-id 18 against a DB card is comparing two artefacts the
+    #   wiring already superseded, which is why 19 of the 44 hits on 2026-08-26
+    #   were noise.
+    for cid, e in lib.items():
+        pairs = []
+        if is_tn(cid):
+            for n, meta in tn[cid]["nines"].items():
+                row = per_nine[cid].get(n)
+                g = greens_of((row or {}).get("holes"))
+                for h, v in g.items():
+                    try:
+                        idx = int(h) - 1
+                    except ValueError:
+                        continue
+                    if v.get("par") and 0 <= idx < len(meta["pars"]):
+                        pairs.append((f"{n}:{h}", v["par"], meta["pars"][idx]))
+        else:
+            c = cards.get(cid) or {}
+            pars = c.get("pars") if isinstance(c.get("pars"), list) else None
+            if not pars:
+                continue
+            g = greens_of((gps.get(cid) or {}).get("holes"))
+            for h, v in g.items():
+                try:
+                    idx = int(h) - 1
+                except ValueError:
+                    continue
+                if v.get("par") and 0 <= idx < len(pars):
+                    pairs.append((h, v["par"], pars[idx]))
+        if len(pairs) >= 6:
+            agree = sum(1 for _, a, b in pairs if a == b)
+            if agree / len(pairs) < 0.70:
+                bad = [f"h{h}: gps {a} vs card {b}" for h, a, b in pairs if a != b][:8]
+                findings["par_mismatch"].append({
+                    "id": cid, "name": e.get("name"), "city": e.get("city"), "st": e.get("st"),
+                    "agree": f"{agree}/{len(pairs)}",
+                    "source": (gps.get(cid) or {}).get("source", ""),
+                    "verified": "YES" if cid in verified else "",
+                    "detail": "; ".join(bad),
+                    "reference": "three-nine config" if is_tn(cid) else "scorecard",
+                })
+
+    # ---- 5. shared GPS signature ------------------------------------------
+    sig = defaultdict(list)
+    for cid, row in gps.items():
+        g = greens_of(row.get("holes"))
+        if not g:
+            continue
+        key = "|".join(f"{h}:{round(v['mid'][1],5)},{round(v['mid'][0],5)}"
+                       for h, v in sorted(g.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0))
+        sig[key].append(cid)
+    for key, ids in sig.items():
+        if len(ids) > 1:
+            live = [i for i in ids if i in lib or "#" in i]
+            if len(live) > 1:
+                findings["shared_gps"].append({
+                    "ids": ", ".join(sorted(live)),
+                    "names": ", ".join(sorted((lib.get(i, {}) or {}).get("name", i) for i in live)),
+                    "greens": len(greens_of(gps[live[0]]["holes"])),
+                    "issue": "Same GPS mapping on more than one course",
+                })
+
+    # ---- 6. mapped far from the library pin -------------------------------
+    for cid, e in lib.items():
+        row = gps.get(cid)
+        g = greens_of((row or {}).get("holes"))
+        if not g or e.get("lat") is None:
+            continue
+        clat = sum(v["mid"][1] for v in g.values()) / len(g)
+        clng = sum(v["mid"][0] for v in g.values()) / len(g)
+        d = km(clat, clng, e["lat"], e["lng"])
+        if d and d > 2:
+            findings["wrong_course"].append({
+                "id": cid, "name": e.get("name"), "city": e.get("city"), "st": e.get("st"),
+                "km": d, "greens": len(g), "source": (row or {}).get("source", ""),
+                "verified": "YES" if cid in verified else "",
+                "note": "Manual map - suspect the library PIN before the map"
+                        if (row or {}).get("source") == "manual" else
+                        "Check whether the pin or the mapping is wrong",
+            })
+
+    # ---- 7. city hygiene ---------------------------------------------------
+    for cid, e in lib.items():
+        city = (e.get("city") or "").strip()
+        if not city or city == (e.get("st") or "").strip():
+            findings["city"].append({
+                "id": cid, "name": e.get("name"), "st": e.get("st"),
+                "lat": e.get("lat"), "lng": e.get("lng"),
+                "issue": "City blank or just the state code",
+            })
+
+    summary = {
+        "generated": today,
+        "live_courses": len(lib),
+        "gps_rows": len(gps),
+        "three_nine_facilities": len(tn),
+        "counts": {k: len(v) for k, v in findings.items()},
+    }
+    return summary, findings, tn, out_path, args
+
+# ------------------------------------------------------------------ xlsx ----
+
+TABS = [
+    ("no_card",      "No Scorecard",     ["id", "name", "city", "st", "issue"]),
+    ("no_rating",    "No Rated Tee",     ["id", "name", "city", "st", "issue"]),
+    ("coverage",     "Unmapped & Partial",
+     ["id", "name", "city", "st", "greens", "expected", "issue", "nines_missing",
+      "legacy_base_greens", "note"]),
+    ("par_mismatch", "Par Mismatches",
+     ["id", "name", "city", "st", "agree", "reference", "source", "verified", "detail"]),
+    ("shared_gps",   "Shared GPS",       ["ids", "names", "greens", "issue"]),
+    ("wrong_course", "Wrong-Course Check",
+     ["id", "name", "city", "st", "km", "greens", "source", "verified", "note"]),
+    ("city",         "City Hygiene",     ["id", "name", "st", "lat", "lng", "issue"]),
+]
+
+def write_xlsx(summary, findings, tn, out_path):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    bold = Font(bold=True)
+    ws.append(["Bad Golf - Course Mapping Audit"]); ws["A1"].font = Font(bold=True, size=14)
+    ws.append([f"Generated {summary['generated']} - live courses {summary['live_courses']:,} - "
+               f"GPS rows {summary['gps_rows']:,} - wired three-nine facilities {summary['three_nine_facilities']}"])
+    ws.append([])
+    ws.append(["THREE-NINE AWARE. Wired three-nine facilities are exempt from the no-card and"])
+    ws.append(["no-rated-tee checks: their pars and their per-combination ratings live in the app"])
+    ws.append(["config, not in shared:courses. Their mapping is counted across per-nine rows"])
+    ws.append(["(base#nine), never the base id. Do NOT 'fix' a three-nine by writing a card into"])
+    ws.append(["shared:courses - that shadows the config and destroys the 27-hole data."])
+    ws.append([])
+    ws.append(["#", "Finding", "Count", "Tab"]); [setattr(c, "font", bold) for c in ws[ws.max_row]]
+    for i, (key, tab, _cols) in enumerate(TABS, 1):
+        ws.append([i, tab, len(findings.get(key, [])), tab])
+    for col, w in zip("ABCD", (6, 30, 10, 24)):
+        ws.column_dimensions[col].width = w
+
+    for key, tab, cols in TABS:
+        s = wb.create_sheet(tab[:31])
+        s.append(cols); [setattr(c, "font", bold) for c in s[1]]
+        for r in findings.get(key, []):
+            s.append([r.get(c, "") for c in cols])
+        s.freeze_panes = "A2"
+        for idx, c in enumerate(cols):
+            s.column_dimensions[chr(65 + idx)].width = 46 if c in ("detail", "note", "names", "ids") else 20
+
+    tabsheet = wb.create_sheet("Three-Nine Facilities")
+    tabsheet.append(["course_id", "nines", "rated", "config source"])
+    [setattr(c, "font", bold) for c in tabsheet[1]]
+    for cid, cfg in sorted(tn.items()):
+        tabsheet.append([cid, ", ".join(sorted(cfg["nines"])), "YES" if cfg["rated"] else "no",
+                         cfg.get("source", "")])
+    tabsheet.freeze_panes = "A2"
+    for col, w in zip("ABCD", (48, 40, 8, 14)):
+        tabsheet.column_dimensions[col].width = w
+
+    wb.save(out_path)
+    return out_path
+
+
+def main():
+    summary, findings, tn, out_path, args = build()
+    write_xlsx(summary, findings, tn, out_path)
+    print(json.dumps(summary, indent=2))
+    print("wrote", out_path)
+    if args.json:
+        with open(out_path.replace(".xlsx", ".json"), "w") as f:
+            json.dump({"summary": summary, "findings": findings}, f, indent=2)
+
+
+if __name__ == "__main__":
+    main()
