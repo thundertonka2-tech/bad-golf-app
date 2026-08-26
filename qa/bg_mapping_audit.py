@@ -41,18 +41,23 @@ from collections import defaultdict
 
 SUPABASE_URL = os.environ.get("BG_SUPABASE_URL", "https://ojclesuwxhtzvrymqrwg.supabase.co")
 ANON_KEY = os.environ.get("BG_SUPABASE_ANON_KEY", "")
+# The code-review queue is admin workflow data and is correctly blocked to anon by
+# the v1229 RLS lockdown. Set this to populate the "Kevin Queue" tab; leave it unset
+# and every other check still runs, that one tab just says why it is empty.
+SERVICE_KEY = os.environ.get("BG_SUPABASE_SERVICE_KEY", "")
 APP_HTML = os.environ.get("BG_APP_HTML", "golf-app.html")
 
 # ----------------------------------------------------------------- fetch ----
 
-def _get(path, params=None, tries=4):
+def _get(path, params=None, tries=4, key=None):
     url = SUPABASE_URL.rstrip("/") + path
     if params:
         url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
+    key = key or ANON_KEY
     last = None
     for attempt in range(tries):
         req = urllib.request.Request(url, headers={
-            "apikey": ANON_KEY, "Authorization": "Bearer " + ANON_KEY,
+            "apikey": key, "Authorization": "Bearer " + key,
             "Accept": "application/json", "Accept-Encoding": "gzip",
         })
         try:
@@ -75,8 +80,8 @@ def _get(path, params=None, tries=4):
             time.sleep(1.5 * (attempt + 1))
     raise last
 
-def singleton(code):
-    rows = _get("/rest/v1/games", {"code": f"eq.{code}", "select": "data"})
+def singleton(code, key=None):
+    rows = _get("/rest/v1/games", {"code": f"eq.{code}", "select": "data"}, key=key)
     return rows[0]["data"] if rows else None
 
 def fetch_course_gps(page=150):
@@ -225,6 +230,10 @@ def build(argv=None):
     ap.add_argument("-o", "--out", default=None, help="xlsx output path")
     ap.add_argument("--app", default=APP_HTML, help="path to golf-app.html")
     ap.add_argument("--json", action="store_true", help="also dump findings as JSON")
+    ap.add_argument("--prev", default=None,
+                    help="a previous run's .json, to show movement in the Summary")
+    ap.add_argument("--kevin-json", default=None,
+                    help="pre-exported code-review queue rows, when the anon key cannot read it")
     args = ap.parse_args(argv)
 
     if not ANON_KEY:
@@ -431,16 +440,75 @@ def build(argv=None):
                 "issue": "City blank or just the state code",
             })
 
+    # ---- 8. Kevin's open queue --------------------------------------------
+    #   The only items that reach him are courses still LIVE in the library whose
+    #   most recent code-review entry sent them back. A course that has since been
+    #   deleted still carries its old entry; it is not work, so it is not listed.
+    try:
+        if args.kevin_json and os.path.exists(args.kevin_json):
+            findings["kevin"].extend(json.load(open(args.kevin_json)))
+            raise StopIteration
+        crq = singleton("shared:code-review-queue", key=SERVICE_KEY or None)
+        if crq is None:
+            raise RuntimeError(
+                "not readable with this key - the code-review queue is admin data and "
+                "anon is blocked by design (v1229 RLS). Set BG_SUPABASE_SERVICE_KEY to fill this tab.")
+        latest = {}
+        for e in crq:
+            if not isinstance(e, dict):
+                continue
+            cid = ((e.get("course") or {}).get("id"))
+            if not cid:
+                continue
+            stamp = str(e.get("lastEventAt") or e.get("resolvedAt") or e.get("rejectedAt") or e.get("createdAt") or "")
+            if cid not in latest or stamp >= latest[cid][0]:
+                latest[cid] = (stamp, e)
+        for cid, (_stamp, e) in sorted(latest.items()):
+            if e.get("status") != "rejected" or cid not in lib:
+                continue
+            d = (e.get("directive") or "").strip()
+            if not d:
+                note = str(e.get("resolutionNote") or "")
+                d = note.split("\n\n")[0].strip()[:240]
+            findings["kevin"].append({
+                "id": cid, "name": lib[cid].get("name"), "city": lib[cid].get("city"),
+                "st": lib[cid].get("st"), "status": "sent back", "directive": d,
+            })
+    except StopIteration:
+        pass
+    except Exception as exc:
+        sys.stderr.write("NOTE: Kevin Queue tab left empty - %s\n" % exc)
+        findings["kevin_note"] = str(exc)
+
     summary = {
         "generated": today,
         "live_courses": len(lib),
         "gps_rows": len(gps),
         "three_nine_facilities": len(tn),
-        "counts": {k: len(v) for k, v in findings.items()},
+        "counts": {k: len(v) for k, v in findings.items() if isinstance(v, list)},
     }
     return summary, findings, tn, out_path, args
 
 # ------------------------------------------------------------------ xlsx ----
+
+# Severity is fixed per finding so the Summary reads the same way run to run --
+# that is what makes the count column a progress bar rather than a snapshot.
+SEVERITY = {
+    "no_card": "LOW", "no_rating": "LOW", "coverage": "MEDIUM",
+    "par_mismatch": "MEDIUM", "shared_gps": "HIGH", "wrong_course": "HIGH",
+    "city": "LOW", "kevin": "INFO",
+}
+NOTES = {
+    "no_card": "Wired three-nines are exempt - their pars live in the app config.",
+    "no_rating": "Wired three-nines are exempt - ratings hang off the 18-hole combination.",
+    "coverage": "Three-nine facilities are counted across per-nine rows (base#nine). "
+                "'legacy base greens' means mapping exists under the base id where the app cannot see it.",
+    "par_mismatch": "Three-nines are compared against the config's per-nine pars, not the DB card.",
+    "shared_gps": "Two courses on one mapping. Players on one get the other's distances.",
+    "wrong_course": "Green centroid >2 km from the library pin. On a manual map, suspect the PIN first.",
+    "city": "Cosmetic, but it is what breaks Kevin's search.",
+    "kevin": "Open items in the code-review queue, with the directive each one carries.",
+}
 
 TABS = [
     ("no_card",      "No Scorecard",     ["id", "name", "city", "st", "issue"]),
@@ -454,9 +522,10 @@ TABS = [
     ("wrong_course", "Wrong-Course Check",
      ["id", "name", "city", "st", "km", "greens", "source", "verified", "note"]),
     ("city",         "City Hygiene",     ["id", "name", "st", "lat", "lng", "issue"]),
+    ("kevin",        "Kevin Queue",      ["id", "name", "city", "st", "status", "directive"]),
 ]
 
-def write_xlsx(summary, findings, tn, out_path):
+def write_xlsx(summary, findings, tn, out_path, previous=None):
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
@@ -474,16 +543,31 @@ def write_xlsx(summary, findings, tn, out_path):
     ws.append(["(base#nine), never the base id. Do NOT 'fix' a three-nine by writing a card into"])
     ws.append(["shared:courses - that shadows the config and destroys the 27-hole data."])
     ws.append([])
-    ws.append(["#", "Finding", "Count", "Tab"]); [setattr(c, "font", bold) for c in ws[ws.max_row]]
+    ws.append(["#", "Finding", "Count", "Prev", "Change", "Severity", "Detail tab", "Notes"])
+    [setattr(c, "font", bold) for c in ws[ws.max_row]]
     for i, (key, tab, _cols) in enumerate(TABS, 1):
-        ws.append([i, tab, len(findings.get(key, [])), tab])
-    for col, w in zip("ABCD", (6, 30, 10, 24)):
+        n = len(findings.get(key, []))
+        prev = (previous or {}).get(key)
+        if prev is None:
+            delta = ""
+        elif n == prev:
+            delta = "no change"
+        elif n == 0:
+            delta = "CLEARED (-%d)" % prev
+        else:
+            delta = ("%+d" % (n - prev))
+        ws.append([i, tab, n, prev if prev is not None else "", delta,
+                   SEVERITY.get(key, ""), tab, NOTES.get(key, "")])
+    for col, w in zip("ABCDEFGH", (5, 22, 8, 8, 14, 10, 22, 96)):
         ws.column_dimensions[col].width = w
 
     for key, tab, cols in TABS:
         s = wb.create_sheet(tab[:31])
         s.append(cols); [setattr(c, "font", bold) for c in s[1]]
-        for r in findings.get(key, []):
+        rows = findings.get(key, [])
+        if not rows and key == "kevin" and findings.get("kevin_note"):
+            s.append(["(not read)", str(findings["kevin_note"])])
+        for r in (rows if isinstance(rows, list) else []):
             s.append([r.get(c, "") for c in cols])
         s.freeze_panes = "A2"
         for idx, c in enumerate(cols):
@@ -503,14 +587,27 @@ def write_xlsx(summary, findings, tn, out_path):
     return out_path
 
 
+def load_previous(path):
+    """Counts from a prior run, so the Summary can show movement rather than a
+    snapshot. Accepts the .json this script writes alongside the xlsx."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        return json.load(open(path)).get("summary", {}).get("counts")
+    except Exception:
+        return None
+
+
 def main():
     summary, findings, tn, out_path, args = build()
-    write_xlsx(summary, findings, tn, out_path)
+    previous = load_previous(args.prev)
+    write_xlsx(summary, findings, tn, out_path, previous=previous)
     print(json.dumps(summary, indent=2))
     print("wrote", out_path)
-    if args.json:
-        with open(out_path.replace(".xlsx", ".json"), "w") as f:
-            json.dump({"summary": summary, "findings": findings}, f, indent=2)
+    with open(out_path.replace(".xlsx", ".json"), "w") as f:
+        json.dump({"summary": summary,
+                   "findings": findings if args.json else {}}, f, indent=2)
+    print("wrote", out_path.replace(".xlsx", ".json"), "(feed it to --prev next run)")
 
 
 if __name__ == "__main__":
