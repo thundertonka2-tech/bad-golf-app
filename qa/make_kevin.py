@@ -21,6 +21,15 @@ OVERRIDES = {
  # Signed off by an admin AND sent back by Tyler on 26 Aug with nothing mapped.
  # A send-back is the newer decision, so it stays in the queue (v1235).
  "shangri-la-golf-club": "Map all 3 nines — nothing is mapped here yet (0 greens). Open Shangri La, tap a nine, drop its 9 greens, then do the next one. Map each nine once; the app builds every 18-hole combination itself.",
+ # Config is not trustworthy enough to map against -- placeholder pars, or two
+ # nines carrying identical pars. Researched separately before Kevin touches them.
+ "the-legends-golf-club-2": "HOLD \u2014 do not map yet. All three nines are stored as par 4,4,4,4,4,4,4,4,4, which is a placeholder somebody left behind, not The Legends' scorecard. We are re-researching the three nines from the club's own card first.",
+ "white-hawk-country-club": "HOLD \u2014 do not map yet. Two of the four nines (Black and Red) are stored as par 4,4,4,4,4,4,4,4,4 \u2014 a placeholder, not a scorecard. The fourth is spelled \"Sliver\" and carries a par 6, so the name and the pars both need checking.",
+ "addison-reserve-country-club": "HOLD \u2014 do not map yet. Salvation and Trepidation are stored with identical pars, hole for hole. We are checking Addison Reserve's own card before asking you to map it.",
+ "eisenhower-lakes-golf-club": "HOLD \u2014 do not map yet. Islandview and Pineview are stored with identical pars, hole for hole \u2014 the fingerprint of one nine copied onto another at import.",
+ "flat-creek": "HOLD \u2014 do not map yet. Graveyard and Homestead are stored with identical pars, hole for hole. That is also why the automatic recovery could not tell them apart.",
+ "hickory-sticks-golf-club": "HOLD \u2014 do not map yet. Meadows and Woods are stored with identical pars, hole for hole \u2014 the fingerprint of one nine copied onto another at import.",
+ "riverview-highlands-golf-course": "HOLD \u2014 do not map yet. Gold and Red are stored with identical pars, hole for hole \u2014 the fingerprint of one nine copied onto another at import.",
  "amara-golf-social-club": "Re-map all 18 greens when the course opens. The mapping we hold is the OLD Bear's Best routing — the course was demolished and rebuilt, so every distance on it is wrong for the new layout. Not urgent if the club is not playable yet.",
  "golf-at-indian-creek": "HOLD — do not map yet. Blackbird, Red Feather and the generic Indian Creek entry are one 27-hole facility sharing a single mapping. Needs three-nine wiring first; we do that.",
  "north-at-heather-hill-country-club": "No mapping needed — greens and fairway targets are complete. This one is waiting on three-nine wiring for the 27-hole club (Middle/North/South). Nothing to do in the app until that ships.",
@@ -54,11 +63,13 @@ def main():
     deletes = set(A.singleton("shared:course-deletes") or [])
     lib = {e["id"]: e for e in additions
            if isinstance(e, dict) and e.get("id") and e["id"] not in deletes}
-    # Tyler, 26 Aug: "sign-off always wins". 48 wired three-nine facilities are
-    # admin-verified while still short of a full set of nines (765 greens between
-    # them). The app reads those as Complete, so they are NOT Kevin's queue -- if
-    # they were, the queue could never equal the Incomplete chip. They are counted
-    # on the Summary tab instead, so the cost of that rule stays visible.
+    # Tyler, 26 Aug: "If he signed off on them they are done." He is right, and the
+    # count that made them look unfinished was measuring the wrong thing. Each of
+    # these facilities was signed off as an EIGHTEEN, with 18 greens and their
+    # fairway targets, and that sign-off stands. Three-nine wiring was added
+    # afterwards and turned the club into a 27, which created a nine nobody has ever
+    # been asked to map. So they DO belong in the queue -- as new work, with a
+    # directive that says so in the first sentence -- not as a re-do.
     verified = set(A.singleton("shared:course-verified") or [])
     tn = A.load_three_nine_from_app(APP); tn.update(A.load_three_nine_from_db())
     per_nine = {}
@@ -71,7 +82,7 @@ def main():
     for cid, e in sorted(lib.items()):
         d = OVERRIDES.get(cid)
         if d is None:
-            if cid not in tn or cid in verified:
+            if cid not in tn:
                 continue
             nines = tn[cid]["nines"]
             miss = sorted(n for n in nines
@@ -81,7 +92,18 @@ def main():
             done = sorted(n for n in nines if n not in miss)
             M = ", ".join(label(n, nines[n]) for n in miss)
             D = ", ".join(label(n, nines[n]) for n in done)
-            if not done:
+            if cid in verified and done:
+                d = ('NEW WORK \u2014 your original sign-off stands. You mapped this as an 18 '
+                     'and it was accepted; all %d of those greens are still in place and '
+                     'correct. The club was later wired as a %d-hole facility, which added %s '
+                     'that %s never been mapped: %s. Map %s only (%d greens + fairway targets) '
+                     '\u2014 do NOT remap %s.'
+                     % (len(done) * 9, len(nines) * 9,
+                        'a nine' if len(miss) == 1 else '%d nines' % len(miss),
+                        'has' if len(miss) == 1 else 'have', M,
+                        'that nine' if len(miss) == 1 else 'those nines',
+                        len(miss) * 9, D))
+            elif not done:
                 d = ("Map all %d nines (%s) — nothing is mapped here yet. Open the course, "
                      "tap each nine in turn and drop a pin on every green, then set the fairway "
                      "targets. %d greens total." % (len(miss), M, len(miss) * 9))
