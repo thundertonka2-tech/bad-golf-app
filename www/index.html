@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1235-->
+<!--BGVER=v2026.11.1238-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -7654,6 +7654,9 @@ html.bg-modal-lock, body.bg-modal-lock { overflow: hidden !important; }
       <select id="nine-back" style="width:100%;margin:4px 0 6px;padding:10px;font-size:15px"></select>
     </div>
     <p class="help-text" id="nine-picker-warn" style="color:var(--danger);display:none;margin:6px 0 0">Pick two different nines.</p>
+    <!-- v1238: says so up front when a chosen nine has no greens mapped. A warning,
+         never a block - the nine is real and the round is playable without GPS. -->
+    <p class="help-text" id="nine-gps-note" style="color:#d98a2b;display:none;margin:8px 0 0;line-height:1.35"></p>
     <div class="actions" style="margin-top:16px">
       <button id="nine-cancel" style="flex:1">Cancel</button>
       <button class="primary" id="nine-confirm" style="flex:2">Use these nines</button>
@@ -8584,7 +8587,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1236';
+const BG_BUILD = 'v2026.11.1238';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -11423,10 +11426,67 @@ async function bgScanAllGps(onProg) {
   try {
     if (typeof initSupabase === 'function' && !supaReady) await initSupabase();
     if (supa && supaOnline) {
-      let from = 0, n = 0, ok = true; const page = 500;
+      // v1237: this page used to be a flat 500 rows and gave up on the first error,
+      // which is why the dashboard kept reading "partial" and showing ~8,000 courses
+      // as incomplete. The `holes` blob is big — a 500-row page of them is megabytes,
+      // and PostgREST answers a request that size with a 500, more often on a phone
+      // than on a desktop. The rows were fine; the page was too fat to fetch.
+      //
+      // So: start smaller, and on an error HALVE the page and retry the SAME offset
+      // rather than abandoning the scan. Nothing is skipped — `from` only advances
+      // after a page actually lands. Only when the page cannot shrink any further do
+      // we accept defeat, and scanOk stays false so the UI keeps saying "partial"
+      // instead of quietly reporting mapped courses as unmapped.
+      // v1237: prefer the slim RPC. It returns the SAME { course_id, holes } shape,
+      // stripped of the geometry the counter never reads (path, line, teePoly,
+      // greenPoly, length) and with coordinates at 5dp. Whole library: ~13 MB
+      // instead of ~137 MB. The counting itself still happens here, in
+      // bgGpsDigest + bgCountGps, so there is exactly ONE definition of what
+      // "mapped" means and the server cannot drift from it.
+      //
+      // If the function is missing — an older database, or a client that ran
+      // before the migration — we fall through to the plain table read below.
+      // A missing RPC must degrade to slow, never to wrong.
+      let usedRpc = false;
+      try {
+        let rfrom = 0, rn = 0; const rpage = 1000;
+        for (;;) {
+          const rr = await supa.rpc('bg_gps_slim', { p_from: rfrom, p_limit: rpage });
+          if (rr.error) { if (rfrom > 0) { throw rr.error; } usedRpc = false; break; }
+          usedRpc = true;
+          const rows = rr.data || [];
+          if (!rows.length) break;
+          rows.forEach(_storeMappedRow);
+          rn += rows.length;
+          if (onProg) { try { onProg(rn); } catch (e) {} }
+          if (rows.length < rpage) break;
+          rfrom += rpage;
+          await new Promise(function (rs) { setTimeout(rs, 0); });
+        }
+        if (usedRpc) { counts.scanOk = true; }
+      } catch (e) {
+        // Partway through the RPC path and it broke. Do NOT keep half a scan and
+        // call it good — clear what we read and let the table path redo it whole.
+        console.warn('slim gps scan failed, falling back to the table read', e);
+        usedRpc = false;
+        try { _adminMappedCache.clear(); } catch (e2) {}
+      }
+      if (usedRpc) { return _finishScan(counts); }
+
+      let from = 0, n = 0, ok = true, page = 200;
+      const MIN_PAGE = 25;
       for (;;) {
         const r = await supa.from('course_gps').select('course_id,holes').range(from, from + page - 1);
-        if (r.error) { console.warn('global gps scan page failed', r.error); ok = false; break; }
+        if (r.error) {
+          if (page > MIN_PAGE) {
+            page = Math.max(MIN_PAGE, Math.floor(page / 2));
+            console.warn('global gps scan: page too large, retrying at ' + page, r.error);
+            await new Promise(function (rs) { setTimeout(rs, 250); });
+            continue;                      // same `from`, smaller bite
+          }
+          console.warn('global gps scan page failed at minimum size', r.error);
+          ok = false; break;
+        }
         const data = r.data;
         if (!data || !data.length) break;
         data.forEach(_storeMappedRow);
@@ -11434,13 +11494,18 @@ async function bgScanAllGps(onProg) {
         if (onProg) { try { onProg(n); } catch (e) {} }
         if (data.length < page) break;
         from += page;
-        // Yield to the main thread — this runs on Kevin's phone, and 30 back-to-back
-        // JSON parses of 500 hole blobs will jank the UI if we never let go.
+        // Yield to the main thread — this runs on Kevin's phone, and back-to-back
+        // JSON parses of hole blobs will jank the UI if we never let go.
         await new Promise(function (rs) { setTimeout(rs, 0); });
       }
       counts.scanOk = ok;
     }
   } catch (e) { console.warn('global gps scan failed', e); }
+  return _finishScan(counts);
+}
+// v1237: the tail of bgScanAllGps, lifted out so the RPC path and the table path
+// return an identically-populated object rather than two near-copies.
+function _finishScan(counts) {
   try {
     _adminMappedCache.forEach(function (m, id) {
       if (!m) return;
@@ -26169,6 +26234,41 @@ function expandCourseForSearch(c) {
   } catch (e) {}
   return [c];
 }
+// v1238 (Tyler): a 27-hole club offers three 18-hole pairings, and a nine with no
+// greens mapped makes two of them half-blind — nine holes with no distances, and
+// nothing on screen said so until you were standing on the tee. Across the library
+// that was 181 unmapped nines at 119 facilities.
+//
+// The first instinct was to hide those pairings from search. That is worse: the nine
+// is a REAL nine, the round is playable and scoreable, and removing it takes a course
+// away from someone who is standing on it. So the picker tells the truth instead —
+// it labels what is mapped, defaults to the pairing that is fully covered, and warns
+// (without blocking) if you deliberately pick a blind one.
+//
+// Returns { key: greensCount } for one facility. Never throws, never blocks the
+// picker: on any failure the caller keeps the plain labels it already rendered.
+async function tnNineGreenCounts(baseId, keys) {
+  const out = {};
+  try {
+    if (!baseId || !Array.isArray(keys) || !keys.length) return out;
+    if (typeof ensureSupa === 'function') { await ensureSupa(); }
+    if (!supa) return out;
+    const ids = keys.map(k => baseId + '#' + k);
+    const { data } = await supa.from('course_gps').select('course_id,holes').in('course_id', ids);
+    (data || []).forEach(function (r) {
+      if (!r || !r.course_id) return;
+      const k = r.course_id.slice(baseId.length + 1);
+      let n = 0;
+      const h = r.holes || {};
+      for (let i = 1; i <= 9; i++) {
+        const v = h[String(i)];
+        if (v && Array.isArray(v.mid) && v.mid.length >= 2) n++;
+      }
+      out[k] = n;
+    });
+  } catch (e) {}
+  return out;
+}
 function openNinePicker(courseId) {
   const nineSet = THREE_NINE_COURSES[courseId];
   const m = $('nine-picker-modal');
@@ -26181,6 +26281,54 @@ function openNinePicker(courseId) {
   $('nine-front').value = keys[0];
   $('nine-back').value = keys[1] || keys[0];
   $('nine-picker-warn').style.display = 'none';
+  // v1238: label what is actually mapped, and steer the default to a pairing we can
+  // give distances for. Runs AFTER the modal is populated and never awaits before
+  // showing it, so a slow or failed lookup costs the player nothing.
+  (function () {
+    try {
+      const myId = courseId;
+      tnNineGreenCounts(courseId, keys).then(function (cnt) {
+        if (_pendingNineCourseId !== myId) return;          // picker moved on
+        if (!cnt || !Object.keys(cnt).length) return;
+        const label = k => {
+          const n = (cnt[k] == null) ? null : cnt[k];
+          const nm = nineSet[k].name;
+          if (n === null) return nm;
+          if (n >= 9) return nm;
+          return nm + (n > 0 ? ' \u00b7 ' + n + '/9 mapped' : ' \u00b7 no GPS yet');
+        };
+        const html = keys.map(k => '<option value="' + k + '">' + label(k) + '</option>').join('');
+        const fEl = $('nine-front'), bEl = $('nine-back');
+        if (!fEl || !bEl) return;
+        const fWas = fEl.value, bWas = bEl.value;
+        fEl.innerHTML = html; bEl.innerHTML = html;
+        fEl.value = fWas; bEl.value = bWas;
+        // Default to two fully-mapped nines when the facility has them and the
+        // player has not chosen yet. Only ever changes the DEFAULT.
+        const full = keys.filter(k => (cnt[k] || 0) >= 9);
+        if (full.length >= 2 && ((cnt[fWas] || 0) < 9 || (cnt[bWas] || 0) < 9)) {
+          fEl.value = full[0]; bEl.value = full[1];
+        }
+        const note = $('nine-gps-note');
+        const refresh = () => {
+          if (!note) return;
+          const on = !!($('nine-single-toggle') && $('nine-single-toggle').checked);
+          const picked = on ? [fEl.value] : [fEl.value, bEl.value];
+          const blind = picked.filter((k, i, a) => a.indexOf(k) === i && (cnt[k] || 0) < 9);
+          if (!blind.length) { note.style.display = 'none'; return; }
+          note.textContent = '\u26a0\ufe0f ' + blind.map(k => nineSet[k].name).join(' and ')
+            + (blind.length > 1 ? ' are' : ' is') + ' not mapped yet \u2014 you can play and score '
+            + (blind.length > 1 ? 'them' : 'it') + ' normally, but there will be no GPS distances on '
+            + (blind.length * 9) + ' holes.';
+          note.style.display = 'block';
+        };
+        fEl.addEventListener('change', refresh);
+        bEl.addEventListener('change', refresh);
+        const _sg = $('nine-single-toggle'); if (_sg) _sg.addEventListener('change', refresh);
+        refresh();
+      });
+    } catch (e) {}
+  })();
   // Single-nine toggle: default OFF (two nines = 18). When ON, hide the back-nine
   // selector and play just the chosen nine as a 9-hole round.
   const _single = $('nine-single-toggle');
