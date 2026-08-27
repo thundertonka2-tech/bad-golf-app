@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1260-->
+<!--BGVER=v2026.11.1261-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8669,7 +8669,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1260';
+const BG_BUILD = 'v2026.11.1261';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -74555,8 +74555,10 @@ async function lgOpenSeason(sid) {
        '<button class="primary full" onclick="lgOpenWeek(\'' + lgEsc(sid) + '\')">This week</button>' +
        '<div style="display:flex;gap:8px;margin-top:8px">' +
        '<button style="flex:1" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Schedule</button>' +
-       '<button style="flex:1" onclick="lgOpenHandicaps(\'' + lgEsc(sid) + '\')">Handicaps</button>' +
-       '<button style="flex:1" onclick="lgOpenStandings(\'' + lgEsc(sid) + '\')">Standings</button></div>' +
+       '<button style="flex:1" onclick="lgOpenHandicaps(\'' + lgEsc(sid) + '\')">Handicaps</button></div>' +
+       '<div style="display:flex;gap:8px;margin-top:8px">' +
+       '<button style="flex:1" onclick="lgOpenStandings(\'' + lgEsc(sid) + '\')">Standings</button>' +
+       '<button style="flex:1" onclick="lgOpenMoney(\'' + lgEsc(sid) + '\')">Money</button></div>' +
        '<button class="full" style="margin-top:8px" onclick="renderLeague()">Back</button></div>';
   body.innerHTML = h;
 }
@@ -75628,13 +75630,22 @@ async function lgPickRound() {
       ? 'These are your rounds that fit this week — right course, right number of holes, close enough to the league day. You can change your pick until the week is finalised.'
       : 'No rounds of yours fit this week yet. It has to be on the league’s course, the same number of holes, and within a few days of the league day.') + '</p>');
   rows.forEach(function (r) {
-    h += '<div class="card" style="cursor:pointer" onclick="lgAttachRound(\'' + lgEsc(r.code) + '\')">' +
+    /* A round whose FORMAT can't produce a league score stays on the list,
+       greyed, with the reason. Tyler 8/27: a scramble score is the team's, and
+       in quota or Stableford you stop holing out — the strokes aren't a real
+       score. Hiding those rounds just produces "why isn't my round here";
+       saying why answers itself. The server refuses them too. */
+    const blocked = r.blocked || null;
+    h += '<div class="card"' + (blocked ? ' style="opacity:.62"' : ' style="cursor:pointer" onclick="lgAttachRound(\'' + lgEsc(r.code) + '\')"') + '>' +
       '<div style="display:flex;align-items:baseline;gap:8px">' +
       '<div style="font-weight:800;font-size:22px">' + r.total + '</div>' +
       '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">' + lgEsc(r.course) + '</div>' +
       '<div class="help-text" style="margin:0;font-size:12px">' + lgEsc(r.played_at) + ' · ' + r.holes + ' holes · ' +
       r.players + ' player' + (r.players === 1 ? '' : 's') + ' · ' + lgEsc(r.code) + '</div></div>' +
-      (r.attached ? '<span class="bg-pill">picked</span>' : '') + '</div></div>';
+      (blocked ? '<span class="bg-pill">can’t use</span>' : (r.attached ? '<span class="bg-pill">picked</span>' : '')) +
+      '</div>' +
+      (blocked ? '<p class="help-text" style="margin:8px 0 0;font-size:12px">' + lgEsc(blocked) + '</p>' : '') +
+      '</div>';
   });
   h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenWeek(window._lgSeason, window._lgWeek)">Back</button></div>';
   body.innerHTML = h;
@@ -75991,6 +76002,229 @@ function lgAbsenceState(a, nameOf) {
   if (a.is_no_show) return 'No-show — too late for a sub';
   if (a.claim_status === 'open') return 'Seat open for a sub';
   return 'Waiting on the commissioner';
+}
+
+
+/* ===================== PHASE 9 — money =================================
+   Every number on this screen is DERIVED. league_money_recompute rebuilds the
+   whole season from settings, cards and standings, then asserts the ledger sums
+   to zero -- so the client never adds anything up itself and never caches a
+   total. If a figure here is wrong, the fix is in the engine, not here. */
+function lgMoney(n) {
+  const v = Number(n || 0);
+  return (v < 0 ? '-' : '') + '$' + Math.abs(v).toFixed(2);
+}
+function lgMoneyColor(n) {
+  const v = Number(n || 0);
+  return v > 0 ? 'var(--success,#1f8a3b)' : (v < 0 ? 'var(--danger,#c2402f)' : 'var(--text-muted)');
+}
+
+async function lgOpenMoney(sid) {
+  const body = document.getElementById('league-body'); if (!body || !sid) return;
+  window._lgSeason = sid;
+  try { switchTab('league'); } catch (e) {}
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Adding it up…</p>');
+
+  let led = null, set = null;
+  try { led = await supa.rpc('league_money_ledger', { p_season_id: sid }); }
+  catch (e) { led = { data: null, error: e }; }
+  if (!led || led.error) {
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">' +
+      lgEsc(lgErrText(led && led.error, 'Couldn’t load the money')) + '</p>' +
+      '<button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back</button>');
+    return;
+  }
+  const d = led.data || {};
+  const members = Array.isArray(d.members) ? d.members : [];
+  const pots = Array.isArray(d.pots) ? d.pots : [];
+  const amCommish = !!d.is_commissioner;
+
+  try { set = await supa.rpc('league_money_settle', { p_season_id: sid }); } catch (e) { set = null; }
+  const st = (set && !set.error && set.data) || {};
+  const transfers = Array.isArray(st.transfers) ? st.transfers : [];
+
+  const anyMoney = members.some(function (m) { return Number(m.net) !== 0; }) || pots.length;
+
+  let h = lgCard('<div style="display:flex;align-items:baseline;gap:8px">' +
+    '<h2 style="margin:0;flex:1">Money</h2>' +
+    (Number(d.ledger_sum) === 0
+      ? '<span class="bg-pill" style="font-size:10px">balanced</span>'
+      : '<span class="bg-pill" style="font-size:10px;background:var(--danger,#c2402f);color:#fff">off by ' + lgMoney(d.ledger_sum) + '</span>') +
+    '</div>' +
+    '<p class="help-text" style="margin:6px 0 0">' +
+    (anyMoney
+      ? 'Every line is worked out from the scores and the settings. Nothing here is typed in by hand.'
+      : 'No money set up yet.' + (amCommish ? ' Set the dues, buy-in and weekly pots below.' : ' The commissioner hasn’t set any up.')) +
+    '</p>');
+
+  if (members.length && anyMoney) {
+    h += '<div class="card"><div class="bg-sec">Where everyone stands</div>' +
+      members.map(function (m) {
+        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(m.name) + '</div>' +
+          '<div class="help-text" style="margin:0;font-size:12px">' +
+            (Number(m.settled) !== 0 ? 'Settled ' + lgMoney(m.settled) + ' · ' : '') +
+            (Number(m.net) < 0 ? 'owes' : (Number(m.net) > 0 ? 'is owed' : 'square')) + '</div></div>' +
+          '<div style="font-weight:800;font-size:15px;color:' + lgMoneyColor(m.net) + '">' + lgMoney(m.net) + '</div>' +
+          (amCommish
+            ? ' <button class="small" style="margin-left:8px" onclick="lgMarkPaid(\'' + lgEsc(sid) + '\',\'' + lgEsc(m.member_id) + '\')">Square up</button>'
+            : '') +
+          '</div>';
+      }).join('') + '</div>';
+  }
+
+  if (pots.length) {
+    h += '<div class="card"><div class="bg-sec">The league is holding</div>' +
+      pots.map(function (p) {
+        return '<div style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--bg-border,#e5e7eb);font-size:14px">' +
+          '<div style="flex:1">' + lgEsc(String(p.kind).replace(/_/g, ' ')) + '</div>' +
+          '<div style="font-weight:700">' + lgMoney(p.holding) + '</div></div>';
+      }).join('') +
+      '<p class="help-text" style="margin:10px 0 0;font-size:12px">Dues stay with the league. A pot nobody won carries into next week.</p></div>';
+  }
+
+  if (transfers.length) {
+    h += '<div class="card"><div class="bg-sec">Settle up <span>' + transfers.length + '</span></div>' +
+      transfers.map(function (t) {
+        return '<div style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--bg-border,#e5e7eb);font-size:14px">' +
+          '<div style="flex:1;min-width:0">' + lgEsc(t.from) + ' <span class="help-text">pays</span> ' + lgEsc(t.to) + '</div>' +
+          '<div style="font-weight:700">' + lgMoney(t.amount) + '</div></div>';
+      }).join('') +
+      '<button class="full" style="margin-top:10px" onclick="lgShareSettle(\'' + lgEsc(sid) + '\')">Send this to the group</button></div>';
+  }
+
+  if (amCommish) {
+    h += lgCard('<div class="bg-sec" style="margin-bottom:8px">Commissioner</div>' +
+      '<button class="primary full" onclick="lgOpenMoneySetup(\'' + lgEsc(sid) + '\')">Set up dues and pots</button>' +
+      '<button class="full" style="margin-top:8px" onclick="lgRecomputeMoney(\'' + lgEsc(sid) + '\')">Rebuild the ledger</button>');
+  }
+
+  h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back to the league</button></div>';
+  body.innerHTML = h;
+}
+
+async function lgRecomputeMoney(sid) {
+  let res = null;
+  try { res = await supa.rpc('league_money_recompute', { p_season_id: sid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_money_recompute failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t rebuild the ledger')); } catch (e) {}
+    return;
+  }
+  try { showToast('Ledger rebuilt — ' + ((res.data && res.data.lines) || 0) + ' lines, balanced'); } catch (e) {}
+  try { lgOpenMoney(sid); } catch (e) {}
+}
+
+async function lgMarkPaid(sid, mid) {
+  let ok = false;
+  try { ok = await uiConfirm('Mark everything they owe or are owed as settled?', { title: 'Square up', okLabel: 'Square up' }); }
+  catch (e) { ok = false; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_money_mark_paid', { p_season_id: sid, p_member_id: mid, p_paid: true }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { showToast(lgErrText(res && res.error, 'Couldn’t mark that settled')); } catch (e) {}
+    return;
+  }
+  try { showToast('Settled'); } catch (e) {}
+  try { lgOpenMoney(sid); } catch (e) {}
+}
+
+/* Text, not email — same channel the invites use. */
+async function lgShareSettle(sid) {
+  let set = null;
+  try { set = await supa.rpc('league_money_settle', { p_season_id: sid }); } catch (e) { set = null; }
+  const st = (set && !set.error && set.data) || {};
+  const lines = (st.transfers || []).map(function (t) {
+    return t.from + ' pays ' + t.to + ' ' + lgMoney(t.amount);
+  });
+  if (st.note) lines.push(st.note);
+  if (!lines.length) { try { showToast('Nothing to settle'); } catch (e) {} return; }
+  const txt = 'Settle up:\n' + lines.join('\n');
+  try {
+    if (navigator.share) { await navigator.share({ text: txt }); return; }
+  } catch (e) {}
+  try { location.href = 'sms:?&body=' + encodeURIComponent(txt); } catch (e) {}
+}
+
+/* ---- commissioner: what the money IS ---------------------------------- */
+async function lgOpenMoneySetup(sid) {
+  const body = document.getElementById('league-body'); if (!body || !sid) return;
+  const sr = await _bgRead(function () {
+    return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
+  }, 'lgOpenMoneySetup');
+  if (!sr.ok) { try { showToast('Couldn’t load the settings'); } catch (e) {} return; }
+  const m = ((sr.data && sr.data.settings) || {}).money || {};
+  const wk = m.weekly || {};
+  const pool = function (key, label, hint) {
+    const p = wk[key] || {};
+    return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+      '<label style="flex:1;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:0">' +
+      '<input type="checkbox" class="bg-sw" id="lgm-' + key + '-on"' + (p.on ? ' checked' : '') + '>' +
+      '<span style="min-width:0"><strong style="font-size:14px">' + label + '</strong>' +
+      '<br><span class="help-text" style="font-size:12px">' + hint + '</span></span></label>' +
+      '<div style="flex:0 0 84px;display:flex;align-items:center;gap:4px">$' +
+      '<input type="number" inputmode="decimal" id="lgm-' + key + '-amt" value="' + (Number(p.amount) || 0) +
+      '" min="0" step="1" style="width:100%"></div></div>';
+  };
+
+  body.innerHTML =
+    lgCard('<h2 style="margin:0">Dues and pots</h2>' +
+      '<p class="help-text" style="margin:6px 0 0">Bad Golf works out who owes what. It does not move any money — you still collect it the way you always have.</p>') +
+    lgCard('<div class="bg-sec" style="margin-bottom:10px">Season</div>' +
+      '<label class="lbl">Dues per player</label>' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px">$' +
+      '<input type="number" inputmode="decimal" id="lgm-dues" value="' + (Number(m.dues) || 0) + '" min="0" step="5" style="flex:1"></div>' +
+      '<p class="help-text" style="margin:-6px 0 12px;font-size:12px">Covers the league’s costs. Stays with the league — it isn’t paid back out.</p>' +
+      '<label class="lbl">Season buy-in per player</label>' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px">$' +
+      '<input type="number" inputmode="decimal" id="lgm-buyin" value="' + (Number(m.buyin) || 0) + '" min="0" step="5" style="flex:1"></div>' +
+      '<p class="help-text" style="margin:-6px 0 12px;font-size:12px">Goes into the season pot and pays out on the final standings. Locks once week 1 opens.</p>' +
+      '<label class="lbl">How the season pot pays</label>' +
+      '<select id="lgm-payout" style="width:100%">' +
+      ['winner_take_all|Winner takes all', '80_20|80 / 20', '60_40|60 / 40',
+       '50_30_20|50 / 30 / 20', '40_30_20_10|40 / 30 / 20 / 10'].map(function (o) {
+        const p = o.split('|');
+        return '<option value="' + p[0] + '"' + ((m.payout || '60_40') === p[0] ? ' selected' : '') + '>' + p[1] + '</option>';
+      }).join('') + '</select>' +
+      '<p class="help-text" style="margin:8px 0 0;font-size:12px">A tie for a paid place splits that place’s money.</p>') +
+    '<div class="card"><div class="bg-sec">Every week</div>' +
+      pool('skins', 'Skins', 'Low net on a hole, outright. Nobody wins it, it carries.') +
+      pool('lowest_net', 'Lowest net', 'Best net round of the week. Ties split it.') +
+      pool('ctp', 'Closest to the pin', 'You pick the winner each week.') +
+      pool('longest_drive', 'Longest drive', 'You pick the winner each week.') +
+      pool('longest_putt', 'Longest putt', 'You pick the winner each week.') +
+    '</div>' +
+    '<div class="card" style="padding:12px 14px">' +
+      '<button class="primary full" onclick="lgSaveMoneySettings(\'' + lgEsc(sid) + '\')">Save</button>' +
+      '<button class="full" style="margin-top:8px" onclick="lgOpenMoney(\'' + lgEsc(sid) + '\')">Cancel</button></div>';
+}
+
+async function lgSaveMoneySettings(sid) {
+  const num = function (id) { const el = document.getElementById(id); return el ? (Number(el.value) || 0) : 0; };
+  const on = function (id) { const el = document.getElementById(id); return !!(el && el.checked); };
+  const weekly = {};
+  ['skins', 'lowest_net', 'ctp', 'longest_drive', 'longest_putt'].forEach(function (k) {
+    weekly[k] = { on: on('lgm-' + k + '-on'), amount: num('lgm-' + k + '-amt') };
+  });
+  const sel = document.getElementById('lgm-payout');
+  const money = {
+    dues: num('lgm-dues'), buyin: num('lgm-buyin'),
+    payout: (sel && sel.value) || '60_40',
+    penny_rule: 'lowest_member_id', weekly: weekly
+  };
+  let res = null;
+  try { res = await supa.rpc('league_set_money_settings', { p_season_id: sid, p_money: money }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_set_money_settings failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t save')); } catch (e) {}
+    return;
+  }
+  try { showToast('Saved'); } catch (e) {}
+  try { lgOpenMoney(sid); } catch (e) {}
 }
 
 function renderBottomNav() {
