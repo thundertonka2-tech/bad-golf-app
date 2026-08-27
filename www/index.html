@@ -8612,7 +8612,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1248';
+const BG_BUILD = 'v2026.11.1249';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -74475,6 +74475,7 @@ async function lgOpenSeason(sid) {
   }
   h += '<div class="card" style="padding:12px 14px;display:flex;gap:8px">' +
        '<button class="primary" style="flex:1" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Schedule</button>' +
+       '<button style="flex:1" onclick="lgOpenHandicaps(\'' + lgEsc(sid) + '\')">Handicaps</button>' +
        '<button style="flex:1" onclick="renderLeague()">Back</button></div>';
   body.innerHTML = h;
 }
@@ -74781,6 +74782,207 @@ async function lgSaveWeek(wid) {
   }
   try { showToast('Week updated'); } catch (e) {}
   try { lgOpenSchedule(window._lgSeason); } catch (e) {}
+}
+
+/* ===================== LEAGUES — Phase 5 (v1249): handicaps ================
+   Server side: league_suggest_handicaps (read-only), league_set_handicaps
+   (compare-and-swap, note required on a big override), league_seed_handicaps
+   (cold start + prior-season import).
+
+   D7: THE APP SUGGESTS, THE COMMISSIONER SETS. Every number is logged with who
+   set it and why. Nothing on this screen writes a handicap on its own.
+
+   §10.3: every suggestion is derived from league_cards.gross and the week's
+   frozen course_snapshot — never from scoreHistory, whose 9-hole differential
+   depends on which phone did the archiving.
+   ==================================================================== */
+
+function lgNum(v) { return (v === null || v === undefined || v === '') ? null : Number(v); }
+function lgFmt(v) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(1); }
+
+async function lgOpenHandicaps(sid, weekNumber) {
+  const body = document.getElementById('league-body'); if (!body || !sid) return;
+  window._lgSeason = sid;
+  try { switchTab('league'); } catch (e) {}
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Working out handicaps…</p>');
+
+  const wr = await _bgRead(function () {
+    return supa.from('league_weeks').select('week_number,status')
+      .eq('season_id', sid).order('week_number', { ascending: true });
+  }, 'lgOpenHandicaps:weeks');
+  if (!wr.ok) {
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">Couldn’t load the weeks.</p>' +
+      '<button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back</button>');
+    return;
+  }
+  const weeks = Array.isArray(wr.data) ? wr.data : [];
+  const open = weeks.filter(function (w) { return w.status === 'scheduled'; });
+  const wk = weekNumber || (open.length ? open[0].week_number : (weeks.length ? weeks[weeks.length - 1].week_number : 1));
+  window._lgHcpWeek = wk;
+
+  let res = null;
+  try { res = await supa.rpc('league_suggest_handicaps', { p_season_id: sid, p_week_number: wk }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_suggest_handicaps failed:', res && res.error); } catch (e) {}
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">' +
+      lgEsc(lgErrText(res && res.error, 'Couldn’t work out handicaps')) + '</p>' +
+      '<button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back</button>');
+    return;
+  }
+  const rows = Array.isArray(res.data) ? res.data : [];
+  window._lgHcpRows = rows;
+
+  const anyCold = rows.some(function (r) { return r.cold_start; });
+  const locked = !open.some(function (w) { return w.week_number === wk; });
+
+  const wkSel = open.length > 1
+    ? lgLbl('Which week') + '<select style="width:100%" onchange="lgOpenHandicaps(\'' + lgEsc(sid) + '\', Number(this.value))">' +
+      open.map(function (w) {
+        return '<option value="' + w.week_number + '"' + (w.week_number === wk ? ' selected' : '') + '>Week ' + w.week_number + '</option>';
+      }).join('') + '</select>'
+    : '';
+
+  let h = lgCard('<div class="bg-sec" style="margin-bottom:2px">Handicaps · week ' + wk + '</div>' +
+    '<p class="help-text" style="margin:6px 0 0">' +
+    (locked
+      ? 'Week ' + wk + ' has already opened, so these are locked — this is the record of what was used.'
+      : (anyCold
+        ? 'Nobody has enough league rounds yet, so type a starting number for each player. The app takes over once the rounds are in.'
+        : 'The app suggests; you decide. Anything you change by 2 or more needs a reason on the record.')) +
+    '</p>' + wkSel);
+
+  h += '<div class="card">' + rows.map(function (r, i) {
+    const val = (r.capped !== null && r.capped !== undefined) ? Number(r.capped).toFixed(1)
+              : ((r.previous !== null && r.previous !== undefined) ? Number(r.previous).toFixed(1) : '');
+    const moved = (r.suggested !== null && r.previous !== null && r.suggested !== undefined && r.previous !== undefined);
+    const deltaTxt = (r.delta === null || r.delta === undefined) ? ''
+      : (Number(r.delta) > 0 ? '+' + Number(r.delta).toFixed(1) : Number(r.delta).toFixed(1));
+    return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;' +
+      (i ? 'border-top:1px solid var(--bg-border,#e5e7eb)' : '') + '">' +
+      '<div style="min-width:0;flex:1">' +
+        '<div style="font-weight:700;font-size:14px">' + lgEsc(r.name) +
+          (r.provisional ? ' <span class="bg-pill">prov</span>' : '') + '</div>' +
+        '<div class="help-text" style="margin:0;font-size:12px">' +
+          (r.cold_start ? 'no league rounds yet'
+            : ('was ' + lgFmt(r.previous) + ' · suggests ' + lgFmt(r.suggested) +
+               (deltaTxt ? ' (' + deltaTxt + ')' : '') + ' · from ' + r.rounds_used + ' round' + (r.rounds_used === 1 ? '' : 's'))) +
+        '</div>' +
+      '</div>' +
+      '<input id="lg-hcp-' + i + '" type="number" step="0.1" inputmode="decimal" ' +
+        (locked ? 'disabled ' : '') + 'style="width:76px;text-align:right" value="' + val + '">' +
+      '</div>';
+  }).join('') + (rows.length ? '' : '<p class="help-text" style="margin:0">Nobody on the roster yet.</p>') + '</div>';
+
+  if (!locked && rows.length) {
+    h += '<div class="card" style="padding:12px 14px">' +
+      '<button class="primary full" id="lg-hcp-save" onclick="lgSaveHandicaps()">Save handicaps for week ' + wk + '</button>' +
+      '<button class="full" style="margin-top:8px" onclick="lgImportHandicaps()">Import last season’s numbers</button></div>';
+  }
+  h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back to the league</button></div>';
+  body.innerHTML = h;
+}
+
+async function lgSaveHandicaps() {
+  const sid = window._lgSeason, wk = window._lgHcpWeek, rows = window._lgHcpRows || [];
+  if (!sid || !rows.length) return;
+  const btn = document.getElementById('lg-hcp-save');
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const el = document.getElementById('lg-hcp-' + i);
+    const v = el ? lgNum(el.value) : null;
+    if (v === null || isNaN(v)) continue;
+    const suggested = lgNum(r.capped !== null && r.capped !== undefined ? r.capped : r.suggested);
+    let source, note = null;
+    if (r.cold_start && (r.previous === null || r.previous === undefined)) {
+      source = 'manual';                          // §10.1 commissioner_seed
+    } else if (suggested !== null && Math.abs(v - suggested) < 0.05) {
+      source = 'accepted';
+    } else {
+      source = 'override';
+      // §10: a note is REQUIRED on any override of 2 or more. Ask here rather
+      // than letting the server's refusal be the first the commissioner hears
+      // of it — the server still enforces it either way.
+      if (suggested !== null && Math.abs(v - suggested) >= 2) {
+        try {
+          note = window.prompt('Why is ' + r.name + '’s handicap ' + v.toFixed(1) +
+            ' instead of the suggested ' + Number(suggested).toFixed(1) + '?\n\nThis goes on the record.');
+        } catch (e) { note = null; }
+        if (!note || !String(note).trim()) {
+          try { showToast('That change needs a reason — nothing saved'); } catch (e) {}
+          return;
+        }
+      }
+    }
+    out.push({
+      member_id: r.member_id, effective: v, source: source, note: note,
+      suggested: suggested, basis: r.basis || {},
+      // §12.4 compare-and-swap: what this screen was rendered with. If someone
+      // else saved in the meantime the server rejects that row instead of
+      // silently overwriting their number.
+      expect_previous: (r.stored === undefined ? null : r.stored)
+    });
+  }
+  if (!out.length) { try { showToast('Nothing to save'); } catch (e) {} return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  let res = null;
+  try { res = await supa.rpc('league_set_handicaps', { p_season_id: sid, p_week_number: wk, p_rows: out }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (btn) { btn.disabled = false; btn.textContent = 'Save handicaps for week ' + wk; }
+  if (!res || res.error) {
+    try { console.warn('league_set_handicaps failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t save those handicaps')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  const conflicts = Array.isArray(d.conflicts) ? d.conflicts : [];
+  if (conflicts.length) {
+    try {
+      showToast(conflicts.length + ' change' + (conflicts.length === 1 ? '' : 's') +
+        ' were saved by someone else first — reloading');
+    } catch (e) {}
+  } else {
+    try { showToast('Handicaps saved'); } catch (e) {}
+  }
+  try { lgOpenHandicaps(sid, wk); } catch (e) {}
+}
+
+/* §10.4 prior-season import. Without it, provisional_rounds:3 means the first
+   three weeks of every real league run on invented numbers. */
+function lgImportHandicaps() {
+  const body = document.getElementById('league-body'); if (!body) return;
+  body.innerHTML = lgCard('<h2 style="margin:0 0 4px">Import last season</h2>' +
+    '<p class="help-text" style="margin-bottom:4px">One player per line: <strong>name, handicap</strong>. Names are matched to your roster; anything that doesn’t match is reported back rather than guessed at.</p>' +
+    '<textarea id="lg-imp" rows="8" style="width:100%;font-family:ui-monospace,monospace" placeholder="Kevin Smith, 12.4&#10;Wes Turner, 8.1"></textarea>' +
+    '<button class="primary full" style="margin-top:12px" onclick="lgDoImportHandicaps()">Import</button>' +
+    '<button class="full" style="margin-top:8px" onclick="lgOpenHandicaps(window._lgSeason, window._lgHcpWeek)">Cancel</button>');
+}
+async function lgDoImportHandicaps() {
+  const el = document.getElementById('lg-imp');
+  const txt = el ? String(el.value || '') : '';
+  const rows = [];
+  txt.split(/\r?\n/).forEach(function (line) {
+    const t = line.trim(); if (!t) return;
+    const m = t.match(/^(.*?)[,\t]\s*(-?\d+(?:\.\d+)?)\s*$/);
+    if (m) rows.push({ name: m[1].trim(), index: Number(m[2]) });
+  });
+  if (!rows.length) { try { showToast('Nothing readable — use "name, handicap" per line'); } catch (e) {} return; }
+  let res = null;
+  try {
+    res = await supa.rpc('league_seed_handicaps', {
+      p_season_id: window._lgSeason, p_rows: rows, p_source: 'imported', p_week_number: window._lgHcpWeek || 1 });
+  } catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { showToast(lgErrText(res && res.error, 'Couldn’t import those')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  const miss = Array.isArray(d.unmatched) ? d.unmatched : [];
+  try {
+    showToast('Imported ' + d.written + (miss.length ? ' · no match for ' + miss.join(', ') : ''));
+  } catch (e) {}
+  try { lgOpenHandicaps(window._lgSeason, window._lgHcpWeek); } catch (e) {}
 }
 
 function renderBottomNav() {
