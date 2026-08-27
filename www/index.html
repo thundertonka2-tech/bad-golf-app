@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1263-->
+<!--BGVER=v2026.11.1264-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8672,7 +8672,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1263';
+const BG_BUILD = 'v2026.11.1264';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -75397,7 +75397,7 @@ async function lgOpenWeek(sid, weekId) {
 
   const wr = await _bgRead(function () {
     return supa.from('league_weeks')
-      .select('id,week_number,date,nine,course_id,status,points_possible,settings_snapshot,course_snapshot')
+      .select('id,week_number,date,nine,course_id,status,points_possible,settings_snapshot,course_snapshot,is_playoff,format_config')
       .eq('season_id', sid).order('week_number', { ascending: true });
   }, 'lgOpenWeek:weeks');
   if (!wr.ok) {
@@ -75471,8 +75471,9 @@ async function lgOpenWeek(sid, weekId) {
   const selfOn = !!((w.settings_snapshot || {}).play || {}).self_scheduled;
   const total = function (a) { return Array.isArray(a) ? a.reduce(function (x, y) { return x + (Number(y) || 0); }, 0) : null; };
 
+  const plLabel = (w.is_playoff && w.format_config && w.format_config.label) ? w.format_config.label : '';
   let h = lgCard('<div style="display:flex;align-items:baseline;gap:8px">' +
-    '<h2 style="margin:0;flex:1">Week ' + w.week_number + '</h2>' +
+    '<h2 style="margin:0;flex:1">' + (plLabel ? lgEsc(plLabel) : ('Week ' + w.week_number)) + '</h2>' +
     '<span class="bg-pill">' + lgEsc(w.status) + '</span></div>' +
     '<p class="help-text" style="margin:6px 0 0">' + lgEsc(lgWeekWhen(w)) + ' · ' + lgNineLabel(w.nine) +
     (hcp != null ? ' · your handicap ' + lgFmt(hcp) : '') + '</p>' +
@@ -75597,9 +75598,12 @@ async function lgOpenWeek(sid, weekId) {
       (open
         ? '<button class="full" style="margin-top:8px" onclick="lgFinalizeWeek(\'' + lgEsc(w.id) + '\',' + w.week_number + ')">Finalize week ' + w.week_number + '</button>'
         : '') +
+      (w.status === 'final' && w.is_playoff
+        ? '<button class="primary full" style="margin-top:12px" onclick="lgAdvancePlayoffs(\'' + lgEsc(sid) + '\')">Advance the bracket</button>'
+        : '') +
       (w.status === 'final'
         ? '<p class="help-text" style="margin:12px 0 6px">This week is finished and counted.</p>' +
-          '<button class="full" onclick="lgReopenWeek(\'' + lgEsc(w.id) + '\',' + w.week_number + ')">Reopen week ' + w.week_number + ' to correct it</button>'
+          '<button class="full" onclick="lgReopenWeek(\'' + lgEsc(w.id) + '\',' + w.week_number + ')">Reopen ' + (plLabel ? lgEsc(plLabel).toLowerCase() : ('week ' + w.week_number)) + ' to correct it</button>'
         : ''));
   }
 
@@ -75802,6 +75806,13 @@ async function lgOpenStandings(sid, seg) {
   }, 'lgOpenStandings:season');
   const sset = Object.assign({}, (sr.ok && sr.data && sr.data.settings) || {},
     { public_standings: !!(sr.ok && sr.data && sr.data.public_standings) });
+  let amCommishSt = false;
+  try {
+    const rr = await supa.rpc('league_roster', { p_season_id: sid });
+    const me = (rr && !rr.error && Array.isArray(rr.data))
+      ? rr.data.filter(function (m) { return m.user_id === _authUser.id; })[0] : null;
+    amCommishSt = !!(me && (me.role === 'commissioner' || me.role === 'co_commissioner'));
+  } catch (e) {}
   const segs = (sset.split_season && sset.split_season.enabled) ? ['full', 'h1', 'h2'] : [];
 
   const thru = rows.length ? rows[0].computed_through_week : null;
@@ -75842,6 +75853,14 @@ async function lgOpenStandings(sid, seg) {
           '<div class="help-text" style="margin:0;font-size:11px">' + lgFmt(r.points) + ' / ' + lgFmt(r.points_possible) + '</div>' +
           '</div></div>';
       }).join('') + '</div>';
+  }
+
+  /* Phase 10: the bracket is seeded off this very table, so it is offered here. */
+  if (amCommishSt && sset.playoffs && sset.playoffs.enabled) {
+    h += lgCard('<div class="bg-sec" style="margin-bottom:8px">Playoffs</div>' +
+      '<p class="help-text" style="margin:0 0 10px">Seeds ' + (sset.playoffs.qualifiers || 4) +
+      ' off these standings. Every regular week has to be finalised first.</p>' +
+      '<button class="primary full" onclick="lgBuildPlayoffs(\'' + lgEsc(sid) + '\')">Build the playoffs</button>');
   }
 
   /* Phase 11: the public board. Turning it OFF clears the token server-side,
@@ -76531,6 +76550,52 @@ async function lgOpenRules(sid) {
 
   h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back to the league</button></div>';
   body.innerHTML = h;
+}
+
+
+/* ===================== PHASE 10 — playoffs ==============================
+   A playoff round is just a WEEK whose pairings come from the standings
+   instead of the round-robin, so cards, approval, points, money and audit all
+   work here unchanged. The bracket order guarantees seeds 1 and 2 can only
+   meet in the final. */
+async function lgBuildPlayoffs(sid) {
+  let ok = false;
+  try {
+    ok = await uiConfirm('Seeds the bracket off the final standings and adds the playoff weeks. Every regular week has to be finalised first.',
+      { title: 'Build the playoffs', okLabel: 'Build' });
+  } catch (e) { ok = false; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_build_playoffs', { p_season_id: sid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_build_playoffs failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t build the bracket')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  try { showToast(d.qualifiers + ' qualifiers · ' + d.rounds + ' round' + (d.rounds === 1 ? '' : 's')); } catch (e) {}
+  try { lgOpenWeek(sid, d.first_week); } catch (e) {}
+}
+
+async function lgAdvancePlayoffs(sid) {
+  let res = null;
+  try { res = await supa.rpc('league_advance_playoffs', { p_season_id: sid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_advance_playoffs failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t advance the bracket')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  if (d.complete) {
+    try { showToast('🏆 ' + (d.name || 'Champion') + ' wins the season'); } catch (e) {}
+    try { lgOpenStandings(sid); } catch (e) {}
+    return;
+  }
+  if (d.already_filled) { try { showToast('That round is already set'); } catch (e) {} }
+  else { try { showToast('Next round is set'); } catch (e) {} }
+  try { lgOpenWeek(sid, d.week_id); } catch (e) {}
 }
 
 function renderBottomNav() {
