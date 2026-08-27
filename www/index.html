@@ -8603,7 +8603,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1242';
+const BG_BUILD = 'v2026.11.1243';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -44046,6 +44046,7 @@ async function buildSettleUpText() {
   const where = g.course ? (' — ' + g.course) : '';
   const lines = ['⛳ Bad Golf settle-up' + where];
   (await _settleUpLinesFor(settlements, nm, id => g.players.find(pp => pp.id === id))).forEach(l => lines.push(l));
+  _bgAppendStoreFooter(lines);   // v1243: the settle text reaches every player incl. app-less guests
   return lines.join('\n');
 }
 
@@ -44089,6 +44090,7 @@ async function buildCombinedSettleUpText(t, combinedPay, opts) {
   // who owes who, and how to pay them. (fmtMoney went with them.)
   lines.push('Settle up:', '');   // v1161: blank line after the header
   (await _settleUpLinesFor(settlements, nm, findPlayer)).forEach(l => lines.push(l));
+  _bgAppendStoreFooter(lines);   // v1243: same footer as the round-only text
   return lines.join('\n');
 }
 
@@ -77271,6 +77273,7 @@ async function init() {
       // course wifi. Close the summary, go home, then finish the chores in the
       // background. _bgFinishCleanup is fire-and-forget and fully self-guarded.
       try { _bgReleaseSummaryUI(g); } catch (e) { console.warn('summary release failed:', e); }
+      try { bgPostFinishGrowth(g); } catch (e) {}   // v1243: rating ask / invite nudge, one max, delayed
       try { if (g.t2 && g.t2.tournamentId) t2MaybeCompleteDay(g); } catch (e) {}   // v1154: last group in → day complete
       // v940: retire any invites still outstanding for this round — nobody should
       // be invited to a round that just ended.
@@ -83621,6 +83624,123 @@ async function shareGameInvite(name) {
   catch (e) { showToast(text, 6000); }
 }
 
+
+// ============================ v1243 GROWTH LOOP ============================
+// Tyler, Aug 27 2026: "code what you can" from the zero-budget growth plan.
+// Four pieces, all additive and try/catch-wrapped so none can break boot:
+//   1. bgMaybeAskRating   - post-round rating ask (the listing has 2 ratings;
+//      that is the #1 conversion blocker per the July ASO audit). Opens the
+//      App Store write-review page directly - no native plugin, no Podfile
+//      change, no Codemagic risk. 90-day re-ask cap mirrors Apple's own
+//      SKStoreReviewController cadence; a tapped "Rate" never asks again.
+//   2. bgMaybeNudgeInvite - occasional "send the app to another crew" nudge,
+//      30-day cap, only fires on a finish where the rating ask did NOT show,
+//      so a player never sees two prompts after one round.
+//   3. _bgAppendStoreFooter - store links on the settle-up text. The settle
+//      text is the one message guaranteed to reach every player in the round
+//      INCLUDING guests scored by someone else's phone - exactly the people
+//      who don't have the app yet. Links sit alone at line start per the
+//      v1048 SMS-linkification rule.
+//   4. bgShowJoinWelcome - a signed-out WEB visitor tapping a ?join= text
+//      used to land on the bare sign-in modal with zero context. Greet them:
+//      what this is, both store buttons, and a continue-in-browser path that
+//      resumes the untouched sign-in -> join hand-off underneath.
+const BG_REVIEW_URL = 'https://apps.apple.com/app/id6779399027?action=write-review';
+const KEY_RATE_STATE = 'golf:rate-state';          // {done:bool, askedAt:ms}
+const KEY_INVITE_NUDGE_AT = 'golf:invite-nudge-at';
+
+// Open an external URL from web or the Capacitor shell. Same ladder as the
+// docs-PDF opener: Capacitor Browser plugin -> window.open -> location.href.
+function _bgOpenExternal(url) {
+  try { if (window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.Browser && Capacitor.Plugins.Browser.open) { Capacitor.Plugins.Browser.open({ url: url }); return; } } catch (e) {}
+  try { const w = window.open(url, '_blank'); if (w) return; } catch (e) {}
+  try { window.location.href = url; } catch (e) {}
+}
+
+function _bgRateState() { try { return JSON.parse(localStorage.getItem(KEY_RATE_STATE) || '{}') || {}; } catch (e) { return {}; } }
+function _bgSaveRateState(st) { try { localStorage.setItem(KEY_RATE_STATE, JSON.stringify(st || {})); } catch (e) {} }
+
+// Returns true when the prompt was SHOWN (regardless of the answer) so the
+// post-finish dispatcher knows not to stack a second prompt on top.
+async function bgMaybeAskRating(g) {
+  try {
+    if (!g || !Array.isArray(g.players) || g.players.length < 2) return false;   // real group rounds only
+    const st = _bgRateState();
+    if (st.done) return false;
+    if (st.askedAt && (Date.now() - st.askedAt) < 90 * 24 * 3600 * 1000) return false;
+    let plat = 'web'; try { if (window.Capacitor && Capacitor.getPlatform) plat = Capacitor.getPlatform() || 'web'; } catch (e) {}
+    const url = (plat === 'android') ? BG_PLAYSTORE_URL : BG_REVIEW_URL;
+    st.askedAt = Date.now(); _bgSaveRateState(st);   // stamp BEFORE showing - a crash mid-prompt must not re-ask tomorrow
+    const yes = await uiConfirm('A quick rating helps other golf crews find the app — it takes about 10 seconds and makes a real difference. ⭐', { title: 'Enjoying Bad Golf?', okLabel: '⭐ Rate Bad Golf', cancelLabel: 'Not now', danger: false });
+    if (yes) { st.done = true; _bgSaveRateState(st); _bgOpenExternal(url); }
+    return true;
+  } catch (e) { return false; }
+}
+
+async function bgMaybeNudgeInvite() {
+  try {
+    let last = 0; try { last = Number(localStorage.getItem(KEY_INVITE_NUDGE_AT) || 0); } catch (e) {}
+    if (last && (Date.now() - last) < 30 * 24 * 3600 * 1000) return false;
+    try { localStorage.setItem(KEY_INVITE_NUDGE_AT, String(Date.now())); } catch (e) {}
+    const yes = await uiConfirm('Know another crew that would love this? Send them the free app — more groups, better games.', { title: 'Spread the word 🏌️', okLabel: '📲 Send the app', cancelLabel: 'Not now', danger: false });
+    if (yes) { try { await shareBetaInvite(); } catch (e) {} }
+    return true;
+  } catch (e) { return false; }
+}
+
+// One prompt max per finished round: rating first, invite nudge only when the
+// rating ask was skipped by its own rules. Delayed so it appears on Home,
+// after the summary modal has closed - never in the settle-up flow itself.
+function bgPostFinishGrowth(g) {
+  try {
+    setTimeout(async function () {
+      try {
+        const shown = await bgMaybeAskRating(g);
+        if (!shown) await bgMaybeNudgeInvite();
+      } catch (e) {}
+    }, 1600);
+  } catch (e) {}
+}
+
+// Store-links footer for the settle-up text (see header note). Mutates the
+// lines array in place; never throws.
+function _bgAppendStoreFooter(lines) {
+  try {
+    lines.push('', 'Scored & settled free with the Bad Golf app ⛳');
+    lines.push('iPhone: ' + BG_APPSTORE_URL);
+    lines.push('Android: ' + BG_PLAYSTORE_URL);
+  } catch (e) {}
+}
+
+// Signed-out web visitor on a ?join= link: branded welcome above the auth
+// modal. "Continue in the browser" just removes the overlay - the auth modal
+// (already .show underneath) and the stashed pending-join code do the rest,
+// so the existing hand-off path is completely untouched.
+function bgShowJoinWelcome() {
+  try {
+    if (document.getElementById('bg-join-welcome')) return;
+    const d = document.createElement('div');
+    d.id = 'bg-join-welcome';
+    d.style.cssText = 'position:fixed;inset:0;z-index:100060;background:rgba(10,24,40,.93);display:flex;align-items:center;justify-content:center;padding:24px;';
+    d.innerHTML = '<div style="max-width:340px;width:100%;background:#fff;border-radius:16px;padding:24px 20px;text-align:center;">'
+      + '<div style="font-size:40px;line-height:1">⛳</div>'
+      + '<h2 style="margin:10px 0 6px;font-size:20px;color:#0e3a64;">You’re invited to a round!</h2>'
+      + '<p style="margin:0 0 16px;color:#4b5563;font-size:14px;line-height:1.45;">Your crew keeps score, runs the bets and settles up in <strong>Bad Golf</strong> — free. The app is the best way to play.</p>'
+      + '<a href="' + BG_APPSTORE_URL + '" style="display:block;background:#0e3a64;color:#fff;text-decoration:none;border-radius:10px;padding:12px;font-weight:700;margin-bottom:8px;">📱 Get the free iPhone app</a>'
+      + '<a href="' + BG_PLAYSTORE_URL + '" style="display:block;background:#1a7f37;color:#fff;text-decoration:none;border-radius:10px;padding:12px;font-weight:700;margin-bottom:12px;">🤖 Get it on Android</a>'
+      + '<div style="color:#6b7280;font-size:12px;margin-bottom:12px;">Installing? Come back and tap your invite link again — it drops you straight into the round.</div>'
+      + '<button id="bg-join-welcome-continue" style="background:none;border:none;color:#0e3a64;font-size:15px;font-weight:600;text-decoration:underline;padding:8px;cursor:pointer;">Continue in the browser</button>'
+      + '</div>';
+    document.body.appendChild(d);
+    const b = d.querySelector('#bg-join-welcome-continue');
+    if (b) b.onclick = function () {
+      try { d.remove(); } catch (e) { try { d.style.display = 'none'; } catch (e2) {} }
+      try { const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); } catch (e) {}
+    };
+  } catch (e) {}
+}
+// ========================== end v1243 GROWTH LOOP ==========================
+
 // ?join=CODE deep link: from an invite text/email straight into the round.
 // Login is mandatory, so stash the code and finish the join AFTER authentication
 // (handled in onAuthStateChange, same pattern as tournament ?tjoin= links). This
@@ -83651,6 +83771,10 @@ let _pendingJoinTok = null;
   if (!(typeof isSignedIn === 'function' && isSignedIn())) {
     try { const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); } catch (e) {}
     showToast('Sign in to join the round');
+    // v1243: on the web (not the native shell), greet the invitee before the bare
+    // sign-in modal - store buttons + continue-in-browser. Overlay only; the
+    // pending-join stash above is already done, so nothing in the flow changes.
+    try { var _bgNativeJ = !!(window.Capacitor && (window.Capacitor.isNativePlatform ? window.Capacitor.isNativePlatform() : window.Capacitor.isNative)); if (!_bgNativeJ) bgShowJoinWelcome(); } catch (e) {}
   }
 })();
 // ?claim=<token>: a host-issued link that hands a guest's whole record (rounds,
