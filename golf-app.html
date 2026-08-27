@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1254-->
+<!--BGVER=v2026.11.1255-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8633,7 +8633,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1254';
+const BG_BUILD = 'v2026.11.1255';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -74515,7 +74515,8 @@ async function lgOpenSeason(sid) {
        '<div style="display:flex;gap:8px;margin-top:8px">' +
        '<button style="flex:1" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Schedule</button>' +
        '<button style="flex:1" onclick="lgOpenHandicaps(\'' + lgEsc(sid) + '\')">Handicaps</button>' +
-       '<button style="flex:1" onclick="renderLeague()">Back</button></div></div>';
+       '<button style="flex:1" onclick="lgOpenStandings(\'' + lgEsc(sid) + '\')">Standings</button></div>' +
+       '<button class="full" style="margin-top:8px" onclick="renderLeague()">Back</button></div>';
   body.innerHTML = h;
 }
 
@@ -75477,6 +75478,15 @@ async function lgOpenWeek(sid, weekId) {
       (((w.settings_snapshot || {}).play || {}).window_days || 6) + ' days of the league day.</span></span></label>' +
       (w.status === 'scheduled'
         ? '<button class="primary full" style="margin-top:12px" onclick="lgOpenWeekNow()">Open week ' + w.week_number + ' now</button>'
+        : '') +
+      /* Phase 7. The server refuses while a card is disputed or unsigned and
+         says which one, so the button stays plain and the refusal explains. */
+      (open
+        ? '<button class="full" style="margin-top:8px" onclick="lgFinalizeWeek(\'' + lgEsc(w.id) + '\',' + w.week_number + ')">Finalize week ' + w.week_number + '</button>'
+        : '') +
+      (w.status === 'final'
+        ? '<p class="help-text" style="margin:12px 0 6px">This week is finished and counted.</p>' +
+          '<button class="full" onclick="lgReopenWeek(\'' + lgEsc(w.id) + '\',' + w.week_number + ')">Reopen week ' + w.week_number + ' to correct it</button>'
         : ''));
   }
 
@@ -75638,6 +75648,130 @@ async function lgOfferRoundToLeague(code) {
       return;
     }
   } catch (e) { try { console.warn('lgOfferRoundToLeague', e); } catch (e2) {} }
+}
+
+
+/* ===================== PHASE 7 — points and standings ====================
+   league_standings_get returns the table already ranked AND already tie-broken
+   by the server (§12: head-to-head, weeks played, low net, matches won, then
+   countback on the back 9/6/3/1). The client never re-sorts it. A client and a
+   server that disagree about third place is an argument in a group text. */
+async function lgOpenStandings(sid, seg) {
+  const body = document.getElementById('league-body'); if (!body || !sid) return;
+  window._lgSeason = sid;
+  window._lgSeg = seg || 'full';
+  try { switchTab('league'); } catch (e) {}
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Loading the standings…</p>');
+
+  let res = null;
+  try { res = await supa.rpc('league_standings_get', { p_season_id: sid, p_segment: window._lgSeg }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_standings_get failed:', res && res.error); } catch (e) {}
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">' +
+      lgEsc(lgErrText(res && res.error, 'Couldn’t load the standings')) + '</p>' +
+      '<button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back</button>');
+    return;
+  }
+  const rows = Array.isArray(res.data) ? res.data : [];
+
+  const sr = await _bgRead(function () {
+    return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
+  }, 'lgOpenStandings:season');
+  const sset = (sr.ok && sr.data && sr.data.settings) || {};
+  const segs = (sset.split_season && sset.split_season.enabled) ? ['full', 'h1', 'h2'] : [];
+
+  const thru = rows.length ? rows[0].computed_through_week : null;
+  let h = lgCard('<div style="display:flex;align-items:baseline;gap:8px">' +
+    '<h2 style="margin:0;flex:1">Standings</h2>' +
+    (thru ? '<span class="bg-pill">through week ' + thru + '</span>' : '') + '</div>' +
+    (rows.length
+      ? '<p class="help-text" style="margin:6px 0 0">Ranked on the percentage of the points that were actually available to you — so a bye, or a week before you joined, can’t help you or hurt you.</p>'
+      : '<p class="help-text" style="margin:6px 0 0">Nothing to rank yet. The table fills in as weeks are finalized.</p>') +
+    (segs.length
+      ? '<div style="display:flex;gap:6px;margin-top:10px">' + segs.map(function (s) {
+          return '<button type="button" class="small"' +
+            (s === window._lgSeg ? ' style="border-color:var(--bg-brand);font-weight:800"' : '') +
+            ' onclick="lgOpenStandings(\'' + lgEsc(sid) + '\',\'' + s + '\')">' +
+            (s === 'full' ? 'Season' : (s === 'h1' ? 'First half' : 'Second half')) + '</button>';
+        }).join('') + '</div>'
+      : ''));
+
+  if (rows.length) {
+    h += '<div class="card"><div class="bg-sec">Table <span>' + rows.length + '</span></div>' +
+      rows.map(function (r) {
+        const pct = (r.pct == null) ? '—' : (Math.round(Number(r.pct) * 10) / 10) + '%';
+        const rec = [];
+        if (r.wins || r.losses || r.ties) rec.push(r.wins + '-' + r.losses + '-' + r.ties);
+        rec.push(r.weeks_played + ' played');
+        if (r.weeks_absent) rec.push(r.weeks_absent + ' missed');
+        if (r.low_net != null) rec.push('best net ' + r.low_net);
+        const tb = (r.decided_by && r.decided_by !== 'unbroken')
+          ? ' · tie broken on ' + String(r.decided_by).replace(/_/g, ' ') : '';
+        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="flex:0 0 26px;font-weight:800;font-size:15px;color:var(--text-muted)">' + r.rank + '</div>' +
+          '<div style="min-width:0;flex:1">' +
+          '<div style="font-weight:700;font-size:14px">' + lgEsc(r.name) +
+            (r.flight ? ' <span class="bg-pill" style="font-size:10px">F' + r.flight + '</span>' : '') + '</div>' +
+          '<div class="help-text" style="margin:0;font-size:12px">' + lgEsc(rec.join(' · ') + tb) + '</div></div>' +
+          '<div style="flex:0 0 auto;text-align:right">' +
+          '<div style="font-weight:800;font-size:15px">' + pct + '</div>' +
+          '<div class="help-text" style="margin:0;font-size:11px">' + lgFmt(r.points) + ' / ' + lgFmt(r.points_possible) + '</div>' +
+          '</div></div>';
+      }).join('') + '</div>';
+  }
+
+  h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back to the league</button></div>';
+  body.innerHTML = h;
+}
+
+/* The commissioner saying the week is done. The server refuses while anything
+   is disputed or still waiting to be signed for, and the refusal names what is
+   blocking it — so this button does not need to pre-check anything. */
+async function lgFinalizeWeek(wid, n) {
+  if (!wid) return;
+  let ok = false;
+  try {
+    ok = await uiConfirm('Finalize week ' + n + '? Scores stop counting for it and the standings update.',
+      { title: 'Finalize week ' + n, okLabel: 'Finalize' });
+  } catch (e) { ok = false; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_finalize_week', { p_week_id: wid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_finalize_week failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t finalize the week')); } catch (e) {}
+    return;
+  }
+  try {
+    showToast((res.data && res.data.already_final) ? 'Week ' + n + ' was already final' : 'Week ' + n + ' is final');
+  } catch (e) {}
+  try { lgOpenStandings(window._lgSeason); } catch (e) {}
+}
+
+/* §12.1 — week 3 was wrong and you find out in week 5. Reopening is explicit,
+   commissioner-only, needs a reason, and is announced in the audit trail. It
+   recomputes week 3 ONLY: weeks 4+ handicaps were locked and played against,
+   and moving them retroactively rewrites matches nobody can replay. */
+async function lgReopenWeek(wid, n) {
+  if (!wid) return;
+  let why = null;
+  try {
+    why = await uiPrompt('Everyone can see why a finished week was reopened.',
+      { title: 'Reopen week ' + n, okLabel: 'Reopen', placeholder: 'e.g. Kevin’s back nine was entered wrong' });
+  } catch (e) { why = null; }
+  if (!why || !String(why).trim()) return;
+  let res = null;
+  try { res = await supa.rpc('league_reopen_week', { p_week_id: wid, p_reason: String(why).trim() }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_reopen_week failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t reopen the week')); } catch (e) {}
+    return;
+  }
+  try { showToast('Week ' + n + ' is open again'); } catch (e) {}
+  try { lgOpenWeek(window._lgSeason, wid); } catch (e) {}
 }
 
 function renderBottomNav() {
