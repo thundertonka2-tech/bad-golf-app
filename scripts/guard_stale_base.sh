@@ -27,6 +27,14 @@
 #   3. TRUNCATION    — unbalanced <script> tags, or no closing </html>.
 #   4. BIG SHRINK    — a large net line-count drop.
 #   5. WEB/iOS DRIFT — golf-app.html and www/index.html app scripts differing.
+#   6. BGVER DRIFT  — the <!--BGVER=...--> head comment not matching BG_BUILD.
+#                     Not a correctness bug (checkForNewBuild only trusts the
+#                     fast 2 KB path when a file's own comment agrees with its
+#                     own BG_BUILD, so it degrades safely) — but it silently
+#                     undoes the whole v1140 fix and puts an 800 KB range fetch
+#                     back on EVERY web launch. It drifted from v1240 to v1250
+#                     and nothing noticed for eleven builds, which is exactly
+#                     why it is checked here now rather than remembered.
 #
 # Exit 0 = clean. Exit 1 = something looks wrong; the pre-commit hook blocks.
 # Deliberate removals are fine — just confirm them (the hook tells you how).
@@ -129,6 +137,13 @@ for f in $FILES; do
   # 2. VERSION GOING BACKWARDS
   if [ "$wb" -lt "$hb" ]; then
     problem "$f BG_BUILD went BACKWARDS ($hb → $wb). Stale base, or the bump was missed."
+  fi
+
+  # 6. BGVER DRIFT — the head comment must match this file's own BG_BUILD.
+  bgver=$(sed -n '1,20p' "$f" | grep -oE 'BGVER=v[0-9.]+' | head -1 | cut -d= -f2)
+  bgbld=$(grep -oE "BG_BUILD[[:space:]]*=[[:space:]]*'v[0-9.]+'" "$f" | head -1 | grep -oE 'v[0-9.]+')
+  if [ -n "$bgver" ] && [ -n "$bgbld" ] && [ "$bgver" != "$bgbld" ]; then
+    problem "$f BGVER comment ($bgver) does not match BG_BUILD ($bgbld). Bump BOTH — otherwise every web launch re-fetches 800 KB instead of 2 KB."
   fi
 
   # 3. TRUNCATION
