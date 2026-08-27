@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1251-->
+<!--BGVER=v2026.11.1252-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8633,7 +8633,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1251';
+const BG_BUILD = 'v2026.11.1252';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -74407,11 +74407,13 @@ async function lgOpenSeason(sid) {
     return supa.from('league_seasons')
       .select('id,name,status,join_code,settings,league_id,leagues(name,logo)').eq('id', sid).maybeSingle();
   }, 'lgOpenSeason:season');
+  // league_roster() instead of a plain select: claimed_by is a bare uuid and the
+  // profiles row behind it is not client-readable, so the one thing worth seeing
+  // -- WHICH ACCOUNT actually took each seat -- is exactly what a select cannot
+  // return. It also flags a claim whose name does not match the seat.
   const mr = await _bgRead(function () {
-    return supa.from('league_members')
-      .select('id,display_name,status,role,invite_email,invite_token,invite_sent_at,user_id')
-      .eq('season_id', sid).order('created_at', { ascending: true });
-  }, 'lgOpenSeason:members');
+    return supa.rpc('league_roster', { p_season_id: sid });
+  }, 'lgOpenSeason:roster');
   if (!sr.ok || !mr.ok || !sr.data) {
     body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">Couldn’t load that league.</p>' +
       '<button class="full" onclick="renderLeague()">Back to leagues</button>');
@@ -74439,9 +74441,20 @@ async function lgOpenSeason(sid) {
         right = '<button class="small" onclick="event.stopPropagation();lgRemove(\'' + lgEsc(m.id) + '\',\'active\',\'' + lgEsc(m.display_name) + '\')">Remove</button>';
       }
     }
-    const sub = (m.role === 'commissioner') ? 'Commissioner'
-      : (m.status === 'invited' ? (m.invite_email ? ('Invited · ' + lgEsc(m.invite_email)) : 'Invited')
-      : (m.status === 'requested' ? 'Asked to join' : ''));
+    let sub;
+    if (m.role === 'commissioner') sub = 'Commissioner';
+    else if (m.status === 'invited') {
+      sub = (m.invite_sent_at ? 'Invite sent' : 'Not sent yet') +
+            (m.invite_phone ? ' · ' + lgEsc(m.invite_phone)
+                            : (m.invite_email ? ' · ' + lgEsc(m.invite_email) : ''));
+    } else if (m.status === 'requested') sub = 'Asked to join';
+    else if (m.claimed && m.claimed_by_name) {
+      // Who actually took the seat. league_claim_member() refuses a claim whose
+      // name does not match, so a mismatch here is rare and worth a second look.
+      sub = m.claim_name_mismatch
+        ? ('⚠︎ claimed by ' + lgEsc(m.claimed_by_name))
+        : ('Joined as ' + lgEsc(m.claimed_by_name));
+    } else sub = '';
     return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
       '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(m.display_name) + '</div>' +
       (sub ? '<div class="help-text" style="margin:0;font-size:12px">' + sub + '</div>' : '') + '</div>' +
@@ -74480,56 +74493,10 @@ async function lgOpenSeason(sid) {
   body.innerHTML = h;
 }
 
-function lgMailto(to, leagueName, seatName, token) {
-  const base = (typeof BG_PUBLIC_URL === 'string' && BG_PUBLIC_URL) ? BG_PUBLIC_URL : location.origin + location.pathname;
-  const link = base + '?lg=' + encodeURIComponent(token);
-  const subj = 'You’re invited to ' + leagueName;
-  const bodyTxt = (seatName ? seatName + ',\n\n' : '') +
-    'You’re invited to join ' + leagueName + ' on Bad Golf.\n\n' + link +
-    '\n\nThis link is just for you — it only works from this email address.\n';
-  return 'mailto:' + encodeURIComponent(to) + '?subject=' + encodeURIComponent(subj) + '&body=' + encodeURIComponent(bodyTxt);
-}
-function lgSendInviteEmail(to, leagueName, seatName, token) {
-  try { window.location.href = lgMailto(to, leagueName, seatName, token); }
-  catch (e) { try { showToast('Couldn’t open your mail app'); } catch (e2) {} }
-}
-
 /* One seat, one call. Returns true/false so the picker can batch and report.
    Section 5.2.1: a name with no account REQUIRES an email -- it is the only
    destination that exists AND it is what binds the claim, so a forwarded link
    cannot be redeemed by the wrong account. The server enforces it too. */
-async function lgAddMember(sid, name, email, userId) {
-  let res = null;
-  try {
-    res = await supa.rpc('league_add_member', {
-      p_season_id: sid, p_display_name: name,
-      p_invite_email: email || null, p_user_id: userId || null });
-  } catch (e) { res = { data: null, error: e }; }
-  if (!res || res.error) {
-    try { console.warn('league_add_member failed:', res && res.error); } catch (e) {}
-    try { showToast(lgErrText(res && res.error, 'Couldn\u2019t add ' + name)); } catch (e) {}
-    return false;
-  }
-  return true;
-}
-
-
-async function lgResend(mid) {
-  let res = null;
-  try { res = await supa.rpc('league_resend_invite', { p_member_id: mid }); }
-  catch (e) { res = { data: null, error: e }; }
-  if (!res || res.error) {
-    try { console.warn('league_resend_invite failed:', res && res.error); } catch (e) {}
-    try { showToast(lgErrText(res && res.error, 'Couldn’t re-send that invite')); } catch (e) {}
-    return;
-  }
-  const d = res.data || {};
-  let leagueName = 'the league';
-  try { const c = document.querySelector('#league-body .card h2'); if (c) leagueName = c.textContent || leagueName; } catch (e) {}
-  if (!d.invite_email) { try { showToast('That seat has no email on it'); } catch (e) {} return; }
-  lgSendInviteEmail(d.invite_email, leagueName, d.display_name, d.invite_token);
-}
-
 async function lgApprove(mid) {
   let res = null;
   try { res = await supa.rpc('league_approve_member', { p_member_id: mid }); }
@@ -75056,6 +75023,93 @@ async function lgDoImportHandicaps() {
    already resolves to an account needs nothing extra; a name that does not gets
    an inline email field, right under the row, the moment it is selected.
    ==================================================================== */
+/* ===================== LEAGUE INVITES GO BY TEXT (v1251) ===================
+   Tyler 2026-08-27: "No email engine is no problem, lets do everything through
+   text links instead" — and on protecting a seat: "1 and 3", then "if we send
+   the link they login and they don't match a user in the league then just don't
+   let them in. The admin should not have to do anything."
+
+   So: a phone number is the destination, sent with sms: from the commissioner's
+   own phone — no provider, no domain, no API key. The email path is kept as an
+   OPTIONAL, strictly stronger binding wherever an address is known.
+
+   The seat is protected AT LOGIN, server-side, by league_claim_member(): the
+   claiming account's name has to describe the same person as the seat, or the
+   claim is refused outright. Nothing here needs the commissioner to police it.
+   ==================================================================== */
+
+/* One seat, one call. Returns true/false so the picker can batch and report. */
+async function lgAddMember(sid, name, phone, email, userId) {
+  let res = null;
+  try {
+    res = await supa.rpc('league_add_member', {
+      p_season_id: sid, p_display_name: name,
+      p_invite_email: email || null, p_user_id: userId || null,
+      p_invite_phone: phone || null });
+  } catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_add_member failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t add ' + name)); } catch (e) {}
+    return false;
+  }
+  return true;
+}
+
+function lgInviteLink(token) {
+  const base = (typeof BG_PUBLIC_URL === 'string' && BG_PUBLIC_URL) ? BG_PUBLIC_URL : (location.origin + location.pathname);
+  return base + '?lg=' + encodeURIComponent(token);
+}
+
+/* Text first. Same idiom the app already uses everywhere else it opens Messages
+   (_bgSendSettleSms, the ?claim= link sender): iOS wants '&' after the number,
+   everything else wants '?'. Falls back to the share sheet, then the clipboard,
+   so the commissioner is never stuck with no way to pass the link on. */
+async function lgSendInvite(d, leagueName) {
+  const name = (d && d.display_name) || 'you';
+  const link = lgInviteLink(d && d.invite_token);
+  const text = name + ' — you’re in ' + (leagueName || 'the league') + ' on Bad Golf.\n\n' + link +
+    '\n\nThis link is just for you. Sign in with your own account and it’ll put you straight on the roster.';
+  const phone = (d && d.invite_phone) ? String(d.invite_phone).replace(/[^0-9+]/g, '') : '';
+  if (phone) {
+    try {
+      const sep = /iP(hone|ad|od)|Mac/i.test(navigator.userAgent || '') ? '&' : '?';
+      window.location.href = 'sms:' + phone + sep + 'body=' + encodeURIComponent(text);
+      return true;
+    } catch (e) {}
+  }
+  if (d && d.invite_email) {
+    try {
+      window.location.href = 'mailto:' + encodeURIComponent(d.invite_email) +
+        '?subject=' + encodeURIComponent('You’re invited to ' + (leagueName || 'the league')) +
+        '&body=' + encodeURIComponent(text);
+      return true;
+    } catch (e) {}
+  }
+  try { if (navigator.share) { await navigator.share({ text: text }); return true; } }
+  catch (e) { if (e && e.name === 'AbortError') return true; }
+  try { await navigator.clipboard.writeText(text); showToast('Invite link for ' + name + ' copied 📋'); return true; }
+  catch (e) { try { showToast('Could not open Messages'); } catch (e2) {} return false; }
+}
+
+async function lgResend(mid) {
+  let res = null;
+  try { res = await supa.rpc('league_resend_invite', { p_member_id: mid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_resend_invite failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t send that invite')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  if (!d.invite_phone && !d.invite_email) {
+    try { showToast('That seat has no number or email on it'); } catch (e) {}
+    return;
+  }
+  let leagueName = 'the league';
+  try { const c = document.querySelector('#league-body .card h2'); if (c) leagueName = c.textContent || leagueName; } catch (e) {}
+  await lgSendInvite(d, leagueName);
+}
+
 async function lgOpenAddPlayerPicker(sid) {
   sid = sid || window._lgSeason;
   if (!sid) { try { showToast('Open the league first'); } catch (e) {} return; }
@@ -75063,19 +75117,15 @@ async function lgOpenAddPlayerPicker(sid) {
   let roster = [], existing = [];
   try {
     roster = await getPlayerRoster();
-    const r = await _bgRead(function () {
-      return supa.from('league_members').select('display_name,status').eq('season_id', sid);
-    }, 'lgPicker:members');
-    existing = (r.ok && Array.isArray(r.data)) ? r.data : [];
+    const r = await supa.rpc('league_roster', { p_season_id: sid });
+    existing = (r && !r.error && Array.isArray(r.data)) ? r.data : [];
   } catch (e) {}
 
   const norm = function (s) {
     try { return (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').trim().toLowerCase(); }
     catch (e2) { return String(s || '').trim().toLowerCase(); }
   };
-  const already = new Set(existing
-    .filter(function (m) { return ['invited', 'requested', 'active'].indexOf(m.status) >= 0; })
-    .map(function (m) { return norm(m.display_name); }));
+  const already = new Set(existing.map(function (m) { return norm(m.display_name); }));
   let avail = (roster || [])
     .filter(function (r2) { return r2 && r2.name && !already.has(norm(r2.name)); })
     .sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); });
@@ -75087,7 +75137,7 @@ async function lgOpenAddPlayerPicker(sid) {
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
       '<h2 style="margin:0">➕ Add players</h2>' +
       '<button id="lgap-x" aria-label="Close" style="background:transparent;border:none;font-size:22px;line-height:1;cursor:pointer">✕</button></div>' +
-    '<p class="help-text" style="margin:0 0 8px">Tap anyone to add them. Players who aren’t on Bad Golf yet need an email — that’s how the invite reaches them, and only that address can accept it.</p>' +
+    '<p class="help-text" style="margin:0 0 8px">Tap anyone to add them. Players who aren’t on Bad Golf yet need a mobile number — you’ll text them the invite from your own phone.</p>' +
     '<input type="text" id="lgap-search" placeholder="🔍 Search players…" autocomplete="off" style="width:100%;margin-bottom:8px">' +
     '<div id="lgap-rows" style="flex:1;overflow-y:auto;min-height:60px"></div>' +
     '<div class="actions" style="margin-top:10px">' +
@@ -75097,7 +75147,7 @@ async function lgOpenAddPlayerPicker(sid) {
 
   const rowsEl = ov.querySelector('#lgap-rows');
   const doneBtn = ov.querySelector('#lgap-done');
-  const selected = new Map();   // name -> { uid, email }
+  const selected = new Map();   // name -> { uid, phone, email }
   let _busy = false;
 
   const close = function () {
@@ -75115,14 +75165,12 @@ async function lgOpenAddPlayerPicker(sid) {
   };
 
   const rowHtml = function (list) {
-    if (!list.length) {
-      return '<div class="help-text" style="padding:8px 2px">Nobody left to add — use “+ New person”.</div>';
-    }
+    if (!list.length) return '<div class="help-text" style="padding:8px 2px">Nobody left to add — use “+ New person”.</div>';
     return list.map(function (r) {
       const h = (typeof t2RosterHcp === 'function') ? t2RosterHcp(r) : null;
       const sel = selected.get(r.name);
       const on = !!sel;
-      const needsEmail = on && !sel.uid;
+      const needs = on && !sel.uid;
       return '<div class="lgap-wrap" data-name="' + t2esc(r.name) + '">' +
         '<div class="lgap-row" data-name="' + t2esc(r.name) + '" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 2px;border-top:1px solid var(--border)">' +
           ((typeof crewAvatarHtml === 'function') ? crewAvatarHtml(r, false) : '') +
@@ -75132,16 +75180,21 @@ async function lgOpenAddPlayerPicker(sid) {
             ((typeof testPillHtml === 'function') ? testPillHtml(r.name) : '') +
             (h != null ? ' <span class="small-text" style="color:var(--text-muted)">(HCP ' + h + ')</span>' : '') +
           '</div>' +
-          (on ? '<div class="small-text" style="color:var(--text-muted)">' + (sel.uid ? 'On Bad Golf — no email needed' : 'Needs an email') + '</div>' : '') +
+          (on ? '<div class="small-text" style="color:var(--text-muted)">' +
+                (sel.uid ? 'On Bad Golf — nothing else needed' : 'Text them the invite') + '</div>' : '') +
         '</div>' +
         '<div class="lgap-check" style="flex:0 0 auto;width:24px;height:24px;border-radius:7px;border:2px solid ' +
           (on ? 'var(--accent)' : 'var(--border)') + ';background:' + (on ? 'var(--accent)' : 'transparent') +
           ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800">' + (on ? '✓' : '') + '</div>' +
         '</div>' +
-        (needsEmail
-          ? '<div style="padding:0 2px 10px 46px"><input type="email" class="lgap-email" data-name="' + t2esc(r.name) + '" ' +
-            'inputmode="email" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" ' +
-            'placeholder="email address" value="' + t2esc(sel.email || '') + '" style="width:100%"></div>'
+        (needs
+          ? '<div style="padding:0 2px 10px 46px">' +
+            '<input type="tel" class="lgap-phone" data-name="' + t2esc(r.name) + '" inputmode="tel" ' +
+              'autocomplete="off" placeholder="mobile number" value="' + t2esc(sel.phone || '') + '" style="width:100%;margin-bottom:6px">' +
+            '<input type="email" class="lgap-email" data-name="' + t2esc(r.name) + '" inputmode="email" ' +
+              'autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" ' +
+              'placeholder="email (optional — locks the invite to it)" value="' + t2esc(sel.email || '') + '" style="width:100%">' +
+            '</div>'
           : '') +
         '</div>';
     }).join('');
@@ -75151,29 +75204,34 @@ async function lgOpenAddPlayerPicker(sid) {
     rowsEl.querySelectorAll('.lgap-row').forEach(function (row) {
       row.onclick = async function () {
         const name = row.getAttribute('data-name');
-        if (selected.has(name)) {
-          selected.delete(name);
-        } else {
-          // Resolve the account BEFORE deciding whether an email is required --
-          // an existing Bad Golf user is addressable by uid and should never be
-          // asked for one. Cached in the app's own _t2UidCache.
+        if (selected.has(name)) selected.delete(name);
+        else {
           let uid = null;
           try { uid = await t2ResolveUserIdByName(name); } catch (e) {}
-          selected.set(name, { uid: uid || null, email: '' });
+          // Most numbers are already known: the app's own roster carries a phone
+          // for anyone who has ever been texted a round invite (v640).
+          let ph = '';
+          try {
+            const rr = (roster || []).find(function (x) { return x && x.name === name; });
+            if (rr && rr.phone) ph = String(rr.phone);
+          } catch (e) {}
+          selected.set(name, { uid: uid || null, phone: ph, email: '' });
         }
         paint(currentQuery());
         syncDone();
       };
     });
-    rowsEl.querySelectorAll('.lgap-email').forEach(function (inp) {
-      inp.oninput = function () {
-        const n = inp.getAttribute('data-name');
-        const s = selected.get(n);
-        if (s) s.email = String(inp.value || '').trim();
-      };
-      // Do not repaint on every keystroke -- it would blur the field mid-typing.
-      inp.onclick = function (e) { e.stopPropagation(); };
-    });
+    const bind = function (cls, key) {
+      rowsEl.querySelectorAll(cls).forEach(function (inp) {
+        inp.oninput = function () {
+          const s = selected.get(inp.getAttribute('data-name'));
+          if (s) s[key] = String(inp.value || '').trim();
+        };
+        inp.onclick = function (e) { e.stopPropagation(); };
+      });
+    };
+    bind('.lgap-phone', 'phone');
+    bind('.lgap-email', 'email');
   };
 
   const searchEl = ov.querySelector('#lgap-search');
@@ -75186,47 +75244,44 @@ async function lgOpenAddPlayerPicker(sid) {
   if (searchEl) searchEl.oninput = function () { paint(currentQuery()); };
   paint(''); syncDone();
 
-  // Commit every selection in ONE deliberate action, like the tournament picker.
   doneBtn.onclick = async function () {
     if (_busy || !selected.size) return;
     const missing = [];
     selected.forEach(function (v, k) {
-      if (!v.uid && !(v.email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.email))) missing.push(k);
+      const okPhone = v.phone && v.phone.replace(/[^0-9]/g, '').length >= 7;
+      const okMail = v.email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.email);
+      if (!v.uid && !okPhone && !okMail) missing.push(k);
     });
     if (missing.length) {
-      try { showToast(missing[0] + ' needs an email address'); } catch (e) {}
+      try { showToast(missing[0] + ' needs a mobile number'); } catch (e) {}
       return;
     }
-    _busy = true; syncDone();
-    doneBtn.textContent = 'Adding…';
+    _busy = true; syncDone(); doneBtn.textContent = 'Adding…';
     let added = 0; const failed = [];
     for (const entry of Array.from(selected.entries())) {
       const name = entry[0], v = entry[1];
-      const ok = await lgAddMember(sid, name, v.email || null, v.uid || null);
+      const ok = await lgAddMember(sid, name, v.phone || null, v.email || null, v.uid || null);
       if (ok) { added++; avail = avail.filter(function (r) { return r.name !== name; }); }
       else failed.push(name);
     }
     _busy = false;
     try {
-      showToast(added
-        ? (added + ' added' + (failed.length ? ' — ' + failed.join(', ') + ' could not be' : '') +
-           '. Tap Send invite on each one.')
-        : 'Could not add — try again');
+      showToast(added ? (added + ' added' + (failed.length ? ' — ' + failed.join(', ') + ' could not be' : '') +
+        '. Tap Send invite on each one.') : 'Could not add — try again');
     } catch (e) {}
     close();
   };
 
-  // "+ New person": nobody on the roster, so a name AND an email, both required.
   ov.querySelector('#lgap-new').onclick = async function () {
-    let nm = null, em = null;
+    let nm = null, ph = null;
     try { nm = await uiPrompt('Their name:', { title: 'Add a new player', okLabel: 'Next' }); } catch (e) {}
     if (!nm || !nm.trim()) return;
-    try { em = await uiPrompt('Email address — this is where the invite goes, and only this address can accept it:', { title: 'Email for ' + nm.trim(), okLabel: 'Add' }); } catch (e) {}
-    if (!em || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em.trim())) {
-      try { showToast('A valid email is required to send them an invite'); } catch (e) {}
+    try { ph = await uiPrompt('Mobile number — you’ll text them the invite from your phone:', { title: 'Number for ' + nm.trim(), okLabel: 'Add' }); } catch (e) {}
+    if (!ph || ph.replace(/[^0-9]/g, '').length < 7) {
+      try { showToast('A mobile number is needed to send them the invite'); } catch (e) {}
       return;
     }
-    const ok = await lgAddMember(sid, nm.trim(), em.trim(), null);
+    const ok = await lgAddMember(sid, nm.trim(), ph.trim(), null, null);
     try { showToast(ok ? (nm.trim() + ' added — tap Send invite') : 'Could not add them'); } catch (e) {}
     if (ok) close();
   };
