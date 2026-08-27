@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1252-->
+<!--BGVER=v2026.11.1253-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8633,7 +8633,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1252';
+const BG_BUILD = 'v2026.11.1253';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -30724,8 +30724,10 @@ async function renderRosterList() {
   try {
     const _cEl = document.getElementById('roster-pick-count');
     if (_cEl) {
+      const _lgon = (typeof _rosterLgSid !== 'undefined' && _rosterLgSid);
       const _t2on = (typeof _rosterT2Tid !== 'undefined' && _rosterT2Tid);
-      const _cnt = _t2on ? _rosterT2InSet.size
+      const _cnt = _lgon ? _rosterLgInSet.size
+        : _t2on ? _rosterT2InSet.size
         : getCurrentSetupPlayers().filter(p => ((p.firstName || '') + (p.lastName || '')).trim()).length;
       _cEl.textContent = _cnt + ' player' + (_cnt === 1 ? '' : 's');
       _cEl.title = _cnt + (_t2on ? ' on this event' : ' in this round');
@@ -30797,7 +30799,9 @@ async function renderRosterList() {
     const key = (_pf + '|' + _pl).toLowerCase();
     // v664: tournament mode — "already added" means on the EVENT, not the round setup
     const _t2key = _t2NameKey(combineName(_pf, _pl));   // v1009: was .trim().toLowerCase() — diverged from the row key
-    const already = _rosterT2Tid ? _rosterT2InSet.has(_t2key) : inSetup.has(key);
+    // v1253: league mode ticks the rows already on the league roster.
+    const already = _rosterLgSid ? _rosterLgInSet.has(_t2key)
+                  : (_rosterT2Tid ? _rosterT2InSet.has(_t2key) : inSetup.has(key));
     row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--border);' + (already ? '' : 'cursor:pointer;');
     // Calculated handicap from score history (if 3+ rounds)
     const calc = bgHcpFor(p);   // v1010: the owner's published index, not this device's partial copy
@@ -30900,6 +30904,21 @@ async function renderRosterList() {
     };
     row.onclick = async (ev) => {
       if (ev.target.closest('.roster-del-btn')) return;
+      if (_rosterLgSid) {
+        // v1253: league mode — same instant tick + debounced authoritative
+        // refresh as the tournament path, so adding twelve people is twelve
+        // taps and one rebuild, not twelve rebuilds.
+        if (_rosterLgBusy) return;
+        const _lnm = combineName(_pf, _pl).trim();
+        const _ladding = !_rosterLgInSet.has(_t2key);
+        _rosterLgPaintRow(row, _ladding);
+        const _lok = _ladding ? await _rosterLgAdd(_lnm, p.phone) : await _rosterLgRemove(_lnm);
+        if (!_lok) { _rosterLgPaintRow(row, !_ladding); return; }
+        if (_ladding) _rosterLgInSet.add(_t2key); else _rosterLgInSet.delete(_t2key);
+        _rosterLgPaintCount();
+        _rosterLgScheduleRefresh();
+        return;
+      }
       if (_rosterT2Tid) {
         // v664: tournament mode — toggle the player on the EVENT.
         // v1093 (Tyler): "very slow after each selection." Every tap used to await a
@@ -75110,183 +75129,134 @@ async function lgResend(mid) {
   await lgSendInvite(d, leagueName);
 }
 
+/* ===== LEAGUE MODE FOR THE REAL PLAYER PICKER (v1253) =====================
+   Tyler: "This is still not the same as our other player setup screen... where
+   is my friends and everyone tab I am used to seeing. This is just off, make
+   them exact."
+
+   He was right, and I had copied the wrong screen. The picker people know is
+   #roster-modal / renderRosterList -- "Bad Golf Users", the ⭐ Friends / All
+   users filter, the saved-player rows with avatars and calculated handicaps,
+   and "➕ Add a player (guest / non-user)" whose form ALREADY has a phone field.
+   I had rebuilt a lookalike from openT2AddPlayerPicker instead.
+
+   So leagues now use THAT screen, not a copy of it. It already supports being
+   reused: v664 added a tournament mode via _rosterT2Tid, hooked at three
+   points. This is the same trick for leagues, so there is exactly one player
+   picker in the app and it cannot drift from itself.
+   ==================================================================== */
+let _rosterLgSid = null, _rosterLgInSet = new Set(), _rosterLgById = {},
+    _rosterLgBusy = false, _rosterLgReT = null;
+
+function _rosterLgPaintRow(row, on) {
+  try {
+    const chk = row && row.querySelector('.roster-check');
+    if (!chk) return;
+    chk.style.borderColor = on ? 'var(--accent)' : 'var(--border)';
+    chk.style.background  = on ? 'var(--accent)' : 'transparent';
+    chk.textContent = on ? '✓' : '';
+  } catch (e) {}
+}
+function _rosterLgPaintCount() {
+  try {
+    const el = document.getElementById('roster-pick-count');
+    if (!el) return;
+    const n = _rosterLgInSet.size;
+    el.textContent = n + ' in the league';
+    el.style.display = '';
+  } catch (e) {}
+}
+async function _rosterLgRefresh() {
+  if (!_rosterLgSid) return;
+  try {
+    const r = await supa.rpc('league_roster', { p_season_id: _rosterLgSid });
+    _rosterLgInSet = new Set(); _rosterLgById = {};
+    if (r && !r.error && Array.isArray(r.data)) {
+      r.data.forEach(function (m) {
+        const k = (typeof _t2NameKey === 'function') ? _t2NameKey(m.display_name)
+                                                     : String(m.display_name || '').trim().toLowerCase();
+        if (k) { _rosterLgInSet.add(k); _rosterLgById[k] = m; }
+      });
+    }
+  } catch (e) { try { console.warn('_rosterLgRefresh', e); } catch (e2) {} }
+}
+function _rosterLgScheduleRefresh() {
+  try { clearTimeout(_rosterLgReT); } catch (e) {}
+  _rosterLgReT = setTimeout(async function () {
+    if (!_rosterLgSid) return;
+    try { await _rosterLgRefresh(); } catch (e) {}
+    try { await renderRosterList(); } catch (e) {}
+  }, 1500);
+}
+
+/* Add one tapped player to the league. Someone already on Bad Golf is addressed
+   by their account and needs nothing else; anyone else needs a mobile number,
+   taken from their saved roster entry when there is one (the guest form has
+   captured phones since v640) and asked for only when there isn't. */
+async function _rosterLgAdd(name, phoneHint) {
+  if (_rosterLgBusy || !_rosterLgSid) return false;
+  _rosterLgBusy = true;
+  try {
+    let uid = null;
+    try { uid = await t2ResolveUserIdByName(name); } catch (e) {}
+    let phone = null;
+    if (!uid) {
+      phone = String(phoneHint || '').trim();
+      if (!phone) {
+        let typed = null;
+        try {
+          typed = await uiPrompt(name + ' isn’t on Bad Golf yet — mobile number, so you can text them the invite:',
+            { title: 'Number for ' + name, okLabel: 'Add' });
+        } catch (e) {}
+        phone = typed ? String(typed) : '';
+      }
+      if (phone.replace(/[^0-9]/g, '').length < 7) {
+        try { showToast('A mobile number is needed to invite ' + name); } catch (e) {}
+        return false;
+      }
+      if (typeof formatPhoneDisplay === 'function') phone = formatPhoneDisplay(phone) || phone;
+    }
+    return await lgAddMember(_rosterLgSid, name, phone || null, null, uid || null);
+  } finally { _rosterLgBusy = false; }
+}
+
+async function _rosterLgRemove(name) {
+  if (_rosterLgBusy || !_rosterLgSid) return false;
+  _rosterLgBusy = true;
+  try {
+    const k = (typeof _t2NameKey === 'function') ? _t2NameKey(name) : String(name || '').trim().toLowerCase();
+    const m = _rosterLgById[k];
+    if (!m) return false;
+    if (m.role === 'commissioner') { try { showToast('You run this league — you stay on it'); } catch (e) {} return false; }
+    let res = null;
+    try { res = await supa.rpc('league_remove_member', { p_member_id: m.id, p_expect_status: m.status }); }
+    catch (e) { res = { error: e }; }
+    if (!res || res.error) {
+      try { showToast(lgErrText(res && res.error, 'Couldn’t take ' + name + ' off')); } catch (e) {}
+      return false;
+    }
+    return true;
+  } finally { _rosterLgBusy = false; }
+}
+
+function _rosterLgClose() {
+  _rosterLgSid = null; _rosterLgInSet = new Set(); _rosterLgById = {};
+  try { clearTimeout(_rosterLgReT); } catch (e) {}
+  try { const el = document.getElementById('roster-pick-count'); if (el) el.style.display = 'none'; } catch (e) {}
+}
+
+/* The league's "+ Add players" now opens the app's own picker. Same name kept so
+   nothing else has to change (and the stale-base guard sees no symbol vanish). */
 async function lgOpenAddPlayerPicker(sid) {
   sid = sid || window._lgSeason;
   if (!sid) { try { showToast('Open the league first'); } catch (e) {} return; }
-
-  let roster = [], existing = [];
-  try {
-    roster = await getPlayerRoster();
-    const r = await supa.rpc('league_roster', { p_season_id: sid });
-    existing = (r && !r.error && Array.isArray(r.data)) ? r.data : [];
-  } catch (e) {}
-
-  const norm = function (s) {
-    try { return (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').trim().toLowerCase(); }
-    catch (e2) { return String(s || '').trim().toLowerCase(); }
-  };
-  const already = new Set(existing.map(function (m) { return norm(m.display_name); }));
-  let avail = (roster || [])
-    .filter(function (r2) { return r2 && r2.name && !already.has(norm(r2.name)); })
-    .sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); });
-
-  const ov = document.createElement('div');
-  ov.className = 'modal-overlay show';
-  ov.style.cssText = 'z-index:100067';
-  ov.innerHTML = '<div class="modal" style="max-width:440px;max-height:84vh;display:flex;flex-direction:column">' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
-      '<h2 style="margin:0">➕ Add players</h2>' +
-      '<button id="lgap-x" aria-label="Close" style="background:transparent;border:none;font-size:22px;line-height:1;cursor:pointer">✕</button></div>' +
-    '<p class="help-text" style="margin:0 0 8px">Tap anyone to add them. Players who aren’t on Bad Golf yet need a mobile number — you’ll text them the invite from your own phone.</p>' +
-    '<input type="text" id="lgap-search" placeholder="🔍 Search players…" autocomplete="off" style="width:100%;margin-bottom:8px">' +
-    '<div id="lgap-rows" style="flex:1;overflow-y:auto;min-height:60px"></div>' +
-    '<div class="actions" style="margin-top:10px">' +
-      '<button id="lgap-new" style="flex:1">+ New person</button>' +
-      '<button id="lgap-done" class="primary" style="flex:1" disabled>Add</button></div></div>';
-  document.body.appendChild(ov);
-
-  const rowsEl = ov.querySelector('#lgap-rows');
-  const doneBtn = ov.querySelector('#lgap-done');
-  const selected = new Map();   // name -> { uid, phone, email }
-  let _busy = false;
-
-  const close = function () {
-    try { ov.remove(); } catch (e) {}
-    try { lgOpenSeason(sid); } catch (e) {}
-  };
-  ov.onclick = function (e) { if (e.target === ov) close(); };
-  ov.querySelector('#lgap-x').onclick = close;
-
-  const syncDone = function () {
-    if (!doneBtn) return;
-    const n = selected.size;
-    doneBtn.textContent = n ? ('Add ' + n) : 'Add';
-    doneBtn.disabled = !n || _busy;
-  };
-
-  const rowHtml = function (list) {
-    if (!list.length) return '<div class="help-text" style="padding:8px 2px">Nobody left to add — use “+ New person”.</div>';
-    return list.map(function (r) {
-      const h = (typeof t2RosterHcp === 'function') ? t2RosterHcp(r) : null;
-      const sel = selected.get(r.name);
-      const on = !!sel;
-      const needs = on && !sel.uid;
-      return '<div class="lgap-wrap" data-name="' + t2esc(r.name) + '">' +
-        '<div class="lgap-row" data-name="' + t2esc(r.name) + '" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 2px;border-top:1px solid var(--border)">' +
-          ((typeof crewAvatarHtml === 'function') ? crewAvatarHtml(r, false) : '') +
-          '<div style="flex:1;min-width:0;overflow:hidden"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500">' +
-            t2esc(r.name) +
-            ((typeof guestPillHtml === 'function') ? guestPillHtml(r.name) : '') +
-            ((typeof testPillHtml === 'function') ? testPillHtml(r.name) : '') +
-            (h != null ? ' <span class="small-text" style="color:var(--text-muted)">(HCP ' + h + ')</span>' : '') +
-          '</div>' +
-          (on ? '<div class="small-text" style="color:var(--text-muted)">' +
-                (sel.uid ? 'On Bad Golf — nothing else needed' : 'Text them the invite') + '</div>' : '') +
-        '</div>' +
-        '<div class="lgap-check" style="flex:0 0 auto;width:24px;height:24px;border-radius:7px;border:2px solid ' +
-          (on ? 'var(--accent)' : 'var(--border)') + ';background:' + (on ? 'var(--accent)' : 'transparent') +
-          ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800">' + (on ? '✓' : '') + '</div>' +
-        '</div>' +
-        (needs
-          ? '<div style="padding:0 2px 10px 46px">' +
-            '<input type="tel" class="lgap-phone" data-name="' + t2esc(r.name) + '" inputmode="tel" ' +
-              'autocomplete="off" placeholder="mobile number" value="' + t2esc(sel.phone || '') + '" style="width:100%;margin-bottom:6px">' +
-            '<input type="email" class="lgap-email" data-name="' + t2esc(r.name) + '" inputmode="email" ' +
-              'autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" ' +
-              'placeholder="email (optional — locks the invite to it)" value="' + t2esc(sel.email || '') + '" style="width:100%">' +
-            '</div>'
-          : '') +
-        '</div>';
-    }).join('');
-  };
-
-  const wire = function () {
-    rowsEl.querySelectorAll('.lgap-row').forEach(function (row) {
-      row.onclick = async function () {
-        const name = row.getAttribute('data-name');
-        if (selected.has(name)) selected.delete(name);
-        else {
-          let uid = null;
-          try { uid = await t2ResolveUserIdByName(name); } catch (e) {}
-          // Most numbers are already known: the app's own roster carries a phone
-          // for anyone who has ever been texted a round invite (v640).
-          let ph = '';
-          try {
-            const rr = (roster || []).find(function (x) { return x && x.name === name; });
-            if (rr && rr.phone) ph = String(rr.phone);
-          } catch (e) {}
-          selected.set(name, { uid: uid || null, phone: ph, email: '' });
-        }
-        paint(currentQuery());
-        syncDone();
-      };
-    });
-    const bind = function (cls, key) {
-      rowsEl.querySelectorAll(cls).forEach(function (inp) {
-        inp.oninput = function () {
-          const s = selected.get(inp.getAttribute('data-name'));
-          if (s) s[key] = String(inp.value || '').trim();
-        };
-        inp.onclick = function (e) { e.stopPropagation(); };
-      });
-    };
-    bind('.lgap-phone', 'phone');
-    bind('.lgap-email', 'email');
-  };
-
-  const searchEl = ov.querySelector('#lgap-search');
-  const currentQuery = function () { return searchEl ? searchEl.value.trim().toLowerCase() : ''; };
-  const paint = function (q) {
-    const filtered = q ? avail.filter(function (r) { return (r.name || '').toLowerCase().includes(q); }) : avail;
-    rowsEl.innerHTML = rowHtml(filtered);
-    wire();
-  };
-  if (searchEl) searchEl.oninput = function () { paint(currentQuery()); };
-  paint(''); syncDone();
-
-  doneBtn.onclick = async function () {
-    if (_busy || !selected.size) return;
-    const missing = [];
-    selected.forEach(function (v, k) {
-      const okPhone = v.phone && v.phone.replace(/[^0-9]/g, '').length >= 7;
-      const okMail = v.email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.email);
-      if (!v.uid && !okPhone && !okMail) missing.push(k);
-    });
-    if (missing.length) {
-      try { showToast(missing[0] + ' needs a mobile number'); } catch (e) {}
-      return;
-    }
-    _busy = true; syncDone(); doneBtn.textContent = 'Adding…';
-    let added = 0; const failed = [];
-    for (const entry of Array.from(selected.entries())) {
-      const name = entry[0], v = entry[1];
-      const ok = await lgAddMember(sid, name, v.phone || null, v.email || null, v.uid || null);
-      if (ok) { added++; avail = avail.filter(function (r) { return r.name !== name; }); }
-      else failed.push(name);
-    }
-    _busy = false;
-    try {
-      showToast(added ? (added + ' added' + (failed.length ? ' — ' + failed.join(', ') + ' could not be' : '') +
-        '. Tap Send invite on each one.') : 'Could not add — try again');
-    } catch (e) {}
-    close();
-  };
-
-  ov.querySelector('#lgap-new').onclick = async function () {
-    let nm = null, ph = null;
-    try { nm = await uiPrompt('Their name:', { title: 'Add a new player', okLabel: 'Next' }); } catch (e) {}
-    if (!nm || !nm.trim()) return;
-    try { ph = await uiPrompt('Mobile number — you’ll text them the invite from your phone:', { title: 'Number for ' + nm.trim(), okLabel: 'Add' }); } catch (e) {}
-    if (!ph || ph.replace(/[^0-9]/g, '').length < 7) {
-      try { showToast('A mobile number is needed to send them the invite'); } catch (e) {}
-      return;
-    }
-    const ok = await lgAddMember(sid, nm.trim(), ph.trim(), null, null);
-    try { showToast(ok ? (nm.trim() + ' added — tap Send invite') : 'Could not add them'); } catch (e) {}
-    if (ok) close();
-  };
-
-  try { if (typeof bgKeyboardSafe === 'function') bgKeyboardSafe(ov.querySelector('.modal')); } catch (e) {}
+  window._lgSeason = sid;
+  _rosterLgSid = sid;
+  await _rosterLgRefresh();
+  try { document.getElementById('roster-modal').classList.add('show'); } catch (e) {}
+  try { document.getElementById('roster-search').value = ''; } catch (e) {}
+  try { await renderRosterList(); } catch (e) {}
+  _rosterLgPaintCount();
 }
 
 function renderBottomNav() {
@@ -76943,14 +76913,23 @@ async function init() {
   try { updateNaturalBoostVisibility(); } catch (e) {}
 
   // Roster modal wiring
-  $('roster-cancel').onclick = () => { $('roster-modal').classList.remove('show'); try { _rosterT2Close(); } catch (e) {} };
+  $('roster-cancel').onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} if (_lg) { try { lgOpenSeason(_lg); } catch (e) {} } };
   // v946: top Done mirrors the bottom one exactly.
-  try { const _rdt = $('roster-done-top'); if (_rdt) _rdt.onclick = () => { $('roster-modal').classList.remove('show'); try { _rosterT2Close(); } catch (e) {} }; } catch (e) {}
+  try { const _rdt = $('roster-done-top'); if (_rdt) _rdt.onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} if (_lg) { try { lgOpenSeason(_lg); } catch (e) {} } }; } catch (e) {}
   // ➕ Add a guest / non-user straight to Bad Golf Users (no round needed) — the
   // modern replacement for the old no-email test users. Stored in the shared
   // roster via upsertPlayerInRoster, so they're findable everywhere. (Tyler, June 2026.)
   { const _ra = document.getElementById('roster-add-new'); if (_ra) _ra.onclick = () => { const f = document.getElementById('roster-add-form'); if (f) { f.style.display = (f.style.display === 'none' || !f.style.display) ? 'block' : 'none'; const fi = document.getElementById('roster-add-first'); if (fi && f.style.display === 'block') { try { fi.focus(); } catch (e) {} } } }; }
   { const _rc = document.getElementById('roster-add-cancel'); if (_rc) _rc.onclick = () => { const f = document.getElementById('roster-add-form'); if (f) f.style.display = 'none'; }; }
+  // v1253 (Tyler: "the phone number, which needs to be formatted"): the same
+  // live mask the profile phone field has used since v640's sibling. This form
+  // has captured phones for a while and never formatted them, so numbers went
+  // in however they were typed.
+  { const _rp = document.getElementById('roster-add-phone');
+    if (_rp && !_rp._bgFmtWired && typeof formatPhoneDisplay === 'function') {
+      _rp._bgFmtWired = true;
+      _rp.oninput = () => { try { _rp.value = formatPhoneDisplay(_rp.value); } catch (e) {} };
+    } }
   { const _rs = document.getElementById('roster-add-save'); if (_rs) _rs.onclick = async () => {
       const first = (document.getElementById('roster-add-first').value || '').trim();
       const last = (document.getElementById('roster-add-last').value || '').trim();
@@ -76964,6 +76943,10 @@ async function init() {
       // one onto an entry that already exists. See upsertPlayerInRoster.
       try { await upsertPlayerInRoster(first, last, hcp || 0, { setHcp: true, phone: phone || undefined }); } catch (e) {}
       try { if (_rosterT2Tid) await _rosterT2Add(combineName(first, last), hcp || 0); } catch (e) {}   // v664: tournament mode
+      // v1253: league mode — a guest saved from this form goes straight onto
+      // the league too, using the phone just typed, so "add a new player" is
+      // one action here exactly as it is for a tournament.
+      try { if (_rosterLgSid) await _rosterLgAdd(combineName(first, last), phone); } catch (e) {}
       _rs.disabled = false; _rs.textContent = 'Save player';
       document.getElementById('roster-add-first').value = ''; document.getElementById('roster-add-last').value = ''; document.getElementById('roster-add-hcp').value = '';
       if (_phEl) _phEl.value = '';
