@@ -8600,7 +8600,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1241';
+const BG_BUILD = 'v2026.11.1242';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -76644,6 +76644,45 @@ async function init() {
 
   // Join existing
   // Joining is link/ping/Rounds-tab driven now — no typed codes. This is the
+  // v1242 (Tyler, 8/26): JOIN-LINK IDENTITY GATE. Tyler, signed in as a test
+  // account (IDrive Bombs), tapped Kevin's ?join= text link and dropped straight
+  // into the round as a full scorer — no membership check anywhere on the path.
+  // The gate: when the signed-in account's player name is NOT one of the round's
+  // players, stop and ask before granting scoring access. Three honest outs:
+  // watch read-only, join anyway (audited), or cancel. Accounts whose name IS in
+  // the round sail through exactly as before, and the guest flow is untouched —
+  // a brand-new signup still gets named/matched by the v1041 identity chain
+  // BEFORE processPendingJoin runs, so a guest who types the name the host used
+  // matches and never sees this.
+  function bgJoinIdentityGate(g, meName) {
+    return new Promise(function (resolve) {
+      try {
+        var old = document.getElementById('bg-joingate-modal'); if (old) old.remove();
+        var names = (Array.isArray(g.players) ? g.players : []).map(function (p) { return (p && p.name) || ''; }).filter(Boolean);
+        var ov = document.createElement('div');
+        ov.className = 'modal-overlay show'; ov.id = 'bg-joingate-modal'; ov.style.zIndex = '100096';
+        ov.innerHTML = '<div class="modal" style="max-width:440px">'
+          + '<h2 style="margin:0 0 6px">\u26A0\uFE0F Is this your round?</h2>'
+          + '<p class="help-text" style="margin:0 0 8px">You\u2019re signed in as <b>' + escapeHtml(meName || '') + '</b>, but this round'
+          + (g.course ? ' at <b>' + escapeHtml(g.course) + '</b>' : '') + ' doesn\u2019t have you in it.</p>'
+          + (names.length ? '<p class="help-text" style="margin:0 0 10px">Playing: ' + escapeHtml(names.join(', ')) + '</p>' : '')
+          + '<p class="help-text" style="margin:0 0 12px">If you were invited under one of those names, sign out and back in with that account \u2014 or just watch along.</p>'
+          + '<div style="display:flex;flex-direction:column;gap:8px">'
+          + '<button class="primary" id="bg-jg-watch" style="width:100%">\u{1F440} Watch this round (read-only)</button>'
+          + '<button id="bg-jg-join" style="width:100%">Join anyway as ' + escapeHtml((meName || '').split(/\s+/)[0] || 'me') + '</button>'
+          + '<button id="bg-jg-cancel" style="width:100%">Cancel</button>'
+          + '</div></div>';
+        document.body.appendChild(ov);
+        var done = function (v) { try { ov.remove(); } catch (e) {} resolve(v); };
+        ov.onclick = function (e) { if (e.target === ov) done('cancel'); };
+        ov.querySelector('#bg-jg-watch').onclick = function () { done('watch'); };
+        ov.querySelector('#bg-jg-join').onclick = function () { done('join'); };
+        ov.querySelector('#bg-jg-cancel').onclick = function () { done('cancel'); };
+      } catch (e) { resolve('join'); }   // gate failure must never lock a legit joiner out
+    });
+  }
+  window.bgJoinIdentityGate = bgJoinIdentityGate;   // exposed for tests/console
+
   // single internal join path used by the ?join= deep link (and anything else
   // that needs to drop a player into a round programmatically).
   window.joinRoundByCode = async function (rawCode) {
@@ -76686,6 +76725,30 @@ async function init() {
       if (state.game && state.game.code === code) return;
       showToast('That round isn’t live yet — the host may not have started it (or it ended). Try again once they tee off.'); return;
     }
+    // v1242: identity gate — see bgJoinIdentityGate above. Finished rounds skip it
+    // (they open read-only anyway); an account with no player name yet skips it
+    // (the v1041 identity chain is still naming/matching them).
+    try {
+      let _gateMe = null; try { _gateMe = await getMeName(); } catch (e) {}
+      const _gateMeN = _gateMe ? normalizeNameSegment(String(_gateMe)) : '';
+      const _gateIn = !!(_gateMeN && Array.isArray(g.players) && g.players.some(p => p && normalizeNameSegment(String(p.name || '')) === _gateMeN));
+      if (_gateMeN && !_gateIn && !g.finishedAt) {
+        const _pick = await bgJoinIdentityGate(g, _gateMe);
+        if (_pick === 'cancel') return;
+        if (_pick === 'watch') {
+          state.game = g;
+          state.viewOnlyMode = true;
+          state._scoreResumeAsked = true;
+          state.currentHole = findNextUnscoredHole(g);
+          enableGameTabs(true);
+          switchTab('board');
+          showToast('Watching — read-only \u{1F440}');
+          return;   // no acceptedBy, no KEY_LAST, no recent entry — you are a viewer, not a player
+        }
+        // 'join' — explicit, so let it through, but leave a trail for the admins.
+        try { audit('join_identity_mismatch', code, String(_gateMe) + ' joined without being a listed player'); } catch (e) {}
+      }
+    } catch (e) { /* the gate must never block the join path outright */ }
     state.game = g;
     state.viewOnlyMode = !!g.finishedAt;
     state._scoreResumeAsked = true;   // v673: a join link IS the choice — skip the chooser
