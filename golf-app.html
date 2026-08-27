@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1253-->
+<!--BGVER=v2026.11.1254-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8633,7 +8633,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1253';
+const BG_BUILD = 'v2026.11.1254';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -74361,6 +74361,11 @@ async function renderLeague() {
      invited person can read nothing about the league — which is correct, and is
      why this one narrow RPC exists: "which seats are addressed to me?" It
      matches on uid OR on the verified email of the signed-in account. */
+  // §9.1 auto-open and §11.3 sweep. Deliberately not awaited before the first
+  // paint: neither changes what this screen shows THIS time round, and a slow
+  // network must never hold the League tab blank.
+  try { lgAutoOpenAndSweep(); } catch (e) {}
+
   let invites = [];
   try {
     const ir = await supa.rpc('league_my_invites');
@@ -74505,10 +74510,12 @@ async function lgOpenSeason(sid) {
          '<button class="primary full" onclick="lgOpenAddPlayerPicker(\'' + lgEsc(sid) + '\')">+ Add players</button>' +
          '<p class="help-text" style="margin:10px 0 0">Pick from your players, or add someone new. Anyone not on Bad Golf yet needs an email so the invite can reach them.</p></div>';
   }
-  h += '<div class="card" style="padding:12px 14px;display:flex;gap:8px">' +
-       '<button class="primary" style="flex:1" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Schedule</button>' +
+  h += '<div class="card" style="padding:12px 14px">' +
+       '<button class="primary full" onclick="lgOpenWeek(\'' + lgEsc(sid) + '\')">This week</button>' +
+       '<div style="display:flex;gap:8px;margin-top:8px">' +
+       '<button style="flex:1" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Schedule</button>' +
        '<button style="flex:1" onclick="lgOpenHandicaps(\'' + lgEsc(sid) + '\')">Handicaps</button>' +
-       '<button style="flex:1" onclick="renderLeague()">Back</button></div>';
+       '<button style="flex:1" onclick="renderLeague()">Back</button></div></div>';
   body.innerHTML = h;
 }
 
@@ -75257,6 +75264,380 @@ async function lgOpenAddPlayerPicker(sid) {
   try { document.getElementById('roster-search').value = ''; } catch (e) {}
   try { await renderRosterList(); } catch (e) {}
   _rosterLgPaintCount();
+}
+
+/* ===================== LEAGUES — Phase 6b (v1253): week play ===============
+   The week screen, and the two ways a round becomes a league card.
+   Server side is Phase 6a + the self-scheduled RPCs.
+   ==================================================================== */
+
+/* The course snapshot a week freezes at open (§7.2). Two rating sets, because
+   two functions need opposite things from one card:
+     rating / slope / par        -> the HOLES PLAYED (league_differential)
+     rating18 / slope18 / par18  -> the full 18 (nine_hole_basis 'half_18_ch')
+   The 9-hole rating is half the 18-hole one, the same halving t2LaunchDayRounds
+   already applies to a 9-hole bracket round.
+   Stroke indexes are RE-RANKED for a nine: a back nine's SIs are 10-18 on the
+   full card, and left that way every stroke would be allocated to the wrong
+   holes, because strokes are handed out by SI <= (handicap mod holes). */
+async function lgCourseSnapshot(courseId, nine, teeLabel) {
+  let sc = null;
+  try { sc = await getCourseScorecard(courseId); } catch (e) {}
+  if (!sc || !Array.isArray(sc.pars) || !sc.pars.length) return null;
+  let pars = sc.pars.slice();
+  let sis = Array.isArray(sc.sis) ? sc.sis.slice() : [];
+  const full = pars.length >= 18;
+  if (full && nine === 'front') { pars = pars.slice(0, 9); sis = sis.slice(0, 9); }
+  else if (full && nine === 'back') { pars = pars.slice(9, 18); sis = sis.slice(9, 18); }
+  const holes = pars.length;
+  if (sis.length !== holes) sis = pars.map(function (_, i) { return i + 1; });
+  if (holes === 9) {
+    const order = sis.map(function (v, i) { return { v: Number(v) || 99, i: i }; })
+                     .sort(function (a, b) { return a.v - b.v; });
+    const re = new Array(holes);
+    order.forEach(function (o, k) { re[o.i] = k + 1; });
+    sis = re;
+  }
+  const tees = Array.isArray(sc.tees) ? sc.tees : [];
+  const tee = (teeLabel && tees.filter(function (t) { return t && t.label === teeLabel; })[0])
+            || tees.filter(function (t) { return t && t.rating != null && t.slope != null; })[0]
+            || tees[0] || {};
+  const r18 = (tee.rating != null) ? Number(tee.rating) : null;
+  const s18 = (tee.slope != null) ? Number(tee.slope) : null;
+  const parPlayed = pars.reduce(function (a, b) { return a + (Number(b) || 0); }, 0);
+  const par18 = full ? sc.pars.slice(0, 18).reduce(function (a, b) { return a + (Number(b) || 0); }, 0)
+                     : parPlayed * (holes === 9 ? 2 : 1);
+  return {
+    holes: holes,
+    pars: pars.map(Number),
+    si: sis.map(Number),
+    par: parPlayed,
+    rating: (r18 != null) ? (holes === 9 ? Math.round((r18 / 2) * 10) / 10 : r18) : parPlayed,
+    slope: (s18 != null) ? s18 : 113,
+    rating18: r18, slope18: s18, par18: par18,
+    course_id: courseId, tee: tee.label || null
+  };
+}
+
+/* §9.1 auto-open + §11.3 sweep. Both run on any member opening the League tab:
+   the server cannot open a week itself (COURSE_LIBRARY is client-side) and the
+   sweep is deliberately NOT tied to opening, because sweep-on-open deadlocks the
+   last week of a season and cannot work at all in play-when-you-can mode. */
+async function lgAutoOpenAndSweep() {
+  try {
+    const due = await supa.rpc('league_weeks_due');
+    if (due && !due.error && Array.isArray(due.data)) {
+      for (const w of due.data) {
+        if (!w.course_id) continue;
+        const snap = await lgCourseSnapshot(w.course_id, w.nine, w.tee_id);
+        if (!snap) continue;
+        try { await supa.rpc('league_open_week', { p_week_id: w.week_id, p_course_snapshot: snap, p_opened_by_auto: true }); }
+        catch (e) { try { console.warn('league_open_week failed:', e); } catch (e2) {} }
+      }
+    }
+  } catch (e) { try { console.warn('league_weeks_due failed:', e); } catch (e2) {} }
+  try { await supa.rpc('league_sweep_expired'); } catch (e) {}
+}
+
+/* ---- the week screen --------------------------------------------------- */
+async function lgOpenWeek(sid, weekId) {
+  const body = document.getElementById('league-body'); if (!body || !sid) return;
+  window._lgSeason = sid;
+  try { switchTab('league'); } catch (e) {}
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Loading the week…</p>');
+
+  const wr = await _bgRead(function () {
+    return supa.from('league_weeks')
+      .select('id,week_number,date,nine,course_id,status,points_possible,settings_snapshot,course_snapshot')
+      .eq('season_id', sid).order('week_number', { ascending: true });
+  }, 'lgOpenWeek:weeks');
+  if (!wr.ok) {
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">Couldn’t load the week.</p>' +
+      '<button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back</button>');
+    return;
+  }
+  const weeks = Array.isArray(wr.data) ? wr.data : [];
+  const live = weeks.filter(function (w) { return ['open', 'in_play', 'awaiting_cards'].indexOf(w.status) >= 0; });
+  const w = (weekId && weeks.filter(function (x) { return x.id === weekId; })[0])
+         || live[0]
+         || weeks.filter(function (x) { return x.status === 'scheduled'; })[0]
+         || weeks[weeks.length - 1];
+  if (!w) {
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">This season has no weeks yet.</p>' +
+      '<button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back</button>');
+    return;
+  }
+  window._lgWeek = w.id;
+
+  const rr = await _bgRead(function () { return supa.rpc('league_roster', { p_season_id: sid }); }, 'lgOpenWeek:roster');
+  const members = (rr.ok && Array.isArray(rr.data)) ? rr.data : [];
+  const me = members.filter(function (m) { return m.user_id === _authUser.id; })[0];
+  const amCommish = !!(me && (me.role === 'commissioner' || me.role === 'co_commissioner'));
+  const nameOf = {}; members.forEach(function (m) { nameOf[m.id] = m.display_name; });
+
+  const mur = await _bgRead(function () {
+    return supa.from('league_matchups').select('id,kind,a_entrant_id,b_entrant_id,status').eq('week_id', w.id);
+  }, 'lgOpenWeek:matchups');
+  const mus = (mur.ok && Array.isArray(mur.data)) ? mur.data : [];
+  const myMu = mus.filter(function (m) { return me && (m.a_entrant_id === me.id || m.b_entrant_id === me.id); })[0];
+
+  let cards = [];
+  if (mus.length) {
+    const cr = await _bgRead(function () {
+      return supa.from('league_cards')
+        .select('id,matchup_id,member_id,gross,net,handicap_used,witness_count,posted_by,approved_at,auto_approved,disputed_by,game_code,source')
+        .in('matchup_id', mus.map(function (m) { return m.id; }));
+    }, 'lgOpenWeek:cards');
+    if (cr.ok && Array.isArray(cr.data)) cards = cr.data;
+  }
+  const myCard = me ? cards.filter(function (c) { return c.member_id === me.id; })[0] : null;
+
+  let hcp = null;
+  const hr = await _bgRead(function () {
+    return supa.from('league_handicaps').select('effective,source')
+      .eq('season_id', sid).eq('week_number', w.week_number).eq('member_id', me ? me.id : null).maybeSingle();
+  }, 'lgOpenWeek:hcp');
+  if (hr.ok && hr.data) hcp = hr.data.effective;
+
+  const open = ['open', 'in_play', 'awaiting_cards'].indexOf(w.status) >= 0;
+  const selfOn = !!((w.settings_snapshot || {}).play || {}).self_scheduled;
+  const total = function (a) { return Array.isArray(a) ? a.reduce(function (x, y) { return x + (Number(y) || 0); }, 0) : null; };
+
+  let h = lgCard('<div style="display:flex;align-items:baseline;gap:8px">' +
+    '<h2 style="margin:0;flex:1">Week ' + w.week_number + '</h2>' +
+    '<span class="bg-pill">' + lgEsc(w.status) + '</span></div>' +
+    '<p class="help-text" style="margin:6px 0 0">' + lgEsc(lgWeekWhen(w)) + ' · ' + lgNineLabel(w.nine) +
+    (hcp != null ? ' · your handicap ' + lgFmt(hcp) : '') + '</p>' +
+    (w.status === 'scheduled'
+      ? '<p class="help-text" style="margin:8px 0 0">This week hasn’t opened yet. It opens automatically a couple of days before.</p>'
+      : ''));
+
+  /* ---- my card ---- */
+  if (me && open) {
+    if (myCard) {
+      const st = myCard.disputed_by ? 'Disputed — the commissioner will sort it out'
+        : (myCard.approved_at ? (myCard.auto_approved ? 'Counted' : 'Signed for and counted')
+                              : 'Waiting to be signed for');
+      h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Your card</div>' +
+        '<div style="font-size:26px;font-weight:800">' + total(myCard.gross) +
+        '<span class="help-text" style="font-size:13px;font-weight:600"> gross · ' + total(myCard.net) + ' net</span></div>' +
+        '<p class="help-text" style="margin:4px 0 0">' + lgEsc(st) +
+        (myCard.witness_count ? ' · ' + myCard.witness_count + ' league player' + (myCard.witness_count === 1 ? '' : 's') + ' in the round' : ' · nobody from the league was in the round') +
+        (myCard.game_code ? ' · ' + lgEsc(myCard.game_code) : '') + '</p>' +
+        (!myCard.approved_at && myCard.posted_by === _authUser.id
+          ? '<button class="full" style="margin-top:10px" onclick="lgUnpickRound()">Use a different round</button>' : ''));
+    } else if (!myMu) {
+      h += lgCard('<p class="help-text" style="margin:0">You have no fixture this week yet — the commissioner still has to build the schedule.</p>');
+    } else if (selfOn) {
+      h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Your card</div>' +
+        '<p class="help-text" style="margin:0 0 10px">Played already? Pick the round that counts for this week.</p>' +
+        '<button class="primary full" onclick="lgPickRound()">Pick a round</button>');
+    } else {
+      h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Your card</div>' +
+        '<p class="help-text" style="margin:0">Play this week’s round and your score posts here.</p>');
+    }
+  }
+
+  /* ---- cards waiting on somebody else ---- */
+  const pending = cards.filter(function (c) {
+    return !c.approved_at && !c.disputed_by && c.posted_by !== _authUser.id;
+  });
+  if (pending.length && me) {
+    h += '<div class="card"><div class="bg-sec">Waiting to be signed for <span>' + pending.length + '</span></div>' +
+      pending.map(function (c) {
+        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(nameOf[c.member_id] || 'A player') + '</div>' +
+          '<div class="help-text" style="margin:0;font-size:12px">' + total(c.gross) + ' gross · ' + total(c.net) + ' net' +
+          (c.witness_count ? '' : ' · played alone') + '</div></div>' +
+          '<div style="flex:0 0 auto;white-space:nowrap">' +
+          '<button class="small primary" onclick="lgApproveCard(\'' + lgEsc(c.id) + '\')">Sign</button> ' +
+          '<button class="small" onclick="lgDisputeCard(\'' + lgEsc(c.id) + '\')">Query</button></div></div>';
+      }).join('') + '</div>';
+  }
+
+  /* ---- everyone's scores so far ---- */
+  const done = cards.filter(function (c) { return c.approved_at; });
+  if (done.length) {
+    h += '<div class="card"><div class="bg-sec">In so far <span>' + done.length + '</span></div>' +
+      done.sort(function (a, b) { return (total(a.net) || 999) - (total(b.net) || 999); }).map(function (c) {
+        return '<div style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--bg-border,#e5e7eb);font-size:14px">' +
+          '<div style="flex:1;min-width:0">' + lgEsc(nameOf[c.member_id] || '—') + '</div>' +
+          '<div style="font-weight:700">' + total(c.net) + '<span class="help-text" style="font-size:12px;font-weight:600"> net</span></div></div>';
+      }).join('') + '</div>';
+  }
+
+  /* ---- commissioner ---- */
+  if (amCommish) {
+    h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Commissioner</div>' +
+      '<label style="display:flex;align-items:center;gap:10px;cursor:pointer">' +
+      '<input type="checkbox" class="bg-sw" id="lg-selfsched"' + (selfOn ? ' checked' : '') +
+      ' onchange="lgToggleSelfScheduled(this.checked)">' +
+      '<span style="flex:1"><strong>Let players post rounds they played on their own</strong>' +
+      '<br><span class="help-text" style="font-size:12px">On the league’s course, within ' +
+      (((w.settings_snapshot || {}).play || {}).window_days || 6) + ' days of the league day.</span></span></label>' +
+      (w.status === 'scheduled'
+        ? '<button class="primary full" style="margin-top:12px" onclick="lgOpenWeekNow()">Open week ' + w.week_number + ' now</button>'
+        : ''));
+  }
+
+  /* ---- other weeks ---- */
+  h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Other weeks</div>' +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap">' + weeks.map(function (x) {
+      return '<button type="button" class="small"' + (x.id === w.id ? ' style="border-color:var(--bg-brand);font-weight:800"' : '') +
+        ' onclick="lgOpenWeek(\'' + lgEsc(sid) + '\',\'' + lgEsc(x.id) + '\')">' + x.week_number + '</button>';
+    }).join('') + '</div>');
+
+  h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back to the league</button></div>';
+  body.innerHTML = h;
+}
+
+/* ---- picking a round you already played ------------------------------- */
+async function lgPickRound() {
+  const wid = window._lgWeek; if (!wid) return;
+  const body = document.getElementById('league-body'); if (!body) return;
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Looking for rounds…</p>');
+  let res = null;
+  try { res = await supa.rpc('league_eligible_rounds', { p_week_id: wid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_eligible_rounds failed:', res && res.error); } catch (e) {}
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">' +
+      lgEsc(lgErrText(res && res.error, 'Couldn’t look up your rounds')) + '</p>' +
+      '<button class="full" onclick="lgOpenWeek(window._lgSeason, window._lgWeek)">Back</button>');
+    return;
+  }
+  const rows = Array.isArray(res.data) ? res.data : [];
+  let h = lgCard('<h2 style="margin:0 0 4px">Pick your round</h2>' +
+    '<p class="help-text" style="margin:0">' + (rows.length
+      ? 'These are your rounds that fit this week — right course, right number of holes, close enough to the league day. You can change your pick until the week is finalised.'
+      : 'No rounds of yours fit this week yet. It has to be on the league’s course, the same number of holes, and within a few days of the league day.') + '</p>');
+  rows.forEach(function (r) {
+    h += '<div class="card" style="cursor:pointer" onclick="lgAttachRound(\'' + lgEsc(r.code) + '\')">' +
+      '<div style="display:flex;align-items:baseline;gap:8px">' +
+      '<div style="font-weight:800;font-size:22px">' + r.total + '</div>' +
+      '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">' + lgEsc(r.course) + '</div>' +
+      '<div class="help-text" style="margin:0;font-size:12px">' + lgEsc(r.played_at) + ' · ' + r.holes + ' holes · ' +
+      r.players + ' player' + (r.players === 1 ? '' : 's') + ' · ' + lgEsc(r.code) + '</div></div>' +
+      (r.attached ? '<span class="bg-pill">picked</span>' : '') + '</div></div>';
+  });
+  h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenWeek(window._lgSeason, window._lgWeek)">Back</button></div>';
+  body.innerHTML = h;
+}
+
+async function lgAttachRound(code) {
+  let res = null;
+  try { res = await supa.rpc('league_attach_round', { p_week_id: window._lgWeek, p_game_code: code }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_attach_round failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t post that round')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  try {
+    showToast(d.settled ? 'Posted — it counts.'
+      : 'Posted — it needs someone from the league to sign for it.');
+  } catch (e) {}
+  try { lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
+}
+
+async function lgUnpickRound() {
+  let res = null;
+  try { res = await supa.rpc('league_detach_round', { p_week_id: window._lgWeek }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) { try { showToast(lgErrText(res && res.error, 'Couldn’t remove that card')); } catch (e) {} }
+  try { lgPickRound(); } catch (e) {}
+}
+
+async function lgApproveCard(cid) {
+  let res = null;
+  try { res = await supa.rpc('league_approve_card', { p_card_id: cid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) { try { showToast(lgErrText(res && res.error, 'Couldn’t sign that card')); } catch (e) {} }
+  else { try { showToast('Signed'); } catch (e) {} }
+  try { lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
+}
+
+async function lgDisputeCard(cid) {
+  let note = null;
+  try { note = await uiPrompt('What’s wrong with it? This goes to the commissioner.', { title: 'Query this card', okLabel: 'Send' }); } catch (e) {}
+  if (!note || !String(note).trim()) return;
+  let res = null;
+  try { res = await supa.rpc('league_dispute_card', { p_card_id: cid, p_note: String(note).trim() }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) { try { showToast(lgErrText(res && res.error, 'Couldn’t send that')); } catch (e) {} }
+  else { try { showToast('Sent to the commissioner'); } catch (e) {} }
+  try { lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
+}
+
+async function lgToggleSelfScheduled(on) {
+  const sid = window._lgSeason; if (!sid) return;
+  const r = await _bgRead(function () {
+    return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
+  }, 'lgToggleSelfScheduled:read');
+  if (!r.ok || !r.data) { try { showToast('Couldn’t save that'); } catch (e) {} return; }
+  const s = r.data.settings || {};
+  s.play = Object.assign({ window_days: 6 }, s.play || {}, { self_scheduled: !!on });
+  let up = null;
+  try { up = await supa.from('league_seasons').update({ settings: s }).eq('id', sid).select('id'); }
+  catch (e) { up = { error: e }; }
+  if (!up || up.error || !(Array.isArray(up.data) ? up.data.length : up.data)) {
+    try { showToast('Only the commissioner can change that'); } catch (e) {}
+  } else {
+    // The week reads its FROZEN snapshot, so an already-open week has to be told
+    // too or the toggle appears to do nothing until next week (§7.2).
+    try {
+      await supa.from('league_weeks').update({ settings_snapshot: s })
+        .eq('season_id', sid).in('status', ['open', 'in_play', 'awaiting_cards']);
+    } catch (e) {}
+    try { showToast(on ? 'Players can post their own rounds' : 'Own rounds turned off'); } catch (e) {}
+  }
+  try { lgOpenWeek(sid, window._lgWeek); } catch (e) {}
+}
+
+async function lgOpenWeekNow() {
+  const wid = window._lgWeek; if (!wid) return;
+  const r = await _bgRead(function () {
+    return supa.from('league_weeks').select('course_id,nine,tee_id').eq('id', wid).maybeSingle();
+  }, 'lgOpenWeekNow:week');
+  if (!r.ok || !r.data || !r.data.course_id) { try { showToast('This week has no course set'); } catch (e) {} return; }
+  const snap = await lgCourseSnapshot(r.data.course_id, r.data.nine, r.data.tee_id);
+  if (!snap) { try { showToast('Couldn’t read that course’s scorecard'); } catch (e) {} return; }
+  let res = null;
+  try { res = await supa.rpc('league_open_week', { p_week_id: wid, p_course_snapshot: snap, p_opened_by_auto: false }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) { try { showToast(lgErrText(res && res.error, 'Couldn’t open the week')); } catch (e) {} }
+  else { try { showToast('Week open'); } catch (e) {} }
+  try { lgOpenWeek(window._lgSeason, wid); } catch (e) {}
+}
+
+/* ---- the end-of-round offer -------------------------------------------
+   Fires after a round is finished and saved. Asks league_eligible_rounds --
+   the SAME oracle the picker uses -- so it can never offer something the
+   attach would then refuse. Silent unless this exact round qualifies. */
+async function lgOfferRoundToLeague(code) {
+  try {
+    if (!code || !supa || typeof _authUser === 'undefined' || !_authUser) return;
+    const sr = await supa.rpc('league_my_open_weeks');
+    if (!sr || sr.error || !Array.isArray(sr.data) || !sr.data.length) return;
+    for (const w of sr.data) {
+      if (!w.self_scheduled) continue;   // this league wants rounds launched from the league
+      let el = null;
+      try { el = await supa.rpc('league_eligible_rounds', { p_week_id: w.week_id }); } catch (e) { continue; }
+      if (!el || el.error || !Array.isArray(el.data)) continue;
+      const hit = el.data.filter(function (r) { return r.code === code && !r.attached; })[0];
+      if (!hit) continue;
+      let ok = false;
+      try {
+        ok = await uiConfirm('Post this round as your week ' + w.week_number + ' card in ' + w.league_name + '?',
+          { title: '⛳ League round?', okLabel: 'Post it', cancelLabel: 'Not this one', danger: false });
+      } catch (e) { ok = false; }
+      if (!ok) return;
+      window._lgSeason = w.season_id; window._lgWeek = w.week_id;
+      await lgAttachRound(code);
+      return;
+    }
+  } catch (e) { try { console.warn('lgOfferRoundToLeague', e); } catch (e2) {} }
 }
 
 function renderBottomNav() {
@@ -78570,6 +78951,12 @@ async function init() {
       // background. _bgFinishCleanup is fire-and-forget and fully self-guarded.
       try { _bgReleaseSummaryUI(g); } catch (e) { console.warn('summary release failed:', e); }
       try { bgPostFinishGrowth(g); } catch (e) {}   // v1243: rating ask / invite nudge, one max, delayed
+      // v1253 (Tyler): "could we add something to the end of the rounds... when an
+      // active league is in play and these rules apply we ask them post this round
+      // for league play?" Silent unless this exact round qualifies for a week that
+      // is open AND allows self-scheduled rounds. Delayed so the finish save has
+      // landed server-side before the eligibility read runs.
+      try { setTimeout(function () { try { lgOfferRoundToLeague(g.code); } catch (e) {} }, 2600); } catch (e) {}
       try { if (g.t2 && g.t2.tournamentId) t2MaybeCompleteDay(g); } catch (e) {}   // v1154: last group in → day complete
       // v940: retire any invites still outstanding for this round — nobody should
       // be invited to a round that just ended.
