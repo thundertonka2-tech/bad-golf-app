@@ -8612,7 +8612,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1246';
+const BG_BUILD = 'v2026.11.1247';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -9006,6 +9006,19 @@ async function initAuth() {
           // Same for the general ?tclaim=<id> "tap your name" tournament link.
           let _tck = null; try { _tck = localStorage.getItem('golf:pending-tclaim'); } catch (e) {}
           if (_tck && !_tjk) { processPendingTclaim(_tck); }
+          // v1247: a ?lg=<token> league invite opened before sign-in. Deliberately
+          // LAST and on a short delay, so the identity chain above (slot claim,
+          // autoLinkMyPlayer, ensureMyNameSet) has finished before the account
+          // takes a league seat — league_claim_member checks the profile name for
+          // the one-human-two-accounts collision, and an unnamed account would
+          // slip past that check.
+          let _lgk = null;
+          try { _lgk = _pendingLg; } catch (e) {}
+          if (!_lgk) { try { _lgk = localStorage.getItem('golf:pending-lg'); } catch (e) {} }
+          if (_lgk) {
+            try { _pendingLg = null; } catch (e) {}
+            setTimeout(function () { try { processPendingLg(_lgk); } catch (e) {} }, 900);
+          }
           // A ?join=CODE round link opened before sign-in is completed by the
           // identity chain above (v1041) — this only still needs to know WHETHER one
           // is pending, so the first-run Get Started guide below stays out of the way.
@@ -9016,7 +9029,7 @@ async function initAuth() {
           // with a saved session) and not while following a join / tournament deep
           // link. Tyler: put Get Started behind the login screen, first login only.
           try {
-            if (!_tjk && !_tck && !_jk && !localStorage.getItem(KEY_GETSTARTED_SEEN)) {
+            if (!_tjk && !_tck && !_jk && !_lgk && !localStorage.getItem(KEY_GETSTARTED_SEEN)) {
               setTimeout(function () { try { maybeShowGetStarted(); } catch (e) {} }, 500);
             }
           } catch (e) {}
@@ -65418,15 +65431,23 @@ function t2TeamLogo(t, team) {
 }
 function t2LogoHtml(logo, sizePx) {
   const s = sizePx || 26;
-  if (logo && logo.img) {
+  // v1247 (Leagues §5.5): the image value was interpolated into a style
+  // attribute UNESCAPED. Harmless while every tournament logo is a locally
+  // produced canvas data-URI, but it is a stored-injection path the moment one
+  // member's logo renders on another member's device -- which is exactly what a
+  // league logo does. _bgSafeLogoImg / _bgSafeLogoBg validate against the same
+  // shapes the leagues.logo CHECK constraint enforces in the database, so client
+  // and server agree on what is legal. An unrecognised value renders nothing
+  // rather than an attribute we did not build.
+  if (logo && logo.img && _bgSafeLogoImg(logo.img)) {
     return '<span style="display:inline-block;width:' + s + 'px;height:' + s + 'px;border-radius:' + Math.round(s * 0.22) + 'px;' +
       'background-image:url(' + logo.img + ');background-size:cover;background-position:center;' +
       'vertical-align:-' + Math.round(s * 0.25) + 'px;border:1px solid var(--border)"></span>';
   }
   if (logo && logo.e) {
     return '<span style="display:inline-flex;align-items:center;justify-content:center;width:' + s + 'px;height:' + s + 'px;' +
-      'border-radius:' + Math.round(s * 0.22) + 'px;background:' + (logo.bg || 'var(--accent-light)') + ';font-size:' + Math.round(s * 0.62) + 'px;' +
-      'vertical-align:-' + Math.round(s * 0.25) + 'px">' + logo.e + '</span>';
+      'border-radius:' + Math.round(s * 0.22) + 'px;background:' + _bgSafeLogoBg(logo.bg) + ';font-size:' + Math.round(s * 0.62) + 'px;' +
+      'vertical-align:-' + Math.round(s * 0.25) + 'px">' + escapeHtml(String(logo.e).slice(0, 8)) + '</span>';
   }
   return '';
 }
@@ -74046,50 +74067,6 @@ function lgMonogram(name, id) {
     pal[h % pal.length] + ';color:#fff;font-weight:800;font-size:13px;letter-spacing:.5px;flex:0 0 auto">' + lgEsc(ini) + '</span>';
 }
 
-async function renderLeague() {
-  const body = document.getElementById('league-body'); if (!body) return;
-  if (typeof supa === 'undefined' || !supa || typeof _authUser === 'undefined' || !_authUser) {
-    body.innerHTML = lgCard('<h2 style="margin:0 0 4px">Leagues</h2><p class="help-text" style="margin:0">Sign in to start or join a league.</p>');
-    return;
-  }
-  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Loading your leagues…</p>');
-  const r = await _bgRead(function () {
-    return supa.from('league_seasons')
-      .select('id,name,status,schedule_mode,start_date,round_target,settings,league_id,leagues(name)')
-      .order('created_at', { ascending: false });
-  }, 'renderLeague:seasons');
-  if (!r.ok) {
-    body.innerHTML = lgCard('<h2 style="margin:0 0 4px">Leagues</h2>' +
-      '<p class="help-text" style="margin:0 0 12px">Couldn’t load your leagues just now.</p>' +
-      '<button class="full" onclick="renderLeague()">Try again</button>');
-    return;
-  }
-  const rows = Array.isArray(r.data) ? r.data : [];
-  let h = '';
-  if (!rows.length) {
-    h += lgCard('<h2 style="margin:0 0 4px">Leagues</h2>' +
-      '<p class="help-text" style="margin-bottom:12px">A weekly league with standings, handicaps and the money settled to a phone. Start one and invite your group — or ask your commissioner for the join link.</p>' +
-      '<button class="primary full" onclick="lgOpenCreate()">+ Start a league</button>');
-    h += lgCard('<p class="help-text" style="margin:0"><strong>Coming next:</strong> inviting your group, the season schedule, weekly handicaps and the pot. This first version creates the league and lays out its weeks.</p>');
-  } else {
-    h += '<div class="card" style="padding:12px 14px"><button class="primary full" onclick="lgOpenCreate()">+ Start a league</button></div>';
-    rows.forEach(function (s) {
-      const nm = (s.leagues && s.leagues.name) || 'League';
-      const st = s.settings || {};
-      const bits = [];
-      bits.push(st.competition_mode === 'field' ? 'Everyone posts' : 'Head to head');
-      bits.push((st.base_holes === 9 ? '9' : '18') + ' holes');
-      if (s.schedule_mode === 'open') { if (s.round_target) bits.push(s.round_target + ' rounds, play when you can'); }
-      else if (st.weeks) { bits.push(st.weeks + ' weeks'); }
-      if (s.start_date) bits.push('starts ' + s.start_date);
-      h += lgCard('<div style="display:flex;gap:12px;align-items:flex-start">' + lgMonogram(nm, s.league_id) +
-        '<div style="min-width:0;flex:1"><h2 style="margin:0 0 2px;font-size:17px">' + lgEsc(nm) + '</h2>' +
-        '<p class="help-text" style="margin:0">' + lgEsc(s.name || '') + ' · ' + lgEsc(bits.join(' · ')) + '</p></div>' +
-        '<span class="bg-pill">' + lgEsc(s.status || '') + '</span></div>');
-    });
-  }
-  body.innerHTML = h;
-}
 
 /* §9.6 — season length is any integer. The presets are a shortcut, not a menu,
    and 12 is HIGHLIGHTED rather than preselected so nobody inherits a default
@@ -74174,6 +74151,435 @@ async function lgSubmitCreate() {
   }
   try { showToast('League created'); } catch (e) {}
   try { renderLeague(); } catch (e) {}
+}
+
+/* ===================== LEAGUES — Phase 3b (v1247) =====================
+   Invites, joining, and the commissioner's roster. Server side shipped in
+   Phase 3a: league_preview / league_claim_member / league_request_join /
+   league_add_member / league_approve_member / league_remove_member /
+   league_resend_invite / league_my_invites.
+
+   THE ONE RULE AN IMPLEMENTER MUST NOT BREAK. The round join gate (v1242)
+   compares getMeName() against g.players — a NAME STRING, not a uid — and is
+   deliberately FAIL-OPEN: "a bug here must never lock a legitimate player out
+   mid-tee-box." For a casual round that trade is right. For a league join that
+   grants a share of a season pool it is not. league_claim_member() is uid-bound
+   and HARD-REFUSES on a mismatched account; nothing below offers a "join anyway"
+   escape, and nothing below should ever grow one.
+   ==================================================================== */
+
+/* Shared logo-value guards. §5.5: t2LogoHtml interpolated the image value into a
+   style attribute UNESCAPED. Harmless while every tournament logo is a locally
+   produced canvas data-URI — a stored-injection path the moment one member's
+   logo renders on another member's device, which is exactly what a league logo
+   does. These validate against the same shapes the leagues.logo CHECK constraint
+   enforces in the database, so the client and the server agree on what is legal. */
+function _bgSafeLogoImg(v) {
+  try { return typeof v === 'string' && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]{1,24000}$/.test(v); }
+  catch (e) { return false; }
+}
+function _bgSafeLogoBg(v) {
+  try { return (typeof v === 'string' && /^[A-Za-z0-9(),\- .#]{0,40}$/.test(v)) ? v : 'var(--accent-light)'; }
+  catch (e) { return 'var(--accent-light)'; }
+}
+/* League mark: validated image, else stock badge, else the hashed monogram. */
+function leagueLogoHtml(logo, name, id, sizePx) {
+  const s = sizePx || 34;
+  try {
+    if (logo && logo.img && _bgSafeLogoImg(logo.img)) {
+      return '<span style="display:inline-block;width:' + s + 'px;height:' + s + 'px;border-radius:' +
+        Math.round(s * 0.29) + 'px;background-image:url(' + logo.img + ');background-size:cover;' +
+        'background-position:center;flex:0 0 auto;border:1px solid var(--bg-border,#e5e7eb)"></span>';
+    }
+    if (logo && logo.e) {
+      return '<span style="display:inline-flex;align-items:center;justify-content:center;width:' + s + 'px;height:' +
+        s + 'px;border-radius:' + Math.round(s * 0.29) + 'px;background:' + _bgSafeLogoBg(logo.bg) +
+        ';font-size:' + Math.round(s * 0.55) + 'px;flex:0 0 auto">' + lgEsc(String(logo.e).slice(0, 8)) + '</span>';
+    }
+  } catch (e) {}
+  return lgMonogram(name, id);
+}
+
+/* ---- the ?lg= hand-off ------------------------------------------------- */
+async function processPendingLg(token) {
+  try { localStorage.removeItem('golf:pending-lg'); } catch (e) {}
+  if (!token) return;
+  try { history.replaceState({}, '', location.pathname); } catch (e) {}
+  try { switchTab('league'); } catch (e) {}
+  let res = null;
+  try { res = await supa.rpc('league_preview', { p_code: String(token).trim().toUpperCase() }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error || !res.data) {
+    try { console.warn('league_preview failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'That league link is not valid')); } catch (e) {}
+    try { renderLeague(); } catch (e) {}
+    return;
+  }
+  lgShowPreview(res.data, String(token).trim().toUpperCase());
+}
+
+/* league_* RPCs raise readable prefixed errors on purpose, so the reason can be
+   shown instead of a generic failure. Strip the prefix for humans. */
+function lgErrText(err, fallback) {
+  const raw = String((err && (err.message || err.hint)) || '');
+  if (!raw) return fallback || 'Something went wrong';
+  const m = raw.match(/(?:LEAGUE_[A-Z_]+|NOT_SIGNED_IN|NOT_COMMISSIONER|ALREADY_CLAIMED):\s*([^\n]*)/);
+  if (m && m[1]) return m[1];
+  if (/ALREADY_CLAIMED/.test(raw)) return 'Someone has already accepted that invite';
+  if (/NOT_COMMISSIONER/.test(raw)) return 'Only the commissioner can do that';
+  return fallback || raw;
+}
+
+function lgShowPreview(p, token) {
+  const body = document.getElementById('league-body'); if (!body) return;
+  const bits = [];
+  if (p.competition_mode) bits.push(p.competition_mode === 'field' ? 'Everyone posts' : 'Head to head');
+  if (p.base_holes) bits.push(p.base_holes + ' holes');
+  if (p.weeks) bits.push(p.weeks + ' weeks');
+  if (p.start_date) bits.push('starts ' + p.start_date);
+  const money = [];
+  if (p.dues) money.push('$' + p.dues + ' dues');
+  if (p.buyin) money.push('$' + p.buyin + ' buy-in');
+  let act;
+  if (p.already_member) {
+    act = '<button class="primary full" onclick="lgOpenSeason(\'' + lgEsc(p.season_id) + '\')">Open the league</button>';
+  } else if (p.kind === 'invite') {
+    act = '<button class="primary full" id="lg-accept-btn" onclick="lgAcceptInvite(\'' + lgEsc(token) + '\')">Accept'
+        + (p.seat_name ? ' as ' + lgEsc(p.seat_name) : '') + '</button>';
+  } else {
+    act = '<button class="primary full" id="lg-accept-btn" onclick="lgRequestJoin(\'' + lgEsc(token) + '\')">Ask to join</button>'
+        + '<p class="help-text" style="margin:10px 0 0">The commissioner approves new members, so this sends them a request.</p>';
+  }
+  body.innerHTML = lgCard(
+    '<div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px">' +
+      leagueLogoHtml(p.logo, p.league_name, p.season_id, 44) +
+      '<div style="min-width:0;flex:1"><h2 style="margin:0 0 2px">' + lgEsc(p.league_name || 'League') + '</h2>' +
+      '<p class="help-text" style="margin:0">' + lgEsc(p.season_name || '') +
+      (p.commissioner ? ' · run by ' + lgEsc(p.commissioner) : '') + '</p></div></div>' +
+    '<p class="help-text" style="margin:0 0 4px">' + lgEsc(bits.join(' · ')) + '</p>' +
+    (money.length ? '<p class="help-text" style="margin:0 0 4px"><strong>' + lgEsc(money.join(' · ')) + '</strong></p>' : '') +
+    '<p class="help-text" style="margin:0 0 14px">' + lgEsc(String(p.member_count || 0)) + ' member' +
+      ((p.member_count === 1) ? '' : 's') + ' so far</p>' + act +
+    '<button class="full" style="margin-top:8px" onclick="renderLeague()">Not now</button>');
+}
+
+async function lgAcceptInvite(token) {
+  const b = document.getElementById('lg-accept-btn');
+  if (b) { b.disabled = true; b.textContent = 'Accepting…'; }
+  let res = null;
+  try { res = await supa.rpc('league_claim_member', { p_token: token }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (b) { b.disabled = false; b.textContent = 'Accept'; }
+  if (!res || res.error) {
+    /* HARD REFUSE. A wrong-account invite is not retried, not softened, and not
+       offered an "accept anyway". §5.2: token alone stops a shared code; token
+       plus email binding is what stops a FORWARDED link, which is the threat
+       that matters once there is a season pool. */
+    try { console.warn('league_claim_member failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t accept that invite')); } catch (e) {}
+    return;
+  }
+  try { showToast('You’re in'); } catch (e) {}
+  try { lgOpenSeason((res.data && res.data.season_id) || null); } catch (e) { try { renderLeague(); } catch (e2) {} }
+}
+
+async function lgRequestJoin(code) {
+  const b = document.getElementById('lg-accept-btn');
+  if (b) { b.disabled = true; b.textContent = 'Sending…'; }
+  let res = null;
+  try { res = await supa.rpc('league_request_join', { p_join_code: code }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (b) { b.disabled = false; b.textContent = 'Ask to join'; }
+  if (!res || res.error) {
+    try { console.warn('league_request_join failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t send that request')); } catch (e) {}
+    return;
+  }
+  try { showToast('Request sent — the commissioner will approve it'); } catch (e) {}
+  try { renderLeague(); } catch (e) {}
+}
+
+function lgJoinPrompt() {
+  const body = document.getElementById('league-body'); if (!body) return;
+  body.innerHTML = lgCard('<h2 style="margin:0 0 4px">Join a league</h2>' +
+    '<p class="help-text" style="margin-bottom:4px">Paste the code from your commissioner’s invite, or the league’s join code.</p>' +
+    lgLbl('Code') + '<input id="lg-code" maxlength="24" autocapitalize="characters" autocomplete="off" style="width:100%;text-transform:uppercase" placeholder="ABCD23EFGH">' +
+    '<button class="primary full" style="margin-top:12px" onclick="lgLookupCode()">Look it up</button>' +
+    '<button class="full" style="margin-top:8px" onclick="renderLeague()">Cancel</button>');
+}
+async function lgLookupCode() {
+  const el = document.getElementById('lg-code');
+  const code = el ? String(el.value || '').trim().toUpperCase() : '';
+  if (code.length < 6) { try { showToast('That code looks too short'); } catch (e) {} return; }
+  await processPendingLg(code);
+}
+
+/* ---- the League tab ----------------------------------------------------- */
+async function renderLeague() {
+  const body = document.getElementById('league-body'); if (!body) return;
+  if (typeof supa === 'undefined' || !supa || typeof _authUser === 'undefined' || !_authUser) {
+    body.innerHTML = lgCard('<h2 style="margin:0 0 4px">Leagues</h2><p class="help-text" style="margin:0">Sign in to start or join a league.</p>');
+    return;
+  }
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Loading your leagues…</p>');
+
+  const r = await _bgRead(function () {
+    return supa.from('league_seasons')
+      .select('id,name,status,schedule_mode,start_date,round_target,settings,league_id,leagues(name,logo)')
+      .order('created_at', { ascending: false });
+  }, 'renderLeague:seasons');
+  if (!r.ok) {
+    body.innerHTML = lgCard('<h2 style="margin:0 0 4px">Leagues</h2>' +
+      '<p class="help-text" style="margin:0 0 12px">Couldn’t load your leagues just now.</p>' +
+      '<button class="full" onclick="renderLeague()">Try again</button>');
+    return;
+  }
+  const rows = Array.isArray(r.data) ? r.data : [];
+
+  /* Seats waiting for THIS account. league_is_member() is 'active' only, so an
+     invited person can read nothing about the league — which is correct, and is
+     why this one narrow RPC exists: "which seats are addressed to me?" It
+     matches on uid OR on the verified email of the signed-in account. */
+  let invites = [];
+  try {
+    const ir = await supa.rpc('league_my_invites');
+    if (ir && !ir.error && Array.isArray(ir.data)) invites = ir.data;
+    else if (ir && ir.error) console.warn('league_my_invites failed:', ir.error);
+  } catch (e) { try { console.warn('league_my_invites threw:', e); } catch (e2) {} }
+
+  let h = '';
+  invites.forEach(function (iv) {
+    const pending = (iv.status === 'requested');
+    h += '<div class="card" style="border-color:var(--bg-brand);background:var(--bg-brand-tint)">' +
+      '<div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px">' +
+      leagueLogoHtml(iv.logo, iv.league_name, iv.season_id, 34) +
+      '<div style="min-width:0;flex:1"><h2 style="margin:0 0 2px;font-size:17px">' + lgEsc(iv.league_name) + '</h2>' +
+      '<p class="help-text" style="margin:0">' + (pending
+        ? 'Waiting for ' + lgEsc(iv.commissioner || 'the commissioner') + ' to approve you'
+        : lgEsc(iv.commissioner || 'The commissioner') + ' invited you' + (iv.seat_name ? ' as ' + lgEsc(iv.seat_name) : '')) +
+      '</p></div></div>' +
+      (pending ? '' : '<button class="primary full" onclick="lgAcceptInvite(\'' + lgEsc(iv.invite_token) + '\')">Accept invite</button>') +
+      '</div>';
+  });
+
+  h += '<div class="card" style="padding:12px 14px;display:flex;gap:8px">' +
+       '<button class="primary" style="flex:1" onclick="lgOpenCreate()">+ Start a league</button>' +
+       '<button style="flex:1" onclick="lgJoinPrompt()">Join with a code</button></div>';
+
+  if (!rows.length) {
+    if (!invites.length) {
+      h += lgCard('<h2 style="margin:0 0 4px">Leagues</h2>' +
+        '<p class="help-text" style="margin:0">A weekly league with standings, handicaps and the money settled to a phone. Start one and invite your group — or ask your commissioner for the join link.</p>');
+    }
+  } else {
+    rows.forEach(function (s) {
+      const nm = (s.leagues && s.leagues.name) || 'League';
+      const lg = (s.leagues && s.leagues.logo) || null;
+      const st = s.settings || {};
+      const bits = [];
+      bits.push(st.competition_mode === 'field' ? 'Everyone posts' : 'Head to head');
+      bits.push((st.base_holes === 9 ? '9' : '18') + ' holes');
+      if (s.schedule_mode === 'open') { if (s.round_target) bits.push(s.round_target + ' rounds'); }
+      else if (st.weeks) { bits.push(st.weeks + ' weeks'); }
+      if (s.start_date) bits.push('starts ' + s.start_date);
+      h += '<div class="card" style="cursor:pointer" onclick="lgOpenSeason(\'' + lgEsc(s.id) + '\')">' +
+        '<div style="display:flex;gap:12px;align-items:flex-start">' + leagueLogoHtml(lg, nm, s.league_id, 34) +
+        '<div style="min-width:0;flex:1"><h2 style="margin:0 0 2px;font-size:17px">' + lgEsc(nm) + '</h2>' +
+        '<p class="help-text" style="margin:0">' + lgEsc(s.name || '') + ' · ' + lgEsc(bits.join(' · ')) + '</p></div>' +
+        '<span class="bg-pill">' + lgEsc(s.status || '') + '</span></div></div>';
+    });
+  }
+  body.innerHTML = h;
+}
+
+/* ---- season detail: the roster ------------------------------------------ */
+async function lgOpenSeason(sid) {
+  const body = document.getElementById('league-body'); if (!body || !sid) return;
+  try { switchTab('league'); } catch (e) {}
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Loading…</p>');
+
+  const sr = await _bgRead(function () {
+    return supa.from('league_seasons')
+      .select('id,name,status,join_code,settings,league_id,leagues(name,logo)').eq('id', sid).maybeSingle();
+  }, 'lgOpenSeason:season');
+  const mr = await _bgRead(function () {
+    return supa.from('league_members')
+      .select('id,display_name,status,role,invite_email,invite_token,invite_sent_at,user_id')
+      .eq('season_id', sid).order('created_at', { ascending: true });
+  }, 'lgOpenSeason:members');
+  if (!sr.ok || !mr.ok || !sr.data) {
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">Couldn’t load that league.</p>' +
+      '<button class="full" onclick="renderLeague()">Back to leagues</button>');
+    return;
+  }
+  const s = sr.data, members = Array.isArray(mr.data) ? mr.data : [];
+  const nm = (s.leagues && s.leagues.name) || 'League';
+  const me = members.filter(function (m) { return m.user_id === _authUser.id; })[0];
+  const amCommish = !!(me && (me.role === 'commissioner' || me.role === 'co_commissioner') && me.status === 'active');
+  window._lgSeason = sid;
+
+  const grp = function (st) { return members.filter(function (m) { return m.status === st; }); };
+  const active = grp('active'), requested = grp('requested'), invited = grp('invited');
+
+  const row = function (m) {
+    let right = '';
+    if (amCommish) {
+      if (m.status === 'requested') {
+        right = '<button class="small primary" onclick="event.stopPropagation();lgApprove(\'' + lgEsc(m.id) + '\')">Approve</button> ' +
+                '<button class="small" onclick="event.stopPropagation();lgRemove(\'' + lgEsc(m.id) + '\',\'requested\',\'' + lgEsc(m.display_name) + '\')">Decline</button>';
+      } else if (m.status === 'invited') {
+        right = '<button class="small" onclick="event.stopPropagation();lgResend(\'' + lgEsc(m.id) + '\')">Re-send</button> ' +
+                '<button class="small" onclick="event.stopPropagation();lgRemove(\'' + lgEsc(m.id) + '\',\'invited\',\'' + lgEsc(m.display_name) + '\')">Remove</button>';
+      } else if (m.role !== 'commissioner') {
+        right = '<button class="small" onclick="event.stopPropagation();lgRemove(\'' + lgEsc(m.id) + '\',\'active\',\'' + lgEsc(m.display_name) + '\')">Remove</button>';
+      }
+    }
+    const sub = (m.role === 'commissioner') ? 'Commissioner'
+      : (m.status === 'invited' ? (m.invite_email ? ('Invited · ' + lgEsc(m.invite_email)) : 'Invited')
+      : (m.status === 'requested' ? 'Asked to join' : ''));
+    return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+      '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(m.display_name) + '</div>' +
+      (sub ? '<div class="help-text" style="margin:0;font-size:12px">' + sub + '</div>' : '') + '</div>' +
+      '<div style="flex:0 0 auto;white-space:nowrap">' + right + '</div></div>';
+  };
+
+  let h = '<div class="card"><div style="display:flex;gap:12px;align-items:flex-start">' +
+    leagueLogoHtml((s.leagues && s.leagues.logo) || null, nm, s.league_id, 44) +
+    '<div style="min-width:0;flex:1"><h2 style="margin:0 0 2px">' + lgEsc(nm) + '</h2>' +
+    '<p class="help-text" style="margin:0">' + lgEsc(s.name || '') + ' · ' + lgEsc(s.status || '') + '</p></div></div></div>';
+
+  if (requested.length) {
+    h += '<div class="card"><div class="bg-sec">Waiting for approval <span>' + requested.length + '</span></div>' +
+      requested.map(row).join('') + '</div>';
+  }
+  h += '<div class="card"><div class="bg-sec">Roster <span>' + active.length + '</span></div>' +
+    (active.length ? active.map(row).join('') : '<p class="help-text" style="margin:8px 0 0">Nobody has accepted yet.</p>') + '</div>';
+  if (invited.length) {
+    h += '<div class="card"><div class="bg-sec">Invited <span>' + invited.length + '</span></div>' + invited.map(row).join('') + '</div>';
+  }
+
+  if (amCommish) {
+    /* §5.2.1: adding someone by name REQUIRES an email. It is the only
+       destination that exists — push_tokens is uid-keyed and game_invites.to_user
+       is uuid NOT NULL — and it is also what binds the claim, so a forwarded link
+       cannot be redeemed by the wrong account. */
+    h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Add someone</div>' +
+      lgLbl('Name') + '<input id="lg-add-name" maxlength="40" style="width:100%" placeholder="Kevin">' +
+      lgLbl('Email') + '<input id="lg-add-email" type="email" autocapitalize="off" autocomplete="off" style="width:100%" placeholder="kevin@example.com">' +
+      '<p class="help-text" style="margin:8px 0 10px">The invite is sent from your own mail app, and only that address can accept it.</p>' +
+      '<button class="primary full" id="lg-add-btn" onclick="lgAddMember()">Add &amp; send invite</button>');
+    h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Join code</div>' +
+      '<p class="help-text" style="margin:0 0 8px">Anyone with this code can <strong>ask</strong> to join — you approve them. It never takes someone else’s seat.</p>' +
+      '<div style="font-size:20px;font-weight:800;letter-spacing:2px;margin-bottom:10px">' + lgEsc(s.join_code || '—') + '</div>' +
+      '<button class="full" onclick="lgRotateCode()">Rotate the code</button>');
+  }
+  h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="renderLeague()">Back to leagues</button></div>';
+  body.innerHTML = h;
+}
+
+function lgMailto(to, leagueName, seatName, token) {
+  const base = (typeof BG_PUBLIC_URL === 'string' && BG_PUBLIC_URL) ? BG_PUBLIC_URL : location.origin + location.pathname;
+  const link = base + '?lg=' + encodeURIComponent(token);
+  const subj = 'You’re invited to ' + leagueName;
+  const bodyTxt = (seatName ? seatName + ',\n\n' : '') +
+    'You’re invited to join ' + leagueName + ' on Bad Golf.\n\n' + link +
+    '\n\nThis link is just for you — it only works from this email address.\n';
+  return 'mailto:' + encodeURIComponent(to) + '?subject=' + encodeURIComponent(subj) + '&body=' + encodeURIComponent(bodyTxt);
+}
+function lgSendInviteEmail(to, leagueName, seatName, token) {
+  try { window.location.href = lgMailto(to, leagueName, seatName, token); }
+  catch (e) { try { showToast('Couldn’t open your mail app'); } catch (e2) {} }
+}
+
+async function lgAddMember() {
+  const sid = window._lgSeason; if (!sid) return;
+  const btn = document.getElementById('lg-add-btn');
+  const nEl = document.getElementById('lg-add-name'), eEl = document.getElementById('lg-add-email');
+  const name = nEl ? String(nEl.value || '').trim() : '';
+  const email = eEl ? String(eEl.value || '').trim() : '';
+  if (!name) { try { showToast('Who are you adding?'); } catch (e) {} return; }
+  if (!email) { try { showToast('An email address is required — it’s how the invite gets there'); } catch (e) {} return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+  let res = null;
+  try { res = await supa.rpc('league_add_member', { p_season_id: sid, p_display_name: name, p_invite_email: email, p_user_id: null }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (btn) { btn.disabled = false; btn.textContent = 'Add & send invite'; }
+  if (!res || res.error) {
+    try { console.warn('league_add_member failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t add them')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  let leagueName = 'the league';
+  try { const c = document.querySelector('#league-body .card h2'); if (c) leagueName = c.textContent || leagueName; } catch (e) {}
+  try { showToast('Added — opening your mail app'); } catch (e) {}
+  try { await supa.rpc('league_resend_invite', { p_member_id: d.member_id }); } catch (e) {}
+  lgSendInviteEmail(email, leagueName, name, d.invite_token);
+  try { lgOpenSeason(sid); } catch (e) {}
+}
+
+async function lgResend(mid) {
+  let res = null;
+  try { res = await supa.rpc('league_resend_invite', { p_member_id: mid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_resend_invite failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t re-send that invite')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  let leagueName = 'the league';
+  try { const c = document.querySelector('#league-body .card h2'); if (c) leagueName = c.textContent || leagueName; } catch (e) {}
+  if (!d.invite_email) { try { showToast('That seat has no email on it'); } catch (e) {} return; }
+  lgSendInviteEmail(d.invite_email, leagueName, d.display_name, d.invite_token);
+}
+
+async function lgApprove(mid) {
+  let res = null;
+  try { res = await supa.rpc('league_approve_member', { p_member_id: mid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_approve_member failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t approve them')); } catch (e) {}
+  } else { try { showToast('Approved'); } catch (e) {} }
+  try { lgOpenSeason(window._lgSeason); } catch (e) {}
+}
+
+/* §5.2 DELETE-VS-ACCEPT, the v1182/v1244 stale-clobber shape. The status this
+   screen was rendered with is passed back to the server, which refuses if the
+   row has moved on — so tapping Remove on a row that reads "invited" can never
+   take out a member who accepted while the commissioner was looking at it. */
+async function lgRemove(mid, expectStatus, name) {
+  let ok = true;
+  try {
+    ok = await uiConfirm('Remove ' + name + ' from the league?',
+      { title: 'Remove member', okLabel: 'Remove', cancelLabel: 'Keep', danger: true });
+  } catch (e) { ok = true; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_remove_member', { p_member_id: mid, p_expect_status: expectStatus }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_remove_member failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t remove them')); } catch (e) {}
+  } else { try { showToast(name + ' removed'); } catch (e) {} }
+  try { lgOpenSeason(window._lgSeason); } catch (e) {}
+}
+
+async function lgRotateCode() {
+  let ok = true;
+  try {
+    ok = await uiConfirm('Rotate the join code?\n\nThe old code stops working immediately — anyone you already sent it to will need the new one.',
+      { title: 'Rotate join code', okLabel: 'Rotate', cancelLabel: 'Keep it', danger: false });
+  } catch (e) { ok = true; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_rotate_join_code', { p_season_id: window._lgSeason }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { showToast(lgErrText(res && res.error, 'Couldn’t rotate the code')); } catch (e) {}
+  } else { try { showToast('New join code set'); } catch (e) {} }
+  try { lgOpenSeason(window._lgSeason); } catch (e) {}
 }
 
 function renderBottomNav() {
@@ -83993,6 +84399,29 @@ let _pendingJoinTok = null;
     showToast('Sign in to claim your rounds');
   }
 })();
+// ?lg=<token> — a LEAGUE invite (per-seat token) or a league join code.
+// Leagues get their OWN param and their OWN pending key, deliberately. The
+// existing share path is round-scoped end to end: buildJoinLink emits ?join=,
+// and the handler uppercases the code and calls joinRoundByCode -> loadGame,
+// which returns null for a league — so the invitee taps the text and gets
+// nothing. 'golf:pending-join' is also the JSON-ARRAY key v1041 fixed a
+// collision on. Same stash-then-finish-after-auth shape as ?tjoin=.
+// League tokens are minted uppercase from a 31-symbol alphabet, so the
+// .toUpperCase() the other deep-link paths apply is safe here too.
+let _pendingLg = null;
+(function handleLeagueLink() {
+  let tok = null;
+  try { tok = new URLSearchParams(location.search || '').get('lg'); } catch (e) {}
+  if (!tok) return;
+  tok = String(tok).trim().toUpperCase();
+  if (!tok) return;
+  _pendingLg = tok;
+  try { localStorage.setItem('golf:pending-lg', tok); } catch (e) {}
+  if (!(typeof isSignedIn === 'function' && isSignedIn())) {
+    try { const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); } catch (e) {}
+    try { showToast('Sign in to accept your league invite'); } catch (e) {}
+  }
+})();
 // v1041 - claim the bound slot BEFORE the app invents a player for this account.
 // Runs on sign-in whenever a ?join= link is pending. On success the account is tied
 // to the exact row the host built at the tee box (name + handicap), so
@@ -84258,6 +84687,22 @@ async function processPendingJoin(code) {
       try {
         const url = (data && data.url) || '';
         if (!url) return;
+        // v1247: league invites first — badgolf://league/<token> or https ...?lg=<token>.
+        let lgTok = null;
+        try { const lm = url.match(/badgolf:\/\/league\/([A-Za-z0-9]+)/i); if (lm) lgTok = lm[1]; } catch (e) {}
+        if (!lgTok) { try { lgTok = new URL(url).searchParams.get('lg'); } catch (e) {} }
+        if (lgTok) {
+          lgTok = String(lgTok).trim().toUpperCase();
+          if (typeof isSignedIn === 'function' && isSignedIn()) {
+            try { processPendingLg(lgTok); } catch (e) {}
+          } else {
+            _pendingLg = lgTok;
+            try { localStorage.setItem('golf:pending-lg', lgTok); } catch (e) {}
+            try { const mm = document.getElementById('auth-modal'); if (mm) mm.classList.add('show'); } catch (e) {}
+            try { showToast('Sign in to accept your league invite'); } catch (e) {}
+          }
+          return;
+        }
         let code = null;
         const m = url.match(/badgolf:\/\/round\/([A-Za-z0-9_-]+)/i);   // badgolf://round/<code>
         if (m) code = m[1];
