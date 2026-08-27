@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1262-->
+<!--BGVER=v2026.11.1263-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8669,7 +8669,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1262';
+const BG_BUILD = 'v2026.11.1263';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -76027,12 +76027,70 @@ function lgAbsenceState(a, nameOf) {
    to zero -- so the client never adds anything up itself and never caches a
    total. If a figure here is wrong, the fix is in the engine, not here. */
 function lgMoney(n) {
+  /* v1263 (Tyler): use the app's own money formatter and its .money colour
+     classes, not a second set. _bgPotMoneyFmt drops the sign and the trailing
+     .00 on a round number, which is what every other money figure in the app
+     looks like — so a league total now reads identically to a round total. */
   const v = Number(n || 0);
-  return (v < 0 ? '-' : '') + '$' + Math.abs(v).toFixed(2);
+  return (v < 0 ? '-' : '') + (typeof _bgPotMoneyFmt === 'function'
+    ? _bgPotMoneyFmt(v) : ('$' + Math.abs(v).toFixed(2)));
 }
-function lgMoneyColor(n) {
+function lgMoneyCls(n) {
   const v = Number(n || 0);
-  return v > 0 ? 'var(--success,#1f8a3b)' : (v < 0 ? 'var(--danger,#c2402f)' : 'var(--text-muted)');
+  return 'money ' + (v > 0 ? 'pos' : (v < 0 ? 'neg' : 'zero'));
+}
+
+/* The settle-up list, built with the app's OWN settle-row markup and its
+   tap-to-pay row — the same components the round and tournament screens use.
+   Tyler 8/27: "we spent a lot of time setting these up so lets use them app
+   wide."
+   _renderSettlePayRow wants a game-shaped object, so we hand it a shim carrying
+   the league's members as players. resolvePayHandles already falls back to the
+   user's roster by normalised name, which means a league-mate who has a Venmo
+   handle saved gets a tap-to-pay button here for free — no new field, no new
+   settings screen. */
+async function lgRenderSettleList(sid, transfers, members, leagueName) {
+  const sl = document.getElementById('lg-settle-list');
+  if (!sl) return;
+  sl.innerHTML = '';
+  if (!transfers.length) {
+    sl.innerHTML = '<div class="settle-empty">No money owed between players — all square</div>';
+    return;
+  }
+  const shim = {
+    course: leagueName || '',
+    players: (members || []).map(function (m) { return { id: m.member_id, name: m.name }; })
+  };
+  const nameOf = {};
+  (members || []).forEach(function (m) { nameOf[m.member_id] = m.name; });
+
+  transfers.forEach(function (t) {
+    const row = document.createElement('div');
+    row.className = 'settle-row';
+    const fromFull = nameOf[t.from_member] || t.from || '?';
+    const toFull = nameOf[t.to_member] || t.to || '?';
+    row.innerHTML =
+      '<div class="settle-names">' +
+        '<div class="from" title="' + escAttr(fromFull) + '">' + escapeHtml(fromFull) + '</div>' +
+        '<div class="arrow">↓ pays</div>' +
+        '<div class="to" title="' + escAttr(toFull) + '">' + escapeHtml(toFull) + '</div>' +
+      '</div>' +
+      '<div class="amt">$' + Number(t.amount).toFixed(2) + '</div>';
+    sl.appendChild(row);
+    try {
+      const payWrap = document.createElement('div');
+      payWrap.className = 'settle-pay-wrap';
+      sl.appendChild(payWrap);
+      _renderSettlePayRow(payWrap, shim, t.from_member, t.to_member, Number(t.amount));
+    } catch (e) {}
+  });
+
+  const total = transfers.reduce(function (a, t) { return a + Number(t.amount || 0); }, 0);
+  const sum = document.createElement('div');
+  sum.className = 'settle-summary';
+  sum.textContent = transfers.length + ' payment' + (transfers.length > 1 ? 's' : '') +
+                    ' · $' + total.toFixed(2) + ' total in motion';
+  sl.appendChild(sum);
 }
 
 async function lgOpenMoney(sid) {
@@ -76041,7 +76099,7 @@ async function lgOpenMoney(sid) {
   try { switchTab('league'); } catch (e) {}
   body.innerHTML = lgCard('<p class="help-text" style="margin:0">Adding it up…</p>');
 
-  let led = null, set = null;
+  let led = null;
   try { led = await supa.rpc('league_money_ledger', { p_season_id: sid }); }
   catch (e) { led = { data: null, error: e }; }
   if (!led || led.error) {
@@ -76053,11 +76111,21 @@ async function lgOpenMoney(sid) {
   const d = led.data || {};
   const members = Array.isArray(d.members) ? d.members : [];
   const pots = Array.isArray(d.pots) ? d.pots : [];
+  const lines = Array.isArray(d.lines) ? d.lines : [];
   const amCommish = !!d.is_commissioner;
 
+  let set = null;
   try { set = await supa.rpc('league_money_settle', { p_season_id: sid }); } catch (e) { set = null; }
   const st = (set && !set.error && set.data) || {};
   const transfers = Array.isArray(st.transfers) ? st.transfers : [];
+
+  let lname = '';
+  try {
+    const lr = await _bgRead(function () {
+      return supa.from('league_seasons').select('leagues(name)').eq('id', sid).maybeSingle();
+    }, 'lgOpenMoney:league');
+    lname = (lr.ok && lr.data && lr.data.leagues && lr.data.leagues.name) || '';
+  } catch (e) {}
 
   const anyMoney = members.some(function (m) { return Number(m.net) !== 0; }) || pots.length;
 
@@ -76065,11 +76133,11 @@ async function lgOpenMoney(sid) {
     '<h2 style="margin:0;flex:1">Money</h2>' +
     (Number(d.ledger_sum) === 0
       ? '<span class="bg-pill" style="font-size:10px">balanced</span>'
-      : '<span class="bg-pill" style="font-size:10px;background:var(--danger,#c2402f);color:#fff">off by ' + lgMoney(d.ledger_sum) + '</span>') +
+      : '<span class="bg-pill" style="font-size:10px;background:var(--bg-danger,#c2402f);color:#fff">off by ' + lgEsc(lgMoney(d.ledger_sum)) + '</span>') +
     '</div>' +
     '<p class="help-text" style="margin:6px 0 0">' +
     (anyMoney
-      ? 'Every line is worked out from the scores and the settings. Nothing here is typed in by hand.'
+      ? 'Worked out from the scores and the settings. Bad Golf never touches the money.'
       : 'No money set up yet.' + (amCommish ? ' Set the dues, buy-in and weekly pots below.' : ' The commissioner hasn’t set any up.')) +
     '</p>');
 
@@ -76079,9 +76147,10 @@ async function lgOpenMoney(sid) {
         return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
           '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(m.name) + '</div>' +
           '<div class="help-text" style="margin:0;font-size:12px">' +
-            (Number(m.settled) !== 0 ? 'Settled ' + lgMoney(m.settled) + ' · ' : '') +
+            (Number(m.settled) !== 0 ? 'Settled ' + lgEsc(lgMoney(m.settled)) + ' · ' : '') +
             (Number(m.net) < 0 ? 'owes' : (Number(m.net) > 0 ? 'is owed' : 'square')) + '</div></div>' +
-          '<div style="font-weight:800;font-size:15px;color:' + lgMoneyColor(m.net) + '">' + lgMoney(m.net) + '</div>' +
+          '<div class="' + lgMoneyCls(m.net) + '" style="font-weight:700;font-variant-numeric:tabular-nums;font-size:15px">' +
+            lgEsc(lgMoney(m.net)) + '</div>' +
           (amCommish
             ? ' <button class="small" style="margin-left:8px" onclick="lgMarkPaid(\'' + lgEsc(sid) + '\',\'' + lgEsc(m.member_id) + '\')">Square up</button>'
             : '') +
@@ -76089,25 +76158,51 @@ async function lgOpenMoney(sid) {
       }).join('') + '</div>';
   }
 
+  /* Every pot, in the app's own pot layout (_bgPotTableHtml) — the same rows the
+     round Bets sheet and the tournament payout screens print. v1127's comment on
+     that function is explicit that it must never be a second layout. */
+  try {
+    const potRows = [];
+    const byPot = {};
+    lines.forEach(function (l) {
+      if (l.party !== 'member' || Number(l.amount) <= 0) return;
+      if (['skins', 'lowest_net', 'ctp', 'longest_drive', 'longest_putt', 'season_payout'].indexOf(l.kind) < 0) return;
+      const key = (l.week_number ? ('Week ' + l.week_number + ' · ') : '') +
+        ({ skins: 'Skins', lowest_net: 'Lowest net', ctp: 'Closest to the pin',
+           longest_drive: 'Longest drive', longest_putt: 'Longest putt',
+           season_payout: 'Season pot' })[l.kind];
+      if (!byPot[key]) byPot[key] = { pot: key, wins: 0, names: [], note: '' };
+      byPot[key].wins += Number(l.amount) || 0;
+      if (l.name && byPot[key].names.indexOf(l.name) < 0) byPot[key].names.push(l.name);
+      if (l.note && !byPot[key].note) byPot[key].note = l.note;
+    });
+    Object.keys(byPot).forEach(function (k) {
+      potRows.push({ pot: k, winner: byPot[k].names.join(', '), wins: byPot[k].wins, note: byPot[k].note });
+    });
+    if (potRows.length && typeof _bgPotTableHtml === 'function') {
+      h += '<div class="card">' + _bgPotTableHtml(potRows, 'Every pot — who won what') + '</div>';
+    }
+  } catch (e) { try { console.warn('lgOpenMoney pots', e); } catch (e2) {} }
+
   if (pots.length) {
     h += '<div class="card"><div class="bg-sec">The league is holding</div>' +
       pots.map(function (p) {
         return '<div style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--bg-border,#e5e7eb);font-size:14px">' +
           '<div style="flex:1">' + lgEsc(String(p.kind).replace(/_/g, ' ')) + '</div>' +
-          '<div style="font-weight:700">' + lgMoney(p.holding) + '</div></div>';
+          '<div class="money" style="font-weight:700;font-variant-numeric:tabular-nums">' + lgEsc(lgMoney(p.holding)) + '</div></div>';
       }).join('') +
       '<p class="help-text" style="margin:10px 0 0;font-size:12px">Dues stay with the league. A pot nobody won carries into next week.</p></div>';
   }
 
-  if (transfers.length) {
-    h += '<div class="card"><div class="bg-sec">Settle up <span>' + transfers.length + '</span></div>' +
-      transfers.map(function (t) {
-        return '<div style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--bg-border,#e5e7eb);font-size:14px">' +
-          '<div style="flex:1;min-width:0">' + lgEsc(t.from) + ' <span class="help-text">pays</span> ' + lgEsc(t.to) + '</div>' +
-          '<div style="font-weight:700">' + lgMoney(t.amount) + '</div></div>';
-      }).join('') +
-      '<button class="full" style="margin-top:10px" onclick="lgShareSettle(\'' + lgEsc(sid) + '\')">Send this to the group</button></div>';
-  }
+  /* The app's settle-up card, verbatim in structure: same heading, same
+     #settle-up-list role, same "Text settle-up" primary. */
+  h += '<div class="card" id="lg-settle-card"><h2>Settle up — who pays who</h2>' +
+    '<div id="lg-settle-list"></div>' +
+    (st.note ? '<p class="help-text" style="margin:10px 0 0;font-size:12px">' + lgEsc(st.note) + '</p>' : '') +
+    (transfers.length
+      ? '<div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">' +
+        '<button class="primary full" style="font-weight:600" onclick="lgShareSettle(\'' + lgEsc(sid) + '\')">📲 Text settle-up</button></div>'
+      : '') + '</div>';
 
   if (amCommish) {
     h += lgCard('<div class="bg-sec" style="margin-bottom:8px">Commissioner</div>' +
@@ -76117,6 +76212,7 @@ async function lgOpenMoney(sid) {
 
   h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back to the league</button></div>';
   body.innerHTML = h;
+  try { lgRenderSettleList(sid, transfers, members, lname); } catch (e) {}
 }
 
 async function lgRecomputeMoney(sid) {
