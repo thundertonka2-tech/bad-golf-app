@@ -8612,7 +8612,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1247';
+const BG_BUILD = 'v2026.11.1248';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -74473,7 +74473,9 @@ async function lgOpenSeason(sid) {
       '<div style="font-size:20px;font-weight:800;letter-spacing:2px;margin-bottom:10px">' + lgEsc(s.join_code || '—') + '</div>' +
       '<button class="full" onclick="lgRotateCode()">Rotate the code</button>');
   }
-  h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="renderLeague()">Back to leagues</button></div>';
+  h += '<div class="card" style="padding:12px 14px;display:flex;gap:8px">' +
+       '<button class="primary" style="flex:1" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Schedule</button>' +
+       '<button style="flex:1" onclick="renderLeague()">Back</button></div>';
   body.innerHTML = h;
 }
 
@@ -74580,6 +74582,205 @@ async function lgRotateCode() {
     try { showToast(lgErrText(res && res.error, 'Couldn’t rotate the code')); } catch (e) {}
   } else { try { showToast('New join code set'); } catch (e) {} }
   try { lgOpenSeason(window._lgSeason); } catch (e) {}
+}
+
+/* ===================== LEAGUES — Phase 4 (v1248): the schedule =============
+   Server side: league_generate_schedule(season, from_week, dry_run),
+   league_shuffle_week(week), league_set_week(week, patch).
+
+   The generator only ever touches weeks still marked 'scheduled', aborts rather
+   than deleting a matchup that already has a card, and is fully deterministic —
+   which is what makes the preview below trustworthy: the plan shown IS the plan
+   written, byte for byte, not an estimate of it.
+   ==================================================================== */
+
+function lgNineLabel(n) {
+  return (n === 'front') ? 'Front 9' : (n === 'back') ? 'Back 9' : '18 holes';
+}
+function lgWeekWhen(w) {
+  if (!w.date) return 'Round ' + w.week_number;
+  try {
+    const d = new Date(w.date + 'T12:00:00');
+    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  } catch (e) { return String(w.date); }
+}
+
+async function lgOpenSchedule(sid) {
+  const body = document.getElementById('league-body'); if (!body || !sid) return;
+  window._lgSeason = sid;
+  try { switchTab('league'); } catch (e) {}
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Loading the schedule…</p>');
+
+  const wr = await _bgRead(function () {
+    return supa.from('league_weeks')
+      .select('id,week_number,date,nine,course_id,status,is_playoff')
+      .eq('season_id', sid).order('week_number', { ascending: true });
+  }, 'lgOpenSchedule:weeks');
+  const mr = await _bgRead(function () {
+    return supa.from('league_members').select('id,display_name,status,role,user_id').eq('season_id', sid);
+  }, 'lgOpenSchedule:members');
+  const tr = await _bgRead(function () {
+    return supa.from('league_teams').select('id,name').eq('season_id', sid);
+  }, 'lgOpenSchedule:teams');
+  if (!wr.ok || !mr.ok) {
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">Couldn’t load the schedule.</p>' +
+      '<button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back</button>');
+    return;
+  }
+  const weeks = Array.isArray(wr.data) ? wr.data : [];
+  const members = Array.isArray(mr.data) ? mr.data : [];
+  const teams = (tr.ok && Array.isArray(tr.data)) ? tr.data : [];
+
+  const nameOf = {};
+  members.forEach(function (m) { nameOf[m.id] = m.display_name; });
+  teams.forEach(function (t) { nameOf[t.id] = t.name; });
+  const me = members.filter(function (m) { return m.user_id === _authUser.id; })[0];
+  const amCommish = !!(me && (me.role === 'commissioner' || me.role === 'co_commissioner'));
+
+  let mus = [];
+  if (weeks.length) {
+    const ids = weeks.map(function (w) { return w.id; });
+    const xr = await _bgRead(function () {
+      return supa.from('league_matchups')
+        .select('id,week_id,kind,a_entrant_id,b_entrant_id,status').in('week_id', ids);
+    }, 'lgOpenSchedule:matchups');
+    if (xr.ok && Array.isArray(xr.data)) mus = xr.data;
+  }
+  const byWeek = {};
+  mus.forEach(function (m) { (byWeek[m.week_id] = byWeek[m.week_id] || []).push(m); });
+
+  let h = lgCard('<div class="bg-sec" style="margin-bottom:2px">Schedule <span>' + weeks.length + '</span></div>' +
+    '<p class="help-text" style="margin:6px 0 0">' +
+    (mus.length ? 'Tap a week to change its course or nine.' :
+      (amCommish ? 'No fixtures yet. Build the schedule once your group has accepted.' : 'The commissioner hasn’t built the schedule yet.')) +
+    '</p>' +
+    (amCommish ? '<button class="primary full" style="margin-top:12px" onclick="lgBuildSchedule(\'' + lgEsc(sid) + '\')">' +
+      (mus.length ? 'Rebuild the schedule' : 'Build the schedule') + '</button>' : ''));
+
+  weeks.forEach(function (w) {
+    const list = byWeek[w.id] || [];
+    const played = (w.status !== 'scheduled');
+    let inner = '';
+    if (!list.length) {
+      inner = '<p class="help-text" style="margin:6px 0 0">Nothing scheduled yet.</p>';
+    } else {
+      inner = list.map(function (m) {
+        const a = nameOf[m.a_entrant_id] || '—';
+        if (m.kind === 'bye') {
+          return '<div style="padding:6px 0;border-top:1px solid var(--bg-border,#e5e7eb);font-size:14px">' +
+                 lgEsc(a) + ' <span class="help-text" style="font-size:12px">· bye</span></div>';
+        }
+        if (m.kind === 'vs_field') {
+          return '<div style="padding:6px 0;border-top:1px solid var(--bg-border,#e5e7eb);font-size:14px">' + lgEsc(a) + '</div>';
+        }
+        return '<div style="padding:6px 0;border-top:1px solid var(--bg-border,#e5e7eb);font-size:14px">' +
+               lgEsc(a) + ' <span class="help-text" style="font-size:12px">v</span> ' +
+               lgEsc(nameOf[m.b_entrant_id] || '—') + '</div>';
+      }).join('');
+    }
+    h += '<div class="card">' +
+      '<div style="display:flex;align-items:baseline;gap:8px">' +
+      '<div style="font-weight:800;font-size:15px;flex:1">Week ' + w.week_number +
+        (w.is_playoff ? ' <span class="bg-pill">playoff</span>' : '') + '</div>' +
+      '<div class="help-text" style="margin:0;font-size:12px">' + lgEsc(lgWeekWhen(w)) + ' · ' + lgNineLabel(w.nine) + '</div>' +
+      '</div>' +
+      (played ? '<div class="help-text" style="margin:4px 0 0;font-size:12px">' + lgEsc(w.status) + '</div>' : '') +
+      inner +
+      (amCommish && !played && list.length
+        ? '<button class="small" style="margin-top:8px" onclick="lgShuffleWeek(\'' + lgEsc(w.id) + '\')">Reshuffle this week</button>' +
+          ' <button class="small" style="margin-top:8px" onclick="lgEditWeek(\'' + lgEsc(w.id) + '\',\'' + lgEsc(w.nine) + '\',\'' + lgEsc(w.date || '') + '\')">Change day / nine</button>'
+        : '') +
+      '</div>';
+  });
+
+  h += '<div class="card" style="padding:12px 14px"><button class="full" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back to the league</button></div>';
+  body.innerHTML = h;
+}
+
+/* §12.2: "an explicit action showing a diff before it writes." The dry run is
+   the SAME deterministic code path as the write, so what this shows is exactly
+   what lands — not a forecast of it. */
+async function lgBuildSchedule(sid) {
+  let res = null;
+  try { res = await supa.rpc('league_generate_schedule', { p_season_id: sid, p_from_week: 1, p_dry_run: true }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_generate_schedule dry run failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t work out a schedule')); } catch (e) {}
+    return;
+  }
+  const d = res.data || {};
+  const plan = Array.isArray(d.plan) ? d.plan : [];
+  const skipped = Array.isArray(d.skipped) ? d.skipped : [];
+  let msg = d.entrants + ' ' + (d.entrant_kind === 'team' ? 'teams' : 'players') + ' across ' +
+            plan.length + ' week' + (plan.length === 1 ? '' : 's') + '.\n\n';
+  if (d.cleared) msg += 'This replaces the fixtures already there.\n';
+  if (skipped.length) {
+    msg += skipped.length + ' week' + (skipped.length === 1 ? ' is' : 's are') +
+           ' already under way and will be left exactly as they are.\n';
+  }
+  const first = plan[0];
+  if (first && Array.isArray(first.pairs) && first.pairs.length) {
+    msg += '\nWeek ' + first.week_number + ':\n' + first.pairs.slice(0, 6).map(function (p) {
+      return '  ' + (p.b ? (p.a + ' v ' + p.b) : (p.a + (p.kind === 'bye' ? ' — bye' : '')));
+    }).join('\n');
+    if (first.pairs.length > 6) msg += '\n  …and ' + (first.pairs.length - 6) + ' more';
+  }
+  let ok = true;
+  try { ok = await uiConfirm(msg, { title: 'Build the schedule?', okLabel: 'Build it', cancelLabel: 'Cancel', danger: false }); }
+  catch (e) { ok = true; }
+  if (!ok) return;
+
+  let w = null;
+  try { w = await supa.rpc('league_generate_schedule', { p_season_id: sid, p_from_week: 1, p_dry_run: false }); }
+  catch (e) { w = { data: null, error: e }; }
+  if (!w || w.error) {
+    try { console.warn('league_generate_schedule failed:', w && w.error); } catch (e) {}
+    try { showToast(lgErrText(w && w.error, 'Couldn’t build the schedule')); } catch (e) {}
+    return;
+  }
+  try { showToast('Schedule built'); } catch (e) {}
+  try { lgOpenSchedule(sid); } catch (e) {}
+}
+
+async function lgShuffleWeek(wid) {
+  let res = null;
+  try { res = await supa.rpc('league_shuffle_week', { p_week_id: wid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { showToast(lgErrText(res && res.error, 'Couldn’t reshuffle that week')); } catch (e) {}
+  } else { try { showToast('Week reshuffled'); } catch (e) {} }
+  try { lgOpenSchedule(window._lgSeason); } catch (e) {}
+}
+
+function lgEditWeek(wid, nine, date) {
+  const body = document.getElementById('league-body'); if (!body) return;
+  body.innerHTML = lgCard('<h2 style="margin:0 0 4px">Change this week</h2>' +
+    '<p class="help-text" style="margin-bottom:4px">Moving a week keeps its number — the week number is part of how handicaps are keyed, so nothing is ever renumbered.</p>' +
+    lgLbl('Day') + '<input id="lg-wk-date" type="date" style="width:100%" value="' + lgEsc(date || '') + '">' +
+    lgLbl('Which nine') +
+    '<select id="lg-wk-nine" style="width:100%">' +
+      '<option value="front"' + (nine === 'front' ? ' selected' : '') + '>Front 9</option>' +
+      '<option value="back"' + (nine === 'back' ? ' selected' : '') + '>Back 9</option>' +
+      '<option value="full18"' + (nine === 'full18' ? ' selected' : '') + '>All 18</option>' +
+    '</select>' +
+    '<button class="primary full" style="margin-top:12px" onclick="lgSaveWeek(\'' + lgEsc(wid) + '\')">Save</button>' +
+    '<button class="full" style="margin-top:8px" onclick="lgOpenSchedule(window._lgSeason)">Cancel</button>');
+}
+async function lgSaveWeek(wid) {
+  const d = document.getElementById('lg-wk-date'), n = document.getElementById('lg-wk-nine');
+  const patch = {};
+  if (d) patch.date = String(d.value || '');
+  if (n) patch.nine = String(n.value || 'full18');
+  let res = null;
+  try { res = await supa.rpc('league_set_week', { p_week_id: wid, p_patch: patch }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { showToast(lgErrText(res && res.error, 'Couldn’t save that week')); } catch (e) {}
+    return;
+  }
+  try { showToast('Week updated'); } catch (e) {}
+  try { lgOpenSchedule(window._lgSeason); } catch (e) {}
 }
 
 function renderBottomNav() {
