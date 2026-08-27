@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1259-->
+<!--BGVER=v2026.11.1260-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8672,7 +8672,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1259';
+const BG_BUILD = 'v2026.11.1260';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -75437,6 +75437,25 @@ async function lgOpenWeek(sid, weekId) {
   }
   const myCard = me ? cards.filter(function (c) { return c.member_id === me.id; })[0] : null;
 
+  /* ---- Phase 8: who is out, and which seats I could cover --------------- */
+  let absences = [];
+  if (mus.length) {
+    const ar = await _bgRead(function () {
+      return supa.from('league_absences')
+        .select('id,matchup_id,member_id,is_no_show,resolution,claim_status,sub_member_id,note')
+        .in('matchup_id', mus.map(function (m) { return m.id; }));
+    }, 'lgOpenWeek:absences');
+    if (ar.ok && Array.isArray(ar.data)) absences = ar.data;
+  }
+  const myAbsence = me ? absences.filter(function (a) { return a.member_id === me.id; })[0] : null;
+  let subSeats = [];
+  if (me) {
+    try {
+      const sr = await supa.rpc('league_open_sub_seats', { p_season_id: sid });
+      if (sr && !sr.error && Array.isArray(sr.data)) subSeats = sr.data;
+    } catch (e) {}
+  }
+
   let hcp = null;
   const hr = await _bgRead(function () {
     return supa.from('league_handicaps').select('effective,source')
@@ -75483,6 +75502,49 @@ async function lgOpenWeek(sid, weekId) {
     }
   }
 
+  /* ---- Phase 8: I can't play ------------------------------------------- */
+  if (me && open && myMu && myMu.kind === 'match' && !myCard) {
+    if (myAbsence) {
+      h += lgCard('<div class="bg-sec" style="margin-bottom:6px">You\u2019re out this week</div>' +
+        '<p class="help-text" style="margin:0">' + lgEsc(lgAbsenceState(myAbsence, nameOf)) + '.</p>');
+    } else {
+      h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Can\u2019t make it?</div>' +
+        '<p class="help-text" style="margin:0 0 10px">Say so early and your seat opens for a sub. Leave it late and it\u2019s a no-show.</p>' +
+        '<button class="full" onclick="lgDeclareAbsence(\'' + lgEsc(myMu.id) + '\')">I can\u2019t play this week</button>');
+    }
+  }
+
+  /* ---- Phase 8: seats I could cover ------------------------------------- */
+  if (me && subSeats.length) {
+    h += '<div class="card"><div class="bg-sec">Seats you could cover <span>' + subSeats.length + '</span></div>' +
+      subSeats.map(function (s) {
+        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(s.out_player) + '</div>' +
+          '<div class="help-text" style="margin:0;font-size:12px">Week ' + s.week_number +
+            (s.note ? ' \u00b7 ' + lgEsc(s.note) : '') + '</div></div>' +
+          '<button class="small primary" onclick="lgClaimSub(\'' + lgEsc(s.absence_id) + '\')">Take it</button></div>';
+      }).join('') + '</div>';
+  }
+
+  /* ---- Phase 8: everyone else who is out -------------------------------- */
+  const outs = absences.filter(function (a) { return !me || a.member_id !== me.id; });
+  if (outs.length) {
+    h += '<div class="card"><div class="bg-sec">Out this week <span>' + outs.length + '</span></div>' +
+      outs.map(function (a) {
+        const unsettled = (a.resolution === 'pending' || a.resolution === 'sub') && a.claim_status !== 'claimed';
+        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(nameOf[a.member_id] || 'A player') + '</div>' +
+          '<div class="help-text" style="margin:0;font-size:12px">' + lgEsc(lgAbsenceState(a, nameOf)) +
+            (a.note ? ' \u00b7 ' + lgEsc(a.note) : '') + '</div></div>' +
+          (amCommish && unsettled && open
+            ? '<div style="flex:0 0 auto;white-space:nowrap">' +
+              '<button class="small" onclick="lgResolveAbsence(\'' + lgEsc(a.id) + '\',\'blind_draw\')">Draw</button> ' +
+              '<button class="small" onclick="lgResolveAbsence(\'' + lgEsc(a.id) + '\',\'course\')">Course</button> ' +
+              '<button class="small" onclick="lgResolveAbsence(\'' + lgEsc(a.id) + '\',\'forfeit\')">Forfeit</button></div>'
+            : '') + '</div>';
+      }).join('') + '</div>';
+  }
+
   /* ---- cards waiting on somebody else ---- */
   const pending = cards.filter(function (c) {
     return !c.approved_at && !c.disputed_by && c.posted_by !== _authUser.id;
@@ -75525,6 +75587,9 @@ async function lgOpenWeek(sid, weekId) {
         : '') +
       /* Phase 7. The server refuses while a card is disputed or unsigned and
          says which one, so the button stays plain and the refusal explains. */
+      (open && absences.filter(function (a) { return a.resolution === 'pending' || a.resolution === 'sub'; }).length
+        ? '<button class="full" style="margin-top:8px" onclick="lgSettleAbsences(\'' + lgEsc(w.id) + '\',' + w.week_number + ')">Settle absences</button>'
+        : '') +
       (open
         ? '<button class="full" style="margin-top:8px" onclick="lgFinalizeWeek(\'' + lgEsc(w.id) + '\',' + w.week_number + ')">Finalize week ' + w.week_number + '</button>'
         : '') +
@@ -75816,6 +75881,119 @@ async function lgReopenWeek(wid, n) {
   }
   try { showToast('Week ' + n + ' is open again'); } catch (e) {}
   try { lgOpenWeek(window._lgSeason, wid); } catch (e) {}
+}
+
+
+/* ===================== PHASE 8 — absences and subs =======================
+   Server-side rules live in league_declare_absence / league_claim_sub /
+   league_resolve_absence. The client never decides who is eligible or who got
+   a seat first -- it asks, and it shows what came back. §11.4's claim is a
+   conditional update on the server precisely so eight phones racing cannot
+   each believe they won. */
+async function lgDeclareAbsence(matchupId) {
+  if (!matchupId) return;
+  let why = null;
+  try {
+    why = await uiPrompt('Your seat opens for a sub if there is still time. The league can see this.',
+      { title: 'Can’t play this week?', okLabel: 'I’m out', placeholder: 'Optional — work trip, kid’s game…' });
+  } catch (e) { why = null; }
+  if (why === null || why === false) return;          // dismissed, not "no note"
+  let res = null;
+  try { res = await supa.rpc('league_declare_absence', { p_matchup_id: matchupId, p_note: String(why || '').trim() || null }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_declare_absence failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t mark you out')); } catch (e) {}
+    return;
+  }
+  try { showToast((res.data && res.data.message) || 'Marked out'); } catch (e) {}
+  try { lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
+}
+
+/* The loser of a race gets a real sentence, not a silent no-op. league_claim_sub
+   returns {claimed:false, message} rather than raising, because "someone beat
+   you to it" is an ordinary outcome and not an error. */
+async function lgClaimSub(absenceId) {
+  if (!absenceId) return;
+  let res = null;
+  try { res = await supa.rpc('league_claim_sub', { p_absence_id: absenceId }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_claim_sub failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t take that seat')); } catch (e) {}
+    return;
+  }
+  try { showToast((res.data && res.data.message) || 'Done'); } catch (e) {}
+  try { lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
+}
+
+/* Commissioner. §11.4's order is sub -> partner twice -> blind draw -> course
+   -> forfeit; the first two need a person, so the three the commissioner can
+   apply on their own are the three offered here. */
+async function lgResolveAbsence(absenceId, how) {
+  if (!absenceId || !how) return;
+  const label = how === 'blind_draw' ? 'Blind draw' : (how === 'course' ? 'Play the course' : 'Forfeit');
+  let ok = false;
+  try {
+    ok = await uiConfirm(
+      how === 'blind_draw' ? 'Copy a card drawn from this week’s posted scores. The same draw always lands on the same card.'
+      : how === 'course'   ? 'Score net par on every hole this week.'
+                           : 'No card. Their opponent takes the week.',
+      { title: label + '?', okLabel: label });
+  } catch (e) { ok = false; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_resolve_absence', { p_absence_id: absenceId, p_resolution: how }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_resolve_absence failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t settle that one')); } catch (e) {}
+    return;
+  }
+  try {
+    const d = res.data || {};
+    showToast(d.drawn_from ? (label + ' — ' + d.drawn_from) : label + ' applied');
+  } catch (e) {}
+  try { lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
+}
+
+/* Sweep everything still pending, in the spec's order, before finalizing. */
+async function lgSettleAbsences(weekId, n) {
+  if (!weekId) return;
+  let ok = false;
+  try {
+    ok = await uiConfirm('Anyone still unsettled gets the league’s default — a blind draw where there are scores to draw from, a forfeit where there aren’t.',
+      { title: 'Settle week ' + n + '?', okLabel: 'Settle' });
+  } catch (e) { ok = false; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_resolve_week_absences', { p_week_id: weekId }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_resolve_week_absences failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t settle the week')); } catch (e) {}
+    return;
+  }
+  const n2 = (res.data && res.data.resolved) || 0;
+  try { showToast(n2 ? ('Settled ' + n2 + (n2 === 1 ? ' absence' : ' absences')) : 'Nothing left to settle'); } catch (e) {}
+  try { lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
+}
+
+/* One line of plain English for where an absence currently stands. */
+function lgAbsenceState(a, nameOf) {
+  if (!a) return '';
+  if (a.resolution && a.resolution !== 'pending' && a.resolution !== 'sub') {
+    return a.resolution === 'blind_draw' ? 'Settled by blind draw'
+         : a.resolution === 'course'     ? 'Played the course'
+         : a.resolution === 'forfeit'    ? 'Forfeited'
+                                         : 'Settled';
+  }
+  if (a.claim_status === 'claimed') {
+    return 'Covered by ' + ((nameOf && nameOf[a.sub_member_id]) || 'a sub');
+  }
+  if (a.is_no_show) return 'No-show — too late for a sub';
+  if (a.claim_status === 'open') return 'Seat open for a sub';
+  return 'Waiting on the commissioner';
 }
 
 function renderBottomNav() {
