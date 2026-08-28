@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1269-->
+<!--BGVER=v2026.11.1270-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8695,7 +8695,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1269';
+const BG_BUILD = 'v2026.11.1270';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -75711,7 +75711,22 @@ async function lgCourseSnapshot(courseId, nine, teeLabel) {
     rating: (r18 != null) ? (holes === 9 ? Math.round((r18 / 2) * 10) / 10 : r18) : parPlayed,
     slope: (s18 != null) ? s18 : 113,
     rating18: r18, slope18: s18, par18: par18,
-    course_id: courseId, tee: tee.label || null
+    course_id: courseId, tee: tee.label || null,
+    // v1270 FIX (QA R-8 / C-12): the launcher reads snap.name and snap.tees and
+    // this object has never had either. snap.name undefined meant every league
+    // round in every league was titled "League round" instead of the course;
+    // snap.tees undefined meant it launched with tees:[] and no rating/slope, so
+    // archiveScoresFromRound's _rankable test could never be true -- a whole
+    // league season never posted a single differential to anybody's index.
+    // A tee is only emitted when the card really carries a rating AND a slope:
+    // an invented one would be worse than none. rating is the played-nine value,
+    // halved for a nine exactly as the `rating` field above is.
+    name: (function () { try { return lgCourseName(courseId) || null; } catch (e) { return null; } })(),
+    tees: (r18 != null && s18 != null)
+            ? [{ label: tee.label || 'League',
+                 rating: (holes === 9) ? Math.round((r18 / 2) * 10) / 10 : r18,
+                 slope: s18 }]
+            : []
   };
 }
 
@@ -77509,21 +77524,50 @@ async function lgLaunchWeekRound(sid, weekId) {
       return {
         id: 'p' + i + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
         name: m.display_name,
-        hcp: Math.round(hcpOf[m.id] || 0),
+        // v1270 FIX (QA G-3): the handicaps screen promises, in so many words,
+        // "whatever you type is the number of strokes that player gets" -- the
+        // input is step="0.1" and every value renders toFixed(1) -- and then this
+        // rounded it before strokesOnHole ever saw it, so a commissioner's 12.6
+        // handed out 13 strokes. strokesOnHole already compares against integer
+        // stroke indexes, so passing the number through unrounded is both correct
+        // and what the screen says. It also closes the one-stroke gap against the
+        // server's unrounded league_handicaps.effective.
+        hcp: Number(hcpOf[m.id]) || 0,
         uid: m.user_id || undefined
       };
     });
 
     const game = {
       code: code,
-      course: snap.name || 'League round',
+      // v1270 FIX (QA R-8 / C-12): fall back for weeks whose course_snapshot was
+      // frozen BEFORE v1270 and so carries neither name nor tees -- rebuild both
+      // from what those snapshots have always held (course_id, rating18, slope18).
+      course: snap.name
+              || (function () { try { return lgCourseName(w.course_id) || ''; } catch (e) { return ''; } })()
+              || 'League round',
       courseId: w.course_id || '',
-      pars: pars, sis: sis, tees: Array.isArray(snap.tees) ? snap.tees : [],
+      pars: pars, sis: sis,
+      tees: (Array.isArray(snap.tees) && snap.tees.length)
+              ? snap.tees
+              : ((snap.rating18 != null && snap.slope18 != null)
+                   ? [{ label: snap.tee || 'League',
+                        rating: (holes === 9)
+                                  ? Math.round((Number(snap.rating18) / 2) * 10) / 10
+                                  : Number(snap.rating18),
+                        slope: Number(snap.slope18) }]
+                   : []),
       players: players,
       games: {},
       // ── THE v985 TRAP. Always explicit, never inferred. ──
       holes: holes,
-      nineMode: (holes === 9) ? (w.nine === 'back' ? 'back' : 'front') : undefined,
+      // v1270 FIX (QA R-7): 'back'/'front' are not values bgPhysHole understands
+      // -- the whole vocabulary is all18 | b9first | front9 | back9 | f9x2 | b9x2.
+      // 'back' fell through and returned the played hole unchanged, while
+      // bgHolesByPlayedHole (truthy and != 'all18') BUILT a remap to greens 1-9.
+      // A back-nine league night therefore showed the FRONT nine's greens and
+      // yardages on the score map, the GPS and the Apple Watch. Scoring was never
+      // affected -- the course snapshot already carries the right nine.
+      nineMode: (holes === 9) ? (w.nine === 'back' ? 'back9' : 'front9') : undefined,
       hcpRules: {},
       trackPutts: true, trackGirs: true, trackFairways: true,
       unranked: false,
@@ -77858,7 +77902,19 @@ async function bnavCenter() {
     try { await openPlayGps(); } catch (e) {}       // open the GPS map for the hole they're on
     return;
   }
-  // No live round anywhere → start a fresh one, same as the old "Play now" button.
+  // v1270 (Kevin, 8/27): "when you press the play button it doesn't start the
+  // round after you have it all set -- you have to push the start round tab. I
+  // thought mine was broken." He was standing ON the setup form with everything
+  // chosen, and Play clicked "New round", which RESETS that form -- so the button
+  // looked dead. If the real "Start round now" button is on screen and enabled,
+  // Play now presses it: the same action, the same validation, the same toasts.
+  // Only when there is no round being set up does it fall back to a fresh one.
+  try {
+    const sb = document.getElementById('btn-start-round');
+    if (sb && !sb.disabled && sb.offsetParent !== null) { sb.click(); return; }
+  } catch (e) {}
+  // No live round and nothing being set up → start a fresh one, same as the old
+  // "Play now" button.
   const nb = document.getElementById('btn-new-game');
   if (nb) { nb.click(); } else { try { switchTab('setup'); } catch (e) {} }
 }
@@ -79948,20 +80004,42 @@ async function init() {
     };
     // Repeated-nine rounds: the 18 played holes are the same physical nine
     // twice — remap pars/SIs so scoring, pops, and the board line up.
+    // v1270 FIX (QA R-6): pars repeat across the two loops -- the same hole
+    // really is the same par -- but the STROKE INDEX must be SPLIT, not
+    // repeated. Repeating it left 18 played holes carrying nine distinct SI
+    // values twice, so strokesOnHole's `hcp >= si` test popped a player on
+    // BOTH loops of the same hole: a 5-handicap got 10 strokes, a 9 played off
+    // 18, and every net game in the round (skins, Nassau, match play, team
+    // match, team lowball, banker, hammer, sixes, high & low, Stableford,
+    // Vegas) settled wrong. Rank the chosen nine 1..9 and hand loop 1 the odd
+    // slots (2r-1) and loop 2 the even ones (2r) -- the standard USGA 9->18
+    // split that bg9DoubleCard already uses for the ":x2" course path. This is
+    // the SAME arithmetic, reached from the nine-mode dropdown instead.
+    const _bg9SplitSis = a => {
+      const nine = (Array.isArray(a) ? a : []).map(Number);
+      if (nine.length !== 9) return nine.concat(nine);   // not a clean nine: leave it alone
+      const order = nine.map((v, i) => ({ v: isFinite(v) ? v : 99, i: i }))
+                        .sort((x, y) => x.v - y.v);
+      const rank = new Array(9);
+      order.forEach((o, k) => { rank[o.i] = k + 1; });
+      return rank.map(r => r * 2 - 1).concat(rank.map(r => r * 2));
+    };
     if (setup.nineMode === 'f9x2') {
       game.pars = setup.pars.slice(0, 9).concat(setup.pars.slice(0, 9));
-      game.sis = setup.sis.slice(0, 9).concat(setup.sis.slice(0, 9));
+      game.sis  = _bg9SplitSis(setup.sis.slice(0, 9));
       // v1065: per-tee overrides must follow the SAME remap or they silently
       // stop applying and every player falls back to the card.
-      const _f9 = a => a.slice(0, 9).concat(a.slice(0, 9));
+      const _f9  = a => a.slice(0, 9).concat(a.slice(0, 9));
+      const _f9s = a => _bg9SplitSis(a.slice(0, 9));
       game.teePars = _bgTeeMapRemap(game.teePars, _f9);
-      game.teeSis  = _bgTeeMapRemap(game.teeSis,  _f9);
+      game.teeSis  = _bgTeeMapRemap(game.teeSis,  _f9s);
     } else if (setup.nineMode === 'b9x2') {
       game.pars = setup.pars.slice(9).concat(setup.pars.slice(9));
-      game.sis = setup.sis.slice(9).concat(setup.sis.slice(9));
-      const _b9 = a => a.slice(9).concat(a.slice(9));
+      game.sis  = _bg9SplitSis(setup.sis.slice(9));
+      const _b9  = a => a.slice(9).concat(a.slice(9));
+      const _b9s = a => _bg9SplitSis(a.slice(9));
       game.teePars = _bgTeeMapRemap(game.teePars, _b9);
-      game.teeSis  = _bgTeeMapRemap(game.teeSis,  _b9);
+      game.teeSis  = _bgTeeMapRemap(game.teeSis,  _b9s);
     } else if ((setup.nineMode === 'front9' || setup.nineMode === 'back9')
                && Array.isArray(setup.pars) && setup.pars.length >= 18) {
       // Play ONLY one nine of a regulation 18-hole course. Slice pars/SI to the
