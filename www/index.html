@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1276-->
+<!--BGVER=v2026.11.1277-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8782,7 +8782,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1276';
+const BG_BUILD = 'v2026.11.1277';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -28047,6 +28047,10 @@ async function bgWatchCourseHoles(courseId) {
     return out;
   } catch (e) { return out; }
 }
+// v1277: stamped at PARSE time, i.e. once per cold app launch. Used just below
+// to tell "the app has been up a while and genuinely has no round" apart from
+// "the app is still booting and has not restored the round yet".
+window._bgBootAt = Date.now();
 window.BadGolfWatchSync = async function () {
   try {
     if (typeof isNativeApp !== 'function' || !isNativeApp()) return;
@@ -28064,10 +28068,39 @@ window.BadGolfWatchSync = async function () {
       // pinned the app to every wrist-raise with no way to close it (Kevin had
       // to delete the app). Now merely opening the phone app clears a stale
       // watch. Harmless when the watch is already clear.
-      if (window._bgWatchSyncedCode || !window._bgWatchClearSent) {
+      // v1277 (Tyler, 28 Aug 2026 — "the watch is not staying on, and then it has
+      // to resync and takes forever"). THE ONCE-PER-LAUNCH CLEAR COULD FIRE
+      // DURING A LIVE ROUND. state.game is restored asynchronously on boot, so
+      // on a COLD LAUNCH — exactly what happens when iOS kills the phone app
+      // mid-round with the phone in a pocket — this ran before the round had
+      // been restored, saw !_live, and told the watch the round had ENDED.
+      // On the watch that clears the round, which trips
+      // .onChange(of: store.round?.id) → WorkoutSessionManager.stop(): the
+      // keep-alive workout dies, watchOS suspends the app on the next wrist
+      // drop, and when the phone finishes booting and re-hands the round the
+      // watch has to pull the round, the course and every green back from
+      // scratch. That is the reported symptom exactly, resync and all.
+      //
+      // The live→ended transition clear (v890) is unambiguous and still fires
+      // immediately. Only the v926 launch-time clear now waits for the app to
+      // settle, and it re-checks itself so a genuinely stale watch is still
+      // cleared on a launch with no round — which is the case v926 existed for.
+      const _bootAge = (typeof window._bgBootAt === 'number') ? (Date.now() - window._bgBootAt) : Infinity;
+      const _SETTLE_MS = 25000;
+      if (window._bgWatchSyncedCode) {
         window._bgWatchSyncedCode = null;
         window._bgWatchClearSent = true;
         try { await Capacitor.Plugins.WatchBridge.syncSession({ token: '', playerId: '', handoff: JSON.stringify({ roundEnded: true }) }); } catch (e) {}
+      } else if (!window._bgWatchClearSent) {
+        if (_bootAge >= _SETTLE_MS) {
+          window._bgWatchClearSent = true;
+          try { await Capacitor.Plugins.WatchBridge.syncSession({ token: '', playerId: '', handoff: JSON.stringify({ roundEnded: true }) }); } catch (e) {}
+        } else if (!window._bgWatchClearT) {
+          window._bgWatchClearT = setTimeout(function () {
+            window._bgWatchClearT = null;
+            try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
+          }, (_SETTLE_MS - _bootAge) + 250);
+        }
       }
       return;
     }

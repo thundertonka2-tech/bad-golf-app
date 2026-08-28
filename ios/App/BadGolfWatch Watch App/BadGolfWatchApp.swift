@@ -81,6 +81,18 @@ struct BadGolfWatchApp: App {
                     // Raised wrist / re-opened from the dock — re-ask the phone
                     // right away instead of waiting on a passive delivery.
                     WatchConnectivityManager.shared.requestRound()
+                    // v1277: and RE-ASSERT the keep-alive. Starting the workout
+                    // once when the round arrives is not enough — watchOS can end
+                    // it out from under us (Water Lock, low power, the wearer
+                    // ending it in the Workout app) and nothing here ever noticed,
+                    // so the round carried on with no background allowance and
+                    // every raise became a cold GPS start plus a full resync.
+                    // This is the one place that runs on every raise, so it is
+                    // where the session gets checked and rebuilt if it died.
+                    if store.round != nil {
+                        loc.startUpdating()
+                        WorkoutSessionManager.shared.ensureRunning()
+                    }
                 }
         }
     }

@@ -7,6 +7,7 @@ import SwiftUI
 struct StatusView: View {
     @EnvironmentObject var store: RoundStore
     @EnvironmentObject var loc: LocationManager
+    @ObservedObject private var workout = WorkoutSessionManager.shared
 
     var body: some View {
         List {
@@ -17,6 +18,11 @@ struct StatusView: View {
             }
             Section("GPS") {
                 row("Status", loc.acquiring ? "Acquiring…" : (loc.accuracyGood ? "Good" : "Weak"))
+                // v1277: whether the workout session is holding the app alive is
+                // the single most useful thing to see when someone reports "it
+                // keeps dropping out mid-round" — and it was completely invisible
+                // before, which is why a dead session went unnoticed for weeks.
+                row("Keep-alive", workout.active ? "On (workout)" : "Off")
             }
             Section("Sync") {
                 row("State", syncText)

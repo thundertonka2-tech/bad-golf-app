@@ -36,10 +36,43 @@ final class WorkoutSessionManager: NSObject, ObservableObject {
         guard HKHealthStore.isHealthDataAvailable() else { return }
         guard session == nil else { return }
         let types: Set = [HKObjectType.workoutType()]
-        healthStore.requestAuthorization(toShare: types, read: types) { [weak self] granted, _ in
-            guard granted, let self = self else { return }
+        healthStore.requestAuthorization(toShare: types, read: types) { [weak self] _, _ in
+            // v1277: do NOT gate on `granted`. That flag reports whether the
+            // REQUEST completed, not whether the user allowed anything, and it
+            // comes back false for transient reasons (watch locked, HealthKit
+            // busy at launch) that have nothing to do with permission. Gating on
+            // it meant one unlucky launch ran the WHOLE round with no keep-alive
+            // and said nothing. If authorization really is missing, the
+            // HKWorkoutSession initialiser throws and begin() degrades exactly as
+            // this file's header promises.
+            guard let self = self else { return }
             DispatchQueue.main.async { self.begin() }
         }
+    }
+
+    /// v1277 (Tyler, 28 Aug 2026 - "it is not staying on the last few times").
+    /// Re-assert the session. watchOS ends a workout for reasons that have
+    /// nothing to do with us: Water Lock, low power mode, the wearer ending it in
+    /// the Workout app, the system reclaiming it under memory pressure. When that
+    /// happened the delegate below left `session` pointing at a DEAD session, so
+    /// every later start() hit `guard session == nil` and returned believing one
+    /// was already running. The app then spent the rest of the round with no
+    /// background allowance - suspended on every wrist drop, cold GPS start and a
+    /// full resync on every raise, which is exactly the reported symptom.
+    /// Cheap and idempotent: safe to call on every wrist-raise.
+    func ensureRunning() {
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        if let s = session {
+            if s.state == .running || s.state == .prepared { return }   // healthy
+            clearSession()                                              // ended / stopped / paused - rebuild
+        }
+        start()
+    }
+
+    private func clearSession() {
+        session = nil
+        builder = nil
+        active = false
     }
 
     private func begin() {
@@ -104,7 +137,21 @@ extension WorkoutSessionManager: HKWorkoutSessionDelegate {
                         didChangeTo toState: HKWorkoutSessionState,
                         from fromState: HKWorkoutSessionState, date: Date) {
         DispatchQueue.main.async { [weak self] in
-            if toState == .ended || toState == .stopped { self?.active = false }
+            guard let self = self else { return }
+            if toState == .ended || toState == .stopped {
+                // v1277: THE BUG behind "the watch stops staying on mid-round".
+                // This used to set `active = false` and stop there, leaving
+                // `session` holding a session HealthKit had already ended. start()
+                // then refused to build a new one for the rest of the launch
+                // (`guard session == nil`), so the keep-alive was gone for good
+                // and nothing surfaced it. Release it so ensureRunning() can
+                // rebuild on the next wrist-raise.
+                self.active = false
+                self.session = nil
+                self.builder = nil
+            } else if toState == .running {
+                self.active = true
+            }
         }
     }
     func workoutSession(_ workoutSession: HKWorkoutSession, didFailWithError error: Error) {
