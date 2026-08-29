@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1292-->
+<!--BGVER=v2026.11.1294-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8797,7 +8797,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1292';
+const BG_BUILD = 'v2026.11.1294';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -57967,10 +57967,43 @@ async function t2ListMine() {
     // name" screen relies on. Best-effort and silent — this is a background sweep
     // on the way into the Events tab, not something the user asked for, so a
     // refusal must never raise a toast.
+    // v1293 (Tyler, Larry Perkins 8/29): the `linked` guard meant this loop could only
+    // ever fire for an event I am ALREADY in -- precisely the case that needs no
+    // claiming. A guest the commissioner added BY NAME, who then downloads the app and
+    // signs up, has no linked row, no invite (t2NotifyAllPlayers can only address
+    // accounts that already existed when the day launched) and no friendship. Nothing
+    // surfaced the event to him at all: `tournaments` SELECT is gated on
+    // tourney_is_member(), so he could not even read its NAME. Larry spent a morning
+    // looking at an empty Events tab while his slot sat unclaimed with a valid token.
+    //
+    // Silently claiming every name match across the whole database is NOT the fix --
+    // two different "Larry Perkins" in unrelated events would adopt each other's
+    // slots. So: keep the silent claim for events I am already in (de-duping a twin
+    // row, all it ever did), and surface the rest as an OFFER the Events tab renders.
+    // The person taps "That's me"; claim_tournament_slot enforces everything else.
+    window._t2ClaimOffers = [];
+    let _t2Dismissed = {};
+    try { _t2Dismissed = JSON.parse(localStorage.getItem('golf:t2-claim-dismissed') || '{}') || {}; } catch (e) {}
+    // _norm/_me above live inside the name-match IIFE and are out of scope here --
+    // re-derive them rather than reaching for a binding that does not exist.
+    const _oNorm = (x) => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(x || '')) : String(x || '').trim().toLowerCase();
+    let _oMe = '';
+    try { _oMe = _oNorm(await getMeName()); } catch (e) {}
     for (const r of nameOnly) {
-      if (!linked.has(r.tournament_id)) continue;
       if (!r.invite_token) continue;                 // no token = only the join link can claim it
-      try { await supa.rpc('claim_tournament_slot', { token: r.invite_token }); } catch (e) {}
+      if (linked.has(r.tournament_id)) {
+        try { await supa.rpc('claim_tournament_slot', { token: r.invite_token }); } catch (e) {}
+        continue;
+      }
+      if (_t2Dismissed[r.tournament_id]) continue;
+      // He cannot read the tournament row, but tournament_players IS readable -- so
+      // identify the event by who else is in it, which is what he'd recognise anyway.
+      let _mates = [];
+      try {
+        const { data: _rm } = await _bgRead(() => supa.from('tournament_players').select('display_name').eq('tournament_id', r.tournament_id).limit(6), 't2ListMine:offerMates');
+        _mates = (_rm || []).map(x => x && x.display_name).filter(Boolean).filter(n => !_oMe || _oNorm(n) !== _oMe).slice(0, 3);
+      } catch (e) {}
+      window._t2ClaimOffers.push({ tid: r.tournament_id, name: r.display_name, token: r.invite_token, mates: _mates });
     }
     const fetchIds = [...new Set(need)].filter(id => id && !byId[id]);
     // v1135: this is the single point where every branch above collapses into one
@@ -61269,6 +61302,32 @@ async function renderT2List() {
       listEl.querySelectorAll('.t2-pub-join').forEach(b => b.onclick = () => openT2ClaimScreen(b.dataset.id));
     }
   } catch (e) {}
+  // v1293: name-match claim offers (see t2ListMine). For a guest who was added by
+  // name and has just signed up, this card is the ONLY way the event can appear on
+  // his Events tab -- he holds no roster row yet, so tournaments RLS hides it.
+  try {
+    const _offers = (window._t2ClaimOffers || []).slice(0, 5);
+    if (_offers.length) {
+      const _oh = '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin:0 0 4px">\uD83D\uDC4B Is this you?</div>' +
+        _offers.map(o => '<div class="card" style="margin-bottom:6px;padding:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:150px"><div style="font-weight:600">Listed as ' + t2esc(o.name || 'a player') + '</div>' +
+          '<div class="small-text" style="color:var(--text-muted)">' + (o.mates && o.mates.length ? ('with ' + t2esc(o.mates.join(', '))) : 'in a tournament you were added to') + '</div></div>' +
+          '<button class="small t2-offer-no" data-id="' + t2esc(o.tid) + '" style="flex:0 0 auto">Not me</button>' +
+          '<button class="small t2-offer-yes" data-tok="' + t2esc(o.token) + '" style="flex:0 0 auto;background:var(--accent);color:#fff;border:none;font-weight:700;padding:8px 12px">That\u2019s me</button></div>').join('');
+      listEl.insertAdjacentHTML('afterbegin', _oh);
+      listEl.querySelectorAll('.t2-offer-yes').forEach(b => b.onclick = async () => {
+        b.disabled = true;
+        const _tid = await t2ClaimSlot(b.dataset.tok);
+        if (_tid) { showToast('Welcome to the tournament! \uD83C\uDF89'); window._t2ClaimOffers = []; renderT2List(); }
+        else b.disabled = false;
+      });
+      listEl.querySelectorAll('.t2-offer-no').forEach(b => b.onclick = () => {
+        try { const d = JSON.parse(localStorage.getItem('golf:t2-claim-dismissed') || '{}') || {}; d[b.dataset.id] = 1; localStorage.setItem('golf:t2-claim-dismissed', JSON.stringify(d)); } catch (e) {}
+        window._t2ClaimOffers = (window._t2ClaimOffers || []).filter(o => o.tid !== b.dataset.id);
+        renderT2List();
+      });
+    }
+  } catch (e) {}
   const _byId = {}; list.forEach(tt => _byId[tt.id] = tt);
   const _fullT = async id => { let tf = _byId[id]; try { const f = await t2Get(id); if (f) tf = f; } catch (e) {} return tf; };
   document.querySelectorAll('#t2-list .t2-row').forEach(b => b.onclick = async () => { let tf = null; try { tf = await _fullT(b.dataset.id); } catch (e) {} if (tf && typeof t2CanManage === 'function' && t2CanManage(tf)) { _t2Current = tf; return renderT2SettingsHub(tf); } return openT2Home(b.dataset.id); });
@@ -63670,6 +63729,29 @@ async function t2NotifyAllPlayers(t) {
         if (!_u || _u === _authUser.id || linked.indexOf(_u) >= 0) continue;
         linked.push(_u);
         try { if (typeof t2AdoptSlot === 'function') await t2AdoptSlot(p.id, _u); } catch (e) {}
+      }
+    } catch (e) {}
+    // v1293 (Tyler, 8/29): a roster slot with no account CANNOT be invited -- there is
+    // no to_user to address. Until now those players were skipped in silence, so the
+    // commissioner had no way to know two of his eight golfers were never told. Say so,
+    // and hand him the one link that does work for them (?tclaim=, "tap your name").
+    try {
+      const _stillGuests = [];
+      for (const p of ((players || []).filter(p => p && !p.user_id && p.display_name))) {
+        let _u2 = null;
+        try { if (typeof t2ResolveUserIdByName === 'function') _u2 = await t2ResolveUserIdByName(p.display_name); } catch (e) {}
+        if (!_u2) _stillGuests.push(p.display_name);
+      }
+      if (_stillGuests.length && typeof uiConfirm === 'function') {
+        const _lnk = BG_PUBLIC_URL + '?tclaim=' + t.id;
+        const _msg = _stillGuests.join(', ') + (_stillGuests.length === 1 ? ' is' : ' are') +
+          ' not in Bad Golf yet, so there is no account to send an invite to. Send them this link and they can sign in and tap their name:\n\n' + _lnk;
+        uiConfirm(_msg, { title: 'Not everyone got an invite', okLabel: 'Copy link', cancelLabel: 'Later' }).then(ok => {
+          if (!ok) return;
+          const _txt = 'Join my Bad Golf event "' + (t.name || 'tournament') + '": ' + _lnk + '\n\nSign in and tap your name to join.';
+          try { if (navigator.share) { navigator.share({ text: _txt }); return; } } catch (e) {}
+          try { navigator.clipboard.writeText(_txt); showToast('Join link copied \uD83D\uDCCB'); } catch (e) { showToast(_txt, 6000); }
+        });
       }
     } catch (e) {}
     if (!linked.length) return;
@@ -89213,6 +89295,7 @@ async function maybeClaimBoundSlot() {
     tok = _pendingJoinTok || localStorage.getItem('golf:pending-join-tok') || null;
   } catch (e) {}
   if (!code) return false;
+  try { window._bgJoinRetry = window._bgJoinRetry || 0; } catch (e) {}   // v1294: retry budget, reset on a successful bind
   try { localStorage.removeItem('golf:pending-join-tok'); } catch (e) {}
   _pendingJoinTok = null;
   try {
@@ -89232,6 +89315,21 @@ async function maybeClaimBoundSlot() {
     // drops the user into the generic "Which player are you?" picker instead.
     if (!existing && typeof bgMeNameTrusted === 'function' && !bgMeNameTrusted()) {
       try { if (tok) { localStorage.setItem('golf:pending-join-tok', tok); _pendingJoinTok = tok; } } catch (e) {}
+      // v1294 (Tyler, Larry Perkins 8/29): this returned false in SILENCE. The user
+      // taps a join link, the app opens on the HOME SCREEN, and nothing anywhere
+      // tells him why or what to do -- which is exactly what Larry saw all morning.
+      // The cause is nearly always benign: on a seconds-old account the profile read
+      // behind getMeName() has not landed yet, so the identity is "untrusted" and
+      // this guard (correctly) refuses to re-point the account at someone's slot.
+      // Refusing is right; refusing invisibly, and then waiting for a whole new
+      // sign-in to try again, is not. Say something, and retry a few times on our
+      // own -- the read usually succeeds within a second or two.
+      try { showToast('Finishing your sign-in \u2014 one moment\u2026', 2500); } catch (e) {}
+      try {
+        window._bgJoinRetry = (window._bgJoinRetry || 0) + 1;
+        if (window._bgJoinRetry <= 3) setTimeout(() => { try { maybeClaimBoundSlot(); } catch (e) {} }, 2500);
+        else showToast('Could not open that invite. Sign in, then tap the link again.', 6000);
+      } catch (e) {}
       return false;
     }
     const g = await loadGame(String(code).trim().toUpperCase());
