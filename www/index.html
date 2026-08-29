@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1303-->
+<!--BGVER=v2026.11.1304-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8812,7 +8812,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1303';
+const BG_BUILD = 'v2026.11.1304';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -39500,28 +39500,70 @@ async function _renderSettlePayRow(wrap, g, fromId, toId, amount){
   } catch(e){ console.warn('_renderSettlePayRow', e); }
 }
 
+/* v1304 (Tyler): "on all settle up across the app round to the nearest dollar."
+
+   The trap here is rounding the PAYMENTS. Round each one on its own and they
+   stop adding up: somebody hands over a dollar nobody is owed, and the card's
+   own "every dollar accounted for" line becomes a lie — which is worse than
+   the cents were.
+
+   So the rounding happens to the BALANCES, before anyone is paired off, by
+   largest remainder: round each to the nearest dollar, then hand the leftover
+   dollars back to whoever was rounded hardest, until the set sums to zero
+   again. Whole-dollar balances that sum to zero can only produce whole-dollar
+   payments that sum to zero — the settle-up cannot fail to reconcile.
+
+   The pot table is untouched. What a skin actually paid is $4.44 and saying
+   otherwise would misreport the bet; this is the money changing hands. */
+function bgSettleNets(money, players) {
+  const out = {};
+  const rows = [];
+  (players || []).forEach(p => {
+    if (!p || p.id == null) return;
+    rows.push({ id: p.id, cents: Math.round((((money || {})[p.id]) || 0) * 100) / 100 });
+  });
+  if (!rows.length) return out;
+  // v973's rule first: a pot that does not divide evenly ($10 three ways) leaves
+  // the cent totals off by a penny. Absorb it into the largest balance so the
+  // dollar rounding below starts from a set that already sums to zero.
+  try {
+    const sum = Math.round(rows.reduce((a, x) => a + x.cents, 0) * 100) / 100;
+    if (Math.abs(sum) >= 0.01) {
+      let big = rows[0];
+      rows.forEach(x => { if (Math.abs(x.cents) > Math.abs(big.cents)) big = x; });
+      big.cents = Math.round((big.cents - sum) * 100) / 100;
+    }
+  } catch (e) {}
+  rows.forEach(x => { x.dollars = Math.round(x.cents); x.gain = x.dollars - x.cents; });
+  // `gain` is how much the rounding HANDED each player. Too much given out and
+  // the biggest gainer gives a dollar back; too little and the biggest loser
+  // takes one — the dollar always moves to the player it was closest to anyway.
+  let resid = rows.reduce((a, x) => a + x.dollars, 0);
+  let guard = rows.length * 4 + 20;
+  while (resid > 0 && guard-- > 0) {
+    let pick = rows[0];
+    rows.forEach(x => { if (x.gain > pick.gain) pick = x; });
+    pick.dollars -= 1; pick.gain -= 1; resid -= 1;
+  }
+  while (resid < 0 && guard-- > 0) {
+    let pick = rows[0];
+    rows.forEach(x => { if (x.gain < pick.gain) pick = x; });
+    pick.dollars += 1; pick.gain += 1; resid += 1;
+  }
+  rows.forEach(x => { out[x.id] = x.dollars; });
+  return out;
+}
+
 function calculateSettlements(money, players) {
   const list = [];
+  const nets = bgSettleNets(money, players);
   players.forEach(p => {
-    const amt = Math.round((money[p.id] || 0) * 100) / 100;
-    if (Math.abs(amt) >= 0.01) {
+    const amt = nets[p.id] || 0;
+    if (Math.abs(amt) >= 1) {
       list.push({ id: p.id, name: displayFull(p), amount: amt });
     }
   });
   if (list.length === 0) return [];
-  // v973 (Tyler code review): every balance is rounded to cents INDEPENDENTLY, so
-  // a pot that doesn't divide evenly ($10 three ways) can leave the rounded totals
-  // summing to +/-$0.01 and the greedy loop below exits with that penny unassigned
-  // — Tyler sees a settle-up that doesn't zero out. Absorb the residual into the
-  // largest balance so the payments always reconcile exactly.
-  try {
-    const _sum = Math.round(list.reduce((a, x) => a + x.amount, 0) * 100) / 100;
-    if (Math.abs(_sum) >= 0.01) {
-      let _big = list[0];
-      list.forEach(x => { if (Math.abs(x.amount) > Math.abs(_big.amount)) _big = x; });
-      _big.amount = Math.round((_big.amount - _sum) * 100) / 100;
-    }
-  } catch (e) {}
   const payments = [];
   // v994 (audit P2): this was a hard `let safety = 100`. The greedy loop needs up to
   // N-1 transfers for N players, so the cap bound at ~101 players and the loop just
@@ -39533,10 +39575,10 @@ function calculateSettlements(money, players) {
     list.sort((a, b) => b.amount - a.amount);
     const creditor = list[0];
     const debtor = list[list.length - 1];
-    if (!creditor || !debtor || creditor.amount < 0.01 || debtor.amount > -0.01) break;
+    if (!creditor || !debtor || creditor.amount < 1 || debtor.amount > -1) break;
     const transfer = Math.min(creditor.amount, -debtor.amount);
-    const rounded = Math.round(transfer * 100) / 100;
-    if (rounded < 0.01) break;
+    const rounded = Math.round(transfer);   // v1304: whole dollars in, whole dollars out
+    if (rounded < 1) break;
     payments.push({
       from: debtor.name, fromId: debtor.id,
       to: creditor.name, toId: creditor.id,
@@ -39549,7 +39591,7 @@ function calculateSettlements(money, players) {
   // incomplete. Never fail silently — a settle-up that does not reconcile is exactly
   // the class of bug Tyler has hit before.
   try {
-    const _left = list.filter(x => Math.abs(x.amount) >= 0.01);
+    const _left = list.filter(x => Math.abs(x.amount) >= 1);
     if (_left.length) {
       console.warn('calculateSettlements: loop ended with', _left.length, 'unsettled balance(s)', _left);
       if (typeof showToast === 'function') showToast('⚠️ Settle-up may be incomplete — tell Tyler');
@@ -45349,7 +45391,11 @@ async function _bgSettleShareFilesFor(g) {
       subtitle: new Date(g.finishedAt || g.updatedAt || Date.now()).toLocaleDateString(),
       potRows: bgPotRowsForRound(g),
       statRows: bgStatRowsForRound(g),
-      moneyRows: g.players.map(p => ({ name: displayFull(p), net: money[p.id] || 0 })),
+      /* v1304: the same rounded balances the payments below were built from --
+         a +$52.44 line above a $52.00 payment is the argument this card exists
+         to prevent. */
+      moneyRows: (function () { const _n = bgSettleNets(money, g.players);
+        return g.players.map(p => ({ name: displayFull(p), net: _n[p.id] || 0 })); })(),
       settlements: settlements.map(s => ({ from: nm(s.fromId), to: nm(s.toId), amount: s.amount })),
       footer: g.course || ''
     });
@@ -45402,7 +45448,8 @@ async function shareCombinedSettleUp(t, combinedPay, opts) {
         subtitle: new Date(((headerG && (headerG.finishedAt || headerG.updatedAt)) || Date.now())).toLocaleDateString() + '  ·  every bet, every group',
         potRows: _pots,
         statRows: bgStatRowsForRounds(raw),
-        moneyRows: (combinedPay.rows || []).map(r => ({ name: r.name || r.first, net: r.net || 0 })),
+        moneyRows: (function () { const _n = bgSettleNets(_mDict, combinedPay.rows || []);
+          return (combinedPay.rows || []).map(r => ({ name: r.name || r.first, net: _n[r.id] || 0 })); })(),
         settlements: _st.map(s => ({ from: _nmOf(s.fromId), to: _nmOf(s.toId), amount: s.amount })),
         footer: (t && t.name) || ''
       });
@@ -72967,8 +73014,9 @@ async function openBetsBreakdownScreen(gameOverride, scopeOverride) {
         } catch (e) {}
       });
       const rows = (pay && pay.rows) || [];
-      moneyRows = rows.map(r => ({ id: r.id, name: r.name, first: r.first, net: r.net || 0 }));
       const dict = {}; rows.forEach(r => { dict[r.id] = r.net || 0; });
+      const _rn = bgSettleNets(dict, rows);   // v1304
+      moneyRows = rows.map(r => ({ id: r.id, name: r.name, first: r.first, net: _rn[r.id] || 0 }));
       try { settlements = calculateSettlements(dict, (pay && pay.players) || []) || []; } catch (e) {}
       const pOf = id => ((pay && pay.players) || []).find(x => x && x.id === id);
       settlements = settlements.map(s => ({ from: (pOf(s.fromId) || {}).name || '?', to: (pOf(s.toId) || {}).name || '?', amount: s.amount }));
@@ -72979,7 +73027,8 @@ async function openBetsBreakdownScreen(gameOverride, scopeOverride) {
       potRows = bgPotRowsForRound(g) || [];
       statRows = bgStatRowsForRound(g);
       let money = {}; try { money = computeAllGameMoney(g).combined || {}; } catch (e) {}
-      moneyRows = g.players.map(p => ({ id: p.id, name: displayFull(p), first: displayFirst(p), net: money[p.id] || 0 }));
+      const _rn2 = bgSettleNets(money, g.players);   // v1304
+      moneyRows = g.players.map(p => ({ id: p.id, name: displayFull(p), first: displayFirst(p), net: _rn2[p.id] || 0 }));
       let st = []; try { st = calculateSettlements(money, g.players) || []; } catch (e) {}
       const nm = id => { const p = g.players.find(x => x.id === id); return p ? displayFull(p) : '?'; };
       settlements = st.map(s => ({ from: nm(s.fromId), to: nm(s.toId), amount: s.amount }));
