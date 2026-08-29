@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1301-->
+<!--BGVER=v2026.11.1302-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8812,7 +8812,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1301';
+const BG_BUILD = 'v2026.11.1302';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -76160,19 +76160,249 @@ async function renderLeague() {
            and league_delete_season() both use, so a co-commissioner sees no trash
            here. stopPropagation keeps the card's own onclick from opening the
            league the tap is deleting. lgDelete confirms, then re-renders this list. */
+        /* v1302 (Tyler): "we should have a link to edit sitting by the trash
+           can on the league screen." Tapping the card is now PLAY -- this
+           week, the table, the schedule -- so the way into the setup lives
+           here, next to the other thing you do to a league from the outside.
+           The pencil is for everyone (a player gets the read-only version);
+           the trash stays CREATOR-only, as v1282 set it. */
+        '<div class="bg-evfoot" style="justify-content:flex-end;gap:8px">' +
+        '<button class="lg-row-del" title="League settings" aria-label="League settings" ' +
+        'onclick="event.stopPropagation();lgOpenSettings(\'' + lgEsc(s.id) + '\')">✏️</button>' +
         ((s.created_by && _authUser && s.created_by === _authUser.id)
-          ? '<div class="bg-evfoot" style="justify-content:flex-end">' +
-            '<button class="lg-row-del" title="Delete this league" aria-label="Delete league" ' +
-            'onclick="event.stopPropagation();lgDelete(\'' + lgEsc(s.id) + '\')">🗑️</button></div>'
-          : '') + '</div>';
+          ? '<button class="lg-row-del" title="Delete this league" aria-label="Delete league" ' +
+            'onclick="event.stopPropagation();lgDelete(\'' + lgEsc(s.id) + '\')">🗑️</button>'
+          : '') + '</div></div>';
     });
   }
   if (lgNavStale(_nav)) return;
   body.innerHTML = h;
 }
 
-/* ---- season detail: the roster ------------------------------------------ */
+/* v1302: the local rules. Saved whole, cleared by emptying the box. */
+async function lgSaveHouseRules(sid) {
+  const el = document.getElementById('lg-house-rules'); if (!el) return;
+  const txt = String(el.value || '').trim();
+  let res = null;
+  try { res = await supa.rpc('league_set_house_rules', { p_season_id: sid, p_text: txt }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_set_house_rules failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t save those rules')); } catch (e) {}
+    return;
+  }
+  try { showToast(txt ? 'Local rules saved' : 'Local rules cleared'); } catch (e) {}
+}
+
+/* v1302: the roster list opens and closes in place. */
+function lgToggleRoster(el) {
+  try {
+    const list = document.getElementById('lg-roster-list'); if (!list) return;
+    const open = list.style.display !== 'none';
+    list.style.display = open ? 'none' : '';
+    const c = el && el.querySelector('.lg-chev'); if (c) c.textContent = open ? 'Show' : 'Hide';
+  } catch (e) {}
+}
+
+/* ===================== THE LEAGUE HOME (v1302) ===========================
+   Tyler: "if they click the league it should show them the schedule, current
+   standing and have a place to start the round for the week or pick a
+   previous round that was in the app already for the week for the same
+   course, same tees."
+
+   So the league you tap is the league you PLAY: this week at the top,
+   because that is the thing you do tonight; the table under it, because that
+   is the thing you read; the next few weeks under that. The full table and
+   the full schedule keep their own screens -- this is the one-thumb version
+   of each, not a replacement.
+
+   Both ways of posting a card are offered side by side, which is the point of
+   the screen: start the round from here and it posts itself, or pick the
+   round you already played on the league's course. league_eligible_rounds
+   decides which rounds qualify -- same course, same holes, close enough to
+   the league day -- so this screen never has to know the rule. */
 async function lgOpenSeason(sid) {
+  const body = document.getElementById('league-body'); if (!body || !sid) return;
+  try { lgEnterTab(); } catch (e) {}
+  const _nav = lgNavStart();
+  body.innerHTML = lgCard('<p class="help-text" style="margin:0">Loading…</p>');
+  window._lgSeason = sid;
+
+  const sr = await _bgRead(function () {
+    return supa.from('league_seasons')
+      .select('id,name,status,settings,league_id,leagues(name,logo)').eq('id', sid).maybeSingle();
+  }, 'lgHome:season');
+  const wr = await _bgRead(function () {
+    return supa.from('league_weeks')
+      .select('id,week_number,date,status,course_id,is_playoff,format_config,settings_snapshot')
+      .eq('season_id', sid).order('week_number', { ascending: true });
+  }, 'lgHome:weeks');
+  if (!sr.ok || !sr.data) {
+    if (lgNavStale(_nav)) return;
+    body.innerHTML = lgCard('<p class="help-text" style="margin:0 0 12px">Couldn’t load that league.</p>' +
+      '<button class="full" onclick="renderLeague()">Back to leagues</button>');
+    return;
+  }
+  const s = sr.data, nm = (s.leagues && s.leagues.name) || 'League';
+  const weeks = (wr.ok && Array.isArray(wr.data)) ? wr.data : [];
+
+  let _courseNm = null;
+  try { const _c = await lgSeasonCourse(sid); _courseNm = lgCourseName(_c.course_id); } catch (e) {}
+
+  /* The week the league is ON: the live one, else the next one still to play,
+     else the last one there is. Same order lgOpenWeek uses, so the two screens
+     can never disagree about which week "this week" means. */
+  const live = weeks.filter(function (w) { return ['open','in_play','awaiting_cards'].indexOf(w.status) >= 0; });
+  const w = live[0] || weeks.filter(function (x) { return x.status === 'scheduled'; })[0] || weeks[weeks.length - 1] || null;
+  if (w) window._lgWeek = w.id;
+
+  let me = null, myMu = null, myCard = null, amCommish = false;
+  try {
+    const rr = await supa.rpc('league_roster', { p_season_id: sid });
+    const mem = (rr && !rr.error && Array.isArray(rr.data)) ? rr.data : [];
+    me = mem.filter(function (m) { return m.user_id === _authUser.id; })[0] || null;
+    amCommish = !!(me && (me.role === 'commissioner' || me.role === 'co_commissioner'));
+  } catch (e) {}
+  if (w && me) {
+    try {
+      const mur = await supa.from('league_matchups')
+        .select('id,kind,a_entrant_id,b_entrant_id').eq('week_id', w.id);
+      const mus = (mur && !mur.error && Array.isArray(mur.data)) ? mur.data : [];
+      /* A team league pairs TEAMS, so the fixture that is mine is the one my
+         team is in, not the one my member id is in. */
+      const mine = me.team_id || me.id;
+      myMu = mus.filter(function (x) { return x.a_entrant_id === mine || x.b_entrant_id === mine; })[0] || null;
+      if (myMu) {
+        const cr = await supa.from('league_cards')
+          .select('id,gross,net,approved_at,posted_by,entrant_id').eq('matchup_id', myMu.id);
+        const cards = (cr && !cr.error && Array.isArray(cr.data)) ? cr.data : [];
+        myCard = cards.filter(function (c) { return c.entrant_id === mine; })[0] || null;
+      }
+    } catch (e) {}
+  }
+
+  let standings = [];
+  try {
+    const st = await supa.rpc('league_standings_get', { p_season_id: sid, p_segment: 'full' });
+    if (st && !st.error && Array.isArray(st.data)) standings = st.data;
+  } catch (e) {}
+
+  const total = function (a) { return Array.isArray(a) ? a.reduce(function (x, y) { return x + (Number(y) || 0); }, 0) : null; };
+  const wkLabel = function (x) {
+    if (!x) return '';
+    if (x.is_playoff && x.format_config && x.format_config.label) return x.format_config.label;
+    return 'Week ' + x.week_number;
+  };
+
+  let h = '<div class="card"><div style="display:flex;gap:12px;align-items:flex-start">' +
+    leagueLogoHtml((s.leagues && s.leagues.logo) || null, nm, s.league_id, 44) +
+    '<div style="min-width:0;flex:1"><h2 style="margin:0 0 2px">' + lgEsc(nm) + '</h2>' +
+    '<p class="help-text" style="margin:0">' + lgEsc(s.name || '') +
+    (_courseNm ? ' · ' + lgEsc(_courseNm) : '') + '</p></div>' +
+    '<span class="bg-pill">' + lgEsc(s.status || '') + '</span></div></div>';
+
+  /* ---- this week ---- */
+  if (!w) {
+    h += lgCard('<div class="bg-sec" style="margin-bottom:6px">This week</div>' +
+      '<p class="help-text" style="margin:0">This season has no weeks yet.</p>');
+  } else {
+    const open = ['open','in_play','awaiting_cards'].indexOf(w.status) >= 0;
+    const launched = (w.format_config || {}).launched_code || null;
+    let body2 = '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px">' +
+      '<div class="bg-sec" style="margin:0;flex:1">' + lgEsc(wkLabel(w)) + '</div>' +
+      '<span class="bg-pill">' + lgEsc(w.status || '') + '</span></div>' +
+      (w.date ? '<p class="help-text" style="margin:0 0 10px">' + lgEsc(w.date) +
+                (_courseNm ? ' · ' + lgEsc(_courseNm) : '') + '</p>' : '');
+    if (!me) {
+      body2 += '<p class="help-text" style="margin:0">You are not on this roster.</p>';
+    } else if (myCard) {
+      body2 += '<div style="font-size:26px;font-weight:800">' + total(myCard.gross) +
+        '<span class="help-text" style="font-size:13px;font-weight:600"> gross · ' + total(myCard.net) + ' net</span></div>' +
+        '<p class="help-text" style="margin:4px 0 10px">' +
+        (myCard.approved_at ? 'Your card is in and counted.' : 'Your card is in, waiting to be signed for.') + '</p>' +
+        '<button class="full" onclick="lgOpenWeek(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Open the week</button>';
+    } else if (open && myMu) {
+      body2 += (launched
+        ? '<p class="help-text" style="margin:0 0 10px">The round is live — code ' + lgEsc(launched) + '.</p>' +
+          '<button class="primary full" onclick="lgOpenLaunchedRound(\'' + lgEsc(launched) + '\')">Open the round</button>'
+        : '<button class="primary full" onclick="lgLaunchWeekRound(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Start this week’s round</button>') +
+        /* The second route, in Tyler's words: a round you already played, on
+           this course, off these tees. The picker asks the server which of
+           your rounds qualify rather than guessing here. */
+        '<button class="full" style="margin-top:8px" onclick="lgPickRound()">Pick a round I already played</button>' +
+        '<button class="full" style="margin-top:8px" onclick="lgOpenWeek(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Open the week</button>';
+    } else {
+      body2 += '<p class="help-text" style="margin:0 0 10px">' +
+        (!myMu ? 'No fixture for you this week yet — the schedule still has to be built.'
+               : (w.course_id ? 'This week hasn’t opened yet. It opens on its own a couple of days before.'
+                              : 'This week has no course on it yet, so it can’t open.')) + '</p>' +
+        '<button class="full" onclick="lgOpenWeek(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Open the week</button>';
+    }
+    h += lgCard(body2);
+  }
+
+  /* ---- the table, top five ---- */
+  if (standings.length) {
+    const race = (standings[0] && standings[0].race) || 'points';
+    const toPar = race === 'to_par_total';
+    const par = function (v) {
+      if (v == null) return '\u2014';
+      const n2 = Number(v); return n2 === 0 ? 'E' : (n2 > 0 ? '+' + n2 : String(n2));
+    };
+    const top = standings.slice(0, 5);
+    h += '<div class="card"><div class="bg-sec">Standings</div>' +
+      top.map(function (r) {
+        const big = toPar ? (r.dq ? 'OUT' : par(r.to_par))
+                          : ((r.pct == null) ? '\u2014' : (Math.round(Number(r.pct) * 10) / 10) + '%');
+        const sub = toPar ? (r.weeks_played + ' round' + (r.weeks_played === 1 ? '' : 's'))
+                          : ((r.wins || r.losses || r.ties) ? (r.wins + '-' + r.losses + '-' + r.ties)
+                                                            : (r.weeks_played + ' played'));
+        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)' +
+          (r.dq ? ';opacity:.7' : '') + '">' +
+          '<div style="flex:0 0 22px;font-weight:800;font-size:14px;color:var(--text-muted)">' + r.rank + '</div>' +
+          '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(r.name) + '</div>' +
+          '<div class="help-text" style="margin:0;font-size:12px">' + lgEsc(sub) + '</div></div>' +
+          '<div style="flex:0 0 auto;font-weight:800;font-size:15px">' + big + '</div></div>';
+      }).join('') +
+      '<button class="full" style="margin-top:10px" onclick="lgOpenStandings(\'' + lgEsc(sid) + '\')">' +
+      (standings.length > 5 ? 'Full standings — all ' + standings.length : 'Full standings') + '</button></div>';
+  }
+
+  /* ---- the next three weeks ---- */
+  if (weeks.length) {
+    const from = w ? weeks.findIndex(function (x) { return x.id === w.id; }) : 0;
+    const next = weeks.slice(Math.max(0, from), Math.max(0, from) + 3);
+    h += '<div class="card"><div class="bg-sec">Schedule</div>' +
+      next.map(function (x) {
+        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(wkLabel(x)) + '</div>' +
+          '<div class="help-text" style="margin:0;font-size:12px">' + lgEsc(x.date || 'no date') + '</div></div>' +
+          '<span class="bg-pill">' + lgEsc(x.status || '') + '</span></div>';
+      }).join('') +
+      '<button class="full" style="margin-top:10px" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">' +
+      'Full schedule — all ' + weeks.length + ' weeks</button></div>';
+  }
+
+  h += '<div class="card" style="padding:12px 14px">' +
+       '<div style="display:flex;gap:8px">' +
+       '<button style="flex:1" onclick="lgOpenMoney(\'' + lgEsc(sid) + '\')">Money</button>' +
+       '<button style="flex:1" onclick="lgOpenSettings(\'' + lgEsc(sid) + '\')">⚙️ Settings</button></div>' +
+       '<button class="full" style="margin-top:8px" onclick="renderLeague()">Back to leagues</button></div>';
+  if (lgNavStale(_nav)) return;
+  body.innerHTML = h;
+}
+
+/* ---- league SETTINGS: the roster and everything you set up --------------
+   v1302 (Tyler): "collapse the users under the Roster to save screen space
+   here. This should be the edit setting buttons." So this screen stopped
+   being where you land and became where you go to change something -- reached
+   by the pencil on the league list. Playing the league is lgOpenSeason below.
+
+   A player sees it too, read-only: the course, the schedule, the handicaps and
+   the rules are things they need to look up, and "what are the rules again"
+   should not have to go through the commissioner. Every button that CHANGES
+   the season is commissioner-only, here and on the screen it opens. */
+async function lgOpenSettings(sid) {
   const body = document.getElementById('league-body'); if (!body || !sid) return;
   /* Order matters: switchTab('league') calls renderLeague(), which claims a
      token of its own. Claim AFTER it, so this screen is the newer render and
@@ -76246,8 +76476,17 @@ async function lgOpenSeason(sid) {
        are playing?" — it was nowhere in the whole feature. */
     (_courseNm ? ' · ' + lgEsc(_courseNm) : '') + '</p></div></div></div>';
 
-  h += '<div class="card"><div class="bg-sec">Roster <span class="bg-sec-count">' + active.length + '</span></div>' +
-    (active.length ? active.map(row).join('') : '<p class="help-text" style="margin:8px 0 0">Nobody yet — add your players below.</p>') + '</div>';
+  /* v1302: collapsed. Eight names pushed every setup button below the fold on
+     a phone, and the roster is the one thing on this screen you are NOT here
+     to change most of the time -- the count answers the usual question. */
+  h += '<div class="card">' +
+    '<div class="bg-sec" style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0" ' +
+    'onclick="lgToggleRoster(this)">' +
+    '<span style="flex:1">Roster <span class="bg-sec-count">' + active.length + '</span></span>' +
+    '<span class="lg-chev" style="font-size:12px;font-weight:700;color:var(--bg-brand)">Show</span></div>' +
+    '<div id="lg-roster-list" style="display:none">' +
+    (active.length ? active.map(row).join('') : '<p class="help-text" style="margin:8px 0 0">Nobody yet — add your players below.</p>') +
+    '</div></div>';
 
   if (amCommish) {
     /* v1297. Two buttons, in the order setup night actually runs: put the
@@ -76276,17 +76515,36 @@ async function lgOpenSeason(sid) {
     } catch (e) {}
   }
 
+  /* v1302 (Tyler): "maybe they play it up and allow a club length or maybe
+     they rake and place in bunkers, who knows -- but let's let them add a
+     special rules section."
+
+     Free text on purpose. Every other rule in a league is a setting the engine
+     acts on; these are the ones it CANNOT act on and the group simply agrees
+     to. A "one club length" checkbox would pretend the app enforces something
+     it does not, and a wrong promise about a rule is worse than no field. */
+  {
+    const _hr = (s.settings || {}).house_rules || '';
+    if (amCommish) {
+      h += '<div class="card"><div class="bg-sec">Local rules</div>' +
+        '<p class="help-text" style="margin:6px 0 8px">Anything the app can’t work out for itself — winter rules, a club length off the fairway, rake and place in the bunkers, gimme range. Everyone in the league sees it.</p>' +
+        '<textarea id="lg-house-rules" class="lg-in" maxlength="2000" placeholder="Preferred lies through the green, one club length, no closer to the hole.…">' +
+        lgEsc(_hr) + '</textarea>' +
+        '<button class="full" style="margin-top:8px" onclick="lgSaveHouseRules(\'' + lgEsc(sid) + '\')">Save the local rules</button></div>';
+    } else if (_hr) {
+      h += '<div class="card"><div class="bg-sec">Local rules</div>' +
+        '<p style="margin:8px 0 0;font-size:14px;white-space:pre-wrap">' + lgEsc(_hr) + '</p></div>';
+    }
+  }
+
   h += '<div class="card" style="padding:12px 14px">' +
-       '<button class="primary full" onclick="lgOpenWeek(\'' + lgEsc(sid) + '\')">This week</button>' +
-       '<div style="display:flex;gap:8px;margin-top:8px">' +
+       (amCommish ? '' : '<p class="help-text" style="margin:0 0 10px">You play in this league — this is how it is set up. Only the commissioner can change it.</p>') +
+       '<div style="display:flex;gap:8px">' +
        '<button style="flex:1" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Schedule</button>' +
        '<button style="flex:1" onclick="lgOpenHandicaps(\'' + lgEsc(sid) + '\')">Handicaps</button></div>' +
        '<div style="display:flex;gap:8px;margin-top:8px">' +
        '<button style="flex:1" onclick="lgOpenCourse(\'' + lgEsc(sid) + '\')">Where you play</button>' +
        '<button style="flex:1" onclick="lgOpenFlights(\'' + lgEsc(sid) + '\')">Flights</button></div>' +
-       '<div style="display:flex;gap:8px;margin-top:8px">' +
-       '<button style="flex:1" onclick="lgOpenStandings(\'' + lgEsc(sid) + '\')">Standings</button>' +
-       '<button style="flex:1" onclick="lgOpenMoney(\'' + lgEsc(sid) + '\')">Money</button></div>' +
        /* A scramble league cannot run until its teams exist, so the button is
           only offered where it means something. */
        ((((s && s.settings) || {}).type || 'individual') !== 'individual'
@@ -76298,7 +76556,7 @@ async function lgOpenSeason(sid) {
           Sits where the tournament screen puts its own delete, and reads the
           same way. */
        (amCommish ? '<button class="full" style="margin-top:8px;background:var(--danger);color:#fff;border:1px solid var(--danger);border-radius:12px;padding:12px;font-weight:700" onclick="lgDelete(\'' + lgEsc(sid) + '\')">🗑️ Delete this league</button>' : '') +
-       '<button class="full" style="margin-top:8px" onclick="renderLeague()">Back</button></div>';
+       '<button class="full" style="margin-top:8px" onclick="lgOpenSeason(\'' + lgEsc(sid) + '\')">Back to the league</button></div>';
   if (lgNavStale(_nav)) return;
   body.innerHTML = h;
 }
@@ -76390,7 +76648,7 @@ async function lgRemove(mid, expectStatus, name) {
     try { console.warn('league_remove_member failed:', res && res.error); } catch (e) {}
     try { showToast(lgErrText(res && res.error, 'Couldn’t remove them')); } catch (e) {}
   } else { try { showToast(name + ' removed'); } catch (e) {} }
-  try { lgOpenSeason(window._lgSeason); } catch (e) {}
+  try { lgOpenSettings(window._lgSeason); } catch (e) {}
 }
 
 /* ===================== LEAGUES — THE COURSE (v1268) =======================
@@ -78940,6 +79198,16 @@ async function lgOpenRules(sid) {
   let h = lgCard('<h2 style="margin:0">How this league works</h2>' +
     '<p class="help-text" style="margin:6px 0 0">Straight from the season’s settings — this is exactly what the app is doing.</p>');
 
+  /* v1302: the commissioner's own rules go FIRST, above everything the engine
+     does, because they are the only ones on this screen the app does not
+     enforce for you — the ones somebody actually has to have read. */
+  if (st.house_rules) {
+    h += '<div class="card" style="border-color:var(--bg-brand);background:var(--bg-brand-tint)">' +
+      '<div class="bg-sec">Local rules</div>' +
+      '<p style="margin:8px 0 0;font-size:14px;white-space:pre-wrap">' + lgEsc(st.house_rules) + '</p>' +
+      '<p class="help-text" style="margin:10px 0 0;font-size:12px">Set by your commissioner. The app doesn’t score these — the group plays them.</p></div>';
+  }
+
   h += '<div class="card"><div class="bg-sec">The season</div>' +
     row('Format', st.competition_mode === 'field' ? 'Everyone against the field' : 'Head-to-head match play') +
     row('Schedule', s.schedule_mode === 'open' ? ('Play ' + (s.round_target || '?') + ' rounds whenever you can') : ('Set weeks, starting ' + (s.start_date || '—'))) +
@@ -79419,7 +79687,7 @@ async function lgNextSetupStep(sid) {
   if (!sid) return;
   let st = null;
   try { st = await lgSetupState(sid); } catch (e) { st = null; }
-  if (!st) { try { lgOpenSeason(sid); } catch (e) {} return; }
+  if (!st) { try { lgOpenSettings(sid); } catch (e) {} return; }
 
   // Not enough players to pair anybody — stay on the roster and say why.
   if (st.members < 2) {
@@ -79433,7 +79701,7 @@ async function lgNextSetupStep(sid) {
   // I haven't had a chance to pick the venue(s)".
   if (st.course === null) {
     try { showToast('Players are in — now pick where you play'); } catch (e) {}
-    try { lgOpenCourse(sid); } catch (e) { try { lgOpenSeason(sid); } catch (e2) {} }
+    try { lgOpenCourse(sid); } catch (e) { try { lgOpenSettings(sid); } catch (e2) {} }
     return;
   }
   // Players in, course set, no fixtures yet: BUILD it — do not just open the
@@ -79448,7 +79716,7 @@ async function lgNextSetupStep(sid) {
   // Fixtures exist but nobody has a handicap: that is the last setup step.
   if (!st.handicaps) {
     try { showToast('Schedule is set — check the handicaps'); } catch (e) {}
-    try { lgOpenHandicaps(sid); } catch (e) { try { lgOpenSeason(sid); } catch (e2) {} }
+    try { lgOpenHandicaps(sid); } catch (e) { try { lgOpenSettings(sid); } catch (e2) {} }
     return;
   }
   try { lgOpenSeason(sid); } catch (e) {}
@@ -81497,9 +81765,9 @@ async function init() {
   try { updateNaturalBoostVisibility(); } catch (e) {}
 
   // Roster modal wiring
-  $('roster-cancel').onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} if (_lg) { try { lgNextSetupStep(_lg); } catch (e) { try { lgOpenSeason(_lg); } catch (e2) {} } } };
+  $('roster-cancel').onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} if (_lg) { try { lgNextSetupStep(_lg); } catch (e) { try { lgOpenSettings(_lg); } catch (e2) {} } } };
   // v946: top Done mirrors the bottom one exactly.
-  try { const _rdt = $('roster-done-top'); if (_rdt) _rdt.onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} if (_lg) { try { lgNextSetupStep(_lg); } catch (e) { try { lgOpenSeason(_lg); } catch (e2) {} } } }; } catch (e) {}
+  try { const _rdt = $('roster-done-top'); if (_rdt) _rdt.onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} if (_lg) { try { lgNextSetupStep(_lg); } catch (e) { try { lgOpenSettings(_lg); } catch (e2) {} } } }; } catch (e) {}
   // ➕ Add a guest / non-user straight to Bad Golf Users (no round needed) — the
   // modern replacement for the old no-email test users. Stored in the shared
   // roster via upsertPlayerInRoster, so they're findable everywhere. (Tyler, June 2026.)
