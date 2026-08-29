@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1307-->
+<!--BGVER=v2026.11.1308-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8809,7 +8809,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1307';
+const BG_BUILD = 'v2026.11.1308';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -51161,6 +51161,19 @@ async function getMeName() {
       // An unstamped one is still served (it is nearly always right) but leaves the
       // trust flag alone, so the guards that gate irreversible writes stay cautious.
       if (_cacheUid === _uid) { _meNameReadFailed = false; _meNameLastGood = { uid: _uid, name: cached }; }
+      // v1301 PERF (Tyler: "the tourney tab seems sluggish"). The cached name above is
+      // returned instantly — but this background self-heal fired a `profiles` read on
+      // EVERY call, and renderT2List calls getMeName 3 + one-per-event times, so opening
+      // the Tourney tab kicked off 6-8 extra requests racing the ones actually on the
+      // critical path. my_player barely ever changes, setMeName keeps the cache current
+      // when it changes on THIS device, and this refresh only exists to catch a change
+      // made on ANOTHER device — once a minute per account catches that just as well.
+      // The value returned to the caller is identical either way.
+      try {
+        if (!window._meRefreshAt) window._meRefreshAt = {};
+        if (Date.now() - (window._meRefreshAt[_uid] || 0) < 60000) return cached;
+        window._meRefreshAt[_uid] = Date.now();
+      } catch (e) {}
       try {
         supa.from('profiles').select('my_player').eq('id', _uid).maybeSingle()
           .then(function (r) {
@@ -60600,10 +60613,13 @@ function t2StatusLabel(s) {
 // status column only ever goes 'scheduled' -> 'live'; nothing marks it complete
 // once every group is done. Batched check (2 queries, any day/group count) so
 // the event list can show "Finished" instead of a stale "live" pill.
-async function t2AllGroupsFinished(t) {
+async function t2AllGroupsFinished(t, opts) {
   try {
     if (!t || !supa) return false;
-    const days = await t2GetDays(t.id);
+    // v1301 PERF: the Tourney list already reads tournament_days once for the whole
+    // list and hands the rows in, instead of this doing its own read per event. Nothing
+    // handed in -> the original fetch, so every other caller behaves exactly as before.
+    const days = (opts && opts.days && opts.days.length) ? opts.days : await t2GetDays(t.id);
     const dayIds = (days || []).map(d => d.id).filter(Boolean);
     if (!dayIds.length) return false;
     // v1135: a failed read here made `gs` empty, which falls straight through to
@@ -61012,7 +61028,7 @@ function _t2ExtraCrossBetLabels(merged, memberNames, crossCandidates) {
 
 // Find THIS signed-in user's group + tee time in an event (first day they're in),
 // and whether they're the assigned scorer (group captain). Null if not grouped yet.
-async function _t2MyGroupInfo(t) {
+async function _t2MyGroupInfo(t, opts) {
   if (!_authUser || !t) return null;
   try {
     let myName = ''; try { myName = (await getMeName()) || ''; } catch (e) {}
@@ -61023,7 +61039,8 @@ async function _t2MyGroupInfo(t) {
     // anything. Batch it: players+days together, then ONE groups query across
     // every day, then ONE members query across every group, then replay the
     // exact same "first match wins" search against the in-memory results.
-    const [players, days] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id)]);
+    // v1301 PERF: days come from the list's single whole-list read when it has them.
+    const [players, days] = await Promise.all([t2GetPlayers(t.id), (opts && opts.days && opts.days.length) ? Promise.resolve(opts.days) : t2GetDays(t.id)]);
     // Match by account link OR by name — the commissioner often adds themselves by
     // name (unclaimed), so a user_id-only match would miss them on their own card.
     const myP = players.find(p => (p.user_id && p.user_id === _authUser.id) || (myNameKey && normalizeNameSegment(p.display_name || '') === myNameKey));
@@ -61129,12 +61146,13 @@ function _t2BracketLineFor(t, dayNumber, memberIds, playerById, rr) {
     return mine.map(m => nm(m.a) + ' v ' + nm(m.b)).join(' · ');
   } catch (e) { return ''; }
 }
-async function _t2AllGroupsInfo(t) {
+async function _t2AllGroupsInfo(t, opts) {
   if (!_authUser || !t) return [];
   try {
     let myName = ''; try { myName = (await getMeName()) || ''; } catch (e) {}
     const myNameKey = normalizeNameSegment(myName);
-    const [players, days] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id)]);
+    // v1301 PERF: days come from the list's single whole-list read when it has them.
+    const [players, days] = await Promise.all([t2GetPlayers(t.id), (opts && opts.days && opts.days.length) ? Promise.resolve(opts.days) : t2GetDays(t.id)]);
     const myP = players.find(p => (p.user_id && p.user_id === _authUser.id) || (myNameKey && normalizeNameSegment(p.display_name || '') === myNameKey));
     const dayIds = (days || []).map(d => d.id).filter(Boolean);
     let allGroups = [];
@@ -61328,13 +61346,20 @@ function t2ChatUpdateFeed(tid, msgs) {
   feed.innerHTML = rows || '<div class="help-text" style="text-align:center;padding:10px">No messages yet — say something 🏌️</div>';
   if (atBottom) feed.scrollTop = feed.scrollHeight;
 }
-async function t2ChatToggle(tid) {
+async function t2ChatToggle(tid, tKnown) {
   const host = document.getElementById('t2chat-host-' + tid); if (!host) return;
   if (host.dataset.open === '1') { host.style.display = 'none'; host.dataset.open = ''; host.innerHTML = ''; if (_t2ChatTid === tid) t2ChatUnsubscribe(); return; }
   document.querySelectorAll('.t2chat-host[data-open="1"]').forEach(h => { h.style.display = 'none'; h.dataset.open = ''; h.innerHTML = ''; });
   t2ChatUnsubscribe();
   host.style.display = 'block'; host.dataset.open = '1';
-  let tObj = null; try { tObj = await t2Get(tid); } catch (e) {}
+  // v1301 PERF (Tyler: "the buttons seem slower"). The fetched row was used for ONE
+  // thing — t2CanManage, which only picks the input's placeholder text — yet the whole
+  // chat box waited on that round trip before it appeared on screen. The Tourney list
+  // already holds the identical row (t2ListMine selects * from tournaments) and now
+  // hands it in, so the panel opens with no network wait at all. Callers with nothing
+  // in hand still fetch, exactly as before.
+  let tObj = (tKnown && tKnown.id === tid) ? tKnown : null;
+  if (!tObj) { try { tObj = await t2Get(tid); } catch (e) {} }
   const amDir = tObj ? t2CanManage(tObj) : false;
   host.innerHTML =
     '<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">' +
@@ -61419,11 +61444,50 @@ async function renderT2List() {
   const _mySeq = (window._t2ListSeq = (window._t2ListSeq || 0) + 1);
   const list = await t2ListMine();
   let _ei = {}; try { _ei = await getEventImgs(); } catch (e) {}
+  // v1301 PERF (Tyler 8/29: "the tourney tab seems sluggish to the rest of the app").
+  // tournament_days was read THREE times per tab open: once per LIVE event inside
+  // t2AllGroupsFinished, once below for the past/hide rule, and once per VISIBLE event
+  // inside the group-info builders. One read for the whole list instead, handed to all
+  // three. Identical rows, ordered the same way t2GetDays orders them. Every one of
+  // those readers still does its own fetch when nothing is handed in, so no other
+  // caller of theirs changes at all.
+  const _daysByT = {};
+  try {
+    const _dIds = list.map(t => t && t.id).filter(Boolean);
+    if (_dIds.length) {
+      const _dr = await _bgRead(() => supa.from('tournament_days').select('*').in('tournament_id', _dIds), 'renderT2List:days');
+      if (_dr.ok) {
+        (_dr.data || []).forEach(r => { if (r && r.tournament_id) (_daysByT[r.tournament_id] || (_daysByT[r.tournament_id] = [])).push(r); });
+        Object.keys(_daysByT).forEach(k => _daysByT[k].sort((a, b) => (a.day_number || 0) - (b.day_number || 0)));
+      }
+    }
+  } catch (e) {}
+  const _daysFor = t => (t && _daysByT[t.id] && _daysByT[t.id].length) ? _daysByT[t.id] : null;
+  // v1301 PERF, part two. The two heavy passes below — the finished-check and the
+  // per-event group enrichment — are what left this tab blank for a couple of seconds:
+  // NOTHING painted until both had finished, ~11 network round trips deep. They now run
+  // AFTER the cards are on screen, the same staged pattern the Rounds tab got in v934
+  // ("the healing passes were blocking first paint"). Their answers are remembered for
+  // the session, so flipping back to this tab repaints fully-formed instead of empty.
+  // The second paint reconciles both against fresh data every time, so a remembered
+  // value can never be what the user is left looking at.
+  // The remembered answers are per-ACCOUNT: _t2MyGroupInfo/_t2AllGroupsInfo return
+  // "where do *I* play", so a sign-out/sign-in inside one session must not let the
+  // previous account's group lines flash on the next one's cards. Stamp the cache with
+  // the uid it was built for and drop it the moment that changes. (Same lesson as the
+  // KEY_ME_UID stamp in getMeName and the v924 shared-blob filters.)
+  try {
+    const _cu = (typeof _authUser !== 'undefined' && _authUser) ? _authUser.id : null;
+    if (window._t2CacheUid !== _cu) { window._t2CacheUid = _cu; window._t2FinCache = {}; window._t2InfoCache = {}; }
+  } catch (e) { window._t2FinCache = {}; window._t2InfoCache = {}; }
+  window._t2FinCache = window._t2FinCache || {};
+  window._t2InfoCache = window._t2InfoCache || {};
+  let _allFin = list.map(t => (t && Object.prototype.hasOwnProperty.call(window._t2FinCache, t.id)) ? window._t2FinCache[t.id] : false);
   // v859: only bother checking tournaments the pill would otherwise show as "live" —
   // scheduled/complete ones don't need the extra round trips.
-  const _allFin = await Promise.all(list.map(async t => {
+  const _computeAllFin = () => Promise.all(list.map(async t => {
     if (String(t.status || '').toLowerCase() !== 'live') return false;
-    let r = false; try { r = await t2AllGroupsFinished(t); } catch (e) { r = false; }
+    let r = false; try { r = await t2AllGroupsFinished(t, { days: _daysFor(t) }); } catch (e) { r = false; }
     // v1176 (Tyler: "I don't want our tourney tab getting jacked"): the list does
     // NOTHING bracket-specific beyond this one cheap rule — a bracket is never
     // "Finished" until its champion is stamped (bgBracketAutoBuildNext stamps
@@ -61441,12 +61505,10 @@ async function renderT2List() {
   // These auto-hide from the list (a toggle reveals them) so old tests fall off.
   const _t2PastSet = new Set();
   try {
-    const _ids = list.map(t => t.id);
     const _lastDate = {};
-    if (_ids.length) {
-      const { data: _dd } = await _bgRead(() => supa.from('tournament_days').select('tournament_id, play_date').in('tournament_id', _ids), 'renderT2List:dates');
-      (_dd || []).forEach(r => { if (r.play_date && (!_lastDate[r.tournament_id] || r.play_date > _lastDate[r.tournament_id])) _lastDate[r.tournament_id] = r.play_date; });
-    }
+    // v1301: reuse the one whole-list tournament_days read above — this was a second
+    // identical query for the same rows.
+    Object.keys(_daysByT).forEach(_tid => { (_daysByT[_tid] || []).forEach(r => { if (r && r.play_date && (!_lastDate[_tid] || r.play_date > _lastDate[_tid])) _lastDate[_tid] = r.play_date; }); });
     const _now = new Date();
     const _todayStr = _now.getFullYear() + '-' + String(_now.getMonth() + 1).padStart(2, '0') + '-' + String(_now.getDate()).padStart(2, '0');
     list.forEach(t => {
@@ -61465,14 +61527,15 @@ async function renderT2List() {
   // v1177: a `waiting` answer (carts built, not started / bracket in play) is NOT finished —
   // it used to collapse under a "Finished" pill because any object is truthy.
   const _finishedish = (t, i) => { const s = String(t.status || '').toLowerCase(); const f = _allFin[i]; const _fd = (f && typeof f === 'object') ? f.state === 'finished' : !!f; return _t2PastSet.has(t.id) || _fd || /complete|completed|final|done/.test(s); };
-  const _collapsed = list.map((t, i) => _finishedish(t, i) && !window._t2Expanded.has(t.id));
-  const _visible = list.map(t => _t2ShowPast || !_t2PastSet.has(t.id));
+  let _collapsed = list.map((t, i) => _finishedish(t, i) && !window._t2Expanded.has(t.id));
+  let _visible = list.map(t => _t2ShowPast || !_t2PastSet.has(t.id));
   // Enrich each event with THIS user's group + tee time so they see where they play
   // (and, if they're the scorer, a button to set up their group's side games).
   // v863 (Tyler): the tournament's commissioner/admin sees EVERY group on this
   // card (not just whichever one they happen to play in); a regular player still
   // sees only their own.
-  const _infos = await Promise.all(list.map(async (t, i) => {
+  let _infos = list.map(t => (t && window._t2InfoCache[t.id]) || []);
+  const _computeInfos = () => Promise.all(list.map(async (t, i) => {
     // v892 PERF (Tyler): "it takes forever for the tournaments to load in — we
     // could be loading too many past rounds." Exactly right: this enrichment
     // fetched players + days + groups + members + EVERY group's full round blob
@@ -61481,8 +61544,8 @@ async function renderT2List() {
     // card is tapped open. This is where the slow Events screen went.
     if (_collapsed[i] || !_visible[i]) return [];
     try {
-      if (t2CanManage(t)) { const arr = await _t2AllGroupsInfo(t); return arr || []; }
-      const one = await _t2MyGroupInfo(t);
+      if (t2CanManage(t)) { const arr = await _t2AllGroupsInfo(t, { days: _daysFor(t) }); return arr || []; }
+      const one = await _t2MyGroupInfo(t, { days: _daysFor(t) });
       return one ? [one] : [];
     } catch (e) { return []; }
   }));
@@ -61588,23 +61651,22 @@ async function renderT2List() {
       '<div class="t2chat-host" id="t2chat-host-' + t.id + '" style="display:none;margin-top:8px"></div>' +
       '</div>';
   };
+  const _byId = {}; list.forEach(tt => _byId[tt.id] = tt);
+  // v1301: everything from here to the end of _paint used to run ONCE, only after every
+  // network read had finished. It is now a function called twice — once with just the
+  // event rows (instant), once with the enrichment (a beat later). Identical output for
+  // the same inputs; the only difference is that the first call happens ~8 round trips
+  // sooner. Every button below is wired on BOTH passes, so nothing is un-tappable while
+  // the second pass loads.
+  const _paint = () => {
+  if (_mySeq !== window._t2ListSeq) return;   // v1177: a newer render is in flight — let it paint
   // Auto-hide past/completed events; a toggle reveals them. Nothing is deleted.
   const _rowsHtml = list.map((t, i) => (_t2ShowPast || !_t2PastSet.has(t.id)) ? row(t, i) : '').join('');
   const _pastN = list.filter(t => _t2PastSet.has(t.id)).length;
   const _anyVisible = list.some(t => _t2ShowPast || !_t2PastSet.has(t.id));
   const _toggleHtml = _pastN ? ('<button class="small" id="t2-toggle-past" style="width:100%;margin-top:8px;color:var(--text-muted)">' + (_t2ShowPast ? '\u25B4 Hide ' : '\u25BE Show ') + _pastN + ' past event' + (_pastN === 1 ? '' : 's') + '</button>') : '';
-  if (_mySeq !== window._t2ListSeq) return;   // v1177: a newer render is in flight — let it paint
   listEl.innerHTML = (list.length ? (_anyVisible ? _rowsHtml : '<div class="help-text" style="margin-top:4px">No current tournaments — tap below to see past ones.</div>') : '<div class="help-text" style="margin-top:4px">No tournaments yet.</div>') + _toggleHtml;
   { const _tp = document.getElementById('t2-toggle-past'); if (_tp) _tp.onclick = () => { _t2ShowPast = !_t2ShowPast; renderT2List(); }; }
-  try {
-    const _pub = await t2ListPublicJoinable();
-    if (_pub.length) {
-      const _ph = '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 4px">🌎 Public events you can join</div>' +
-        _pub.slice(0, 12).map(pt => '<div class="card" style="margin-bottom:6px;padding:8px 10px;display:flex;align-items:center;gap:8px"><div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + t2esc(pt.name || 'Tournament') + '</div>' + ((pt.settings && pt.settings.location) ? ('<div class="small-text" style="color:var(--text-muted)">📍 ' + t2esc(pt.settings.location) + '</div>') : '') + '</div><button class="small t2-pub-join" data-id="' + pt.id + '" style="flex:0 0 auto;background:var(--accent);color:#fff;border:none;font-weight:700;padding:8px 12px">Join</button></div>').join('');
-      listEl.insertAdjacentHTML('beforeend', _ph);
-      listEl.querySelectorAll('.t2-pub-join').forEach(b => b.onclick = () => openT2ClaimScreen(b.dataset.id));
-    }
-  } catch (e) {}
   // v1293: name-match claim offers (see t2ListMine). For a guest who was added by
   // name and has just signed up, this card is the ONLY way the event can appear on
   // his Events tab -- he holds no roster row yet, so tournaments RLS hides it.
@@ -61631,23 +61693,37 @@ async function renderT2List() {
       });
     }
   } catch (e) {}
-  const _byId = {}; list.forEach(tt => _byId[tt.id] = tt);
+  // v1301 PERF (Tyler: "the buttons seem slower and take longer to load"). _fullT threw
+  // away the row already in _byId and re-fetched the IDENTICAL row before the button did
+  // anything visible — t2ListMine selects * from tournaments, so _byId[id] is that same
+  // full row. On a cell connection that was 200-400ms of dead air after every tap, with
+  // no pressed state and no spinner to explain it.
+  //
+  // It is kept for the three START paths below, where a stale `status` would change what
+  // the write does and the extra read earns its keep. Everything else now opens from the
+  // row in hand, because the screen it opens re-reads the event itself anyway:
+  //   Board    -> openEventLeaderboard's _renderEvlbBody does its own t2Get (this was a
+  //               second, identical read fired back-to-back with it)
+  //   card tap -> openT2Home does its own t2GetX (non-manager), and
+  //               renderT2SettingsHub re-reads days + players and re-checks t2CanManage
+  //   Details  -> openT2Summary only reads name / num_days / settings, all of them here
+  //   Chat     -> only needed it to pick a placeholder string
   const _fullT = async id => { let tf = _byId[id]; try { const f = await t2Get(id); if (f) tf = f; } catch (e) {} return tf; };
-  document.querySelectorAll('#t2-list .t2-row').forEach(b => b.onclick = async () => { let tf = null; try { tf = await _fullT(b.dataset.id); } catch (e) {} if (tf && typeof t2CanManage === 'function' && t2CanManage(tf)) { _t2Current = tf; return renderT2SettingsHub(tf); } return openT2Home(b.dataset.id); });
+  document.querySelectorAll('#t2-list .t2-row').forEach(b => b.onclick = () => { const tf = _byId[b.dataset.id] || null; if (tf && typeof t2CanManage === 'function' && t2CanManage(tf)) { _t2Current = tf; return renderT2SettingsHub(tf); } return openT2Home(b.dataset.id); });   // v1301: opens instantly for a manager (the hub re-verifies rights and re-reads days+players); a non-manager still lands in openT2Home, which fetches fresh exactly as before
   // v892: collapsed finished events — tap to expand (loads that event's groups
   // on the re-render); expanded finished events — Collapse folds them back up.
   document.querySelectorAll('#t2-list .t2-collapsed-row').forEach(b => b.onclick = () => { try { window._t2Expanded.add(b.dataset.id); } catch (e) {} renderT2List(); });
   document.querySelectorAll('#t2-list .t2-collapse-row').forEach(b => b.onclick = () => { try { window._t2Expanded.delete(b.dataset.id); } catch (e) {} renderT2List(); });
   document.querySelectorAll('#t2-list .t2-row-edit').forEach(b => b.onclick = async () => {
-    let tf = null; try { tf = await _fullT(b.dataset.id); } catch (e) {}
+    const tf = _byId[b.dataset.id] || null;   // v1301: renderT2SettingsHub re-checks t2CanManage and re-reads days + players
     const isLive = tf && String(tf.status || '').toLowerCase() === 'live';
     if (isLive && !(await uiConfirm('This event is live. Changing games, teams, tees or courses now can affect scoring and bets already in progress. Continue?', { title: 'Edit live tournament?', okLabel: 'Edit settings' }))) return;
     if (tf && typeof t2CanManage === 'function' && t2CanManage(tf)) { _t2Current = tf; return renderT2SettingsHub(tf); }
     openT2Home(b.dataset.id, { edit: true });
   });
-  document.querySelectorAll('#t2-list .t2-row-details').forEach(b => b.onclick = async () => { const tf = await _fullT(b.dataset.id); if (tf) openT2Summary(tf); });
-  document.querySelectorAll('#t2-list .t2-row-lb').forEach(b => b.onclick = async () => { const tf = await _fullT(b.dataset.id); if (tf) { _t2Current = tf; openEventLeaderboard(tf); } });
-  document.querySelectorAll('#t2-list .t2-row-msgs').forEach(b => b.onclick = () => t2ChatToggle(b.dataset.id));
+  document.querySelectorAll('#t2-list .t2-row-details').forEach(b => b.onclick = () => { const tf = _byId[b.dataset.id]; if (tf) openT2Summary(tf); });   // v1301: openT2Summary reads only name / num_days / settings, all of which are on this row
+  document.querySelectorAll('#t2-list .t2-row-lb').forEach(b => b.onclick = () => { const tf = _byId[b.dataset.id]; if (tf) { _t2Current = tf; openEventLeaderboard(tf); } });   // v1301: _renderEvlbBody already re-reads the event for exactly this reason — the old fetch here was the same read, twice
+  document.querySelectorAll('#t2-list .t2-row-msgs').forEach(b => b.onclick = () => t2ChatToggle(b.dataset.id, _byId[b.dataset.id] || null));   // v1301: hand the row over so the chat box opens with no network wait
   document.querySelectorAll('#t2-list .t2-row-gps').forEach(b => b.onclick = (e) => { e.stopPropagation(); if (b.dataset.cid) { try { window.previewCourseGps(b.dataset.cid); } catch (err) {} } });
   document.querySelectorAll('#t2-list .t2-row-card').forEach(b => b.onclick = (e) => { e.stopPropagation(); if (b.dataset.cid) { try { window.renderPreviewScorecard(b.dataset.cid); } catch (err) {} } });
   document.querySelectorAll('#t2-list .t2-row-del').forEach(b => b.onclick = async () => {
@@ -61713,6 +61789,40 @@ async function renderT2List() {
     if (!ok) return;
     openT2GroupGamesConfig(b.dataset.tid, b.dataset.gid, parseInt(b.dataset.day, 10) || 1);
   });
+  return true;
+  };
+
+  // ---- PASS 1: the cards, now. Name, image, day count, status pill and every
+  // card-level button, built from the event rows already in hand. ----------------
+  if (!_paint()) return;
+
+  // ---- PASS 2: the enrichment (finished-check + each event's groups/tee times/
+  // Join buttons), then repaint. Yield first so pass 1 actually reaches the screen. --
+  try { await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0))); } catch (e) {}
+  if (_mySeq !== window._t2ListSeq) return;
+  try { _allFin = await _computeAllFin(); } catch (e) {}
+  if (_mySeq !== window._t2ListSeq) return;
+  _collapsed = list.map((t, i) => _finishedish(t, i) && !window._t2Expanded.has(t.id));
+  _visible = list.map(t => _t2ShowPast || !_t2PastSet.has(t.id));
+  try { _infos = await _computeInfos(); } catch (e) {}
+  if (_mySeq !== window._t2ListSeq) return;
+  try { list.forEach((t, i) => { if (t && t.id) { window._t2FinCache[t.id] = _allFin[i]; window._t2InfoCache[t.id] = _infos[i] || []; } }); } catch (e) {}
+  // An open chat lives inside a card, so the repaint would drop it. Reopen the one
+  // that was open (t2ChatToggle rebuilds the feed and its realtime subscription).
+  let _reopenChat = null;
+  try { const _oc = listEl.querySelector('.t2chat-host[data-open="1"]'); if (_oc && _oc.id) _reopenChat = _oc.id.replace('t2chat-host-', ''); } catch (e) {}
+  if (!_paint()) return;
+  if (_reopenChat) { try { t2ChatToggle(_reopenChat, _byId[_reopenChat] || null); } catch (e) {} }
+
+  try {
+    const _pub = await t2ListPublicJoinable();
+    if (_pub.length) {
+      const _ph = '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 4px">🌎 Public events you can join</div>' +
+        _pub.slice(0, 12).map(pt => '<div class="card" style="margin-bottom:6px;padding:8px 10px;display:flex;align-items:center;gap:8px"><div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + t2esc(pt.name || 'Tournament') + '</div>' + ((pt.settings && pt.settings.location) ? ('<div class="small-text" style="color:var(--text-muted)">📍 ' + t2esc(pt.settings.location) + '</div>') : '') + '</div><button class="small t2-pub-join" data-id="' + pt.id + '" style="flex:0 0 auto;background:var(--accent);color:#fff;border:none;font-weight:700;padding:8px 12px">Join</button></div>').join('');
+      listEl.insertAdjacentHTML('beforeend', _ph);
+      listEl.querySelectorAll('.t2-pub-join').forEach(b => b.onclick = () => openT2ClaimScreen(b.dataset.id));
+    }
+  } catch (e) {}
 }
 // v829 (Tyler): can the current user actually edit THIS round's group bets right
 // now? Mirrors enterEditLiveRoundMode's own rule (round creator or an admin may
@@ -64655,6 +64765,28 @@ async function openT2Summary(t) {
   try {
     const [players, days] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id)]);
     const pById = {}; players.forEach(p => pById[p.id] = p);
+    // v1301 PERF (Tyler: Details is one of the slow buttons). This walked the event one
+    // query at a time — one tournament_groups read PER DAY and one
+    // tournament_group_members read PER GROUP, all sequential. A 3-day / 4-group event
+    // was ~15 serial round trips inside the modal with "Loading…" on screen the whole
+    // time. Same rows, same client-side ordering, two batched reads. (The same shape
+    // _t2AllGroupsInfo has used since v858/v986.) Both fail soft to [] like the
+    // per-item readers they replace, so a failure still renders "No carts built yet."
+    const _sDayIds = (days || []).map(d => d && d.id).filter(Boolean);
+    const _sGrpByDay = {}, _sMemByGrp = {};
+    try {
+      let _sGroups = [];
+      if (_sDayIds.length) {
+        const _sgr = await _bgRead(() => supa.from('tournament_groups').select('*').in('day_id', _sDayIds).order('group_number'), 'openT2Summary:groups');
+        if (_sgr.ok) _sGroups = _sgr.data || [];
+      }
+      _sGroups.forEach(g => { if (g && g.day_id) (_sGrpByDay[g.day_id] || (_sGrpByDay[g.day_id] = [])).push(g); });
+      const _sGids = _sGroups.map(g => g && g.id).filter(Boolean);
+      if (_sGids.length) {
+        const _smr = await _bgRead(() => supa.from('tournament_group_members').select('*').in('group_id', _sGids), 'openT2Summary:members');
+        (_smr.ok ? (_smr.data || []) : []).forEach(m => { if (m && m.group_id) (_sMemByGrp[m.group_id] || (_sMemByGrp[m.group_id] = [])).push(m); });
+      }
+    } catch (e) {}
     let h = '<h2 style="margin:0 0 2px">' + t2esc(t.name) + '</h2>';
     h += '<div class="small-text" style="color:var(--text-muted);margin-bottom:10px">' + (od ? 'Individual event' : 'Team cup') + ' · ' + (t.num_days || 1) + ' day' + ((t.num_days || 1) === 1 ? '' : 's') + ' · ' + players.length + ' players</div>';
     if (!od) {
@@ -64671,10 +64803,10 @@ async function openT2Summary(t) {
       // When a quota game is on, show each player's quota target (36 − handicap).
       const _quotaOn = !!(games && (games.quota || games.teamQuota));
       const _qOf = p => (_quotaOn && p && p.handicap != null) ? ' (Q' + (36 - Math.round(Number(p.handicap))) + ')' : '';
-      let groups = []; try { groups = await t2GetGroups(d.id); } catch (e) {}
+      const groups = _sGrpByDay[d.id] || [];   // v1301: from the batched read above
       if (groups.length) {
         for (const g of groups.slice().sort((a, b) => (a.group_number || 0) - (b.group_number || 0))) {
-          let mem = []; try { mem = await t2GetGroupMembers(g.id); } catch (e) {}
+          const mem = _sMemByGrp[g.id] || [];   // v1301: from the batched read above
           const names = mem.map(m => { const p = pById[m.tournament_player_id]; return nm(p) + _qOf(p); }).join(', ');
           const cap = g.captain ? ' · 👑 ' + t2esc(String(g.captain).split(/\s+/)[0]) : '';
           h += '<div style="font-size:13px;margin-top:3px">🛺 Group ' + g.group_number + ' · ⏱ ' + (g.tee_time ? t2esc(g.tee_time) : '—') + cap + ': ' + names + '</div>';
