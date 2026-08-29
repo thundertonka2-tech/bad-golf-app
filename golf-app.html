@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1306-->
+<!--BGVER=v2026.11.1307-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8809,7 +8809,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1306';
+const BG_BUILD = 'v2026.11.1307';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -76422,8 +76422,21 @@ async function lgOpenSeason(sid) {
         : '<button class="primary full" onclick="lgLaunchWeekRound(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Start this week’s round</button>') +
         /* The second route, in Tyler's words: a round you already played, on
            this course, off these tees. The picker asks the server which of
-           your rounds qualify rather than guessing here. */
-        '<button class="full" style="margin-top:8px" onclick="lgPickRound()">Pick a round I already played</button>' +
+           your rounds qualify rather than guessing here.
+
+           v1307 (Tyler): "I played Buffalo today in the Kerbo group... it told
+           me I had no rounds that match the rules." It was right that there
+           were none, and wrong about why: league_eligible_rounds returns an
+           empty list BEFORE looking at a single round when the league has
+           self-scheduled rounds switched off. Offering the button and then
+           blaming the rounds is the worst of both -- so the button only
+           appears when the league actually allows it, and the commissioner is
+           told where the switch is instead. */
+        (((w.settings_snapshot || {}).play || {}).self_scheduled
+          ? '<button class="full" style="margin-top:8px" onclick="lgPickRound()">Pick a round I already played</button>'
+          : (amCommish
+              ? '<p class="help-text" style="margin:10px 0 0;font-size:12px">Posting a round you played on your own is off for this league — turn it on under Open the week.</p>'
+              : '')) +
         '<button class="full" style="margin-top:8px" onclick="lgOpenWeek(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Open the week</button>';
     } else {
       /* v1303. This said "no fixture for you this week yet" -- the app's own
@@ -78206,10 +78219,26 @@ async function lgPickRound() {
     return;
   }
   const rows = Array.isArray(res.data) ? res.data : [];
+  /* v1307: an empty list has two very different causes and this screen used to
+     report only one of them -- "no rounds of yours fit", even when the server
+     had refused to look because the league does not allow self-posted rounds
+     at all. Blaming the rounds for a setting sends people hunting for a round
+     that was never going to count. */
+  let _selfOff = false;
+  if (!rows.length) {
+    try {
+      const _wr = await supa.from('league_weeks').select('settings_snapshot').eq('id', wid).maybeSingle();
+      if (_wr && !_wr.error && _wr.data) {
+        _selfOff = !(((_wr.data.settings_snapshot || {}).play || {}).self_scheduled);
+      }
+    } catch (e) {}
+  }
   let h = lgCard('<h2 style="margin:0 0 4px">Pick your round</h2>' +
     '<p class="help-text" style="margin:0">' + (rows.length
       ? 'These are your rounds that fit this week — right course, right number of holes, close enough to the league day. You can change your pick until the week is finalised.'
-      : 'No rounds of yours fit this week yet. It has to be on the league’s course, the same number of holes, and within a few days of the league day.') + '</p>');
+      : (_selfOff
+         ? 'This league doesn’t take rounds you played on your own — the commissioner turns that on under Open the week. Until then, the round has to be started from the league.'
+         : 'No rounds of yours fit this week yet. It has to be on the league’s course, the same number of holes, and within a few days of the league day.')) + '</p>');
   rows.forEach(function (r) {
     /* A round whose FORMAT can't produce a league score stays on the list,
        greyed, with the reason. Tyler 8/27: a scramble score is the team's, and
@@ -78916,12 +78945,13 @@ async function lgOpenMoney(sid) {
   const st = (set && !set.error && set.data) || {};
   const transfers = Array.isArray(st.transfers) ? st.transfers : [];
 
-  let lname = '';
+  let lname = '', _mset = {};
   try {
     const lr = await _bgRead(function () {
-      return supa.from('league_seasons').select('leagues(name)').eq('id', sid).maybeSingle();
+      return supa.from('league_seasons').select('settings,leagues(name)').eq('id', sid).maybeSingle();
     }, 'lgOpenMoney:league');
     lname = (lr.ok && lr.data && lr.data.leagues && lr.data.leagues.name) || '';
+    _mset = (lr.ok && lr.data && lr.data.settings) || {};
   } catch (e) {}
 
   const anyMoney = members.some(function (m) { return Number(m.net) !== 0; }) || pots.length;
@@ -78937,6 +78967,48 @@ async function lgOpenMoney(sid) {
       ? 'Worked out from the scores and the settings. Bad Golf never touches the money.'
       : 'No money set up yet.' + (amCommish ? ' Set the dues, buy-in and weekly pots below.' : ' The commissioner hasn’t set any up.')) +
     '</p>');
+
+  /* v1307 (Tyler): "even though we don't pay them till the end we need to know
+     the value of the league." The screen could tell you what each player owes
+     today and never what the season was worth -- the number a commissioner is
+     actually asked at the first meeting. Straight multiplication off the
+     settings and the roster, with the workings shown, because a pot total
+     nobody can check is a pot total nobody trusts. */
+  try {
+    const _mm = _mset.money || {}, _wkp = _mm.weekly || {};
+    const _pl = members.length;
+    const _wks = Number(_mset.weeks) || 0;
+    const _dues = (Number(_mm.dues) || 0) * _pl;
+    const _pot  = (Number(_mm.buyin) || 0) * _pl;
+    let _perWeekEach = 0;
+    Object.keys(_wkp).forEach(function (k) {
+      const p = _wkp[k] || {};
+      if (p.on) _perWeekEach += (Number(p.amount) || 0);
+    });
+    const _perWeek = _perWeekEach * _pl;
+    const _weekly  = _perWeek * _wks;
+    if (_dues || _pot || _perWeek) {
+      const line = function (label, amt, note) {
+        return '<div style="display:flex;gap:10px;align-items:baseline;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + label + '</div>' +
+          (note ? '<div class="help-text" style="margin:0;font-size:12px">' + note + '</div>' : '') + '</div>' +
+          '<div style="flex:0 0 auto;font-weight:700;font-variant-numeric:tabular-nums;font-size:15px">' +
+          lgEsc(lgMoney(amt)) + '</div></div>';
+      };
+      h += '<div class="card"><div class="bg-sec">What the season is worth</div>' +
+        (_pot ? line('Season pot', _pot, _pl + ' × ' + lgMoney(Number(_mm.buyin) || 0) + ' buy-in · pays out on the final table') : '') +
+        (_perWeek ? line('Weekly pots', _weekly,
+            lgMoney(_perWeek) + ' a week' + (_wks ? ' × ' + _wks + ' weeks' : '') +
+            ' · ' + lgMoney(_perWeekEach) + ' each, each week') : '') +
+        (_dues ? line('Dues', _dues, _pl + ' × ' + lgMoney(Number(_mm.dues) || 0) + ' · stays with the league, not paid back out') : '') +
+        '<div style="display:flex;gap:10px;align-items:baseline;padding:10px 0 0;border-top:2px solid var(--bg-border,#e5e7eb);margin-top:2px">' +
+        '<div style="flex:1;font-weight:800;font-size:15px">In play this season</div>' +
+        '<div style="font-weight:800;font-size:17px;font-variant-numeric:tabular-nums">' +
+        lgEsc(lgMoney(_dues + _pot + _weekly)) + '</div></div>' +
+        '<p class="help-text" style="margin:10px 0 0;font-size:12px">Off ' + _pl + ' player' + (_pl === 1 ? '' : 's') +
+        ' on the roster today. It moves as players do.</p></div>';
+    }
+  } catch (e) {}
 
   if (members.length && anyMoney) {
     h += '<div class="card"><div class="bg-sec">Where everyone stands</div>' +
