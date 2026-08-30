@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1316-->
+<!--BGVER=v2026.11.1317-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8826,7 +8826,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1316';
+const BG_BUILD = 'v2026.11.1317';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -43124,6 +43124,29 @@ function calcJunk(g) {
 function calcBirdiePool(g) {
   if (!g.games.birdiePool) return null;
   const cfg = g.games.birdiePool;
+  // v1317 (Tyler, 8/30 - Senior Sunday): "anytime I am setting up a tournament any
+  // game I select should be for tournament wide. The only time they would be group
+  // only bets is if I set them up in the group settings."
+  //
+  // A Birdie Bump configured in TOURNAMENT setup is one whole-field bet, not one
+  // separate bet per cart. t2ComputeFieldBirdiePool now settles it across the
+  // field, so this group-level engine must stand down for it - exactly the way
+  // calcLongPutt bails on cfg.fieldOnly. Two independent markers are checked so an
+  // event already in flight is corrected without relaunching it: fieldOnly (stamped
+  // at launch from v1317 on) and g.t2.dayGameKeys (stamped at launch since v670).
+  // A bump a CART adds in its own group settings carries neither, so it falls
+  // straight through and still settles right here, for that group only.
+  if (cfg.fieldOnly) return null;
+  try {
+    if (g && g.t2 && g.t2.tournamentId) {
+      const _dgk = Array.isArray(g.t2.dayGameKeys) ? g.t2.dayGameKeys : null;
+      if (_dgk && _dgk.indexOf('birdiePool') >= 0) return null;
+      // Pre-v670 rounds never got dayGameKeys. state._t2DayGameKeys is the same
+      // list re-fetched live; only trusted when the round itself carries nothing.
+      const _sdg = (typeof state !== 'undefined' && state && Array.isArray(state._t2DayGameKeys)) ? state._t2DayGameKeys : null;
+      if (!_dgk && _sdg && _sdg.indexOf('birdiePool') >= 0) return null;
+    }
+  } catch (e) {}
   // v1128 (Tyler, 8/19): "the birdie bumps aren't showing up on the group totals
   // and it looks like they aren't in the group bets money payout either. They
   // show up on the tourney bets so maybe they were done at that level instead."
@@ -51327,8 +51350,22 @@ async function getMeName() {
 async function setMeName(name) {
   if (isSignedIn() && supa && _authUser) {
     try {
-      await supa.from('profiles')
-        .update({ my_player: name || null }).eq('id', _authUser.id);
+      // v1317 (Larry Perkins, 8/30): this was a bare `.update()`, which quietly
+      // affects ZERO rows when the account has no `profiles` row - and an account
+      // CAN lack one (Larry's was removed by the 8/29 duplicate-account merge; a
+      // signup whose handle_new_user trigger did not fire is the other way in).
+      // The name then never persisted, so getMeName() answered null on every cold
+      // launch and the whole first-run chain - name, handicap, phone - fired again
+      // EVERY time he opened the app, with no way for him to ever escape it.
+      // Upsert instead: identical behaviour when the row exists, self-healing when
+      // it does not. `.select('id')` is what makes the zero-row case detectable at
+      // all - supabase-js reports a no-op update as success.
+      const _r = await supa.from('profiles')
+        .update({ my_player: name || null }).eq('id', _authUser.id).select('id');
+      if (!_r || _r.error || !(_r.data && _r.data.length)) {
+        await supa.from('profiles')
+          .upsert({ id: _authUser.id, my_player: name || null }, { onConflict: 'id' });
+      }
     } catch (e) { /* non-fatal — local cache below still applies */ }
   }
   return await safeSet(KEY_ME, name || '', false);
@@ -65032,6 +65069,17 @@ function t2RemapGamesToGroup(src, gp, Aids, Bids, teamKeys) {
         // else: cross-group → dropped here, settled on the leaderboard.
       });
       if (kept.length) out.nassau = Object.assign({}, kept[0], { instances: kept });
+    } else if (key === 'birdiePool') {
+      // v1317 (Tyler, 8/30): an event-level Birdie Bump is a FIELD bet. Flag it so
+      // calcBirdiePool stands down and t2ComputeFieldBirdiePool settles one pool
+      // across every cart. Participants are still written in explicitly (the v1030
+      // rule below) so the group's card can show who is in it and so nothing
+      // downstream ever sees the empty roster that broke this game before v1030.
+      delete cfg.pair; delete cfg.instances;
+      cfg.fieldOnly = true;
+      cfg.participants = gp.map(p => p.id);
+      cfg.participantNames = gp.map(p => p.name);
+      out[key] = cfg;
     } else {
       // Whole-group games (quota, skins, ctp, longPutt, junk, nassau, …): keep
       // the options and replace any configured participant subset with the WHOLE
@@ -66593,7 +66641,12 @@ const _T2_FMT_GAMES = { singles: ['match'], bestball: ['teamMatch'], scramble: [
 // settlement engine, so they must still settle inside each group's own round.
 // Stripping them as "tournament-owned" just deletes the money (see v1030 note in
 // computeAllGameMoney). Birdie Bump is the only one today.
-const _T2_NEVER_OWNED = new Set(['birdiePool']);
+// v1317: Birdie Bump now HAS a field-wide engine (t2ComputeFieldBirdiePool), so it
+// is no longer the exception - an event-level bump is tournament-owned like every
+// other event pot and must be stripped from the group's own money, or it would be
+// counted twice (once per cart, once for the field). The set stays in place, empty,
+// because the three call sites still consult it and a future game may need it.
+const _T2_NEVER_OWNED = new Set([]);
 function _t2OwnedGameKeys(g) {
   const owned = new Set();
   try {
@@ -71581,6 +71634,132 @@ function t2EffectiveSidePots(t) {
     return out;
   } catch (e) { return (t && t.settings && t.settings.tourneySidePots) || null; }
 }
+// ===== FIELD-WIDE BIRDIE BUMP (v1317) =======================================
+// Tyler, 8/30 (Senior Sunday — 7 players, 2 carts): "the birdie bump only
+// applied to each group and not the tournament."
+//
+// He was right, and the reason was structural: there was NO field-wide Birdie
+// Bump engine at all. `_T2_NEVER_OWNED` existed for the sole purpose of saying
+// so, and an event-level bump was pushed down into each cart's round carrying
+// only that cart's roster, then settled there. Senior Sunday therefore ran TWO
+// unrelated pools — group 1 (Jackson/Perkins/Miller, 9 birdies) and group 2
+// (OConnor/Lonigro/Varnado/Tar Heel, 5 birdies). Josh Varnado made no birdies
+// and paid $50, but only to the three men in his own cart; Steve Miller's five
+// birdies collected from two people ($60) instead of six ($210).
+//
+// This settles it the way every other event pot settles: ONE pool, the whole
+// field, per day. Same per-event rule as the group engine (each birdie / eagle /
+// ace collects `amount` from every OTHER player in the field), the same
+// completion gate Skins / CTP / Long Putt use (no money moves until every
+// group's round is in), and the same { perDay, totals, totalsByKey } shape the
+// two payout screens already consume.
+//
+// Scope rule (Tyler, 8/30): "anytime I am setting up a tournament any game I
+// select should be for tournament wide. The only time they would be group only
+// bets is if I set them up in the group settings." An event-level bump is
+// flagged `fieldOnly` at launch (t2GamesForGroup) and is listed in
+// g.t2.dayGameKeys; either marker routes it here. A bump a cart adds in its own
+// group settings carries neither, so it stays a group bet and calcBirdiePool
+// pays it exactly as before.
+function t2ComputeFieldBirdiePool(rows) {
+  try {
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const nmk = s => normalizeNameSegment(String(s || ''));
+    const byDay = {};
+    rows.forEach(row => {
+      const g = row && row.data ? row.data : row;
+      if (!g || !Array.isArray(g.players)) return;
+      const cfg = g.games && g.games.birdiePool;
+      if (!cfg) return;                                     // this group is not in the bump
+      const _dgk = (g.t2 && Array.isArray(g.t2.dayGameKeys)) ? g.t2.dayGameKeys : null;
+      // EVENT-level only. Rounds launched before v1317 have no fieldOnly flag,
+      // but dayGameKeys was stamped at launch and says the same thing — so an
+      // event already in progress is corrected without relaunching it.
+      if (!cfg.fieldOnly && !(_dgk && _dgk.indexOf('birdiePool') >= 0)) return;
+      const day = (g.t2 && g.t2.day) || 1;
+      const d = byDay[day] = byDay[day] || { parts: {}, cfg: null, rounds: 0, finished: 0, nH: 18 };
+      if (!d.cfg) d.cfg = cfg;
+      d.rounds++; if (g.finishedAt) d.finished++;
+      const pars = Array.isArray(g.pars) ? g.pars : null;
+      const _nH = (pars && pars.filter(x => x != null).length === 9) ? 9 : 18;
+      d.nH = Math.min(d.nH, _nH);
+      g.players.forEach(p => {
+        if (!p || !p.name) return;
+        const sc = (g.scores && g.scores[p.id]) || [];
+        let scored = 0;
+        for (let h = 0; h < 18; h++) { if (sc[h] != null) scored++; }
+        // v1292's rule, applied here from day one: no card posted, not in the pot.
+        if (!scored) return;
+        const k = nmk(p.name);
+        const cur = d.parts[k];
+        if (cur && cur.scored >= scored) return;            // one entry per human — keep the fullest card
+        d.parts[k] = { key: k, name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), scored: scored, g: g, p: p, sc: sc };
+      });
+    });
+    const perDay = [], totalsByName = {};
+    Object.keys(byDay).sort(function (a, b) { return a - b; }).forEach(day => {
+      const d = byDay[day], cfg = d.cfg || {};
+      const players = Object.values(d.parts), N = players.length;
+      if (N < 2) return;
+      const _nHd = d.nH || 18;
+      const _dayFin = d.rounds > 0 && d.finished === d.rounds;
+      const complete = players.every(x => x.scored >= _nHd) || _dayFin;
+      const money = {}, made = {};
+      players.forEach(x => { money[x.key] = 0; made[x.key] = 0; });
+      const events = [];
+      players.forEach(x => {
+        const g = x.g, p = x.p;
+        // Same basis rule as calcBirdiePool: gross by default; 'net' also counts a
+        // handicap-stroke birdie. An ace is always a natural 1.
+        const _useNet = (cfg.birdieBasis === 'net') && !!g.sis;
+        for (let h = 0; h < 18; h++) {
+          const raw = x.sc[h];
+          if (raw == null) continue;
+          const _par = parFor(g, p.id, h);                  // this player's tee par
+          if (_par == null) continue;
+          const basis = _useNet
+            ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), _par, g.hcpRules, _nHd)
+            : raw;
+          let kind = null, amount = 0;
+          // Same tier fall-through as the group engine (v973 / v983): an unpriced
+          // ace settles as an eagle, an unpriced eagle settles as a birdie, so a
+          // blank box can never pay LESS than the tier below it.
+          if (raw === 1 && (Number(cfg.hio) || 0) > 0) { kind = 'HIO'; amount = Number(cfg.hio) || 0; }
+          else if (basis - _par <= -2 && (Number(cfg.eagle) || 0) > 0) { kind = 'Eagle'; amount = Number(cfg.eagle) || 0; }
+          else if (basis - _par <= -1) { kind = 'Birdie'; amount = Number(cfg.birdie) || 0; }
+          if (!kind || !amount) continue;
+          money[x.key] += amount * (N - 1);
+          players.forEach(o => { if (o.key !== x.key) money[o.key] -= amount; });
+          made[x.key]++;
+          events.push({ day: Number(day), hole: h + 1, name: x.name, first: x.first, kind: kind, amount: amount, pot: amount * (N - 1), group: (g.t2 && g.t2.group) || null });
+        }
+      });
+      const rowsOut = players.map(x => ({ name: x.name, first: x.first, money: complete ? money[x.key] : 0, made: made[x.key] }))
+        .sort((a, b) => (b.money - a.money) || String(a.first || '').localeCompare(String(b.first || '')));
+      if (complete) {
+        players.forEach(x => {
+          if (!money[x.key]) return;
+          totalsByName[x.key] = totalsByName[x.key] || { name: x.name, first: x.first, net: 0, made: 0 };
+          totalsByName[x.key].net += money[x.key];
+          totalsByName[x.key].made += made[x.key];
+        });
+      }
+      perDay.push({
+        day: Number(day), complete: complete, players: N,
+        birdie: Number(cfg.birdie) || 0, eagle: Number(cfg.eagle) || 0, hio: Number(cfg.hio) || 0,
+        basis: (cfg.birdieBasis === 'net') ? 'net' : 'gross',
+        events: events.sort((a, b) => a.hole - b.hole), rows: rowsOut
+      });
+    });
+    if (!perDay.length) return null;
+    return {
+      perDay: perDay,
+      totals: Object.values(totalsByName).filter(x => x.net !== 0).sort((a, b) => b.net - a.net),
+      totalsByKey: totalsByName
+    };
+  } catch (e) { return null; }
+}
+
 function t2ComputeFieldSidePots(rows, cfg) {
   try {
     if (!cfg || !Array.isArray(rows) || !rows.length) return null;
@@ -72295,6 +72474,7 @@ async function t2ComputeCombinedPayouts(t) {
     let fNassau = null; try { fNassau = (nassauCfg && nassauCfg.on) ? t2ComputeFieldNassau(raw, nassauCfg) : null; } catch (e) {}
     let longPutt = null; try { longPutt = (longPuttCfg && longPuttCfg.on) ? t2ComputeFieldLongPutt(raw, longPuttCfg) : null; } catch (e) {}
     let ctp = null; try { ctp = t2ComputeFieldCtp(raw); } catch (e) {}
+    let fBirdie = null; try { fBirdie = t2ComputeFieldBirdiePool(raw); } catch (e) {}   // v1317: field-wide Birdie Bump
     let sidePots = null; try { sidePots = sidePotsCfg ? t2ComputeFieldSidePots(raw, sidePotsCfg) : null; } catch (e) {}
     let fieldStbl = null; try { fieldStbl = t2ComputeFieldStableford(raw, t, evPlayers); } catch (e) {}
     let fieldScram = null; try { fieldScram = t2ComputeFieldScramble(raw, t); } catch (e) {}   // v1039
@@ -72409,7 +72589,7 @@ async function t2ComputeCombinedPayouts(t) {
       rebuildFirstToKey();
     }
 
-    [[fNassau, 'Tournament Nassau'], [longPutt, 'Long Putt'], [ctp, 'Closest to Pin']].forEach(pair => {
+    [[fNassau, 'Tournament Nassau'], [longPutt, 'Long Putt'], [ctp, 'Closest to Pin'], [fBirdie, 'Birdie Bump']].forEach(pair => {
       const pot = pair[0], label = pair[1];
       if (!pot || !pot.totalsByKey) return;
       Object.keys(pot.totalsByKey).forEach(k => { const row = pot.totalsByKey[k]; bump(k, row.net || 0, row.name, row.first); bumpGame(label, k, row.net || 0); });
@@ -72533,6 +72713,8 @@ async function t2ComputeCombinedPayouts(t) {
       // withheld with NO flag at all, and rendered as a bare dash indistinguishable
       // from "nobody won it". Same for the field Nassau.
       if (longPutt && Array.isArray(longPutt.perDay) && longPutt.perDay.some(d => d.complete === false)) _pendingGameLabels.add('Long Putt');
+      // v1317: same gate as its siblings - a live Birdie Bump reads "pending", not $0.
+      if (fBirdie && Array.isArray(fBirdie.perDay) && fBirdie.perDay.some(d => d.complete === false)) _pendingGameLabels.add('Birdie Bump');
       if (fNassau && Array.isArray(fNassau.perDay) && fNassau.perDay.some(d => (d.segments || []).some(s => s && s.complete === false))) _pendingGameLabels.add('Tournament Nassau');
       if (fieldStbl && fieldStbl.complete === false && (fieldStbl.pool || 0) > 0) _pendingGameLabels.add('Stableford (field)');
       if (fieldQuota && fieldQuota.complete === false && (fieldQuota.pool || 0) > 0) _pendingGameLabels.add('Quota (field)');
@@ -72555,6 +72737,15 @@ async function t2ComputeCombinedPayouts(t) {
     try {
       const _ctpConfigured = (raw || []).some(row => { const rg = row && row.data ? row.data : row; return !!(rg && rg.games && rg.games.ctp && rg.games.ctp.fieldOnly); });
       if (_ctpConfigured) { gameTotals['Closest to Pin'] = gameTotals['Closest to Pin'] || {}; _alwaysShowGameLabels.add('Closest to Pin'); }
+      // v1317: Birdie Bump is configured per-day like CTP (no top-level on/off), so
+      // it gets the same treatment - keep the column even when it nets $0 for all.
+      const _bumpConfigured = (raw || []).some(row => {
+        const rg = row && row.data ? row.data : row;
+        if (!rg || !rg.games || !rg.games.birdiePool) return false;
+        const _k = (rg.t2 && Array.isArray(rg.t2.dayGameKeys)) ? rg.t2.dayGameKeys : null;
+        return !!(rg.games.birdiePool.fieldOnly || (_k && _k.indexOf('birdiePool') >= 0));
+      });
+      if (_bumpConfigured) { gameTotals['Birdie Bump'] = gameTotals['Birdie Bump'] || {}; _alwaysShowGameLabels.add('Birdie Bump'); }
     } catch (e) {}
     try {
       const _dg = (t.settings && t.settings.dayGames) || {};
@@ -72652,6 +72843,7 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     let fNassau = null; try { fNassau = (nassauCfg && nassauCfg.on) ? t2ComputeFieldNassau(raw, nassauCfg) : null; } catch (e) {}
     let longPutt = null; try { longPutt = (longPuttCfg && longPuttCfg.on) ? t2ComputeFieldLongPutt(raw, longPuttCfg) : null; } catch (e) {}
     let ctp = null; try { ctp = t2ComputeFieldCtp(raw); } catch (e) {}
+    let fBirdie = null; try { fBirdie = t2ComputeFieldBirdiePool(raw); } catch (e) {}   // v1317: field-wide Birdie Bump
     let sidePots = null; try { sidePots = sidePotsCfg ? t2ComputeFieldSidePots(raw, sidePotsCfg) : null; } catch (e) {}
     let fieldStbl = null; try { fieldStbl = t2ComputeFieldStableford(raw, t, evPlayers); } catch (e) {}
     let fieldScram = null; try { fieldScram = t2ComputeFieldScramble(raw, t); } catch (e) {}   // v1039
@@ -72748,7 +72940,7 @@ async function t2ComputeTournamentOnlyPayouts(t) {
       rebuildFirstToKey();
     }
 
-    [[fNassau, 'Tournament Nassau'], [longPutt, 'Long Putt'], [ctp, 'Closest to Pin']].forEach(pair => {
+    [[fNassau, 'Tournament Nassau'], [longPutt, 'Long Putt'], [ctp, 'Closest to Pin'], [fBirdie, 'Birdie Bump']].forEach(pair => {
       const pot = pair[0], label = pair[1];
       if (!pot || !pot.totalsByKey) return;
       Object.keys(pot.totalsByKey).forEach(k => { const row = pot.totalsByKey[k]; bump(k, row.net || 0, row.name, row.first); bumpGame(label, k, row.net || 0); });
@@ -72866,6 +73058,8 @@ async function t2ComputeTournamentOnlyPayouts(t) {
       // withheld with NO flag at all, and rendered as a bare dash indistinguishable
       // from "nobody won it". Same for the field Nassau.
       if (longPutt && Array.isArray(longPutt.perDay) && longPutt.perDay.some(d => d.complete === false)) _pendingGameLabels.add('Long Putt');
+      // v1317: same gate as its siblings - a live Birdie Bump reads "pending", not $0.
+      if (fBirdie && Array.isArray(fBirdie.perDay) && fBirdie.perDay.some(d => d.complete === false)) _pendingGameLabels.add('Birdie Bump');
       if (fNassau && Array.isArray(fNassau.perDay) && fNassau.perDay.some(d => (d.segments || []).some(s => s && s.complete === false))) _pendingGameLabels.add('Tournament Nassau');
       if (fieldStbl && fieldStbl.complete === false && (fieldStbl.pool || 0) > 0) _pendingGameLabels.add('Stableford (field)');
       if (fieldQuota && fieldQuota.complete === false && (fieldQuota.pool || 0) > 0) _pendingGameLabels.add('Quota (field)');
@@ -72885,6 +73079,15 @@ async function t2ComputeTournamentOnlyPayouts(t) {
     try {
       const _ctpConfigured = (raw || []).some(row => { const rg = row && row.data ? row.data : row; return !!(rg && rg.games && rg.games.ctp && rg.games.ctp.fieldOnly); });
       if (_ctpConfigured) { gameTotals['Closest to Pin'] = gameTotals['Closest to Pin'] || {}; _alwaysShowGameLabels.add('Closest to Pin'); }
+      // v1317: Birdie Bump is configured per-day like CTP (no top-level on/off), so
+      // it gets the same treatment - keep the column even when it nets $0 for all.
+      const _bumpConfigured = (raw || []).some(row => {
+        const rg = row && row.data ? row.data : row;
+        if (!rg || !rg.games || !rg.games.birdiePool) return false;
+        const _k = (rg.t2 && Array.isArray(rg.t2.dayGameKeys)) ? rg.t2.dayGameKeys : null;
+        return !!(rg.games.birdiePool.fieldOnly || (_k && _k.indexOf('birdiePool') >= 0));
+      });
+      if (_bumpConfigured) { gameTotals['Birdie Bump'] = gameTotals['Birdie Bump'] || {}; _alwaysShowGameLabels.add('Birdie Bump'); }
     } catch (e) {}
     try {
       const _dg = (t.settings && t.settings.dayGames) || {};
