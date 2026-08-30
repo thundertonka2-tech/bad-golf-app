@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1318-->
+<!--BGVER=v2026.11.1319-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8829,7 +8829,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1318';
+const BG_BUILD = 'v2026.11.1319';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -65101,6 +65101,10 @@ async function openT2Summary(t) {
 // settle has to know that this cart's "A" was really team C, or it would merge team C
 // with some other cart's "A" and pay the wrong people. Omitted -> ['A','B'], i.e. every
 // existing 2-team event, unchanged.
+// v1319: the field-settled SIDE games — the ones a player can sit out while still
+// playing the event. Main games (stroke, the day format, the team games) are not in
+// here on purpose: Tyler, 8/30 — "the main games stay the way they are."
+const _T2_FIELD_SIDE_GAMES = new Set(['birdiePool', 'ctp', 'longPutt']);
 function t2RemapGamesToGroup(src, gp, Aids, Bids, teamKeys) {
   const out = {};
   const allIds = gp.map(p => p.id);
@@ -65111,6 +65115,19 @@ function t2RemapGamesToGroup(src, gp, Aids, Bids, teamKeys) {
     if (!src[key]) continue;
     if (key === 'longDrive') continue;   // Long Drive is ONE field-wide winner per day, set on the Event Leaderboard — never a per-group game
     let cfg; try { cfg = JSON.parse(JSON.stringify(src[key])); } catch (e) { cfg = Object.assign({}, src[key]); }
+    // v1319 (Tyler, 8/30): "on the birdie bump and other side games make them optional
+    // by player, so if one of the seven of us didn't want to do birdie bump and still
+    // play they could." The director's Configure Day participant picker has always
+    // written that list — but `participants` below is REWRITTEN to this cart, so by the
+    // time a field engine sees the round the opt-out is gone. Keep the director's list
+    // verbatim as `fieldNames`: names, not ids, because every field engine pools people
+    // across carts and normalised NAME is the only key that survives the crossing.
+    // No list = everybody in, which is every round launched before v1319.
+    try {
+      if (_T2_FIELD_SIDE_GAMES.has(key) && Array.isArray(src[key].participantNames) && src[key].participantNames.length) {
+        cfg.fieldNames = src[key].participantNames.slice();
+      }
+    } catch (e) {}
     if (TEAM_GAMES.indexOf(key) >= 0) {
       if (cfg.teamMode === '4man') { cfg.teamA = allIds.slice(); cfg.teamB = []; }
       else {
@@ -66721,24 +66738,63 @@ async function openT2GroupBoardReadOnly(code) {
 // the event's games — Tyler: tournament games are admin-only via Events) and
 // re-attaches them untouched on save.
 const _T2_FMT_GAMES = { singles: ['match'], bestball: ['teamMatch'], scramble: ['scramble'], altshot: ['ryderCup'], rydercup: ['ryderCup'], quota: ['quota'], teamquota: ['teamQuota'], stableford: ['stableford'], teamstableford: ['stableford'] };
-// v1030: game keys that are configured at the EVENT level but have no field-wide
-// settlement engine, so they must still settle inside each group's own round.
-// Stripping them as "tournament-owned" just deletes the money (see v1030 note in
-// computeAllGameMoney). Birdie Bump is the only one today.
-// v1317: Birdie Bump now HAS a field-wide engine (t2ComputeFieldBirdiePool), so it
-// is no longer the exception - an event-level bump is tournament-owned like every
-// other event pot and must be stripped from the group's own money, or it would be
-// counted twice (once per cart, once for the field). The set stays in place, empty,
-// because the three call sites still consult it and a future game may need it.
+// v1030 / v1317 — superseded by _T2_FIELD_SETTLED below. Kept (empty) because three
+// call sites still consult it; nothing needs to be listed here any more.
 const _T2_NEVER_OWNED = new Set([]);
+// v1319 (Tyler, 8/30): "fix the other games so we don't have this issue with others."
+//
+// The Birdie Bump defect was never really about Birdie Bump. ANY game a director
+// selects at the day level lands in g.t2.dayGameKeys, and this function marked every
+// one of them tournament-owned — which STRIPS it from the cart's money, on the
+// assumption that a field engine pays it instead. For nine games no field engine
+// exists, so the bet was stripped and then paid by nobody, in silence.
+//
+// Audited key-by-key against the live payout wiring (the bumpGame labels in
+// t2ComputeCombinedPayouts / t2ComputeTournamentOnlyPayouts). The silent losses were
+// sixes, niners, highLow, ryderCup, teamLowball, comboScore, teamQuota, teamMatch and
+// vegas — and every single one is a game you physically CANNOT play against someone in
+// another cart. T2_GAME_RULES already says so: they all carry a `size:` or `even:` rule.
+// (Two near-misses that are fine: `stroke` becomes the field Low Net pot through
+// t2EffectiveSidePots, and `longDrive` never reaches a cart round at all — it is
+// skipped in t2RemapGamesToGroup and settled on the Event Leaderboard.)
+//
+// So the rule is no longer "the day configured it, therefore the event owns it". It is:
+//
+//        THE EVENT OWNS A GAME ONLY IF THE EVENT CAN ACTUALLY PAY IT.
+//
+// Anything else the director turns on is played inside each cart and settles there —
+// which is the only thing "every cart plays Vegas" can possibly mean.
+//
+// Deliberately a WHITELIST keyed on engines that really exist, not a blacklist of
+// today's nine broken games: a game added next year that nobody writes a field engine
+// for will settle in the cart, instead of quietly paying nobody. That is the part of
+// this fix that keeps working after everyone has forgotten why it is here.
+const _T2_FIELD_SETTLED = new Set([
+  'nassau',      // t2ComputeFieldNassau       -> "Tournament Nassau"
+  'match',       // t2ComputeCrossGroupMatches -> "Cross-group bets"
+  'ctp',         // t2ComputeFieldCtp          -> "Closest to Pin"
+  'longPutt',    // t2ComputeFieldLongPutt     -> "Long Putt"
+  'birdiePool',  // t2ComputeFieldBirdiePool   -> "Birdie Bump"        (v1317)
+  'skins',       // t2ComputeFieldSkins        -> "Skins won"
+  'stableford',  // t2ComputeFieldStableford   -> "Stableford (field)"
+  'quota',       // t2ComputeFieldQuota        -> "Quota (field)"
+  'scramble',    // t2ComputeFieldScramble     -> "Scramble (field)"
+  'stroke',      // t2EffectiveSidePots        -> becomes the field "Low Net" pot
+  'lowNetPool', 'girPool', 'puttsPool',        // t2ComputeFieldSidePots
+  'longDrive'    // one field-wide winner, set on the Event Leaderboard
+]);
 function _t2OwnedGameKeys(g) {
   const owned = new Set();
   try {
     if (!g || !g.t2 || !g.t2.tournamentId || !g.games) return owned;
+    // An explicit fieldOnly flag always wins — it is stamped at launch for the sole
+    // purpose of saying "the event settles this one".
     Object.keys(g.games).forEach(k => { const c = g.games[k]; if (c && c.fieldOnly) owned.add(k); });
-    (_T2_FMT_GAMES[String(g.t2.format || '').toLowerCase()] || []).forEach(k => { if (g.games[k] !== undefined) owned.add(k); });
-    (Array.isArray(g.t2.dayGameKeys) ? g.t2.dayGameKeys : []).forEach(k => { if (g.games[k] !== undefined) owned.add(k); });
-    (Array.isArray(state._t2DayGameKeys) ? state._t2DayGameKeys : []).forEach(k => { if (g.games[k] !== undefined) owned.add(k); });
+    // Everything else is claimed only if a field engine actually pays it.
+    const _claim = k => { if (g.games[k] !== undefined && _T2_FIELD_SETTLED.has(k)) owned.add(k); };
+    (_T2_FMT_GAMES[String(g.t2.format || '').toLowerCase()] || []).forEach(_claim);
+    (Array.isArray(g.t2.dayGameKeys) ? g.t2.dayGameKeys : []).forEach(_claim);
+    (Array.isArray(state._t2DayGameKeys) ? state._t2DayGameKeys : []).forEach(_claim);
   } catch (e) {}
   return owned;
 }
@@ -71562,12 +71618,17 @@ function t2ComputeFieldLongPutt(rows, cfg) {
     // no score posted, not in the pot. `_t2Played` is also used below so a winner who
     // is not in the pot can never be paid out of it.
     const _t2Played = {};
+    // v1319: the same per-player opt-out Birdie Bump honours. A player left out of the
+    // director's picker is not anted, cannot win the pot, and does not inflate it for
+    // anyone else - the v1292 rule for a no-show, applied to a deliberate sit-out.
+    const _optIn = (typeof _t2FieldOptIn === 'function') ? _t2FieldOptIn(g.games && (g.games.longPutt || g.games.ctp)) : null;
     g.players.forEach(p => {
       if (!p || !p.name) return;
       const _sc = (g.scores && g.scores[p.id]) || [];
       let _any = false;
       for (let _i = 0; _i < _sc.length; _i++) { if (_sc[_i] != null) { _any = true; break; } }
       if (!_any) return;
+      if (_optIn && !_optIn.has(nmk(p.name))) return;
       _t2Played[p.id] = 1;
       byDay[day].names[nmk(p.name)] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name) };
     });
@@ -71647,12 +71708,17 @@ function t2ComputeFieldCtp(rows) {
     // no score posted, not in the pot. `_t2Played` is also used below so a winner who
     // is not in the pot can never be paid out of it.
     const _t2Played = {};
+    // v1319: the same per-player opt-out Birdie Bump honours. A player left out of the
+    // director's picker is not anted, cannot win the pot, and does not inflate it for
+    // anyone else - the v1292 rule for a no-show, applied to a deliberate sit-out.
+    const _optIn = (typeof _t2FieldOptIn === 'function') ? _t2FieldOptIn(g.games && (g.games.longPutt || g.games.ctp)) : null;
     g.players.forEach(p => {
       if (!p || !p.name) return;
       const _sc = (g.scores && g.scores[p.id]) || [];
       let _any = false;
       for (let _i = 0; _i < _sc.length; _i++) { if (_sc[_i] != null) { _any = true; break; } }
       if (!_any) return;
+      if (_optIn && !_optIn.has(nmk(p.name))) return;
       _t2Played[p.id] = 1;
       byDay[day].names[nmk(p.name)] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name) };
     });
@@ -71735,6 +71801,21 @@ function t2EffectiveSidePots(t) {
     return out;
   } catch (e) { return (t && t.settings && t.settings.tourneySidePots) || null; }
 }
+// v1319: who is actually IN a field-wide side game. Reads the director's list that
+// t2RemapGamesToGroup stamped onto the round as `fieldNames`. Returns null when there
+// is no list — meaning everybody, which is both the old behaviour and the right answer
+// for a round launched before v1319. Keyed on normalised name because these engines
+// pool players from different carts, where the per-round ids do not line up.
+function _t2FieldOptIn(cfg) {
+  try {
+    const n = (cfg && Array.isArray(cfg.fieldNames)) ? cfg.fieldNames : null;
+    if (!n || !n.length) return null;
+    const s = new Set();
+    n.forEach(x => { const k = normalizeNameSegment(String(x || '')); if (k) s.add(k); });
+    return s.size ? s : null;
+  } catch (e) { return null; }
+}
+
 // ===== FIELD-WIDE BIRDIE BUMP (v1317) =======================================
 // Tyler, 8/30 (Senior Sunday — 7 players, 2 carts): "the birdie bump only
 // applied to each group and not the tournament."
@@ -71778,8 +71859,9 @@ function t2ComputeFieldBirdiePool(rows) {
       // event already in progress is corrected without relaunching it.
       if (!cfg.fieldOnly && !(_dgk && _dgk.indexOf('birdiePool') >= 0)) return;
       const day = (g.t2 && g.t2.day) || 1;
-      const d = byDay[day] = byDay[day] || { parts: {}, cfg: null, rounds: 0, finished: 0, nH: 18 };
+      const d = byDay[day] = byDay[day] || { parts: {}, cfg: null, rounds: 0, finished: 0, nH: 18, optIn: undefined };
       if (!d.cfg) d.cfg = cfg;
+      if (d.optIn === undefined) d.optIn = _t2FieldOptIn(cfg);   // v1319: per-player opt-out
       d.rounds++; if (g.finishedAt) d.finished++;
       const pars = Array.isArray(g.pars) ? g.pars : null;
       const _nH = (pars && pars.filter(x => x != null).length === 9) ? 9 : 18;
@@ -71792,6 +71874,7 @@ function t2ComputeFieldBirdiePool(rows) {
         // v1292's rule, applied here from day one: no card posted, not in the pot.
         if (!scored) return;
         const k = nmk(p.name);
+        if (d.optIn && !d.optIn.has(k)) return;   // v1319: he sat this bet out
         const cur = d.parts[k];
         if (cur && cur.scored >= scored) return;            // one entry per human — keep the fullest card
         d.parts[k] = { key: k, name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), scored: scored, g: g, p: p, sc: sc };
