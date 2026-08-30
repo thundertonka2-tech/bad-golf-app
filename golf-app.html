@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1319-->
+<!--BGVER=v2026.11.1320-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8826,7 +8826,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1319';
+const BG_BUILD = 'v2026.11.1320';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -45362,6 +45362,130 @@ async function _settleUpLinesFor(settlements, nameOf, findPlayerById, opts) {
   return lines;
 }
 
+// ===== ONE SHAPE FOR THE WHOLE-EVENT SETTLE-UP (v1320) ======================
+// Tyler, 8/30: "We need to fix the settle up screen and the text settle up. It is
+// confusing because it doesn't show both groups, it shows your group then the
+// tournament's total... It should show tourney total, then each group's total, but
+// only one final payout for everything. The text should be the same way."
+//
+// He is describing two different complaints with one cause. The sheet led with
+// "Settle up — this group" and then showed a SECOND "Settle up — whole event"
+// underneath: two payout lists on one screen, which reads as a contradiction
+// rather than as a breakdown — and on a round like Senior Sunday, where every bet
+// is now field-wide, the first one says "All square, nobody owes anybody" directly
+// above $305 of real debt. The texted version inherited the same shape.
+//
+// So: ONE payout, at the bottom, for everything. Above it, the two breakdowns that
+// explain where the number came from — what the EVENT pots paid each player, and
+// what each GROUP's own bets paid — with both stated as totals, never as payments.
+// Nobody can read this and think they owe money twice.
+//
+// These builders are shared by the Bets sheet and by both texted settle-ups, for
+// the v878 reason ("we keep recreating stuff instead of using what we already
+// have") and so screen and text can never drift into two different answers.
+
+// Every player's NET across the whole event, biggest winner first.
+function bgEventTotalRows(pay) {
+  try {
+    const rows = (pay && Array.isArray(pay.rows)) ? pay.rows : [];
+    const pl = (pay && pay.players) || [];
+    return rows.map(r => {
+      const p = pl.find(x => x && x.id === r.id) || null;
+      return { name: (p && (typeof displayFull === 'function' ? displayFull(p) : (p.name || p.first))) || r.name || '?', net: Number(r.net) || 0 };
+    }).filter(x => x.name && x.name !== '?')
+      .sort((a, b) => b.net - a.net || String(a.name).localeCompare(String(b.name)));
+  } catch (e) { return []; }
+}
+
+// Each cart's OWN bets, one block per group. Only the group's own money — the
+// event pots are the other breakdown — so the two never double-count.
+// Returns [{ group, label, rows:[{name,net}] }] with every group listed, including
+// the empty ones (a group with no side bets is a fact worth showing, not a gap).
+function bgGroupBetRows(raw) {
+  const out = [];
+  try {
+    (raw || []).forEach(row => {
+      const rg = (row && row.data) ? row.data : row;
+      if (!rg || !Array.isArray(rg.players) || !rg.players.length) return;
+      const gnum = (rg.t2 && rg.t2.group) || null;
+      let m = null;
+      try { m = computeAllGameMoney(rg); } catch (e) { m = null; }
+      const combined = (m && m.combined) || {};
+      const rows = rg.players.map(p => ({
+        name: (typeof displayFull === 'function' ? displayFull(p) : (p.name || '?')),
+        net: Number(combined[p.id] || 0)
+      })).filter(x => Math.abs(x.net) >= 0.005).sort((a, b) => b.net - a.net);
+      out.push({
+        group: gnum,
+        label: 'Group ' + (gnum == null ? '?' : gnum),
+        code: rg.code || '',
+        rows: rows
+      });
+    });
+    out.sort((a, b) => (Number(a.group) || 0) - (Number(b.group) || 0));
+  } catch (e) {}
+  return out;
+}
+
+// The two breakdowns as TEXT, in the order Tyler asked for. `moneyTxt` keeps the
+// $ formatting identical to the rest of the message.
+function bgEventBreakdownLines(pay, raw) {
+  const lines = [];
+  const money = v => (v > 0 ? '+$' : (v < 0 ? '-$' : '$')) + Math.abs(Math.round(v * 100) / 100).toFixed(2);
+  try {
+    const tot = bgEventTotalRows(pay);
+    if (tot.length) {
+      lines.push('TOURNAMENT TOTAL — every bet, every group', '');
+      tot.forEach(r => lines.push('  ' + r.name + '  ' + money(r.net)));
+      lines.push('');
+    }
+    const grps = bgGroupBetRows(raw);
+    // Only worth printing when at least one cart actually had its own bet running —
+    // otherwise it is a header over nothing (Senior Sunday, where every game is
+    // field-wide, is exactly that case).
+    if (grps.some(x => x.rows.length)) {
+      lines.push("EACH GROUP'S OWN BETS — already inside the total above", '');
+      grps.forEach(x => {
+        if (!x.rows.length) { lines.push('  ' + x.label + ': no group bets'); return; }
+        lines.push('  ' + x.label + ': ' + x.rows.map(r => r.name + ' ' + money(r.net)).join(' · '));
+      });
+      lines.push('');
+    }
+  } catch (e) {}
+  return lines;
+}
+
+// The same two breakdowns as HTML for the Bets sheet, reusing the app's own
+// .rt-bd-row / .rt-bd-money classes rather than inventing a layout.
+function bgEventBreakdownHtml(pay, raw) {
+  let h = '';
+  try {
+    const esc = (typeof escapeHtml === 'function') ? escapeHtml : (s => String(s == null ? '' : s));
+    const sg = (typeof signed === 'function') ? signed : (v => String(v));
+    const cell = r => '<span class="rt-bd-money ' + (r.net > 0 ? 'positive' : (r.net < 0 ? 'negative' : 'zero')) + '" style="font-size:13px">'
+      + '<span style="color:var(--text);font-weight:500">' + esc(r.name) + '</span> ' + sg(r.net) + '</span>';
+    const tot = bgEventTotalRows(pay);
+    if (tot.length) {
+      h += '<div style="font-weight:800;font-size:15px;margin:14px 0 4px">Tournament total <span class="small-text" style="font-weight:400;color:var(--text-muted)">— every bet, every group</span></div>'
+        + '<div class="rt-bd-row" style="flex-direction:column;align-items:stretch;gap:5px"><div style="display:flex;flex-wrap:wrap;gap:5px 14px">'
+        + tot.map(cell).join('') + '</div></div>';
+    }
+    const grps = bgGroupBetRows(raw);
+    if (grps.some(x => x.rows.length)) {
+      h += '<div style="font-weight:800;font-size:15px;margin:14px 0 4px">Each group’s own bets <span class="small-text" style="font-weight:400;color:var(--text-muted)">— already inside the total above</span></div>';
+      grps.forEach(x => {
+        h += '<div class="rt-bd-row" style="flex-direction:column;align-items:stretch;gap:5px">'
+          + '<div class="rt-bd-game">' + esc(x.label) + '</div>'
+          + (x.rows.length
+              ? ('<div style="display:flex;flex-wrap:wrap;gap:5px 14px">' + x.rows.map(cell).join('') + '</div>')
+              : '<div class="small-text" style="color:var(--text-muted)">No group bets — everything this cart played settles at the event level.</div>')
+          + '</div>';
+      });
+    }
+  } catch (e) {}
+  return h;
+}
+
 async function buildSettleUpText() {
   const g = state.game;
   if (!g || !Array.isArray(g.players)) return '';
@@ -45447,7 +45571,16 @@ async function buildCombinedSettleUpText(t, combinedPay, opts) {
   // table never survives a messaging app's proportional font -- that is the whole
   // reason the image exists. The text keeps only what a reader actually acts on:
   // who owes who, and how to pay them. (fmtMoney went with them.)
-  lines.push('Settle up:', '');   // v1161: blank line after the header
+  // v1320 (Tyler, 8/30): "It should show tourney total, then each group's total, but
+  // only one final payout for everything. The text should be the same way."
+  // Two breakdowns stated as TOTALS, then exactly one payout list. Best-effort: if
+  // the rounds cannot be fetched the message still goes out as it always did.
+  try {
+    let _raw = [];
+    try { _raw = await loadTourneyRawRounds(t).catch(() => []); } catch (e) { _raw = []; }
+    bgEventBreakdownLines(combinedPay, _raw).forEach(l => lines.push(l));
+  } catch (e) {}
+  lines.push('SETTLE UP — final, covers everything above', '');   // v1320 (was 'Settle up:')
   (await _settleUpLinesFor(settlements, nm, findPlayer)).forEach(l => lines.push(l));
   _bgAppendStoreFooter(lines);   // v1243: same footer as the round-only text
   return lines.join('\n');
@@ -54419,7 +54552,7 @@ function recentRowHasName(r, meName) {
    leaderboard opens on top and closing it drops you back here (the same pattern
    the v781 round-summary → leaderboard flow uses).
    ========================================================================== */
-async function openRoundBetsSheet(code, courseName) {
+async function openRoundBetsSheet(code, courseName, opts) {
   if (!code) { try { showToast('No bets recorded for this round'); } catch (e) {} return; }
   const ov = document.createElement('div');
   ov.className = 'modal-overlay show';
@@ -54468,7 +54601,15 @@ async function openRoundBetsSheet(code, courseName) {
     ? money.byGame.filter(b => b && b.money && Object.keys(b.money).some(k => Math.abs(b.money[k] || 0) >= 0.005))
     : [];
 
-  let html = '<div style="font-weight:800;font-size:15px;margin-bottom:4px">Group bets</div>';
+  // v1320 (Tyler, 8/30): "if I hit view result from the group it should only show me
+  // the group's bets with a tournament tab to view the whole tournament. Then if I
+  // click tournament results it's the opposite." One sheet, two scopes, a tab bar to
+  // move between them — instead of every scope stacked down one screen, which is what
+  // made a group's "All square" sit directly above the event's real debt.
+  // The scorecard, stats and the action buttons stay OUTSIDE both scopes: they are
+  // the same view either way, and the card already labels its own scope.
+  let html = '<div id="rb-tabs"></div><div id="rb-scope-group">'
+    + '<div style="font-weight:800;font-size:15px;margin-bottom:4px">Group bets</div>';
   if (!byGame.length) {
     html += '<div class="help-text" style="padding:4px 0 2px">No money games were played in this round.</div>';
   } else {
@@ -54499,19 +54640,26 @@ async function openRoundBetsSheet(code, courseName) {
     _grpSettle = settlements || [];
     payLines = await _settleUpLinesFor(settlements, nameOf, id => g.players.find(pp => pp.id === id), { noPay: true });
   } catch (e) {}
-  if (payLines.length) {
+  // v1320 (Tyler, 8/30): on a TOURNAMENT round this block is the confusion. It ran
+  // calculateSettlements over this cart's money alone, so it printed a second,
+  // smaller "who pays who" above the event's real one -- or, once every game became
+  // field-wide, "All square - nobody owes anybody" directly above $305 of debt.
+  // One payout per screen, and it is the event's. The cart's own money is still
+  // shown, as a TOTAL, in the group breakdown below. A plain round is unchanged.
+  const _oneSettleUp = !!(g.t2 && g.t2.tournamentId);
+  if (payLines.length && !_oneSettleUp) {
     // v1108 (Tyler, 8/19): name this block for what it actually is. On a
     // tournament round the whole-event who-pays-who renders under the event
     // heading below, and two unlabelled "Settle up" blocks would read as a
     // contradiction rather than as group-then-event.
-    html += '<div style="font-weight:800;font-size:15px;margin:14px 0 4px">'
-      + ((g.t2 && g.t2.tournamentId) ? 'Settle up — this group' : 'Settle up') + '</div>'
+    html += '<div style="font-weight:800;font-size:15px;margin:14px 0 4px">Settle up</div>'
       // v1314: cards, not a text block — the same .settle-row markup the round Board,
       // the Tournament total scope and the league screen use. payLines is untouched
       // above because the share handler further down still texts it.
       + '<div id="rb-settle">' + bgSettleCardsHtml(_grpSettle, nameOf) + '</div>';
   }
 
+  html += '</div>';   // v1320: /#rb-scope-group
   // v895 (Tyler): the complete scorecard, right here on the settle-up sheet -
   // birdies/eagles coloured, skin-winning scores circled, and a dot on every
   // hole where that player got a stroke.
@@ -54531,9 +54679,11 @@ async function openRoundBetsSheet(code, courseName) {
   let _fieldStatHtml = ''; // v1305 — and the whole field's putts/greens with it
   // v1111: kept so the share handler can rebuild the same lines WITH payment links.
   let _evSettle = null, _evNameOf = null, _evPlayerOf = null;
+  let _evRaw = [], _evPay = null;   // v1320: hoisted for the breakdown + the share text
   let t = null;
   try { if (g.t2 && g.t2.tournamentId && typeof t2Get === 'function') t = await t2Get(g.t2.tournamentId); } catch (e) {}
   if (t) {
+    html += '<div id="rb-scope-event" hidden>';   // v1320: shown by the Tournament tab
     html += '<div style="font-weight:800;font-size:15px;margin:16px 0 6px">\u{1F3C6} ' + escapeHtml(t.name || 'Tournament') + '</div>';
     // v1108 (Tyler, 8/19): "make that the results screen but make sure it shows
     // who pays who and there is access to see every single bet both group and
@@ -54561,6 +54711,7 @@ async function openRoundBetsSheet(code, courseName) {
         loadTourneyRawRounds(t).catch(() => []),
         t2ComputeCombinedPayouts(t).catch(() => null)
       ]);
+      _evRaw = _raw || []; _evPay = _pay || null;   // v1320
       if (_pay && Array.isArray(_pay.rows) && _pay.rows.length) {
         const _dict = {}; _pay.rows.forEach(r => { _dict[r.id] = r.net || 0; });
         const _pl = _pay.players || [];
@@ -54607,13 +54758,16 @@ async function openRoundBetsSheet(code, courseName) {
             });
           } catch (e) {}
         });
-        _otherPotHtml = _bgPotTableHtml(_otherRows, "Other groups' bets — who won what") || '';
+        _otherPotHtml = _bgPotTableHtml(_otherRows, "Other groups' bets — who won what (already in the total)") || '';
       } catch (e) {}
     } catch (e) {}
     // v1113: standings first — on a team-format event this is the main game.
     if (_evStdHtml) html += '<div style="margin-bottom:10px">' + _evStdHtml + '</div>';
+    // v1320: the two breakdowns Tyler asked for — the event total for every player,
+    // then each cart's own bets — both stated as TOTALS, above the single payout.
+    try { html += bgEventBreakdownHtml(_evPay, _evRaw); } catch (e) {}
     if (_evLines.length) {
-      html += '<div style="font-weight:700;font-size:13px;color:var(--text-muted);margin:2px 0 4px">Settle up — whole event <span style="font-weight:400">(group bets + every event pot)</span></div>';
+      html += '<div style="font-weight:800;font-size:15px;margin:16px 0 4px">\u{1F4B0} Settle up — FINAL <span class="small-text" style="font-weight:400;color:var(--text-muted)">— covers everything above</span></div>';
       if (_evProv) html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">' + escapeHtml(_evProv) + '</div>';
       // v1314: cards. _evSettle / _evNameOf are the rows _evLines was built from,
       // already hoisted for the share handler — so screen and text stay one answer.
@@ -54627,6 +54781,7 @@ async function openRoundBetsSheet(code, courseName) {
       // already shows below); "Event leaderboard" renamed to Tournament Results.
       + '<button id="rb-lb" class="full" style="width:100%;padding:13px;min-height:46px">\u{1F4CA} Tournament Results</button>'
       + '</div>';
+    html += '</div>';   // v1320: /#rb-scope-event
   }
   // v1108: one way into EVERY bet from here -- on a tournament round that screen
   // pulls the whole event (field pots AND every group's own side bets), on a plain
@@ -54648,6 +54803,37 @@ async function openRoundBetsSheet(code, courseName) {
     html += '<button id="rb-delete" class="full" style="width:100%;margin-top:8px;padding:13px;min-height:46px;border:1px solid var(--danger);color:var(--danger);background:var(--surface);font-weight:600">\u{1F5D1} Delete round</button>';
   }
   body.innerHTML = html;
+
+  // v1320: the scope tabs. Only on a tournament round — a plain round has one scope
+  // and a single-tab bar would be noise. `opts.scope` lets a caller open straight to
+  // the event view; opening from a group's own Group Results button lands on that
+  // group, which is the whole point of the two entry points reading differently.
+  try {
+    const _tabsEl = body.querySelector('#rb-tabs');
+    const _gEl = body.querySelector('#rb-scope-group');
+    const _eEl = body.querySelector('#rb-scope-event');
+    if (_tabsEl && _gEl && _eEl) {
+      const _myGrp = (g.t2 && g.t2.group != null) ? ('Group ' + g.t2.group) : 'This group';
+      const _btn = (id, label) => '<button id="' + id + '" class="rb-tab" style="flex:1 1 0;min-width:0;padding:10px 6px;font-weight:700;font-size:14px;border-radius:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(label) + '</button>';
+      _tabsEl.innerHTML = '<div style="display:flex;gap:6px;margin-bottom:12px">'
+        + _btn('rb-tab-g', _myGrp) + _btn('rb-tab-e', '\u{1F3C6} Tournament') + '</div>';
+      const _gB = _tabsEl.querySelector('#rb-tab-g'), _eB = _tabsEl.querySelector('#rb-tab-e');
+      const _paint = (scope) => {
+        const _ev = (scope === 'event');
+        _gEl.hidden = _ev; _eEl.hidden = !_ev;
+        [[_gB, !_ev], [_eB, _ev]].forEach(pair => {
+          const b = pair[0], on = pair[1];
+          if (!b) return;
+          b.style.background = on ? 'var(--accent)' : 'var(--surface)';
+          b.style.color = on ? '#fff' : 'var(--text)';
+          b.style.border = on ? '1px solid var(--accent)' : '1px solid var(--border)';
+        });
+      };
+      if (_gB) _gB.onclick = () => _paint('group');
+      if (_eB) _eB.onclick = () => _paint('event');
+      _paint((opts && opts.scope === 'event') ? 'event' : 'group');
+    }
+  } catch (e) {}
 
   // v897 (Tyler): tournament rounds — repaint the sheet's scorecard with the
   // GOLD field-skin circles once the cross-group fetch lands (same pattern as
@@ -54716,16 +54902,32 @@ async function openRoundBetsSheet(code, courseName) {
           _txtPay = await _settleUpLinesFor(calculateSettlements(money.combined, g.players),
                                             nameOf, id => g.players.find(pp => pp.id === id));
         } catch (e) { _txtPay = payLines; }
-        if (_txtPay.length) { lines.push(''); lines.push(t ? 'This group:' : 'Settle up:'); lines.push(''); _txtPay.forEach(l => lines.push(l)); }   // v1161 spacing
-        // v1109: a tournament round texts the WHOLE-EVENT who-pays-who as well --
-        // same rule v1086 set for the Board's settle-up text ("the final settle up
-        // text should always include both"), and the same lines this sheet shows.
-        if (_evSettle && _evSettle.length) {
-          lines.push(''); lines.push('Whole event:');
-          if (_evProv) lines.push(_evProv);
-          let _txtEv = _evLines;
-          try { _txtEv = await _settleUpLinesFor(_evSettle, _evNameOf, _evPlayerOf); } catch (e) {}
-          _txtEv.forEach(l => lines.push(l));
+        // v1320 (Tyler, 8/30): this used to text "This group:" + that cart's payments
+        // and THEN "Whole event:" + a second set of payments. Two payout lists in one
+        // message, and on an event whose money is all field-wide the first one is
+        // empty or "all square" directly above real debt -- which is exactly what he
+        // read as "it only shows my group". A tournament round now sends ONE payout,
+        // for everything, under the two totals-only breakdowns that explain it. A
+        // plain round is untouched: no event, no breakdowns, its own settle-up.
+        if (!t) {
+          if (_txtPay.length) { lines.push(''); lines.push('Settle up:'); lines.push(''); _txtPay.forEach(l => lines.push(l)); }   // v1161 spacing
+        } else {
+          if (_evProv) { lines.push(''); lines.push('\u26A0\uFE0F ' + _evProv); }
+          lines.push('');
+          // Reuse what the sheet already fetched — no second round-trip, and the
+          // text is built from the identical objects the screen rendered.
+          try { bgEventBreakdownLines(_evPay, _evRaw).forEach(l => lines.push(l)); } catch (e) {}
+          if (_evSettle && _evSettle.length) {
+            lines.push('SETTLE UP — final, covers everything above', '');
+            let _txtEv = _evLines;
+            try { _txtEv = await _settleUpLinesFor(_evSettle, _evNameOf, _evPlayerOf); } catch (e) {}
+            _txtEv.forEach(l => lines.push(l));
+          } else if (_txtPay.length) {
+            // The event totals could not be built (offline, or a read that did not come
+            // back). Say so rather than passing this cart's bets off as the event's.
+            lines.push("Couldn't reach the event totals \u2014 this is THIS GROUP'S money only:", '');
+            _txtPay.forEach(l => lines.push(l));
+          }
         }
         const text = lines.join('\n');
         // v1109 (Tyler): images every time. Same scorecard + bets card the Board's
@@ -61709,7 +61911,7 @@ async function renderT2List() {
         ' · <span style="color:' + (info.finished ? 'var(--money-pos)' : (info.started ? 'var(--accent)' : 'var(--text-muted)')) + '">' + (info.finished ? 'finished' : (info.started ? 'live' : 'scheduled')) + '</span>' +
         (info.bracketLine ? '<div style="margin-top:4px;font-size:13px;font-weight:600;line-height:1.35;word-break:break-word">⚔️ ' + t2esc(info.bracketLine) + '</div>' : '') +   // v1172: this cart's matches
         (info.gamesSummary ? '<div class="small-text" style="margin-top:4px;color:var(--text-muted)">🎲 ' + t2esc(info.gamesSummary) + '</div>' : '') +
-        (info.gameCode ? '<button class="full t2-open-round" data-code="' + t2esc(info.gameCode) + '" style="margin-top:6px;background:' + (info.finished ? 'var(--money-pos)' : 'var(--accent)') + ';color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">' + (info.finished ? '🏆 View results' : 'Join now') + '</button>' : '') +
+        (info.gameCode ? '<button class="full t2-open-round" data-code="' + t2esc(info.gameCode) + '" style="margin-top:6px;background:' + (info.finished ? 'var(--money-pos)' : 'var(--accent)') + ';color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">' + (info.finished ? '🏆 Group Results' : 'Join now') + '</button>' : '') +
         // v1171 (Tyler): in a bracket, either player in the match can start the cart's round.
         ((!info.gameCode && info.isMine && String(t.status || '').toLowerCase() === 'live' && typeof t2IsBracket === 'function' && t2IsBracket(t))   // v1176: was `_stl` — declared further down, so this threw before initialization and killed the whole list
           ? '<button class="full t2-start-cart" data-id="' + t.id + '" data-gid="' + t2esc(info.gid) + '" data-day="' + info.day + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">▶ Start our round — Day ' + info.day + '</button>' : '') +
@@ -61798,7 +62000,7 @@ async function renderT2List() {
       // provisional (a group that has not tapped Finish holds the totals open — see the
       // v1158 force-finish note above).
       (_finishedish(t, _idx)
-        ? '<button class="full t2-row-total" data-id="' + t.id + '" style="margin-top:10px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:15px;padding:14px;border-radius:10px;white-space:normal;line-height:1.25">\uD83C\uDFC6 Tournament leaderboard &amp; payout</button>'
+        ? '<button class="full t2-row-total" data-id="' + t.id + '" style="margin-top:10px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:15px;padding:14px;border-radius:10px;white-space:normal;line-height:1.25">\uD83C\uDFC6 Tournament Leaderboard</button>'
         : '') +
       // Start tournament — commissioner-only, and only while still scheduled. Reuses
       // t2StartEventNow so it runs the same readiness guards as the wizard. (Tyler, Jul 2026.)
