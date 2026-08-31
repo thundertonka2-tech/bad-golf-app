@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1342-->
+<!--BGVER=v2026.11.1343-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8940,7 +8940,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1342';
+const BG_BUILD = 'v2026.11.1343';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -16975,11 +16975,19 @@ function _bgMoneyRank(s) {
     // which is the case the old scale could not express. Callers add this to
     // `(complete*1000 + holes) * 10`, so the result must stay under 10: max here is
     // manual + settled = 9.
-    let r = (src === 'manual') ? 8
-          : (src === 'event') ? 6
-          : (src === 'event-provisional') ? 4
-          : 2;
-    if (s.moneyFinal === true) r += 1;
+    // v1343: 'settled' is money read from the ROUND ITSELF (g.settledMoney) rather
+    // than computed on this device. It outranks every locally-derived source because
+    // it is the one figure all devices share — that is the whole point of it. Only a
+    // hand correction beats it. Budget unchanged: callers add this to
+    // `(complete*1000 + holes) * 10`, so it must stay under 10.
+    let r = (src === 'manual') ? 9
+          : (src === 'settled') ? 7
+          : (src === 'event') ? 5
+          : (src === 'event-provisional') ? 3
+          : 1;
+    // The settled bit only breaks ties between LOCALLY-computed figures; 'manual' and
+    // 'settled' are already terminal and adding to them would collide with the tier above.
+    if (s.moneyFinal === true && src !== 'manual' && src !== 'settled') r += 1;
     return r;
   } catch (e) { return 0; }
 }
@@ -18404,6 +18412,61 @@ async function archiveScoresFromRound(g) {
     }
   } catch (e) { try { console.warn('[BadGolf] tournament money resolve failed:', e); } catch (e2) {} }
 
+  // ══ v1343 — SETTLED MONEY LIVES ON THE ROUND ════════════════════════════════
+  // v1342 stopped a settled figure drifting on the device that settled it. It could
+  // not stop two devices settling the SAME round differently: each archives into its
+  // own roster row, so two builds computing two numbers froze two numbers, and
+  // dedupeScoreHistory compares with a strict `>` — equal-ranked records never replace
+  // each other, so that disagreement became PERMANENT on both phones. The freeze alone
+  // cements divergence as readily as it prevents it.
+  //
+  // The fix is an authority, and the round already is one: `games` is a single shared
+  // document per round. The first device to settle publishes the figure onto it; every
+  // other device READS it instead of computing its own. One writer, one value.
+  //
+  // Two guards on publishing, because enshrining a wrong figure is worse than none:
+  //   · a TOURNAMENT round publishes only once its event money actually resolved
+  //     (_moneySrcById populated). Otherwise moneyTotals is the group-only figure with
+  //     every event pot missing — the v1035 hazard — and must never become canonical.
+  //   · a PLAIN round must net to zero first. Money moves between players; it cannot be
+  //     created. Same invariant and tolerance as v1327, applied here at the SOURCE
+  //     rather than after the fact. (Tournament rounds legitimately do not net zero
+  //     per round — one round carries a player's whole event net and the others carry
+  //     0 — so the check applies at the event level there, inside _bgEventMoney.)
+  let _settledById = null;
+  try {
+    const _sm = g.settledMoney;
+    if (_sm && _sm.net && g.finishedAt && _sm.at === g.finishedAt) {
+      _settledById = _sm.net;                       // authoritative — read, never recompute
+    } else if (g.finishedAt && g.code) {
+      const _isT2 = !!(g.t2 && g.t2.tournamentId);
+      const _t2Resolved = (g.players || []).some(p => p && _moneySrcById[p.id]);
+      if (!_isT2 || _t2Resolved) {
+        const _net = {}; let _any = false, _sum = 0, _n = 0;
+        (g.players || []).forEach(p => {
+          if (!p || !p.id) return;
+          const v = moneyTotals[p.id];
+          if (v == null) return;
+          _net[p.id] = Math.round(v * 100) / 100; _any = true; _sum += _net[p.id]; _n++;
+        });
+        const _tol = Math.max(0.05, _n * 0.01 + 0.005);
+        const _balances = _isT2 ? true : (_n < 2 || Math.abs(_sum) <= _tol);
+        if (_any && _balances) {
+          g.settledMoney = {
+            at: g.finishedAt,
+            build: (typeof BG_BUILD !== 'undefined') ? BG_BUILD : '',
+            source: _isT2 ? 'event' : 'group',
+            net: _net
+          };
+          _settledById = _net;
+          try { await saveGame(g); } catch (e) {}
+        } else if (_any && !_balances) {
+          try { console.warn('[BadGolf] not publishing settled money — round does not net zero:', g.code, Math.round(_sum * 100) / 100); } catch (e2) {}
+        }
+      }
+    }
+  } catch (e) { try { console.warn('[BadGolf] settled-money publish failed:', e); } catch (e2) {} }
+
   const roster = await getPlayerRoster();
   let changed = false;
   // Who am I on this device? Used to skip rounds I was invited to but never
@@ -18752,11 +18815,16 @@ async function archiveScoresFromRound(g) {
       differential,
       differentialRaw,
       ca: _ca,
-      money: moneyTotals[p.id] != null ? Math.round(moneyTotals[p.id] * 100) / 100 : null, // penny-exact so bet-history rows always sum to the lifetime total (Tyler v440)
+      // v1343: the ROUND's settled figure wins over anything computed here. This is
+      // what makes two phones agree — they are reading the same number, not deriving
+      // two of their own.
+      money: (_settledById && _settledById[p.id] != null)
+        ? Math.round(_settledById[p.id] * 100) / 100
+        : (moneyTotals[p.id] != null ? Math.round(moneyTotals[p.id] * 100) / 100 : null), // penny-exact so bet-history rows always sum to the lifetime total (Tyler v440)
       // v1035: where this money came from, so provisional vs final vs hand-corrected is
       // legible and _bgMoneyRank can stop a weaker archive overwriting a stronger one.
       // Absent on a plain non-tournament round (group money is simply the whole truth).
-      moneySource: _moneySrcById[p.id] || undefined,
+      moneySource: (_settledById && _settledById[p.id] != null) ? 'settled' : (_moneySrcById[p.id] || undefined),
       // v1327: WHICH BUILD produced this figure. Senior Sunday could not be diagnosed
       // from the stored rows — every one said 'event' and nothing recorded that they
       // were computed by five different versions of the money engine. Costs a dozen
@@ -18766,7 +18834,7 @@ async function archiveScoresFromRound(g) {
       // i.e. it is a settled result, not a running total mid-round. The write-freeze
       // below keys off this, and reopening a round deletes g.finishedAt, so a round
       // being corrected is correctly NOT frozen.
-      moneyFinal: (g.finishedAt && moneyTotals[p.id] != null) ? true : undefined,
+      moneyFinal: (g.finishedAt && (moneyTotals[p.id] != null || (_settledById && _settledById[p.id] != null))) ? true : undefined,
       // v1342: WHICH settlement this figure belongs to — the round's finishedAt at the
       // moment it was computed. This is the difference between "settled" and "settled
       // WHEN", and the distinction matters: reopening deletes finishedAt and finishing
@@ -18774,7 +18842,7 @@ async function archiveScoresFromRound(g) {
       // moneyAt and is correctly allowed to overwrite. A plain boolean cannot express
       // that — it would freeze a round at its FIRST settlement forever and make
       // reopen-to-fix-a-score silently unable to update the money.
-      moneyAt: (g.finishedAt && moneyTotals[p.id] != null) ? g.finishedAt : undefined,
+      moneyAt: (g.finishedAt && (moneyTotals[p.id] != null || (_settledById && _settledById[p.id] != null))) ? g.finishedAt : undefined,
       putts: puttsTotal,
       girs: girCount,
       puttHoles: puttHoles || null,
@@ -18849,7 +18917,13 @@ async function archiveScoresFromRound(g) {
         // Without this, a legacy record could never be unfrozen and a reopen could never
         // fix it.
         const _legacySettled = _hasOldMoney && old.moneyAt == null && !!g.finishedAt;
-        const _frozen = _hasOldMoney && (old.moneySource === 'manual' || _sameSettlement || _legacySettled);
+        // v1343: the round's OWN settled figure is the authority, so it overrides a
+        // frozen local one — that is precisely how a device holding a divergent value
+        // converges onto the shared one. A hand correction still beats both.
+        const _hasSettled = !!(_settledById && _settledById[p.id] != null);
+        const _frozen = _hasOldMoney && old.moneySource === 'manual'
+                        ? true
+                        : (_hasOldMoney && !_hasSettled && (_sameSettlement || _legacySettled));
         if (_frozen) {
           record.money = old.money;
           record.moneySource = old.moneySource;
