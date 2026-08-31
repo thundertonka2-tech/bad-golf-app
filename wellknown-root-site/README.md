@@ -1,89 +1,78 @@
 # Root-domain association files (`thundertonka2-tech.github.io`)
 
-**Why this folder exists.** Both platforms fetch their association file from the
-**domain root**, never from a project path:
+**STATUS: DONE — both platforms verified live 2026-08-31.** This folder is now a
+reference copy of what is published; nothing here needs action.
 
-- iOS  → `https://thundertonka2-tech.github.io/.well-known/apple-app-site-association`
+## What these are
+
+Both platforms fetch their association file from the **domain root**, never from
+a project path:
+
+- iOS → `https://thundertonka2-tech.github.io/.well-known/apple-app-site-association`
 - Android → `https://thundertonka2-tech.github.io/.well-known/assetlinks.json`
 
-This repo publishes to `https://thundertonka2-tech.github.io/**bad-golf-app**/`,
-so the copy in `../.well-known/` lands at
-`…/bad-golf-app/.well-known/apple-app-site-association` — a path neither OS ever
-asks for.
+They are served from a **separate repo**, `thundertonka2-tech/thundertonka2-tech.github.io`
+(public, Pages on `main` / root, with a `.nojekyll` so Jekyll does not eat the
+dot-folder). That repo has existed since ~June 2026 — this repo's own
+`.well-known/` copy publishes under `/bad-golf-app/`, which neither OS reads.
 
-Checked 2026-08-31:
+## Correcting the v1337 note
 
-| URL | result |
-|---|---|
-| `https://thundertonka2-tech.github.io/` | **404** — no root site |
-| `https://thundertonka2-tech.github.io/.well-known/assetlinks.json` | **404** |
-| `https://thundertonka2-tech.github.io/bad-golf-app/` | 200 |
-| `https://app-site-association.cdn-apple.com/a/v1/thundertonka2-tech.github.io` | 200, valid appID |
+The v1337 commit message and handoff claimed iOS Universal Links were "on
+borrowed time, running on Apple's cache" because the association source 404s.
+**That was wrong**, and worth recording so nobody re-derives it:
 
-That last row is why iPhone Universal Links work **today**: Apple's CDN is
-serving a cached association from a fetch that succeeded at some point. The
-source is a 404 now, so that cache is the only thing holding it up — if Apple
-re-fetches and gets a 404, iPhone invites fall out to Safari and we are back to
-the v1043 bug. Android has no cache to fall back on, which is why its invites
-open Chrome today.
+| URL | result | why |
+|---|---|---|
+| `https://thundertonka2-tech.github.io/` | 404 | no `index.html` in the root repo — cosmetic only |
+| `…/.well-known/apple-app-site-association` | **200, always has been** | served fine |
+| `…/.well-known/assetlinks.json` | was 404 | genuinely missing — this was the only real gap |
 
-## Fix: publish a root GitHub Pages site (~5 minutes, one time)
+The root `/` 404 is what misled the check: with `.nojekyll` set, Pages does not
+render `README.md` into an index page, so the bare domain 404s while every real
+file under it serves normally. A 404 at `/` says nothing about `/.well-known/`.
 
-1. On GitHub, create a **new public repo named exactly**
-   `thundertonka2-tech.github.io`
-   (the name is what makes it the user/organization site at the domain root).
-2. Copy the **contents of this folder** — `.well-known/`, `.nojekyll` and
-   `index.html` — into the root of that new repo and push.
-   **`.nojekyll` is not optional.** GitHub Pages runs Jekyll by default and Jekyll
-   drops every file and folder starting with a dot, so without it `.well-known/`
-   is silently never published and both platforms keep getting a 404. (This repo
-   already carries one, which is why `/bad-golf-app/.well-known/` resolves at all.)
-3. Repo → Settings → Pages → Source: `Deploy from a branch`, branch `main`,
-   folder `/ (root)`. Save.
-4. Wait for the green check, then confirm **both** return the file (not a 404):
-   - `https://thundertonka2-tech.github.io/.well-known/apple-app-site-association`
-   - `https://thundertonka2-tech.github.io/.well-known/assetlinks.json`
+So iOS was never broken. Android was, because `assetlinks.json` did not exist.
 
-GitHub Pages serves dot-folders fine and sends `assetlinks.json` as
-`application/json`, which is what Android requires. The extension-less
-`apple-app-site-association` is served as `application/octet-stream`; iOS accepts
-that (it must NOT be signed or have a `.json` extension).
+## What was actually done (2026-08-31)
 
-Leave the copy in `../.well-known/` alone — harmless, and it documents the appID.
+1. Read the **App signing key** SHA-256 from Play Console → Bad Golf →
+   Protected with Play → App signing → *Digital Asset Links JSON*:
 
-## Before step 2: fill in the Android fingerprint
+       5A:31:D6:AC:39:09:32:02:25:67:11:24:F9:C7:BA:4D:F3:7A:66:C6:31:D8:4D:AA:3E:98:79:85:09:54:83:1D
 
-`assetlinks.json` here has a placeholder:
+   Note this is NOT the upload key, whose SHA-256 is
+   `9C:6F:17:89:3B:8B:30:34:…` — the one Codemagic holds as `badgolf_upload`.
+   Using the upload key is the usual reason App Links silently fail to verify.
 
-    "REPLACE_WITH_PLAY_APP_SIGNING_SHA256"
+   Bad Golf lives under the **Simplistic Fishing** developer account
+   (`5895763212838474099`, app `4974387837708854894`). The other account on the
+   same login, *Simplistic Mobile*, was closed by Google in Nov 2024 for
+   inactivity — it is not the one to look in.
 
-It must be the **App signing key** SHA-256 — the key Google re-signs with — NOT
-the `badgolf_upload` key Codemagic holds. Using the upload key is the single most
-common reason App Links silently fail to verify.
+2. Committed `.well-known/assetlinks.json` to the root repo with that
+   fingerprint (the copy in this folder is identical).
 
-Google hands you the finished file:
+3. Verified with Google's own checker:
 
-> Play Console → Bad Golf → **Test and release → Setup → App integrity**
-> → *App signing* tab → **App signing key certificate** → `SHA-256 certificate fingerprint`
+       https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://thundertonka2-tech.github.io&relation=delegate_permission/common.handle_all_urls
 
-Copy that value (the `AB:CD:EF:…` string, colons included) over the placeholder.
-The same page also has a **"Digital Asset Links JSON"** block you can paste
-wholesale over this file's contents — either way works.
+   Returns the statement, the correct package and fingerprint, **no errorCode**.
 
-## Verifying after the app ships with v1336
+## Remaining
 
-The intent-filter half is injected by `codemagic.yaml` (step *"Android App Links
-(invite links open the app, not Chrome)"*), because `android/` is regenerated on
-every build. Both halves must be live before Android verifies.
-
-Google's checker:
-
-    https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://thundertonka2-tech.github.io&relation=delegate_permission/common.handle_all_urls
-
-On a device with the build installed:
-
-    adb shell pm get-app-links com.simplisticfishing.badgolf
-    # want: thundertonka2-tech.github.io: verified
-
-Verification runs at install time, so testers already holding the app may need a
-reinstall before invite links start opening Bad Golf.
+- Android verification runs at **install time**, once. Anyone already holding
+  Bad Golf keeps the old unverified state however correct the file is — delete
+  and reinstall to test, and expect the same for existing testers on the first
+  build after v1337.
+- The intent-filter half is injected by `codemagic.yaml` (step *"Android App
+  Links (invite links open the app, not Chrome)"*) on every build, since
+  `android/` is regenerated each time. Both halves are needed; the file is now
+  live, so the next Android build completes it.
+- Optional: add an `index.html` to the root repo so the bare domain stops 404ing.
+  Purely cosmetic — no bearing on either platform's verification.
+- If an Android tester on a very old install still fails to verify, add the
+  **previous** app signing key's SHA-256 as a second entry in
+  `sha256_cert_fingerprints` (the key was upgraded 1 Aug 2026; Play Console's
+  own snippet lists only the current one, and the previous key shows 0% install
+  base, so this is unlikely to be needed).
