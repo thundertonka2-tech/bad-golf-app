@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1331-->
+<!--BGVER=v2026.11.1332-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8844,7 +8844,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1331';
+const BG_BUILD = 'v2026.11.1332';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -54936,9 +54936,14 @@ async function openRoundBetsSheet(code, courseName, opts) {
       // v1116: these were serial — the sheet sat on "Loading the money…" for the sum
       // of both. They are independent, so run them together; the field-round cache
       // above then collapses their overlapping reads into one.
-      const [_raw, _pay] = await Promise.all([
+      // v1332: + the two inputs the whole-field standings need. Added to the SAME
+      // Promise.all rather than awaited after it, so folding the Tournament Results
+      // screen in here costs no extra wall-clock (the v1330 rule).
+      const [_raw, _pay, _evScores, _evPl] = await Promise.all([
         loadTourneyRawRounds(t).catch(() => []),
-        t2ComputeCombinedPayouts(t).catch(() => null)
+        t2ComputeCombinedPayouts(t).catch(() => null),
+        (typeof loadTourneyScores === 'function' ? loadTourneyScores(t).catch(() => []) : Promise.resolve([])),
+        t2GetPlayers(t.id).catch(() => [])
       ]);
       _evRaw = _raw || []; _evPay = _pay || null;   // v1320
       if (_pay && Array.isArray(_pay.rows) && _pay.rows.length) {
@@ -54992,6 +54997,13 @@ async function openRoundBetsSheet(code, courseName, opts) {
     } catch (e) {}
     // v1113: standings first — on a team-format event this is the main game.
     if (_evStdHtml) html += '<div style="margin-bottom:10px">' + _evStdHtml + '</div>';
+    // v1332: the whole-field leaderboard, the one thing Tournament Results had that
+    // this sheet did not. Rendered by the SAME builder that screen uses, so removing
+    // the button loses nothing.
+    try {
+      const _fs = _t2FieldStandingsHtml(_evScores, _evPl);
+      if (_fs) html += '<div style="margin-bottom:10px">' + _fs + '</div>';
+    } catch (e) {}
     // v1320: the two breakdowns Tyler asked for — the event total for every player,
     // then each cart's own bets — both stated as TOTALS, above the single payout.
     try { html += bgEventBreakdownHtml(_evPay, _evRaw); } catch (e) {}
@@ -55005,11 +55017,12 @@ async function openRoundBetsSheet(code, courseName, opts) {
     }
     if (_evPotHtml) html += '<div style="margin-bottom:10px">' + _evPotHtml + '</div>';
     if (_otherPotHtml) html += '<div style="margin-bottom:10px">' + _otherPotHtml + '</div>';
-    html += '<div style="display:flex;flex-direction:column;gap:8px">'
-      // v894 (Tyler): "Tourney bets — whole event" removed (the combined payout
-      // already shows below); "Event leaderboard" renamed to Tournament Results.
-      + '<button id="rb-lb" class="full" style="width:100%;padding:13px;min-height:46px">\u{1F4CA} Tournament Results</button>'
-      + '</div>';
+    // v1332 (Tyler, 8/31): the Tournament Results button is gone. Everything it
+    // showed is on this sheet now — the whole-field standings above, the pot table,
+    // the field scorecard, the single settle-up — so a second screen was one more tap
+    // to reach the same facts, and one more place for the two to disagree.
+    // openEventLeaderboard itself is untouched and still reachable from the Events
+    // tab; only this shortcut is retired.
     html += '</div>';   // v1320: /#rb-scope-event
   }
   // v1108: one way into EVERY bet from here -- on a tournament round that screen
@@ -55017,7 +55030,11 @@ async function openRoundBetsSheet(code, courseName, opts) {
   // round just this round. Passing g explicitly matters: this sheet can be opened
   // from the Rounds list for a round that is NOT state.game, and the breakdown
   // screen used to read state.game unconditionally.
-  html += '<button id="rb-everybet" class="full" style="width:100%;margin-top:12px;padding:13px;min-height:46px">\u{1F4CB} Every bet — who won what</button>';
+  // v1332 (Tyler, 8/31): "get rid of the button every bet who won what, we do such a
+  // good job on this screen now it is not needed anymore." Correct — since v1321 every
+  // active pot is one row in the Tournament games table right above, with the winner
+  // and what they collected, so this button opened a second view of what is already
+  // on screen. openBetsBreakdownScreen is left in place for its other callers.
   html += '<button id="rb-share" class="full" style="width:100%;margin-top:8px;padding:13px;min-height:46px">\u{1F4F2} Text settle-up</button>';
   // v1125 (Tyler): View and 💵 merged into one button that lands here, so the one
   // thing this sheet was missing is the way back into an editable round.
@@ -73008,6 +73025,36 @@ function _evFmtMoney(n) { return (n > 0 ? '+$' : (n < 0 ? '−$' : '$')) + Math.
 // IDENTICAL field scorecard — same players, same birdie/skin marking — instead of
 // growing a second one that would drift. evPlayers is optional: it only seeds people
 // who have no round yet, so a caller without it still gets everyone who has played.
+// v1332 (Tyler, 8/31): "tournament results is not needed because they are all on
+// this screen as well. If there is anything on the tournament results button that is
+// not on here, let's add it." The whole-field standings WERE the thing not on the
+// Bets sheet. Lifted verbatim into a function so both screens render the identical
+// table off the identical inputs — the same rule the settle-up screens now follow,
+// and the reason those two drifted apart in the first place.
+function _t2FieldStandingsHtml(list, evPlayers) {
+  try {
+    let html = '';
+  // Whole field = every registered tournament player, not just those who've started.
+    let _fieldList = Array.isArray(list) ? list.slice() : [];
+    try {
+      const _have = new Set(_fieldList.map(r => normalizeNameSegment(String(r.name || ''))));
+      (evPlayers || []).forEach(p => { const dn = p && p.display_name; const k = normalizeNameSegment(String(dn || '')); if (dn && k && !_have.has(k)) { _fieldList.push({ name: dn, first: String(dn).split(/\s+/)[0], gross: null, thru: 0, toPar: null }); _have.add(k); } });
+      _fieldList.sort((a, b) => { const ap = a.toPar == null ? 9999 : a.toPar, bp = b.toPar == null ? 9999 : b.toPar; if (ap !== bp) return ap - bp; return (a.gross == null ? 9999 : a.gross) - (b.gross == null ? 9999 : b.gross); });
+    } catch (e) {}
+    if (_fieldList.length) {
+      html += '<h3 style="margin:6px 0 4px">Standings — whole field</h3><div style="font-size:13px">';
+      html += '<div style="display:flex;gap:8px;padding:2px 0;font-size:11px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border)"><span style="width:22px"></span><span style="flex:1;min-width:0">Player</span><span style="width:48px;text-align:right">To&nbsp;par</span><span style="width:78px;text-align:right">Strokes&nbsp;(thru)</span></div>';
+      // v986 (T43): plain 1..n numbering read as "1st, 2nd" for players on the
+      // same score. Rank on the same keys the sort above uses and mark ties.
+      const _fPos = []; _fieldList.forEach((r, i) => { const pv = i ? _fieldList[i - 1] : null; _fPos.push((pv && pv.toPar === r.toPar && pv.gross === r.gross && pv.thru === r.thru) ? _fPos[i - 1] : (i + 1)); });
+      const _fN = {}; _fPos.forEach(p => { _fN[p] = (_fN[p] || 0) + 1; });
+      _fieldList.forEach((r, i) => { const _sc = (r.thru ? (r.gross + ' (' + r.thru + ')') : '—'); html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + ((_fN[_fPos[i]] > 1 ? 'T' : '') + _fPos[i]) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:48px;text-align:right;font-weight:700">' + _evFmtTp(r.toPar) + '</span><span style="width:78px;text-align:right;color:var(--text-muted)">' + _sc + '</span></div>'; });
+      html += '</div>';
+    }
+    return html;
+  } catch (e) { return ''; }
+}
+
 function _t2FieldScorecardHtml(t, rawRounds, evPlayers) {
   try {
     let field = null;
@@ -75847,23 +75894,8 @@ async function openEventLeaderboard(t, opts) {
       });
       html += '</div></div>';
     }
-    // Whole field = every registered tournament player, not just those who've started.
-    let _fieldList = Array.isArray(list) ? list.slice() : [];
-    try {
-      const _have = new Set(_fieldList.map(r => normalizeNameSegment(String(r.name || ''))));
-      (evPlayers || []).forEach(p => { const dn = p && p.display_name; const k = normalizeNameSegment(String(dn || '')); if (dn && k && !_have.has(k)) { _fieldList.push({ name: dn, first: String(dn).split(/\s+/)[0], gross: null, thru: 0, toPar: null }); _have.add(k); } });
-      _fieldList.sort((a, b) => { const ap = a.toPar == null ? 9999 : a.toPar, bp = b.toPar == null ? 9999 : b.toPar; if (ap !== bp) return ap - bp; return (a.gross == null ? 9999 : a.gross) - (b.gross == null ? 9999 : b.gross); });
-    } catch (e) {}
-    if (_fieldList.length) {
-      html += '<h3 style="margin:6px 0 4px">Standings — whole field</h3><div style="font-size:13px">';
-      html += '<div style="display:flex;gap:8px;padding:2px 0;font-size:11px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border)"><span style="width:22px"></span><span style="flex:1;min-width:0">Player</span><span style="width:48px;text-align:right">To&nbsp;par</span><span style="width:78px;text-align:right">Strokes&nbsp;(thru)</span></div>';
-      // v986 (T43): plain 1..n numbering read as "1st, 2nd" for players on the
-      // same score. Rank on the same keys the sort above uses and mark ties.
-      const _fPos = []; _fieldList.forEach((r, i) => { const pv = i ? _fieldList[i - 1] : null; _fPos.push((pv && pv.toPar === r.toPar && pv.gross === r.gross && pv.thru === r.thru) ? _fPos[i - 1] : (i + 1)); });
-      const _fN = {}; _fPos.forEach(p => { _fN[p] = (_fN[p] || 0) + 1; });
-      _fieldList.forEach((r, i) => { const _sc = (r.thru ? (r.gross + ' (' + r.thru + ')') : '—'); html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + ((_fN[_fPos[i]] > 1 ? 'T' : '') + _fPos[i]) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(r.first || r.name) + '</span><span style="width:48px;text-align:right;font-weight:700">' + _evFmtTp(r.toPar) + '</span><span style="width:78px;text-align:right;color:var(--text-muted)">' + _sc + '</span></div>'; });
-      html += '</div>';
-    }
+    // v1332: one implementation, shared with the round Bets sheet.
+    html += _t2FieldStandingsHtml(list, evPlayers) || '';
     if (teamStand && teamStand.days && teamStand.days.length) {
       teamStand.days.forEach(d => {
         const ds = teamStand.byDay[d];
