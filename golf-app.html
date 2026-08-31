@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1328-->
+<!--BGVER=v2026.11.1330-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8841,7 +8841,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1328';
+const BG_BUILD = 'v2026.11.1330';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -54331,9 +54331,41 @@ async function loadRounds() {
   // changed anything. Same data, same healing — just not in the user's way.
   // Only rounds YOU played in. Spectating other groups lives on the Crew tab
   // (Live now / recent feed) — this list is your personal round history.
+  // v1329 PERF (Tyler, 8/31: "speed up buttons and the overall feel"). Nothing in
+  // this list could paint until FIVE independent reads had each finished in turn:
+  // getMeName, getRecent, getSharedTombstones, getPlayerRoster and safeGet(KEY_LAST).
+  // None of them depends on any other — they are simply written one after another —
+  // so the tab sat waiting out five round trips end to end, which on course wifi is
+  // most of the delay behind "saved rounds take a while to load".
+  //
+  // Started together here and awaited where each was already awaited below, so every
+  // value is used at exactly the same point in exactly the same order. This is the
+  // v1099/v1116 fix applied to the Rounds tab: identical data, one wall-clock wait.
+  //
+  // NOT a staleness trade. Every one of these is still fully awaited before the value
+  // is read — nothing paints from a cache that has not been confirmed, which is the
+  // rule v1205 set on Home and v963/v1035 set on the money. Concurrency only removes
+  // dead waiting; it never lets an unconfirmed value reach the screen.
+  // _kick starts a read now and returns a promise that still REJECTS exactly as the
+  // original call did. The detached .catch() only silences Node/browser
+  // unhandled-rejection warnings for a promise nobody has awaited yet; it does not
+  // swallow the error for the real consumer below.
+  //
+  // This distinction is the whole safety argument, and the first draft got it wrong:
+  // giving these a fallback value (`.catch(() => [])`) made a FAILED getRecent look
+  // like an empty history, so a dead connection would have rendered "no rounds" —
+  // stating something false instead of failing. Every await below therefore keeps the
+  // exact try/catch shape it had before, so a failure produces the identical outcome
+  // it always did. Concurrency removes waiting; it must never change what is true.
+  const _kick = (fn) => { const p = Promise.resolve().then(fn); try { p.catch(function () {}); } catch (e) {} return p; };
+  const _pMe   = _kick(getMeName);
+  const _pRec  = _kick(getRecent);
+  const _pTomb = _kick(getSharedTombstones);
+  const _pRost = _kick(getPlayerRoster);
+  const _pLast = _kick(() => safeGet(KEY_LAST, false));
   let meName = null;
-  try { meName = await getMeName(); } catch (e) {}
-  let fullRecent = await getRecent();
+  try { meName = await _pMe; } catch (e) {}
+  let fullRecent = await _pRec;
   // Self-heal stale LIVE flags: a round finished before finishedAt was tracked
   // in the recent cache (or synced from an older record) shows as LIVE here even
   // though its game record is complete — which is why opening it correctly says
@@ -54365,7 +54397,7 @@ async function loadRounds() {
   } catch (e) {}
   // Shared round tombstones: a round deleted on ANY device stays gone here too.
   let _sharedRoundTomb = new Set();
-  try { const _st = await getSharedTombstones(); if (_st && _st.rounds) _sharedRoundTomb = _st.rounds; } catch (e) {}
+  try { const _st = await _pTomb; if (_st && _st.rounds) _sharedRoundTomb = _st.rounds; } catch (e) {}   // v1329: started above
   const recent = _t2DedupeRecentTourneyRounds(fullRecent
     .filter(r => !getHiddenRounds().includes(r.code))
     .filter(r => !(r && r.code && _sharedRoundTomb.has(r.code)))
@@ -54428,7 +54460,7 @@ async function loadRounds() {
   let _recByCode = {};            // recent index keyed by code (display enrichment only)
   try {
     (fullRecent || []).forEach(r => { if (r && r.code) _recByCode[r.code] = r; });
-    const roster2 = await getPlayerRoster();
+    const roster2 = await _pRost;   // v1329: started above
     const mineP = findMyRosterPlayer(roster2, meName);
     if (mineP && Array.isArray(mineP.scoreHistory)) {
       // SINGLE SOURCE OF TRUTH: your recorded rounds = your scoreHistory — the SAME
@@ -54466,7 +54498,7 @@ async function loadRounds() {
   // "started" so it reads LIVE the moment you're in it — even before the first
   // score is entered (Tyler: "I was just in this round, it shouldn't say scheduled").
   let activeLastCode = null;
-  try { activeLastCode = await safeGet(KEY_LAST, false); } catch (e) {}
+  try { activeLastCode = await _pLast; } catch (e) {}   // v1329: started above
 
   // Sort for display: LIVE/unfinished rounds first, then by the fixed PLAY date
   // (newest first). Avoids a re-touched old round jumping to the top by updatedAt.
