@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1327-->
+<!--BGVER=v2026.11.1328-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8844,7 +8844,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1327';
+const BG_BUILD = 'v2026.11.1328';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -16878,6 +16878,61 @@ function _bgMoneyRank(s) {
     return 1;
   } catch (e) { return 0; }
 }
+// v1328 (Tyler, 8/31): "if we do have a code problem, I think a message would be
+// appropriate here and you would need to notify me and Kevin there is a betting issue
+// via the admin portal message."
+//
+// v1327's reconciliation guard was silent by design — it refuses a bad total and leaves
+// the stored money alone. Correct, but a guard nobody hears about is a bug that hides:
+// the money quietly stops updating and the first anyone knows is a player saying their
+// lifetime looks wrong, which is exactly how Senior Sunday was found.
+//
+// So it now does both: the player is told plainly that the total is held, and a row goes
+// into `feedback`, which the Admin tab's Feedback inbox already renders for admins.
+// De-duped hard — the guard can fire on every archive attempt and on a 60s cache cycle,
+// and an inbox with 400 copies of one alert is no more useful than silence.
+var _bgBetAlertSent = {};
+async function bgReportBettingIssue(tid, info) {
+  try {
+    const key = 'golf:betalert:' + String(tid || 'x');
+    if (_bgBetAlertSent[key]) return;                       // once per session, per event
+    _bgBetAlertSent[key] = true;
+    try {                                                    // and at most once a day per device
+      const prev = Number(localStorage.getItem(key) || 0);
+      if (prev && (Date.now() - prev) < 86400000) return;
+      localStorage.setItem(key, String(Date.now()));
+    } catch (e) {}
+    // Tell the player something true and useful. They cannot fix it; what they need to
+    // know is that the number they are looking at is not final and nobody is guessing.
+    try { showToast('⚠️ This event\u2019s bets don\u2019t add up — totals are on hold and Tyler has been notified.', 7000); } catch (e) {}
+    if (!supa || !_authUser) return;
+    let ev = '';
+    try { const _t = await t2Get(tid); ev = (_t && _t.name) ? _t.name : ''; } catch (e) {}
+    const detail = [
+      'AUTOMATIC ALERT — an event\u2019s bet totals did not reconcile, so they were NOT archived.',
+      'Event: ' + (ev || '(name unavailable)') + '  [' + tid + ']',
+      'Players: ' + ((info && info.players) != null ? info.players : '?'),
+      'Nets sum to: $' + ((info && info.sum) != null ? info.sum : '?') + '   (must be $0.00)',
+      'Tolerance: $' + ((info && info.tol) != null ? info.tol : '?'),
+      'Reported by: ' + ((_authUser && _authUser.id) || '?'),
+      'Build: ' + (typeof BG_BUILD !== 'undefined' ? BG_BUILD : '?'),
+      '',
+      'Money moves between players, so a whole event must net to zero. It did not, which',
+      'means a game is being scored, scoped or paid inconsistently. Stored lifetime money',
+      'was left untouched on purpose — see FINDING_v1327_LifetimeMoneyReconciliation.'
+    ].join('\n');
+    try {
+      await supa.from('feedback').insert({
+        from_name: 'Bad Golf (automatic)',
+        topic: '\u26A0\uFE0F BETTING ISSUE',
+        course: ev || null,
+        message: detail,
+        status: 'new',
+        user_id: _authUser.id
+      });
+    } catch (e) { /* non-fatal — the guard already did its job by refusing the write */ }
+  } catch (e) {}
+}
 // v1035 (JOB B): resolve an event's settled per-player net ONCE and cache it briefly.
 // Returns { net: {nameKey -> $}, lastCode: {nameKey -> the code of THAT PLAYER'S last
 // finished round}, source } or null when it cannot be resolved (offline, tournament row
@@ -16955,6 +17010,8 @@ async function _bgEventMoney(tid) {
           { tournament: tid, players: _n, sum: Math.round(_sum * 100) / 100, tolerance: _tol,
             build: (typeof BG_BUILD !== 'undefined' ? BG_BUILD : '?') });
       } catch (e) {}
+      // v1328: say so — to the player on screen, and to the admins' Feedback inbox.
+      try { bgReportBettingIssue(tid, { players: _n, sum: Math.round(_sum * 100) / 100, tol: Math.round(_tol * 1000) / 1000 }); } catch (e) {}
       _bgEventMoneyCache[tid] = { at: Date.now(), val: null };
       return null;
     }
@@ -81668,6 +81725,29 @@ async function bnavCenter() {
   const nb = document.getElementById('btn-new-game');
   if (nb) { nb.click(); } else { try { switchTab('setup'); } catch (e) {} }
 }
+// v1328 (Tyler, 8/31): "hide the league tab to where only me and Kevin see it for now,
+// it is very buggy and I don't want it out on the live version but I need everything
+// else live."
+//
+// An explicit two-account allow-list, NOT isAdmin(): there are three admins (Tyler,
+// Kevin Wells, Michael Wells) and Tyler asked for two people. Confirmed which Kevin —
+// Kevin Wells, the admin who has been in the app decisions since v829, not Kevin
+// Wright, the non-playing Saturday official added in v1318.
+//
+// To let another tester in, add their profile id here and ship a build. Deliberately
+// not a database flag: this hides an unfinished feature from a live release, and that
+// decision should be visible in the code and travel with the build, not be flippable
+// from a table nobody would think to check.
+const BG_LEAGUE_TESTERS = [
+  '96c81a63-a969-483f-acd4-887758ee1053',   // Tyler OConnor
+  '577b3347-c4ca-4a07-bba1-ff5a7174c3e4'    // Kevin Wells
+];
+function bgCanSeeLeague() {
+  try {
+    const uid = (_authUser && _authUser.id) || null;
+    return !!uid && BG_LEAGUE_TESTERS.indexOf(uid) >= 0;
+  } catch (e) { return false; }
+}
 function bnavOpenMore() {
   const grid = document.getElementById('bnav-sheet-grid'); if (!grid) return;
   const admin = (typeof isAdmin === 'function' && isAdmin());
@@ -81682,7 +81762,7 @@ function bnavOpenMore() {
     { tab: 'stats', icon: 'stats', lbl: 'Stats' },
     { tab: 'times', icon: 'cal', lbl: 'Times' },
     { tab: 'tourneys', icon: 'trophy', lbl: 'Tourney' }
-  ];
+  ].filter(i => i.tab !== 'league' || bgCanSeeLeague());   // v1328
   const cell = i => '<button type="button" class="s-item" onclick="bnavSheetGo(\'' + i.tab + '\')"><span class="sic"><svg><use href="#bn-' + i.icon + '"/></svg>' +
     (i.tab === 'league' ? '<span class="beta-pill">BETA</span>' : '') + '</span>' + i.lbl + '</button>';
   grid.style.gridTemplateColumns = 'repeat(' + items.length + ', minmax(0, 1fr))';
@@ -81764,6 +81844,12 @@ window.switchTab = function(name, opts) {
   // v922: the Wager tab is disabled (WAGER_ENABLED). Anything still pointing at it
   // lands on Home instead of activating a panel that is no longer in the document.
   if (name === 'wager' && !WAGER_ENABLED) name = 'home';
+  // v1328: the League screen is testers-only while it is being finished. The nav tile
+  // is filtered out for everyone else, but a ?lg= invite link, a deep link or any
+  // stale caller can still route here — so the tab itself is the gate, not the tile.
+  // Silent redirect: a toast about a screen the user cannot reach and did not ask for
+  // would only raise questions about a feature that is not announced yet.
+  try { if (name === 'league' && !bgCanSeeLeague()) name = 'home'; } catch (e) {}
   // v922: 'tourneys' is a REAL tab again — the new Tourney page holding the
   // tournament list and the tournament templates. The old alias that folded it into
   // the Events/Rounds tab is gone, which is exactly why every existing
