@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1356-->
+<!--BGVER=v2026.11.1357-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8978,7 +8978,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1356';
+const BG_BUILD = 'v2026.11.1357';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -47128,6 +47128,14 @@ async function bgFinishRoundFlow() {
         try { _lastFinishOpenAt = g.finishOpen.at; } catch (e2) {}   // don't react to our own write
         try { _bgFinishOpenApplied = false; } catch (e2) {}
         Promise.resolve(saveGame(g)).catch(function () {});
+        // v1357: stamp the players' account ids so everyone on this card keeps read
+        // access after finishedAt lands. Deliberately NOT awaited — this is the Finish
+        // tap, and blocking it on a name lookup over course wifi is the exact failure
+        // v934/v1348 were about. It saves again only if something actually changed;
+        // "Save & return home" awaits the same call as a second chance.
+        Promise.resolve().then(async function () {
+          try { if (await bgStampRoundUids(g)) await saveGame(g); } catch (e) {}
+        }).catch(function () {});
       }
     } catch (e) {}
     // Open the summary modal — actual archive happens on "Save & return home"
@@ -51499,7 +51507,9 @@ async function renderHomeLive() {
       try {
         const g = await loadGame(b.dataset.code);
         if (g && !g.finishedAt) {
-          g.finishedAt = Date.now(); await saveGame(g);
+          g.finishedAt = Date.now();
+          try { await bgStampRoundUids(g); } catch (e) {}   // v1357: before the round closes to its players
+          await saveGame(g);
           try { expireInvitesForRound(g.code); } catch (e) {}   // v940: kill outstanding invites for the ended round
           try { if (typeof liveActivity !== 'undefined') liveActivity.endIfCode(g.code); } catch (e) {} // end the lock-screen card for the ender
           try { notifyPlayersRoundSummary(g); } catch (e) {} // fire the end-of-round payment/summary notification (the quick End action skipped it)
@@ -64922,6 +64932,75 @@ async function _t2ResolveUserIdByNameUncached(name) {
     return null;
   } catch (e) { return null; }
 }
+// ===== v1357 — STAMP ACCOUNT IDS ONTO A ROUND'S PLAYERS ======================
+// Tyler, 8/31: Max Willard could not see his own two rounds. Not a display bug —
+// games_select_rounds_auth lets you read a round only if you OWN it, are in
+// `participants`, or your uid is on your player row. `participants` is maintained by
+// the bg_set_row_type trigger and it appends only whoever WRITES the row, so it
+// records SCOREKEEPERS, not players. A golfer added by name who never scorekept
+// satisfies none of the clauses, and the moment the round is finished the
+// "unfinished + touched in 24h" escape hatch closes behind them. 109 player-rounds
+// across 25 people were in that state.
+//
+// The backfill repaired the history. This closes the hole: the scorekeeper's device
+// resolves each player's name to an account and stamps it BEFORE the finishing write,
+// while it still has permission. It has to happen here — the locked-out player cannot
+// fix it themselves, because games_update_auth won't let them write a finished round
+// either.
+//
+// STRICT on purpose. _t2ResolveUserIdByNameUncached ends with .find(), which returns
+// the FIRST match — and "Steve Miller" is two accounts. Guessing there would weld a
+// real golfer's round to a dormant duplicate. This resolves only when EXACTLY ONE
+// account carries the name, and otherwise leaves the row alone for a human to sort.
+const _bgStrictUidCache = new Map();
+async function bgResolveUidStrict(name) {
+  const norm = (typeof normalizeNameSegment === 'function')
+    ? normalizeNameSegment : (x => String(x || '').trim().toLowerCase());
+  const key = norm(name);
+  if (!key) return null;
+  if (_bgStrictUidCache.has(key)) return _bgStrictUidCache.get(key);
+  let out = null;
+  try {
+    const first = String(name).trim().split(/\s+/)[0] || '';
+    if (first.length >= 2 && supa) {
+      // Escape LIKE metacharacters — a player literally named "%" must not match
+      // every profile (the T25 lesson the t2 resolver already learned).
+      const fp = '%' + first.replace(/([\\%_])/g, '\\$1') + '%';
+      const { data } = await supa.rpc('bg_profiles_public').ilike('my_player', fp).limit(200);
+      const hits = (data || []).filter(p => p && p.my_player && norm(p.my_player) === key);
+      out = (hits.length === 1) ? hits[0].id : null;   // 0 or 2+ => refuse
+    }
+  } catch (e) { out = null; }
+  _bgStrictUidCache.set(key, out);   // cache the refusal too — it will not change mid-round
+  return out;
+}
+// Fill in any missing players[].uid. Returns true if it changed the round, so the
+// caller knows whether a save is needed. Never overwrites a uid that is already set,
+// and never assigns one uid to two players in the same round.
+async function bgStampRoundUids(g) {
+  try {
+    if (!g || !Array.isArray(g.players) || !g.players.length) return false;
+    if (!supa || !supaOnline || typeof _authUser === 'undefined' || !_authUser) return false;
+    const _has = p => p && p.uid && String(p.uid).trim();
+    const need = g.players.filter(p => p && p.name && !_has(p));
+    if (!need.length) return false;
+    const taken = new Set();
+    g.players.forEach(p => { if (_has(p)) taken.add(String(p.uid)); });
+    let changed = false;
+    for (const p of need) {
+      let uid = null;
+      try { uid = await bgResolveUidStrict(p.name); } catch (e) { uid = null; }
+      if (!uid) continue;
+      // Two names on one card resolving to the same account means the name match is
+      // wrong, not that one person is playing twice. Leave both alone.
+      if (taken.has(String(uid))) continue;
+      p.uid = uid; taken.add(String(uid)); changed = true;
+    }
+    if (changed) { try { console.log('[BG v1357] stamped account ids on ' + g.code); } catch (e) {} }
+    return changed;
+  } catch (e) { return false; }
+}
+
 // v664: tournament flows use the SAME "Bad Golf Users" modal as regular games
 // (Tyler: "Make it like the regular games" — the inline embedded list flickered
 // on multi-add). openT2RosterPicker puts the shared modal into tournament mode:
@@ -85830,6 +85909,10 @@ async function init() {
       // v1295: bgFinishRoundFlow already stamped this when Finish was tapped. Keep the
       // original timestamp rather than moving it to whenever the payout was closed.
       if (!g.finishedAt) g.finishedAt = Date.now();
+      // v1357: last chance to stamp account ids while this device still has write
+      // permission on the round. Awaited here (unlike the Finish tap) because this
+      // path already awaits the archive, and after this the round is closed.
+      try { await bgStampRoundUids(g); } catch (e) {}
       // v1044 (Tyler, 8/16): Gregory's Senior Sunday card archived as a 79 while his
       // scorecard read 77 -- holes 11 and 14 were corrected during a REOPEN, the round
       // was finished a second time, and the archive kept the pre-edit scores. He then
