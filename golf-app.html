@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1335-->
+<!--BGVER=v2026.11.1336-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8841,7 +8841,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1335';
+const BG_BUILD = 'v2026.11.1336';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -64269,6 +64269,17 @@ function t2PlayerRow(p, amCommish, od, teeLabel, opts) {
     if (!(opts && opts.noWd)) {
       row += '<button class="small t2-wd-btn" data-pid="' + p.id + '" title="' + (wd ? 'Reinstate this player' : 'Withdraw — they sit out and their groups forfeit') + '" style="flex:0 0 auto' + (wd ? ';color:var(--accent);border-color:var(--accent)' : '') + '">' + (wd ? '↩' : 'WD') + '</button>';
     }
+    // v1336 (Tyler, 8/31): THE INVITE BUTTON. `.t2-invite-btn` had a click handler
+    // in renderT2Home the whole time -- it builds the ?tjoin=<token> link, the one
+    // invite path that actually works (claim_tournament_slot is SECURITY DEFINER, so
+    // it claims the slot no matter that RLS hides the event from a non-member). But
+    // NOTHING in the file ever emitted an element with that class, so the working
+    // link could not be sent. Same shape of bug as the v639 Event-pots row and the
+    // v986 WD button. Shown only on a slot with no account attached -- a linked
+    // player is invited in-app by t2NotifyAllPlayers and needs no link.
+    if (!p.user_id) {
+      row += '<button class="small t2-invite-btn" data-pid="' + p.id + '" data-token="' + t2esc(p.invite_token || '') + '" data-name="' + t2esc(p.display_name || '') + '" title="Text ' + t2esc(p.display_name || 'this player') + ' a personal join link" style="flex:0 0 auto;color:var(--accent);border-color:var(--accent)">✉</button>';
+    }
     row += '<button class="small t2-remove-btn" data-pid="' + p.id + '" title="Remove player" style="flex:0 0 auto;color:var(--danger);border-color:var(--danger)">×</button>';
     if (!_oneLine) row += '</div>';
   }
@@ -64946,7 +64957,8 @@ async function t2NotifyAllPlayers(t) {
       if (_stillGuests.length && typeof uiConfirm === 'function') {
         const _lnk = BG_PUBLIC_URL + '?tclaim=' + t.id;
         const _msg = _stillGuests.join(', ') + (_stillGuests.length === 1 ? ' is' : ' are') +
-          ' not in Bad Golf yet, so there is no account to send an invite to. Send them this link and they can sign in and tap their name:\n\n' + _lnk;
+          ' not in Bad Golf yet, so there is no account to send an invite to. Send them this link — they sign in and tap their name:\n\n' + _lnk +
+          '\n\nOr text one person their own link: tap the \u2709 next to their name on the roster.';   // v1336
         uiConfirm(_msg, { title: 'Not everyone got an invite', okLabel: 'Copy link', cancelLabel: 'Later' }).then(ok => {
           if (!ok) return;
           const _txt = 'Join my Bad Golf event "' + (t.name || 'tournament') + '": ' + _lnk + '\n\nSign in and tap your name to join.';
@@ -68775,6 +68787,7 @@ async function renderT2Home() {
       body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { const _ok = await t2RemovePlayer(b.dataset.pid); if (!_ok) showToast('Could not remove that player — they may be locked to a started group'); await renderT2Home(); });   // v986 (T47)
       body.querySelectorAll('.t2-wd-btn').forEach(b => b.onclick = () => t2ToggleWithdraw(b.dataset.pid));   // v986 (T38)
       body.querySelectorAll('.t2-fill-slot').forEach(b => b.onclick = () => t2FillSlotPrompt(b.dataset.pid));
+      body.querySelectorAll('.t2-invite-btn').forEach(b => b.onclick = () => bgShareSlotInvite(b));   // v1336: was bound only on the event home
       body.querySelectorAll('.t2-hcp-input').forEach(inp => {
         const _save = async (toast) => { const v = inp.value; const ok = await t2SetPlayerHcp(inp.dataset.pid, v !== '' ? parseFloat(v) : null); if (toast) showToast(ok ? 'Handicap saved' : 'Could not save handicap'); return ok; };
         let _tm; inp.oninput = () => { _t2HcpPending[inp.dataset.pid] = inp.value; clearTimeout(_tm); _tm = setTimeout(() => _save(false), 700); };
@@ -69397,15 +69410,7 @@ async function renderT2Home() {
       } catch (e) {}
     });
   }
-  body.querySelectorAll('.t2-invite-btn').forEach(b => b.onclick = async () => {
-    const link = BG_PUBLIC_URL + '?tjoin=' + b.dataset.token;
-    const text = 'Join my Bad Golf event: ' + link;
-    try { if (navigator.share) { await navigator.share({ text: text }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      try { await navigator.clipboard.writeText(link); showToast('Invite link copied'); return; } catch (e2) {}
-    }
-    showToast(link);
-  });
+  body.querySelectorAll('.t2-invite-btn').forEach(b => b.onclick = () => bgShareSlotInvite(b));
   // Standings refresh — re-pulls every group round and recomputes the cup.
   // v1140: wire BOTH refresh buttons (the cup card's #t2-refresh and the leaderboard's
   // #t2-refresh-lb, which used to be a duplicate id and therefore never bound).
@@ -69565,19 +69570,56 @@ async function processPendingTclaim(tid) {
 // claim_tournament_slot RPC via each slot's invite_token. Sign-in required.
 async function openT2ClaimScreen(tid) {
   if (!isSignedIn()) { try { localStorage.setItem('golf:pending-tclaim', tid); } catch (e) {} const m = document.getElementById('auth-modal'); if (m) m.classList.add('show'); showToast('Sign in to join'); return; }
-  let players = [], t = null;
-  try { await t2EnsureInviteTokens(tid); } catch (e) {}
-  try { players = await t2GetPlayers(tid); } catch (e) {}
-  try { t = await t2Get(tid); } catch (e) {}
-  const myId = _authUser && _authUser.id;
-  if (players.find(p => p.user_id === myId)) { showToast("You're already in this event ✓"); switchTab('tourneys'); openT2Home(tid); return; }
-  const unclaimed = players.filter(p => !p.user_id);
+  // v1336 (Tyler, 8/31 -- "the invite process has bit us more than once"). This
+  // screen used to read the roster with t2GetPlayers/t2Get, plain SELECTs governed
+  // by tp_select (tourney_is_member OR user_id = auth.uid()) and tournaments_select
+  // (tourney_is_member). A brand-new signup -- the ONLY person a ?tclaim= link is
+  // ever sent to -- is neither, so both returned ZERO rows and this rendered
+  // "Everyone here is already claimed": the exact opposite of the truth, with the
+  // person's own unclaimed slot sitting right there. Confirmed by impersonating a
+  // non-member against a live event: plain select 0 rows, RPC 3 slots.
+  //
+  // bg_list_claimable_slots is SECURITY DEFINER, the read-side twin of
+  // claim_tournament_slot (which was always fine). It returns ONLY unclaimed rows
+  // and only {id, display_name, invite_token}, and it mints missing tokens -- which
+  // t2EnsureInviteTokens could never do from the invitee's session, UPDATE being
+  // commissioner-only. The actual claim still goes through claim_tournament_slot
+  // unchanged, so there is exactly one claim path.
+  let unclaimed = [], evName = '', alreadyIn = false, _rpcOk = false;
+  try {
+    const { data, error } = await supa.rpc('bg_list_claimable_slots', { p_tid: tid });
+    if (!error && data) {
+      _rpcOk = true;
+      evName = data.name || '';
+      alreadyIn = !!data.already_in;
+      unclaimed = Array.isArray(data.slots) ? data.slots : [];
+    }
+  } catch (e) {}
+  // Fallback for a phone on an older build, and for a commissioner opening their
+  // own link (who can read the roster directly anyway).
+  if (!_rpcOk) {
+    let players = [], t = null;
+    try { await t2EnsureInviteTokens(tid); } catch (e) {}
+    try { players = await t2GetPlayers(tid); } catch (e) {}
+    try { t = await t2Get(tid); } catch (e) {}
+    const _mid = _authUser && _authUser.id;
+    alreadyIn = !!players.find(p => p.user_id === _mid);
+    unclaimed = players.filter(p => !p.user_id);
+    evName = (t && t.name) || '';
+  }
+  if (alreadyIn) { showToast("You're already in this event ✓"); switchTab('tourneys'); openT2Home(tid); return; }
   const ov = document.createElement('div');
   ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100070';
   const rows = unclaimed.map(p => '<button class="full t2-claim-pick" data-token="' + t2esc(p.invite_token || '') + '" style="text-align:left;margin-bottom:6px;font-weight:600">' + t2esc(p.display_name || '?') + testPillHtml(p.display_name) + '</button>').join('');
-  ov.innerHTML = '<div class="modal" style="max-width:440px"><h2 style="margin-bottom:6px">Join ' + t2esc((t && t.name) || 'the tournament') + '</h2>' +
+  // v1336: the empty state now distinguishes the two things that can produce it.
+  // "Everyone here is already claimed" was asserted even when the read had FAILED,
+  // which is how a dead link read as a full roster.
+  const _empty = _rpcOk
+    ? '<div class="help-text">Every spot in this event is already taken. If one of them is you, you may have signed up under a second login — ask your organizer to re-link your name.</div>'
+    : '<div class="help-text">Couldn\'t read this event\'s roster — you may be offline, or this link may be for an event that was deleted. Try again, or ask your organizer for a fresh link.</div>';
+  ov.innerHTML = '<div class="modal" style="max-width:440px"><h2 style="margin-bottom:6px">Join ' + t2esc(evName || 'the tournament') + '</h2>' +
     '<p class="help-text" style="margin-bottom:10px">Tap your name to join. This links your account to the spot your organizer set up — so your scores and history stay in one place (no duplicate player).</p>' +
-    '<div style="max-height:50vh;overflow-y:auto">' + (rows || '<div class="help-text">Everyone here is already claimed. If one of these players is you, ask your organizer to re-add your name.</div>') + '</div>' +
+    '<div style="max-height:50vh;overflow-y:auto">' + (rows || _empty) + '</div>' +
     '<div style="margin-top:10px"><button class="full" id="t2-claim-notme">I\'m not listed</button></div>' +
     '<div class="actions" style="margin-top:8px"><button id="t2-claim-cancel" style="flex:1">Close</button></div></div>';
   document.body.appendChild(ov);
@@ -69593,6 +69635,56 @@ async function openT2ClaimScreen(tid) {
     if (claimedTid) { close(); showToast('Welcome to the tournament! 🎉'); switchTab('tourneys'); openT2Home(claimedTid); }
     else b.disabled = false;
   });
+}
+// v1336: send ONE player their personal ?tjoin= link. Bound to every .t2-invite-btn,
+// on the tournament home roster and in the setup wizard alike.
+//
+// Mints the token on the spot if the slot has none. t2EnsureInviteTokens only ever
+// ran on the event home, so a slot added in the wizard and invited immediately had
+// no token and the link was dead on arrival. UPDATE here is the COMMISSIONER's --
+// the only session RLS allows to write this row -- which is exactly why the invitee
+// could never mint one for themselves.
+async function bgShareSlotInvite(btn) {
+  if (!btn) return;
+  let token = btn.dataset.token || '';
+  const who = btn.dataset.name || 'you';
+  const pid = btn.dataset.pid;
+  if (!token && pid) {
+    try {
+      token = t2GenToken();
+      const _ok = _bgWrote(await supa.from('tournament_players').update({ invite_token: token }).eq('id', pid).select('id'));
+      if (!_ok) { showToast('Could not create an invite link — check your connection'); return; }
+      btn.dataset.token = token;
+    } catch (e) { showToast('Could not create an invite link — check your connection'); return; }
+  }
+  if (!token) { showToast('Could not create an invite link for that spot'); return; }
+  // v1336 (Tyler, 8/31): "the invite goes out to all players ... via a group text."
+  // That is how this event is actually invited, and it makes this button a footgun:
+  // a ?tjoin= link claims ONE named slot, so the first person to tap it in a group
+  // thread takes that seat. The group blast is "Invite all players" (?tclaim=), which
+  // is safe by construction -- bg_list_claimable_slots only ever offers spots nobody
+  // has taken, the same property v1297 gave the league link. So: confirm, by name,
+  // every time, and say plainly where the group link lives.
+  if (typeof uiConfirm === 'function') {
+    const _ok = await uiConfirm(
+      'This link claims ' + who + "'s spot specifically \u2014 whoever opens it FIRST takes that seat.\n\n" +
+      'Send it to ' + who + ' alone, never to the group thread.\n\n' +
+      'For the group, use \u201cInvite all players\u201d instead \u2014 that link lets each person tap their own name.',
+      { title: 'Personal link for ' + who, okLabel: 'Send to ' + who, cancelLabel: 'Cancel' });
+    if (!_ok) return;
+  }
+  const link = BG_PUBLIC_URL + '?tjoin=' + encodeURIComponent(token);
+  let me = null; try { me = await getMeName(); } catch (e) {}
+  const from = me ? String(me).split(/\s+/)[0] : 'Your buddy';
+  const evName = (_t2Current && _t2Current.name) || 'our Bad Golf event';
+  // Names the SLOT, so the recipient knows this link is theirs and not a group
+  // link they can forward -- forwarding it hands away their spot.
+  const text = from + ' added you to "' + evName + '" on Bad Golf as ' + who + '.\n\n' +
+    'This link is just for you — open it and you are in:\n' + link +
+    '\n\n📱 Get the free app first (best experience):\niPhone: ' + BG_APPSTORE_URL + '\nAndroid: ' + BG_PLAYSTORE_URL;
+  try { if (navigator.share) { await navigator.share({ text: text }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(text); showToast('Invite for ' + who + ' copied 📋'); return; } catch (e) {}
+  showToast(text, 6000);
 }
 // Commissioner-side dedupe: when adding a known account (friend/roster pick),
 // ADOPT an existing unclaimed slot whose name matches instead of inserting a twin.
@@ -91963,16 +92055,68 @@ async function processPendingJoin(code) {
   try {
     const App = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.App;
     if (!App || typeof App.addListener !== 'function') return;
-    App.addListener('appUrlOpen', (data) => {
+    App.addListener('appUrlOpen', (data) => { try { _bgRouteDeepLink((data && data.url) || ''); } catch (e) {} });
+    // v1336 (Tyler, 8/31): COLD LAUNCH. When a tap on a Universal Link starts the
+    // app from not-running, iOS hands Capacitor the URL as the LAUNCH url; the
+    // 'appUrlOpen' listener is wired here, several seconds later, and never fires
+    // for it. handleTournamentJoinLink() cannot cover the gap either -- it reads
+    // location.search, and the native webview is served from https://localhost with
+    // no query string, so inside the app it has always seen nothing at all. Read the
+    // launch URL explicitly and route it through the same function.
+    try {
+      if (typeof App.getLaunchUrl === 'function') {
+        // stashOnly: this runs at PARSE time, long before initSupabase() -- acting on
+        // the link here would call t2ClaimSlot/joinRoundByCode against a null client
+        // and burn the invite on a "couldn't open that" toast. Stash it in exactly the
+        // keys the boot path already drains (handleTournamentJoinLink at boot, and the
+        // INITIAL_SESSION branch of onAuthStateChange), which run after the client is up.
+        App.getLaunchUrl().then(function (r) { try { if (r && r.url) _bgRouteDeepLink(r.url, true); } catch (e) {} }).catch(function () {});
+      }
+    } catch (e) {}
+  } catch (e) {}
+})();
+// One place that turns a tapped URL into a destination, for both the warm
+// ('appUrlOpen') and cold (getLaunchUrl) cases above.
+function _bgRouteDeepLink(url, stashOnly) {
       try {
-        const url = (data && data.url) || '';
         if (!url) return;
-        // v1247: league invites first — badgolf://league/<token> or https ...?lg=<token>.
+        // v1336 (Tyler, 8/31): TOURNAMENT invites. This handler understood ?join=
+        // and ?lg= and nothing else, so a ?tclaim= / ?tjoin= link fell through to
+        // `if (!code) return;` and the app silently showed Home. Universal Links
+        // ARE live for thundertonka2-tech.github.io (Apple's CDN is serving the
+        // association), which made it worse, not better: an iPhone WITH the app
+        // installed opens the app on every tournament invite, and the app threw the
+        // token away. That is Tyler's v1043 report -- "when I send him an invite it
+        // takes him to the home screen instead of into the game" -- which v1043
+        // only ever fixed on the web path.
+        let tj = null, tc = null;
+        try { const u = new URL(url); tj = u.searchParams.get('tjoin'); tc = u.searchParams.get('tclaim'); } catch (e) {}
+        if (tj || tc) {
+          if (stashOnly) {
+            if (tj) { try { localStorage.setItem('golf:pending-tjoin', String(tj).trim()); } catch (e) {} }
+            else { try { localStorage.setItem('golf:pending-tclaim', String(tc).trim()); } catch (e) {} }
+            return;
+          }
+          if (typeof isSignedIn === 'function' && isSignedIn()) {
+            if (tj) { try { processPendingTjoin(String(tj).trim()); } catch (e) {} }
+            else { try { processPendingTclaim(String(tc).trim()); } catch (e) {} }
+          } else {
+            // Same stash-then-finish-after-auth shape the web path uses; the
+            // onAuthStateChange block reads exactly these two keys.
+            if (tj) { _pendingTjoin = String(tj).trim(); try { localStorage.setItem('golf:pending-tjoin', _pendingTjoin); } catch (e) {} }
+            else { try { localStorage.setItem('golf:pending-tclaim', String(tc).trim()); } catch (e) {} }
+            try { const mm = document.getElementById('auth-modal'); if (mm) mm.classList.add('show'); } catch (e) {}
+            try { showToast('Sign in to join the tournament'); } catch (e) {}
+          }
+          return;
+        }
+        // v1247: league invites — badgolf://league/<token> or https ...?lg=<token>.
         let lgTok = null;
         try { const lm = url.match(/badgolf:\/\/league\/([A-Za-z0-9]+)/i); if (lm) lgTok = lm[1]; } catch (e) {}
         if (!lgTok) { try { lgTok = new URL(url).searchParams.get('lg'); } catch (e) {} }
         if (lgTok) {
           lgTok = String(lgTok).trim().toUpperCase();
+          if (stashOnly) { try { localStorage.setItem('golf:pending-lg', lgTok); } catch (e) {} return; }
           if (typeof isSignedIn === 'function' && isSignedIn()) {
             try { processPendingLg(lgTok); } catch (e) {}
           } else {
@@ -91989,6 +92133,7 @@ async function processPendingJoin(code) {
         if (!code) { try { code = new URL(url).searchParams.get('join'); } catch (e) {} }  // https ...?join=<code>
         if (!code) return;
         code = String(code).trim().toUpperCase();
+        if (stashOnly) { try { localStorage.setItem('golf:pending-join-link', code); } catch (e) {} return; }
         if (typeof isSignedIn === 'function' && isSignedIn()) {
           if (typeof window.joinRoundByCode === 'function') window.joinRoundByCode(code);
         } else {
@@ -91999,9 +92144,7 @@ async function processPendingJoin(code) {
           try { showToast('Sign in to open the round'); } catch (e) {}
         }
       } catch (e) {}
-    });
-  } catch (e) {}
-})();
+}
 
 // ============================================================
 // CONTACT US + ADMIN FEEDBACK INBOX
