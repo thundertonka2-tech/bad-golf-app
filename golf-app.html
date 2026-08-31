@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1347-->
+<!--BGVER=v2026.11.1348-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8951,7 +8951,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1347';
+const BG_BUILD = 'v2026.11.1348';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -16975,6 +16975,17 @@ function rosterRoundKey(s) {
 // 'manual' is reserved for a hand-corrected row; nothing in the app writes it today
 // (Saturday's corrections were applied straight to the database), but a row stamped
 // with it by hand will outrank every automatic archive.
+// v1348: one money formatter for every per-round figure on screen. Penny-exact when
+// the stored value has cents, whole dollars when it does not, so a column of rows always
+// sums to the total printed above it.
+function bgMoneyTxt(v) {
+  const n = Number(v) || 0;
+  const a = Math.abs(n);
+  const body = (Math.abs(a - Math.round(a)) < 0.005) ? String(Math.round(a)) : a.toFixed(2);
+  return (n < 0 ? '-$' : '+$') + body;
+}
+window.bgMoneyTxt = bgMoneyTxt;
+
 function _bgMoneyRank(s) {
   try {
     if (!s || typeof s.money !== 'number') return 0;
@@ -18469,8 +18480,37 @@ async function archiveScoresFromRound(g) {
             source: _isT2 ? 'event' : 'group',
             net: _net
           };
-          _settledById = _net;
-          try { await saveGame(g); } catch (e) {}
+          _settledById = _net;          // this device uses it immediately, saved or not
+          // ── v1348 (Tyler, 8/31: "the rounds tab is just stuck loading") ──────────
+          // This `saveGame` used to be AWAITED right here. archiveScoresFromRound is
+          // called by every list render — the Rounds tab, the Stats heal, the Crew heal
+          // — in sequential `for` loops of up to ten rounds, and the Rounds tab awaits
+          // loadRounds() before it renders the tournament list, the open rounds and the
+          // templates. So v1343 quietly put a full game-blob cloud WRITE per round on
+          // the critical path of the tab's first paint, and on the first run after
+          // upgrading EVERY finished round needs one. Ten serialized writes is a tab
+          // that sits on "Loading…", and everything staged behind it never runs.
+          //
+          // The write is a PUBLICATION, not a dependency: `_settledById` is already set,
+          // so this device renders correct money whether or not the write has landed,
+          // and the next archive republishes if it failed. Nothing downstream reads the
+          // result. So it goes off the critical path entirely.
+          //
+          // The once-per-round guard matters as much as the detach: renderBoard() calls
+          // archiveScoresFromRound on every repaint, and a save can echo back as a
+          // realtime update that repaints the board again. Awaited or not, that is a
+          // feedback loop; a round published once per session cannot participate in one.
+          try {
+            window._bgSettledPublished = window._bgSettledPublished || {};
+            const _pk = g.code + '@' + g.finishedAt;
+            if (!window._bgSettledPublished[_pk]) {
+              window._bgSettledPublished[_pk] = 1;
+              Promise.resolve().then(() => saveGame(g)).catch(() => {
+                // let a later archive retry it — the figure is not lost, only unpublished
+                try { delete window._bgSettledPublished[_pk]; } catch (e) {}
+              });
+            }
+          } catch (e) {}
         } else if (_any && !_balances) {
           try { console.warn('[BadGolf] not publishing settled money — round does not net zero:', g.code, Math.round(_sum * 100) / 100); } catch (e2) {}
         }
@@ -52512,8 +52552,29 @@ async function syncMyStatsToCloud(roster, visOverride){
       _cloudEmptyConfirmed = cloud.length === 0;
       if (cloud.length) {
         const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
-        const have = new Set(stats.map(keyOf));
-        cloud.forEach(s => { const k = keyOf(s); if (s && k && !have.has(k) && !_deleted.has(k)) { stats.push(s); have.add(k); } });
+        // v1348: this union used to only ADD rounds the local copy was missing. For a
+        // round present in BOTH, the local record won unconditionally — so a device
+        // holding a stale or weaker archive overwrote a better cloud one on every sync.
+        // That is the mechanism that silently reverted the v1327 money correction:
+        // the fix was written to player_stats, then a phone that still had the old
+        // figure synced and put it straight back.
+        //
+        // Every other merge path in this file (dedupeScoreHistory, the archive merge)
+        // already compares with this rank. player_stats was the one table that did not,
+        // which made it the weak link in an otherwise guarded chain. Same formula, so a
+        // record that would win in the roster wins here too — no new precedence rules.
+        const _psRank = s => s ? (((s.complete ? 1000 : 0) + (s.holesScored || 0)) * 10 + _bgMoneyRank(s)) : -1;
+        const byKey = new Map();
+        stats.forEach((s, i) => { const k = keyOf(s); if (k) byKey.set(k, i); });
+        cloud.forEach(s => {
+          const k = keyOf(s);
+          if (!s || !k || _deleted.has(k)) return;
+          if (!byKey.has(k)) { byKey.set(k, stats.length); stats.push(s); return; }
+          // present in both — keep whichever record is stronger. Strictly greater, so a
+          // tie always leaves the local copy in place and repeated syncs cannot oscillate.
+          const i = byKey.get(k);
+          if (_psRank(s) > _psRank(stats[i])) stats[i] = s;
+        });
       }
     } catch (e) { console.warn('syncMyStatsToCloud: cloud read failed — skipping upsert (will retry)', e); return; }
     if (!stats.length && !_cloudEmptyConfirmed) return;   // never shrink the backup to empty without confirmation
@@ -56818,7 +56879,11 @@ async function openCrewProfile(name, _skipHeal) {
     html += hist.map(h => {
       const d = h.date ? new Date(h.date).toLocaleDateString() : '';
       const hasMoney = typeof h.money === 'number';
-      const m = hasMoney ? (h.money >= 0 ? '+$' + h.money.toFixed(0) : '-$' + Math.abs(h.money).toFixed(0)) : '—';
+      // v1348: money is stored penny-exact (v440), but this column ran toFixed(0), so
+      // Steve's $210.84 read "+$211" and a column of rounded rows visibly failed to sum
+      // to the lifetime total above it — the exact discrepancy that started the 8/31
+      // money audit. Cents only where they exist: a clean $25 still reads "$25".
+      const m = hasMoney ? bgMoneyTxt(h.money) : '—';
       const mcls = (h.money || 0) > 0 ? 'pos' : ((h.money || 0) < 0 ? 'neg' : 'zero');
       const grossTxt = (h.gross != null) ? h.gross : '—';
       let netTxt = '—';
