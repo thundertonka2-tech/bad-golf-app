@@ -1,7 +1,37 @@
-# Root-domain association files (`thundertonka2-tech.github.io`)
+# Root-domain association files
 
-**STATUS: DONE — both platforms verified live 2026-08-31.** This folder is now a
-reference copy of what is published; nothing here needs action.
+**STATUS (v1364, 2026-08-31): the primary host is now `officialbadgolf.com`.**
+`thundertonka2-tech.github.io` is kept as a LEGACY host and must not be removed yet.
+
+## v1364 — the domain moved
+
+`officialbadgolf.com` (Squarespace registrar, GitHub Pages custom domain on THIS
+repo) is now the invite host. Because the custom domain puts this repo at the
+**domain root**, this repo's own `.well-known/` finally serves where the OSes
+look — the separate `thundertonka2-tech.github.io` repo is no longer needed for
+the new host:
+
+- iOS  → `https://officialbadgolf.com/.well-known/apple-app-site-association`
+- Android → `https://officialbadgolf.com/.well-known/assetlinks.json`
+
+Both files live in `.well-known/` at this repo's root. `assetlinks.json` carries
+the same Play **App signing** SHA-256 documented below — it is a copy of the file
+in this folder, not a new fingerprint.
+
+**Why the old host stays.** Android verifies App Links at INSTALL time, once. Every
+phone that already has Bad Golf is verified against `thundertonka2-tech.github.io`
+and will not re-verify for `officialbadgolf.com` until the app is reinstalled or
+updated. Invite links already sitting in people's texts also point at the old host.
+So both hosts are listed in `App.entitlements` and in the Android intent-filter that
+`codemagic.yaml` injects, and both keep serving their association files. Drop the
+legacy host only after a couple of releases have shipped and the old links have
+aged out — not before.
+
+GitHub Pages 301s `thundertonka2-tech.github.io/bad-golf-app/*` to
+`officialbadgolf.com/*` automatically, so old WEB links keep working regardless.
+
+## History (the github.io host)
+
 
 ## What these are
 
