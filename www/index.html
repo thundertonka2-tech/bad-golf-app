@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1336-->
+<!--BGVER=v2026.11.1337-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8844,7 +8844,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1336';
+const BG_BUILD = 'v2026.11.1337';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -55004,6 +55004,12 @@ async function openRoundBetsSheet(code, courseName, opts) {
       const _fs = _t2FieldStandingsHtml(_evScores, _evPl);
       if (_fs) html += '<div style="margin-bottom:10px">' + _fs + '</div>';
     } catch (e) {}
+    // v1336 (Tyler, 8/31): the last three Event-Leaderboard-only blocks — cup
+    // standings, per-day team standings, money by day. Filled in after first paint
+    // (see #rb-evextra below): the cup needs a load and money-by-day runs one payout
+    // pass PER DAY, so awaiting them here would hold the whole sheet shut on a cell
+    // connection. Same builders openEventLeaderboard uses, so the two cannot drift.
+    html += '<div id="rb-evextra"></div>';
     // v1320: the two breakdowns Tyler asked for — the event total for every player,
     // then each cart's own bets — both stated as TOTALS, above the single payout.
     try { html += bgEventBreakdownHtml(_evPay, _evRaw); } catch (e) {}
@@ -55105,6 +55111,17 @@ async function openRoundBetsSheet(code, courseName, opts) {
     // skins, and this repaint would overwrite the whole field with this group again.
     if (!_fieldScHtml && g.t2 && g.t2.tournamentId && typeof _t2FetchFieldSkinMap === 'function') {
       _t2FetchFieldSkinMap(g).then(m => { try { const sc = body.querySelector('#rb-scorecard'); if (sc && m) { const fresh = buildRoundScorecardHtml(g, m); if (fresh) sc.innerHTML = fresh; } } catch (e) {} }).catch(() => {});
+    }
+  } catch (e) {}
+  // v1336: fill #rb-evextra once the sheet is up. Fire-and-forget on purpose —
+  // a slow or failed load leaves the placeholder empty and every other section of
+  // the sheet still renders, rather than the whole sheet waiting on it.
+  try {
+    const _xh = body.querySelector('#rb-evextra');
+    if (_xh && t && t.id) {
+      _t2EventExtrasHtml(t, _evPay).then(function (h) {
+        try { if (h && _xh.isConnected) _xh.innerHTML = h; } catch (e) {}
+      }).catch(function () {});
     }
   } catch (e) {}
   { const lb = body.querySelector('#rb-lb'); if (lb) lb.onclick = () => { try { openEventLeaderboard(t, { fromCode: (g && g.code) || '' }); } catch (e) { try { showToast('Could not open the leaderboard'); } catch (e2) {} } }; }
@@ -73168,6 +73185,98 @@ function _t2FieldStandingsHtml(list, evPlayers) {
   } catch (e) { return ''; }
 }
 
+// v1336 (Tyler, 8/31): the last three blocks that lived ONLY on the Event
+// Leaderboard -- cup standings, per-day team standings, money by day. The
+// "Tournament Results" button was retired in v1332 because everything it showed
+// was on the round Bets sheet; these three were the remainder. Extracted verbatim
+// into builders so BOTH screens render from one implementation and cannot drift.
+
+// Cup standings, day by day. Team, multi-day events only; '' otherwise.
+async function _t2CupStandingsHtml(t) {
+  try {
+    if (typeof t2IsOneDay === 'function' && t2IsOneDay(t)) return '';
+    const _cupData = await t2LoadCupStandings(t);
+    const _cupH = _cupData && _t2CupDayTableHtml(t, _cupData.standings, _cupData.days);
+    if (!_cupH) return '';
+    const _cs = _cupData.standings;
+    const _lead = (_cs.ranked && _cs.ranked[0]) || null;
+    const _tie = _cs.ranked && _cs.ranked.length > 1 && _cs.ranked[1].final === _lead.final;
+    let h = '<h3 style="margin:6px 0 4px">\uD83C\uDFC6 Cup standings <span class="small-text" style="color:var(--text-muted)">1 point a match \u00b7 \u00bd a tie</span></h3>';
+    h += '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">' + (_lead && _lead.final > 0 ? (_tie ? 'Tied at the top' : t2esc(_lead.name) + ' leads') : 'No points decided yet') + ' \u00b7 ' + (t.num_days || 1) + ' day' + ((t.num_days || 1) === 1 ? '' : 's') + '</div>';
+    return h + _cupH;
+  } catch (e) { console.warn('cup standings', e); return ''; }
+}
+
+// Per-day team standings vs the field. Takes the loadTourneyTeamStandings result.
+function _t2TeamDayStandingsHtml(teamStand) {
+  try {
+    if (!(teamStand && teamStand.days && teamStand.days.length)) return '';
+    let html = '';
+    teamStand.days.forEach(d => {
+      const ds = teamStand.byDay[d];
+      html += '<h3 style="margin:14px 0 4px">\uD83E\uDD1D Team standings \u2014 Day ' + d + ' \u00b7 ' + escapeHtml(ds.fmt) + ' <span class="small-text" style="color:var(--text-muted)">vs the field</span></h3><div style="font-size:13px">';
+      ds.teams.forEach((tm, i) => {
+        const score = ds.points
+          ? ((tm.total > 0 ? '+' : '') + tm.total + ' pts')
+          : (tm.total + (tm.parTotal != null ? ' (' + _evFmtTp(tm.total - tm.parTotal) + ')' : ''));
+        html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">G' + escapeHtml(String(tm.group)) + ' \u00b7 ' + escapeHtml(tm.name || '') + '</span><span style="width:92px;text-align:right;font-weight:700">' + escapeHtml(score) + '</span>' + (tm.thru != null ? '<span style="width:40px;text-align:right;color:var(--text-muted)">(' + tm.thru + ')</span>' : '') + '</div>';
+      });
+      html += '</div>';
+    });
+    return html;
+  } catch (e) { console.warn('team day standings', e); return ''; }
+}
+
+// Money by day: each day's games and pots settled on that day's rounds alone
+// (the _t2DayOnly filter in _t2FetchFieldRounds), then the combined total. No new
+// money math -- t2ComputeCombinedPayouts is the same engine the event total uses.
+async function _t2MoneyByDayHtml(t, combinedPay) {
+  try {
+    const _nD = t.num_days || 1;
+    if (!(_nD > 1 && combinedPay && Array.isArray(combinedPay.rows) && combinedPay.rows.length)) return '';
+    const _dayPays = [];
+    for (let _dn = 1; _dn <= _nD; _dn++) {
+      let _dp = null;
+      try { _dp = await t2ComputeCombinedPayouts(Object.assign({}, t, { _t2DayOnly: _dn })); } catch (e) { _dp = null; }
+      if (_dp && Array.isArray(_dp.rows) && _dp.rows.length && _dp.roundsTotal > 0) _dayPays.push({ day: _dn, pay: _dp });
+    }
+    if (!_dayPays.length) return '';
+    let html = '<h3 style="margin:14px 0 4px">\uD83D\uDCB0 Money by day</h3>';
+    html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:6px">Each day\u2019s games and pots on their own, then everything combined. Tap a day to expand.</div>';
+    _dayPays.forEach(dp => {
+      const _crs = (t.settings && t.settings.dayCourses && t.settings.dayCourses[dp.day] && t.settings.dayCourses[dp.day].name) || '';
+      const _sub = dp.pay.allFinished ? 'all groups in' : (dp.pay.roundsFinished + ' of ' + dp.pay.roundsTotal + ' groups finished \u2014 provisional');
+      const _top = dp.pay.rows.slice().sort((a, b) => (b.net || 0) - (a.net || 0))[0];
+      html += '<details style="margin:0 0 6px;border:1px solid var(--border);border-radius:10px;padding:6px 10px"><summary style="cursor:pointer;font-weight:700">Day ' + dp.day + (_crs ? ' \u00b7 ' + escapeHtml(_crs) : '') + ' <span class="small-text" style="font-weight:400;color:var(--text-muted)">' + escapeHtml(_sub) + (_top && (_top.net || 0) > 0.005 ? ' \u00b7 top: ' + escapeHtml(_top.first || _top.name) + ' +$' + (Math.round(_top.net * 100) / 100).toFixed(2) : '') + '</span></summary>';
+      html += '<div style="margin-top:6px">' + _t2PayoutBoardRowsHtml(dp.pay.rows.map(r => ({ id: r.id, name: r.name, first: r.first, net: r.net || 0 })), {}) + '</div>';
+      if (dp.pay.byGame && dp.pay.byGame.length) html += '<div class="small-text" style="color:var(--text-muted);margin-top:4px">Games: ' + escapeHtml(dp.pay.byGame.map(gm => gm.key + (gm.pending ? ' (pending)' : '')).join(' \u00b7 ')) + '</div>';
+      html += '</details>';
+    });
+    html += '<details style="margin:0 0 6px;border:2px solid var(--accent);border-radius:10px;padding:6px 10px"><summary style="cursor:pointer;font-weight:800">Event total <span class="small-text" style="font-weight:400;color:var(--text-muted)">' + escapeHtml(combinedPay.allFinished ? 'everything combined' : (combinedPay.roundsFinished + ' of ' + combinedPay.roundsTotal + ' groups finished \u2014 provisional')) + '</span></summary>';
+    html += '<div style="margin-top:6px">' + _t2PayoutBoardRowsHtml(combinedPay.rows.map(r => ({ id: r.id, name: r.name, first: r.first, net: r.net || 0 })), {}) + '</div></details>';
+    return html;
+  } catch (e) { console.warn('money by day', e); return ''; }
+}
+
+// All three, in the Event Leaderboard's own order, for the round Bets sheet.
+// Async and network-bound (cup load + one payout pass per day), so the sheet
+// paints first and this fills in after -- see #rb-evextra.
+async function _t2EventExtrasHtml(t, combinedPay) {
+  let out = '';
+  try {
+    const [_cup, _teamStand] = await Promise.all([
+      _t2CupStandingsHtml(t).catch(() => ''),
+      loadTourneyTeamStandings(t).catch(() => null)
+    ]);
+    if (_cup) out += '<div style="margin-bottom:10px">' + _cup + '</div>';
+    const _td = _t2TeamDayStandingsHtml(_teamStand);
+    if (_td) out += '<div style="margin-bottom:10px">' + _td + '</div>';
+    const _mb = await _t2MoneyByDayHtml(t, combinedPay).catch(() => '');
+    if (_mb) out += '<div style="margin-bottom:10px">' + _mb + '</div>';
+  } catch (e) { console.warn('event extras', e); }
+  return out;
+}
+
 function _t2FieldScorecardHtml(t, rawRounds, evPlayers) {
   try {
     let field = null;
@@ -75951,21 +76060,7 @@ async function openEventLeaderboard(t, opts) {
     let html = '';
     // v1154: the cup, day by day, at the top of Tournament Results (it only ever
     // lived on the tournament home before). Team events only.
-    let _cupData = null;
-    try {
-      if (!(typeof t2IsOneDay === 'function' && t2IsOneDay(t))) {
-        _cupData = await t2LoadCupStandings(t);
-        const _cupH = _cupData && _t2CupDayTableHtml(t, _cupData.standings, _cupData.days);
-        if (_cupH) {
-          const _cs = _cupData.standings;
-          const _lead = (_cs.ranked && _cs.ranked[0]) || null;
-          const _tie = _cs.ranked && _cs.ranked.length > 1 && _cs.ranked[1].final === _lead.final;
-          html += '<h3 style="margin:6px 0 4px">🏆 Cup standings <span class="small-text" style="color:var(--text-muted)">1 point a match · ½ a tie</span></h3>';
-          html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">' + (_lead && _lead.final > 0 ? (_tie ? 'Tied at the top' : t2esc(_lead.name) + ' leads') : 'No points decided yet') + ' · ' + (t.num_days || 1) + ' day' + ((t.num_days || 1) === 1 ? '' : 's') + '</div>';
-          html += _cupH;
-        }
-      }
-    } catch (e) { console.warn('evlb cup', e); }
+    html += (await _t2CupStandingsHtml(t)) || '';   // v1336: shared with the Bets sheet
     // v1155: the bracket tree leads Tournament Results on a bracket event.
     try { if (t2IsBracket(t)) { const _bk = await bgBracketLoad(t); const _bh = _bgBracketCardHtml(t, _bk, false, { noControls: true }); if (_bh) html += _bh; } } catch (e) { console.warn('evlb bracket', e); }
     if (_fieldTQ && Array.isArray(_fieldTQ.teams) && _fieldTQ.teams.length) {
@@ -76009,19 +76104,7 @@ async function openEventLeaderboard(t, opts) {
     }
     // v1332: one implementation, shared with the round Bets sheet.
     html += _t2FieldStandingsHtml(list, evPlayers) || '';
-    if (teamStand && teamStand.days && teamStand.days.length) {
-      teamStand.days.forEach(d => {
-        const ds = teamStand.byDay[d];
-        html += '<h3 style="margin:14px 0 4px">🤝 Team standings — Day ' + d + ' · ' + escapeHtml(ds.fmt) + ' <span class="small-text" style="color:var(--text-muted)">vs the field</span></h3><div style="font-size:13px">';
-        ds.teams.forEach((tm, i) => {
-          const score = ds.points
-            ? ((tm.total > 0 ? '+' : '') + tm.total + ' pts')
-            : (tm.total + (tm.parTotal != null ? ' (' + _evFmtTp(tm.total - tm.parTotal) + ')' : ''));
-          html += '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border)"><span style="width:22px;color:var(--text-muted)">' + (i + 1) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">G' + escapeHtml(String(tm.group)) + ' · ' + escapeHtml(tm.name || '') + '</span><span style="width:92px;text-align:right;font-weight:700">' + escapeHtml(score) + '</span>' + (tm.thru != null ? '<span style="width:40px;text-align:right;color:var(--text-muted)">(' + tm.thru + ')</span>' : '') + '</div>';
-        });
-        html += '</div>';
-      });
-    }
+    html += _t2TeamDayStandingsHtml(teamStand) || '';   // v1336: shared with the Bets sheet
     // The field scorecard object, built from the raw tournament rounds.
     // v1024: moved to bgBuildFieldScorecard (next to buildStackedScorecardHtml)
     // so the GPS scorecard sheet draws the identical field from the identical
@@ -76129,32 +76212,7 @@ async function openEventLeaderboard(t, opts) {
     // everyone can see what that day settled for without waiting on the whole trip.
     // Each day is the normal combined-payout engine run on that day's rounds only
     // (_t2DayOnly filter in _t2FetchFieldRounds) — no new money math.
-    try {
-      const _nD = t.num_days || 1;
-      if (_nD > 1 && _combinedPay && Array.isArray(_combinedPay.rows) && _combinedPay.rows.length) {
-        const _dayPays = [];
-        for (let _dn = 1; _dn <= _nD; _dn++) {
-          let _dp = null;
-          try { _dp = await t2ComputeCombinedPayouts(Object.assign({}, t, { _t2DayOnly: _dn })); } catch (e) { _dp = null; }
-          if (_dp && Array.isArray(_dp.rows) && _dp.rows.length && _dp.roundsTotal > 0) _dayPays.push({ day: _dn, pay: _dp });
-        }
-        if (_dayPays.length) {
-          html += '<h3 style="margin:14px 0 4px">💰 Money by day</h3>';
-          html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:6px">Each day\u2019s games and pots on their own, then everything combined. Tap a day to expand.</div>';
-          _dayPays.forEach(dp => {
-            const _crs = (t.settings && t.settings.dayCourses && t.settings.dayCourses[dp.day] && t.settings.dayCourses[dp.day].name) || '';
-            const _sub = dp.pay.allFinished ? 'all groups in' : (dp.pay.roundsFinished + ' of ' + dp.pay.roundsTotal + ' groups finished — provisional');
-            const _top = dp.pay.rows.slice().sort((a, b) => (b.net || 0) - (a.net || 0))[0];
-            html += '<details style="margin:0 0 6px;border:1px solid var(--border);border-radius:10px;padding:6px 10px"><summary style="cursor:pointer;font-weight:700">Day ' + dp.day + (_crs ? ' · ' + escapeHtml(_crs) : '') + ' <span class="small-text" style="font-weight:400;color:var(--text-muted)">' + escapeHtml(_sub) + (_top && (_top.net || 0) > 0.005 ? ' · top: ' + escapeHtml(_top.first || _top.name) + ' +$' + (Math.round(_top.net * 100) / 100).toFixed(2) : '') + '</span></summary>';
-            html += '<div style="margin-top:6px">' + _t2PayoutBoardRowsHtml(dp.pay.rows.map(r => ({ id: r.id, name: r.name, first: r.first, net: r.net || 0 })), {}) + '</div>';
-            if (dp.pay.byGame && dp.pay.byGame.length) html += '<div class="small-text" style="color:var(--text-muted);margin-top:4px">Games: ' + escapeHtml(dp.pay.byGame.map(gm => gm.key + (gm.pending ? ' (pending)' : '')).join(' · ')) + '</div>';
-            html += '</details>';
-          });
-          html += '<details style="margin:0 0 6px;border:2px solid var(--accent);border-radius:10px;padding:6px 10px"><summary style="cursor:pointer;font-weight:800">Event total <span class="small-text" style="font-weight:400;color:var(--text-muted)">' + escapeHtml(_combinedPay.allFinished ? 'everything combined' : (_combinedPay.roundsFinished + ' of ' + _combinedPay.roundsTotal + ' groups finished — provisional')) + '</span></summary>';
-          html += '<div style="margin-top:6px">' + _t2PayoutBoardRowsHtml(_combinedPay.rows.map(r => ({ id: r.id, name: r.name, first: r.first, net: r.net || 0 })), {}) + '</div></details>';
-        }
-      }
-    } catch (e) { console.warn('evlb money by day', e); }
+    html += (await _t2MoneyByDayHtml(t, _combinedPay)) || '';   // v1336: shared with the Bets sheet
     // Long Drive — ONE field-wide individual winner per day, set by the commissioner.
     const _amCommish = t2CanManage(t);
     const _ldDays = [];
