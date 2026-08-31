@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1346-->
+<!--BGVER=v2026.11.1347-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8954,7 +8954,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1346';
+const BG_BUILD = 'v2026.11.1347';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -49080,6 +49080,36 @@ function renderScorecard(g, totals, fieldSkinMap) {
 // ============================================================
 // Build the Home copy of the Stats-tab KPI header (handicap bubble + tiles).
 // Computations mirror renderStatsForSelectedPlayer exactly — one player in.
+// ── Bet history — ONE source for the payload the Bet-history sheet reads ─────────
+// v1347: this existed in THREE places — buildHomeKpiHtml, renderCrewPlayerStats and
+// openBetHistory's roster fallback — each with its own copy of the key formula, the
+// round mapping and the lifetime total. Three chances for the Stats tab, the Friends
+// profile card and the Friends leaderboard to disagree about one player's money, which
+// is the exact shape of bug this project spent 31 Aug unpicking. One definition now.
+//
+// _betHistStore stays a CACHE, not a source of truth: whoever renders a stats card fills
+// it as a side effect, and openBetHistory rebuilds from the roster when nobody has.
+function bgBetKey(name) {
+  return 'bh_' + String(name || 'me').replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+// `validMoney` is a player's money-bearing rounds — history.filter(roundCountsForBets).
+// The total is derived from the same rounds the sheet lists, so the header and the list
+// can never disagree.
+function bgBetHistoryData(name, validMoney) {
+  const rounds = (validMoney || [])
+    .map(s => ({ money: s.money, date: s.date || null, course: s.course || '', gross: (s.gross != null ? s.gross : null) }))
+    .sort((a, b) => (b.date || 0) - (a.date || 0));
+  return { name: name || 'You', total: rounds.reduce((a, r) => a + (r.money || 0), 0), rounds: rounds };
+}
+function bgStashBetHistory(name, validMoney) {
+  const key = bgBetKey(name);
+  try {
+    window._betHistStore = window._betHistStore || {};
+    window._betHistStore[key] = bgBetHistoryData(name, validMoney);
+  } catch (e) {}
+  return key;
+}
+
 function buildHomeKpiHtml(player, isMe) {
   // v1141: lifetime money, avg score, best round and the round count all come off this
   // one list, so filtering it here takes deleted-tournament rounds out of every tile.
@@ -49113,13 +49143,7 @@ function buildHomeKpiHtml(player, isMe) {
   const moneyColor = validMoney.length ? (lifetimeMoney >= 0 ? 'var(--money-pos,var(--money-pos))' : 'var(--danger)') : '';
   // Bet history: stash this player's per-round money so the Lifetime Bets tile can
   // open a breakdown (keyed by a sanitized player name; re-renders just overwrite).
-  const _betKey = 'bh_' + String(player.name || 'me').replace(/[^a-z0-9]/gi, '').toLowerCase();
-  window._betHistStore = window._betHistStore || {};
-  window._betHistStore[_betKey] = {
-    name: player.name || 'You', total: lifetimeMoney,
-    rounds: validMoney.map(s => ({ money: s.money, date: s.date || null, course: s.course || '', gross: (s.gross != null ? s.gross : null) }))
-                      .sort((a, b) => (b.date || 0) - (a.date || 0))
-  };
+  const _betKey = bgStashBetHistory(player.name, validMoney);   // v1347
   const puttRounds = statPuttRounds(history);
   const girRounds = statGirRounds(history);
   const totPutts = puttRounds.reduce((a, b) => a + b.putts, 0);
@@ -49348,22 +49372,17 @@ async function openBetHistory(key, nameHint) {
     try {
       const _roster = await getPlayerRoster();
       const _norm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
-      const _keyOf = n => 'bh_' + String(n || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
       let _p = null;
       if (nameHint) _p = (_roster || []).find(x => x && _norm(x.name) === _norm(nameHint));
-      if (!_p && key) _p = (_roster || []).find(x => x && _keyOf(x.name) === key);
+      if (!_p && key) _p = (_roster || []).find(x => x && bgBetKey(x.name) === key);
       if (_p) {
-        const _hist = bgLiveHistory(_p.scoreHistory);
-        const _valid = _hist.filter(roundCountsForBets);
+        // v1347: same filter, same mapping, same total as every stats card — one helper.
+        const _valid = bgLiveHistory(_p.scoreHistory).filter(roundCountsForBets);
         if (_valid.length) {
-          data = {
-            name: _p.name || 'Player',
-            total: _valid.reduce((a, b) => a + b.money, 0),
-            rounds: _valid.map(s => ({ money: s.money, date: s.date || null, course: s.course || '', gross: (s.gross != null ? s.gross : null) }))
-                          .sort((a, b) => (b.date || 0) - (a.date || 0))
-          };
-          window._betHistStore = window._betHistStore || {};
-          window._betHistStore[key || _keyOf(_p.name)] = data;
+          bgStashBetHistory(_p.name, _valid);
+          data = (window._betHistStore || {})[bgBetKey(_p.name)];
+          // the caller's key may be a stale spelling; make it resolve next time too
+          try { if (key && key !== bgBetKey(_p.name)) window._betHistStore[key] = data; } catch (e) {}
         }
       }
     } catch (e) { console.warn('openBetHistory fallback', e); }
@@ -52717,15 +52736,9 @@ function computePlayerKpiHtml(player) {
   // v900 (Tyler): the Crew box's tiles must behave EXACTLY like Home's. Home
   // stashes the player's per-round money under the same key openBetHistory reads,
   // so do it here too — without this, tapping Lifetime bets in Crew opened
-  // nothing. Same key formula as buildHomeKpiHtml, so a re-render from either
-  // surface just overwrites with identical data.
-  const _betKey = 'bh_' + String(player.name || 'me').replace(/[^a-z0-9]/gi, '').toLowerCase();
-  window._betHistStore = window._betHistStore || {};
-  window._betHistStore[_betKey] = {
-    name: player.name || 'You', total: lifeMoney,
-    rounds: validMoney.map(s => ({ money: s.money, date: s.date || null, course: s.course || '', gross: (s.gross != null ? s.gross : null) }))
-                      .sort((a, b) => (b.date || 0) - (a.date || 0))
-  };
+  // nothing. v1347: shares bgStashBetHistory with every other surface, so a re-render
+  // from any of them writes byte-identical data.
+  const _betKey = bgStashBetHistory(player.name, validMoney);
   const pr = statPuttRounds(history), gr = statGirRounds(history), fr = statFairwayRounds(history);
   const tP = pr.reduce((a, b) => a + b.putts, 0), tPH = pr.reduce((a, b) => a + b.puttHoles, 0);
   const tG = gr.reduce((a, b) => a + b.girs, 0), tGH = gr.reduce((a, b) => a + (b.girHoles || b.puttHoles), 0);
@@ -56601,8 +56614,12 @@ async function renderCrewLeaderboard() {
         const m = e && e.target && e.target.closest ? e.target.closest('.money[data-bets]') : null;
         if (m && row.contains(m)) {
           e.stopPropagation();
+          // v1347: bgBetKey, not a fourth hand-rolled copy of the formula. Guarded on a
+          // real name — bgBetKey('') falls back to 'bh_me', which would open YOUR history
+          // behind someone else's row if a leaderboard row ever lost its name.
           const nm = row.dataset.name || '';
-          openBetHistory('bh_' + nm.replace(/[^a-z0-9]/gi, '').toLowerCase(), nm);
+          if (!nm) return;
+          openBetHistory(bgBetKey(nm), nm);
           return;
         }
       } catch (err) {}
