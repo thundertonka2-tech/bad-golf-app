@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1370-->
+<!--BGVER=v2026.11.1371-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9008,7 +9008,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1370';
+const BG_BUILD = 'v2026.11.1371';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -78635,8 +78635,17 @@ async function lgSubmitCreate() {
   const holes = (parseInt(val('lg-holes'), 10) === 9) ? 9 : 18;
   const weeks = lgWeeksValue();
   const start = val('lg-start'), tz = val('lg-tz') || 'America/Chicago';
-  if (!name) { try { showToast('Give the league a name'); } catch (e) {} return; }
-  if (!start) { try { showToast('Pick the date of the first week'); } catch (e) {} return; }
+  /* v1371 (Tyler: "I set this up hit create league and nothing happened").
+     A toast is the only thing these guards ever did, and a toast is missable --
+     it is a second and a half at the bottom of a screen you are looking at the
+     top of. Focus the field that is actually stopping the create as well, so
+     the answer is where the eye already is even if the toast is gone. */
+  const _stop = function (id, msg) {
+    try { showToast(msg); } catch (e) {}
+    try { const el = document.getElementById(id); if (el) { el.focus(); el.scrollIntoView({ block: 'center' }); } } catch (e) {}
+  };
+  if (!name)  { _stop('lg-name', 'Give the league a name'); return; }
+  if (!start) { _stop('lg-start', 'Pick the date of the first week'); return; }
   /* v1368: playoffs are a yes/no. The bracket SIZE is deliberately not asked
      for -- on this screen the league has no players yet, so the honest answer
      is not knowable until the bracket is built. league_build_playoffs sizes it
@@ -78717,7 +78726,12 @@ async function lgSubmitCreate() {
   let res = null;
   try { res = await supa.rpc('league_create_season', { p_payload: payload }); }
   catch (e) { res = { data: null, error: e }; }
+  /* The button comes back BEFORE anything else can go wrong. A create that
+     leaves "Creating…" on a dead button is indistinguishable from a create
+     that did nothing, and the whole point of this pass is that the screen
+     always says what happened. */
   if (btn) { btn.disabled = false; btn.textContent = 'Create league'; }
+  if (!res) { try { showToast('No answer from the server — try again'); } catch (e) {} return; }
   if (!res || res.error) {
     /* v1271 FIX (QA C-11): this had its own regex, which needed a colon and a
        message -- so league_create_season's BARE codes (LEAGUE_NAME_REQUIRED,
@@ -78729,12 +78743,26 @@ async function lgSubmitCreate() {
   }
   // Tyler 2026-08-27: "as soon as I create the league for the first time it
   // should take me right into the setup not make me click and open it to setup."
-  // Creating a league is never the goal in itself -- the next thing is always
-  // your players. Land on the league's own screen (roster, schedule, handicaps),
-  // not back on a list with one row to tap.
-  try { showToast('League created'); } catch (e) {}
+  // v1371 (Tyler, 9/1): "it should take me to the players next then the games."
+  // So creating no longer just LANDS on the league screen, it opens the add-
+  // players sheet on top of it -- and closing that sheet runs lgNextSetupStep,
+  // which now routes players -> game -> course -> schedule -> handicaps. The
+  // league screen is painted underneath first, so closing the sheet leaves you
+  // somewhere real rather than on a create form that no longer exists.
+  try { showToast('League created — add your players'); } catch (e) {}
   const _sid = (res.data && res.data.season_id) || null;
-  if (_sid) { try { lgOpenSeason(_sid); return; } catch (e) {} }
+  if (_sid) {
+    try { lgOpenSeason(_sid); } catch (e) {}
+    try { await lgOpenAddPlayerPicker(_sid); } catch (e) {
+      try { console.warn('lgOpenAddPlayerPicker failed:', e); } catch (e2) {}
+      try { lgOpenSettings(_sid); } catch (e2) {}
+    }
+    return;
+  }
+  /* The RPC said yes but gave us no season id. That should be impossible --
+     league_create_season always returns one -- and it is exactly the shape of
+     failure that used to look like nothing happening at all. */
+  try { showToast('League created, but it could not be opened — pull down to refresh'); } catch (e) {}
   try { renderLeague(); } catch (e) {}
 }
 
@@ -79776,7 +79804,11 @@ async function lgSaveGame(sid) {
       ? lgGameName(d.format) + ' — regenerate the schedule'
       : (d.changed ? lgGameName(d.format) + ' it is' : 'No change'));
   } catch (e) {}
-  try { lgOpenSettings(sid); } catch (e) {}
+  /* v1371: keep going. During setup this is players -> game -> course ->
+     schedule -> handicaps; on a finished league it lands on the league screen,
+     and if the change cleared the pairings it offers to rebuild the schedule --
+     which is exactly what a commissioner who just changed the game needs next. */
+  try { lgNextSetupStep(sid); } catch (e) { try { lgOpenSettings(sid); } catch (e2) {} }
 }
 
 async function lgOpenCourse(sid) {
@@ -83214,7 +83246,18 @@ async function lgAssignFlights(sid) {
    genuinely ready it just opens the season screen, so this never nags a running
    league. */
 async function lgSetupState(sid, pre) {
-  const out = { members: 0, weeks: 0, matchups: 0, handicaps: 0, course: null, ready: false };
+  const out = { members: 0, weeks: 0, matchups: 0, handicaps: 0, course: null, game: false, ready: false };
+  /* v1371: has anybody actually CHOSEN the game? Every league already has a
+     format -- stroke_net is what league_create_season writes -- so the format
+     itself cannot answer that. settings.game_set is written by
+     league_set_format, i.e. by saving on the Game screen, and picking stroke
+     play deliberately counts exactly as much as picking scramble. */
+  try {
+    const gr = await _bgRead(function () {
+      return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
+    }, 'lgSetupState:game');
+    if (gr.ok && gr.data) out.game = !!((gr.data.settings || {}).game_set);
+  } catch (e) {}
   /* v1272 (QA SP-2): the caller usually already holds the roster and the course.
      Taking them saves two round trips per season-screen open and, more to the
      point, means the two answers cannot disagree. */
@@ -83272,6 +83315,17 @@ async function lgNextSetupStep(sid) {
     try { lgOpenSettings(sid); } catch (e) {}
     return;
   }
+  // v1371 (Tyler, 9/1): "it should take me to the players next then the games."
+  // The game comes straight after the roster and BEFORE the course and the
+  // schedule, and that order is load-bearing rather than cosmetic: the game
+  // decides whether entrants are players or teams and whether there are
+  // pairings at all, and league_set_format CLEARS pairings when that changes.
+  // Choosing it after the schedule was built would throw the schedule away.
+  if (!st.game) {
+    try { showToast('Players are in — now pick the game'); } catch (e) {}
+    try { lgOpenGame(sid); } catch (e) { try { lgOpenSettings(sid); } catch (e2) {} }
+    return;
+  }
   // Nowhere to play yet. This comes BEFORE the schedule on purpose: the
   // schedule stamps weeks that a week can only open from once they have a
   // course, and Tyler hit exactly this order — "it want to build a schedule and
@@ -83302,8 +83356,9 @@ async function lgNextSetupStep(sid) {
 /* The same state, as a checklist on the season screen, so the commissioner can
    see what is left instead of being routed at. */
 function lgSetupChecklistHtml(sid, st) {
-  if (!st || st.ready && st.handicaps) return '';
+  if (!st || (st.ready && st.game && st.handicaps)) return '';
   const _next = (st.members < 2) ? 'Add players'
+              : (!st.game) ? 'Pick the game'
               : (st.course === null) ? 'Pick the course'
               : (!st.matchups) ? 'Build the schedule'
               : 'Check the handicaps';
@@ -83316,6 +83371,7 @@ function lgSetupChecklistHtml(sid, st) {
   };
   return lgCard('<div class="bg-sec" style="margin-bottom:2px">Getting set up</div>' +
     row(st.members >= 2, 'Add your players', 'You need at least two.') +
+    row(!!st.game, 'Pick the game', 'Stroke, match, stableford or scramble. Set it before the schedule.') +
     row(st.course !== null, 'Pick the course', 'A week can’t open until the league has somewhere to play.') +
     row(st.matchups > 0, 'Build the schedule', 'Sets who plays who, week by week.') +
     row(st.handicaps > 0, 'Check the handicaps', 'They lock when a week opens.') +
