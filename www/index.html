@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1373-->
+<!--BGVER=v2026.11.1374-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -7890,6 +7890,11 @@ html.bg-modal-lock, body.bg-modal-lock { overflow: hidden !important; }
   <div class="modal">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h2 style="margin:0">Bad Golf Users</h2><div style="display:flex;align-items:center;gap:8px;flex:0 0 auto"><span id="roster-pick-count" style="flex:0 0 auto;background:var(--accent);color:#fff;border-radius:999px;padding:3px 11px;font-size:12px;font-weight:700;display:none"></span><!-- v946 (Tyler): a Done button pinned at the TOP as well, so a long user list never has to be scrolled just to finish. Same action as the bottom Done. --><button type="button" class="primary" id="roster-done-top" style="flex:0 0 auto;min-height:34px;padding:6px 16px;font-weight:700">Done</button></div></div>
     <p class="help-text" style="margin-bottom:8px">Tap to add. Names are saved automatically when you start a round — or use ➕ Add a player to store a guest (non-user) now so they're here next time.</p>
+    <!-- v1374 (Tyler): when this picker is adding players to a HEAD-TO-HEAD league,
+         the count is not just a number -- it decides whether the season can be a
+         complete round robin. Painted live by _rosterLgPaintCount as names are
+         tapped; hidden entirely in every other use of this modal. -->
+    <div id="roster-lg-fit" class="help-text" style="display:none;margin:0 0 8px;font-size:12px;line-height:1.45;padding:8px 10px;border-radius:8px;background:var(--bg-brand-tint,rgba(43,108,184,0.10))"></div>
     <input type="text" id="roster-search" placeholder="Search names…" style="width:100%;margin-bottom:10px">
     <!-- v618: Friends / All users filter -->
     <div style="display:flex;gap:6px;margin-bottom:10px">
@@ -9015,7 +9020,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1373';
+const BG_BUILD = 'v2026.11.1374';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -78549,8 +78554,136 @@ function lgGameName(k) {
   for (let i = 0; i < LG_GAMES.length; i++) if (LG_GAMES[i].key === k) return LG_GAMES[i].name;
   return 'Stroke play';
 }
-/* v1369: what a league is created as, until the Game screen changes it. */
+/* v1369: what a league is created as, until the Game screen changes it.
+   v1374: only the fallback now -- lgSubmitCreate takes the format from the SHAPE
+   the commissioner picks on the create screen. */
 const LG_DEFAULT_FORMAT = 'stroke_net';
+
+/* ---- v1374 (Tyler, 9/1): the SHAPE of a league -----------------------------
+   "We need to add something on the main setup of the league above the weeks
+   selection that says individual league or team league. That will determine the
+   number of players needed."
+
+   Shape is NOT the same question as the game (LG_GAMES / the Game screen). The
+   game is what you score; the shape is who you are scored AGAINST, and that is
+   what decides how many players a season wants -- which is why it belongs on the
+   create screen, above the weeks slider, and the game does not.
+
+   Each shape is stored as the format + type pair league_create_season validates:
+     h2h   -> match     / individual   -> competition_mode head_to_head
+     field -> stroke_net/ individual   -> competition_mode field
+     team  -> scramble  / team_2man    -> competition_mode head_to_head
+   lgCompForFormat already maps format -> competition_mode, so there is still one
+   answer to "what fixture shape is this", not three. */
+const LG_SHAPES = [
+  { key: 'field', name: 'Individual — against the field', unit: 'player',
+    format: 'stroke_net',
+    sub: 'Everyone posts a score and the week ranks the cards. No opponents, so any number of players works.' },
+  { key: 'h2h', name: 'Individual — head to head', unit: 'player',
+    format: 'match',
+    sub: 'Paired against one other player every week. The season is a round robin, so the player count and the week count have to agree.' },
+  { key: 'team', name: 'Team league', unit: 'team',
+    format: 'scramble',
+    sub: 'Two-man teams paired against another team every week. Same round-robin maths, counted in teams — so it wants twice the players.' }
+];
+const LG_SHAPE_DEFAULT = 'field';
+function lgShape(k) {
+  for (let i = 0; i < LG_SHAPES.length; i++) if (LG_SHAPES[i].key === k) return LG_SHAPES[i];
+  return LG_SHAPES[0];
+}
+function lgShapeKey() { return window._lgShape || LG_SHAPE_DEFAULT; }
+function lgShapePick(k) {
+  window._lgShape = k;
+  try {
+    LG_SHAPES.forEach(function (s) {
+      const el = document.getElementById('lg-shape-' + s.key);
+      if (el) el.classList.toggle('on', s.key === k);
+    });
+  } catch (e) {}
+  try { lgPaintFitNote(); } catch (e) {}
+}
+
+/* A complete single round robin among N entrants takes N-1 weeks when N is EVEN
+   and N weeks when N is ODD -- an odd roster carries a phantom entrant, so one
+   player sits out each week. Both results are ODD numbers, which is the whole
+   reason an even-week season can never be exactly one round robin.
+
+   This is the same circle method league_generate_schedule runs (it pads an odd
+   roster with a null and does v_n - 1 rounds), so what these notes promise is
+   what the schedule actually builds. */
+function lgRrRounds(n) { return (n % 2 === 0) ? (n - 1) : n; }
+
+/* Entrant counts that land CLEANLY on `weeks` weeks: `once` = exactly one
+   complete round robin, `cycles` = a whole number of times round. */
+function lgRrFits(weeks, lo, hi) {
+  const once = [], cycles = [];
+  for (let n = lo; n <= hi; n++) {
+    const r = lgRrRounds(n);
+    if (r === weeks) once.push(n);
+    else if (r < weeks && weeks % r === 0) cycles.push({ n: n, times: weeks / r });
+  }
+  return { once: once, cycles: cycles };
+}
+
+/* One sentence on what a roster of `n` actually does over `weeks` weeks. Shared
+   by the roster picker and the schedule screen so the two cannot drift into
+   different answers. Nothing here blocks anything -- Tyler: advise, never block. */
+function lgFitVerdict(n, weeks, unit) {
+  if (!n || n < 2 || !weeks) return '';
+  const us = unit + 's', r = lgRrRounds(n);
+  if (weeks === r) {
+    return n + ' ' + us + ' over ' + weeks + ' weeks — a complete round robin: everyone plays everyone exactly once.';
+  }
+  if (weeks % r === 0) {
+    const k = weeks / r;
+    return n + ' ' + us + ' over ' + weeks + ' weeks — everyone plays everyone ' + (k === 2 ? 'twice' : k + ' times') + '.';
+  }
+  if (weeks < r) {
+    const miss = r - weeks;
+    return n + ' ' + us + ' need ' + r + ' weeks to play everyone once. Over ' + weeks + ' you play ' + weeks +
+           ' of the ' + r + ' rounds, so each ' + unit + ' misses ' + miss + ' opponent' + (miss === 1 ? '' : 's') + '.';
+  }
+  const k = Math.floor(weeks / r), rem = weeks % r;
+  return n + ' ' + us + ' play everyone once in ' + r + ' weeks. Over ' + weeks + ' you get ' +
+         (k === 1 ? 'the full round robin' : k + ' full round robins') + ' plus ' + rem + ' more week' +
+         (rem === 1 ? '' : 's') + ' — the fixtures start again, with home and away swapped.';
+}
+
+/* The create screen's live note: the counts that FIT the chosen shape and week
+   count, before anybody is on the roster. */
+function lgFitAdvice(shapeKey, weeks) {
+  const sh = lgShape(shapeKey);
+  if (sh.key === 'field') {
+    return 'Any number of players. Everybody posts a score and the week ranks the cards, so there is nothing to pair up and no count to hit.';
+  }
+  const u = sh.unit, us = u + 's';
+  const f = lgRrFits(weeks, 4, 20);
+  const list = function (a) {
+    return a.length === 1 ? String(a[0]) : a.slice(0, -1).join(', ') + ' or ' + a[a.length - 1];
+  };
+  const out = [];
+  if (f.once.length) {
+    out.push('<strong>' + list(f.once) + ' ' + us + '</strong> plays everyone exactly once in ' + weeks + ' weeks.');
+  } else {
+    out.push('No number of ' + us + ' plays everyone exactly once in ' + weeks + ' weeks — a complete round robin is always an <em>odd</em> number of weeks (one less than the count when it is even, the count itself when it is odd).');
+  }
+  if (f.cycles.length) {
+    out.push(f.cycles.map(function (c) {
+      return '<strong>' + c.n + ' ' + us + '</strong> plays everyone ' + (c.times === 2 ? 'twice' : c.times + ' times');
+    }).join('; ') + '.');
+  }
+  out.push('Any other number still works — the season just runs part of the round robin and some pairs never meet. Nothing is blocked, and the schedule screen tells you exactly what you got.');
+  if (sh.key === 'team') out.push('Teams are pairs, so double it for players.');
+  return out.join(' ');
+}
+
+function lgPaintFitNote() {
+  try {
+    const el = document.getElementById('lg-fit-note');
+    if (!el) return;
+    el.innerHTML = lgFitAdvice(lgShapeKey(), lgWeeksValue());
+  } catch (e) {}
+}
 
 /* §8.2 — the fixture shape follows the format, and is no longer a question.
    One function so the hint text, the payload and any future screen cannot
@@ -78571,6 +78704,7 @@ function lgOpenCreate() {
   let tz = 'America/Chicago';
   try { tz = (Intl.DateTimeFormat().resolvedOptions().timeZone) || tz; } catch (e) {}
   window._lgWeeks = LG_WEEK_DEFAULT;
+  window._lgShape = LG_SHAPE_DEFAULT;   /* v1374 */
   body.innerHTML = lgCard('<h2 style="margin:0 0 4px">Start a league</h2>' +
     /* v1271 FIX (QA C-9): the old line said "you can change most of this later",
        and nothing in the app edits the league name, format, holes, weeks or
@@ -78598,11 +78732,28 @@ function lgOpenCreate() {
        app puts its live value INSIDE the label in --accent, runs a bare
        full-width native range under it, and closes with a space-between row of
        end labels. Copied exactly, so this reads as the same control. */
+    /* v1374 (Tyler): the shape goes ABOVE the weeks slider, because it is what
+       decides how many players the season wants -- and the note underneath the
+       slider then answers "how many" for the shape and length actually chosen.
+       Same .lg-radio rows the Game screen uses, so it reads as one app. */
+    lgLbl('What kind of league') +
+    LG_SHAPES.map(function (s) {
+      return '<label class="lg-radio' + (s.key === lgShapeKey() ? ' on' : '') + '" id="lg-shape-' + s.key + '" ' +
+        'style="align-items:flex-start">' +
+        '<input type="radio" name="lg-shape" value="' + s.key + '"' + (s.key === lgShapeKey() ? ' checked' : '') +
+        ' onchange="lgShapePick(\'' + s.key + '\')" style="margin-top:2px">' +
+        '<span style="min-width:0"><strong style="font-size:14px">' + lgEsc(s.name) + '</strong>' +
+        '<br><span class="help-text" style="font-size:12px;font-weight:400">' + lgEsc(s.sub) + '</span></span></label>';
+    }).join('') +
+    '<p class="help-text" style="margin:2px 0 10px;font-size:12px">This sets the fixtures. WHAT you play each week — stroke, Stableford, match, scramble — is still the Game screen, and can be changed until the first week is scored.</p>' +
     lgLbl('How many weeks: <span id="lg-weeks-val" style="color:var(--accent);font-weight:600">' + LG_WEEK_DEFAULT + ' weeks</span>') +
     '<input type="range" id="lg-weeks" min="' + LG_WEEK_MIN + '" max="' + LG_WEEK_MAX + '" step="1" value="' + LG_WEEK_DEFAULT + '" ' +
       'aria-label="How many weeks the season runs" style="width:100%" oninput="lgSetWeeks(this.value)" onchange="lgSetWeeks(this.value)">' +
     '<div class="help-text" style="display:flex;justify-content:space-between;margin-top:2px;font-size:11px">' +
       '<span>6</span><span>7</span><span>8</span><span>9</span><span>10</span><span>11</span><span>12</span></div>' +
+    /* v1374: how many players THIS shape over THIS many weeks wants. Repainted by
+       lgShapePick and by lgSetWeeks, because it depends on both. */
+    '<div id="lg-fit-note" class="help-text" style="margin:8px 0 0;font-size:12px;line-height:1.45"></div>' +
     /* v1370 (Tyler): one on/off switch, no explanatory paragraph. The switch is
        the app's own .bg-sw, and the question is the label -- same 700/13px as
        lgLbl, so it sits in the same rhythm as the fields above without being a
@@ -78621,7 +78772,7 @@ function lgOpenCreate() {
     '<input type="hidden" id="lg-tz" value="' + lgEsc(tz) + '">' +
     '<button class="primary full" id="lg-create-btn" onclick="lgSubmitCreate()">Create league</button>' +
     '<button class="full" style="margin-top:8px" onclick="renderLeague()">Cancel</button>');
-  try { lgSetWeeks(LG_WEEK_DEFAULT); } catch (e) {}
+  try { lgSetWeeks(LG_WEEK_DEFAULT); } catch (e) {}   /* also paints the playoff + fit notes */
 }
 
 function lgSetWeeks(n) {
@@ -78634,8 +78785,9 @@ function lgSetWeeks(n) {
     if (out) out.textContent = w + ' weeks';
     /* v1372: the playoff note quotes the season length and the bracket size, and
        both move with this slider -- so it is repainted from here, not just from
-       the switch. */
+       the switch. v1374: so does the how-many-players note. */
     try { lgPlayoffNote(); } catch (e) {}
+    try { lgPaintFitNote(); } catch (e) {}
   } catch (e) {}
 }
 
@@ -78686,9 +78838,13 @@ async function lgSubmitCreate() {
   /* v1368: the season name is no longer asked for. Every league opens at
      "Season 1"; the rollover names the one after it. */
   const season = 'Season 1';
-  /* v1369: not asked for on this screen any more. Every new league starts as
-     stroke play, low net; the game is chosen where the games are chosen. */
-  const fmt = LG_DEFAULT_FORMAT;
+  /* v1369: the GAME is not asked for on this screen -- it is chosen where the
+     games are chosen.
+     v1374: the SHAPE is, and it carries a format with it, because "who am I
+     scored against" is exactly what a format encodes here. Field keeps the old
+     stroke-play default, so a commissioner who ignores the picker gets precisely
+     what v1369 gave them. */
+  const fmt = lgShape(lgShapeKey()).format;
   /* v1368: §8.2's fixture shape is DERIVED from the format now, not asked
      for separately -- so the one combination league_create_season refuses
      (field mode + scramble, the v1297 clash) cannot be posted at all. */
@@ -79441,6 +79597,17 @@ async function lgOpenSettings(sid) {
     return;
   }
   const s = sr.data, members = Array.isArray(mr.data) ? mr.data : [];
+  /* v1374: the three numbers the round-robin notes need, stashed where the roster
+     picker and the schedule screen can both read them without another fetch.
+     Set here because opening the league is the way in to both of them. */
+  try {
+    const _st = (s && s.settings) || {};
+    window._lgFitCtx = {
+      weeks: parseInt(_st.weeks, 10) || 0,
+      comp: _st.competition_mode || 'head_to_head',
+      type: _st.type || 'individual'
+    };
+  } catch (e) { window._lgFitCtx = null; }
   const nm = (s.leagues && s.leagues.name) || 'League';
   const me = members.filter(function (m) { return m.user_id === _authUser.id; })[0];
   const amCommish = !!(me && (me.role === 'commissioner' || me.role === 'co_commissioner') && me.status === 'active');
@@ -80081,6 +80248,25 @@ async function lgOpenSchedule(sid) {
   const _cid = weeks.filter(function (w) { return w.course_id !== null && w.course_id !== undefined; })[0];
   const _courseNm = _cid ? lgCourseName(_cid.course_id) : null;
 
+  /* v1374 (Tyler): the honest verdict, said where the fixtures actually are.
+     Counted off the built matchups rather than the roster, so it describes what
+     WAS generated -- byes, missing pairs and all -- not what somebody intended.
+     Only for head-to-head: a field week has no opponents to run out of. */
+  let _fitLine = '';
+  try {
+    if (mus.some(function (m) { return m.kind === 'match'; })) {
+      const _ents = new Set();
+      mus.forEach(function (m) {
+        if (m.a_entrant_id) _ents.add(m.a_entrant_id);
+        if (m.b_entrant_id) _ents.add(m.b_entrant_id);
+      });
+      const _regWeeks = weeks.filter(function (w) { return !w.is_playoff; }).length;
+      const _cx = window._lgFitCtx || {};
+      const _unit = (_cx.type && _cx.type !== 'individual') ? 'team' : 'player';
+      _fitLine = lgFitVerdict(_ents.size, _regWeeks, _unit);
+    }
+  } catch (e) {}
+
   let h = lgCard('<div class="bg-sec" style="margin-bottom:2px">Schedule <span class="bg-sec-count">' + weeks.length + '</span></div>' +
     /* Tyler: "how do I know what course we are playing?" The answer belongs at
        the top of the screen that decides it, not buried a tap away. */
@@ -80090,6 +80276,7 @@ async function lgOpenSchedule(sid) {
       (amCommish ? 'Nobody is down to play yet — build the schedule and every week gets its pairings.'
                  : 'The commissioner hasn’t built the schedule yet.')) +
     '</p>' +
+    (_fitLine ? '<p class="help-text" style="margin:6px 0 0">' + lgEsc(_fitLine) + '</p>' : '') +   /* v1374 */
     (amCommish ? '<button class="' + (_courseNm ? '' : 'primary ') + 'full" style="margin-top:12px" onclick="lgOpenCourse(\'' + lgEsc(sid) + '\')">' +
       (_courseNm ? 'Change the course' : 'Pick the course') + '</button>' : '') +
     /* v1372: the second argument is what tells lgBuildSchedule it is about to
@@ -80935,10 +81122,36 @@ function _rosterLgPaintRow(row, on) {
 function _rosterLgPaintCount() {
   try {
     const el = document.getElementById('roster-pick-count');
-    if (!el) return;
+    if (el) {
+      const n = _rosterLgInSet.size;
+      el.textContent = n + ' in the league';
+      el.style.display = '';
+    }
+  } catch (e) {}
+  /* v1374 (Tyler): "walk the user through what options they have." The create
+     screen could only advise -- it has no roster -- so the real number is said
+     HERE, live, as the names go in. Only for head-to-head leagues: a field league
+     has no pairings and no count to hit, and the line stays hidden. */
+  try {
+    const note = document.getElementById('roster-lg-fit');
+    if (!note) return;
     const n = _rosterLgInSet.size;
-    el.textContent = n + ' in the league';
-    el.style.display = '';
+    const cx = window._lgFitCtx || null;
+    let txt = '';
+    if (cx && cx.comp === 'head_to_head' && cx.weeks) {
+      if (cx.type && cx.type !== 'individual') {
+        /* A team league counts TEAMS. The roster is players, so say both -- and
+           name the odd one out rather than quietly rounding them away. */
+        const t = Math.floor(n / 2);
+        txt = n + ' player' + (n === 1 ? '' : 's') + ' → <strong>' + t + ' team' + (t === 1 ? '' : 's') + '</strong>' +
+              (n % 2 ? ' and one player without a partner' : '') + '. ' +
+              (t >= 2 ? lgFitVerdict(t, cx.weeks, 'team') : 'Two teams is the minimum.');
+      } else {
+        txt = (n >= 2) ? lgFitVerdict(n, cx.weeks, 'player') : 'A head-to-head league needs at least two players.';
+      }
+    }
+    note.innerHTML = txt;
+    note.style.display = txt ? '' : 'none';
   } catch (e) {}
 }
 async function _rosterLgRefresh() {
@@ -81021,6 +81234,7 @@ function _rosterLgClose() {
   _rosterLgSid = null; _rosterLgInSet = new Set(); _rosterLgById = {};
   try { clearTimeout(_rosterLgReT); } catch (e) {}
   try { const el = document.getElementById('roster-pick-count'); if (el) el.style.display = 'none'; } catch (e) {}
+  try { const fx = document.getElementById('roster-lg-fit'); if (fx) { fx.style.display = 'none'; fx.innerHTML = ''; } } catch (e) {}   /* v1374 */
 }
 
 /* The league's "+ Add players" now opens the app's own picker. Same name kept so
