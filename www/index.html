@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1366-->
+<!--BGVER=v2026.11.1367-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8992,7 +8992,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1366';
+const BG_BUILD = 'v2026.11.1367';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -50487,13 +50487,57 @@ async function renderHomeInvites() {
     if (_fast.length) _bgPaintHomeRows(_fast);
   } catch (e) {}
 
+
+  /* v1366 PERF (Tyler: "loading rounds in on the home screen is lagging").
+     Sections 1-5b below each OPENED with its own await — the invite query, then the
+     tourneys blob, then the event list, then the recent index — so the card was built
+     as a chain even though not one of them needs another's answer. Four waits became
+     the sum of four waits. Start them together; each section then picks its own result
+     out of the batch and is otherwise untouched. Every one falls back to its old
+     behaviour if the batch entry is missing, so a single failed read still only costs
+     its own section. */
+  let _pfInvites = null, _pfTourneys = null, _pfT2Mine = null, _pfRecent = null, _pfActiveCode;
+  let _pfActiveSet = false;
+  try {
+    const _pf = await Promise.all([
+      (isSignedIn() && supa && _authUser)
+        ? Promise.resolve(supa.from('game_invites').select('*').eq('to_user', _authUser.id)
+            .in('status', ['pending', 'seen']).order('created_at', { ascending: false }).limit(20)).catch(() => null)
+        : Promise.resolve(null),
+      Promise.resolve(typeof getTourneys === 'function' ? getTourneys() : []).catch(() => null),
+      (supa && _authUser && typeof t2ListMine === 'function')
+        ? Promise.resolve(t2ListMine()).catch(() => null) : Promise.resolve(null),
+      Promise.resolve(typeof getRecent === 'function' ? getRecent() : []).catch(() => null),
+      Promise.resolve(typeof getLastGameCode === 'function' ? getLastGameCode() : null).catch(() => null)
+    ]);
+    _pfInvites = _pf[0]; _pfTourneys = _pf[1]; _pfT2Mine = _pf[2];
+    _pfRecent = _pf[3]; _pfActiveCode = _pf[4]; _pfActiveSet = true;
+  } catch (e) {}
+
   // 1) Live-round invites addressed to me (skip tournament/wager invites and
   //    finished rounds). Each → Join, which drops me into the round's GPS.
   try {
     if (isSignedIn() && supa && _authUser) {
-      const { data } = await supa.from('game_invites')
-        .select('*').eq('to_user', _authUser.id).in('status', ['pending', 'seen'])
-        .order('created_at', { ascending: false }).limit(20);
+      // v1366: fetched in the batch above.
+      const data = (_pfInvites && _pfInvites.data) ? _pfInvites.data
+        : (await supa.from('game_invites').select('*').eq('to_user', _authUser.id)
+            .in('status', ['pending', 'seen']).order('created_at', { ascending: false }).limit(20)).data;
+      // v1366 PERF: the loop below did `await loadGame(code)` for EVERY invite, one
+      // after another — up to 20 sequential round-trips, each pulling a whole round
+      // blob, before the home list could paint. They do not depend on each other.
+      // Issue them together and read the answers out of a map; loadGame is still the
+      // one that runs, so all of its read guards (the v863 finishedAt guard, the
+      // v1101 score-count guard) apply exactly as before.
+      const _invPre = new Map();
+      try {
+        const _ic = Array.from(new Set((data || [])
+          .map(iv => String((iv && iv.game_code) || ''))
+          .filter(c => c && c.indexOf('T2:') !== 0 && c.indexOf('W:') !== 0 && c.indexOf('WB:') !== 0)));
+        if (_ic.length) {
+          const _ig = await Promise.all(_ic.map(c => Promise.resolve(loadGame(c)).catch(() => null)));
+          _ic.forEach((c, i) => _invPre.set(c, _ig[i]));
+        }
+      } catch (e) {}
       const seenCodes = new Set();
       for (const inv of (data || [])) {
         const code = String(inv.game_code || '');
@@ -50501,7 +50545,7 @@ async function renderHomeInvites() {
         try { if (await _bgRetireStaleInvite(inv)) continue; } catch (e) {}   // v1016
         if (seenCodes.has(code)) continue;
         seenCodes.add(code);
-        let g0 = null; try { g0 = await loadGame(code); } catch (e) {}
+        let g0 = null; try { g0 = _invPre.has(code) ? _invPre.get(code) : await loadGame(code); } catch (e) {}
         // v940: the row was only SKIPPED here, so it stayed pending forever and
         // came back on the popup path every launch. Retire it for good.
         if (g0 && g0.finishedAt) {
@@ -50528,7 +50572,7 @@ async function renderHomeInvites() {
   // await getTourneys() — cache-first, but every call also kicks off a background
   // cloud refresh, so one card render was triggering three).
   let _homeTourneys6 = [];
-  try { _homeTourneys6 = (await getTourneys()) || []; } catch (e) { _homeTourneys6 = []; }
+  try { _homeTourneys6 = _pfTourneys || (await getTourneys()) || []; } catch (e) { _homeTourneys6 = []; }   // v1366: from the batch
   // 2) My scheduled rounds (single-round saved configs). Starting one also lands
   //    in GPS via the normal start flow.
   try {
@@ -50617,39 +50661,86 @@ async function renderHomeInvites() {
       const _t2n = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
       const _meN2 = _t2n(meName || '');
       const _uid2 = _authUser.id;
-      const _mine = await t2ListMine();
+      const _mine = _pfT2Mine || await t2ListMine();   // v1366: from the batch
       const _seenT2 = new Set(rows.map(r => r.code).filter(Boolean));
-      for (const ev of (_mine || [])) {
-        if (!ev || ev.status === 'complete') continue;
-        let _pl = []; try { _pl = await t2GetPlayers(ev.id); } catch (e) {}
-        const _meIds = new Set((_pl || []).filter(p => (p.user_id && p.user_id === _uid2) || (_meN2 && _t2n(p.display_name) === _meN2)).map(p => p.id));
-        if (!_meIds.size) continue;
-        let _days = []; try { _days = await t2GetDays(ev.id); } catch (e) {}
-        for (const d of _days) {
-          let _gs = []; try { _gs = await t2GetGroups(d.id); } catch (e) {}
-          for (const g2 of _gs) {
-            if (!g2.game_code || _seenT2.has(g2.game_code)) continue;
-            let _mem = []; try { _mem = await t2GetGroupMembers(g2.id); } catch (e) {}
-            if (!_mem.some(m => _meIds.has(m.tournament_player_id))) continue;
-            let _g0 = null; try { _g0 = await loadGame(g2.game_code); } catch (e) {}
-            if (!_g0 || _g0.finishedAt) continue;
-            _seenT2.add(g2.game_code);
-            let _thru = 0; try { if (_g0.scores) { for (const pid in _g0.scores) { const a = _g0.scores[pid]; if (Array.isArray(a)) { let c = 0; for (let h = 0; h < 18; h++) if (a[h] != null) c++; if (c > _thru) _thru = c; } } } } catch (e) {}
-            let _cid2 = _g0.courseId || ''; if (!_cid2) { try { const _dc = ev.settings && ev.settings.dayCourses && ev.settings.dayCourses[d.day_number]; if (_dc && _dc.id) _cid2 = _dc.id; else { const _nm = (_g0.course || '').trim().toLowerCase(); if (_nm && typeof COURSE_LIBRARY !== 'undefined' && Array.isArray(COURSE_LIBRARY)) { const _m = COURSE_LIBRARY.find(c => c && (c.name || '').trim().toLowerCase() === _nm); if (_m) _cid2 = _m.id; } } } catch (e) {} }
-            rows.push({
-              kind: 't2round', code: g2.game_code, tournamentId: ev.id, courseId: _cid2, dayNumber: d.day_number,
-              ownerId: ev.commissioner_id || null, myTpId: (function(){ try { return Array.from(_meIds)[0]; } catch (e) { return null; } })(), isCreator: !!(ev.commissioner_id && _authUser && ev.commissioner_id === _authUser.id),
-              course: _g0.course || ev.name || 'Tournament round',
-              // v902: the trophy moved OUT of this subtitle and up beside the
-              // course name, so a live tournament round and a finished one wear
-              // it in the same place instead of two different ones.
-              sub: (ev.name || 'Tournament') + (_days.length > 1 ? ' · Day ' + d.day_number : '') + ' · Group ' + g2.group_number + (_thru ? ' · thru ' + _thru : ''),
-              action: 'Open'
-            });
-            break;   // only the group I'm assigned to this day — one card per event-day
-          }
-        }
-      }
+      /* v1366 PERF (Tyler: "loading rounds in on the home screen is lagging").
+         This was a FOUR-DEEP SERIAL NEST: for every event, await the player list,
+         then await the day list, then for each day await that day's groups, then for
+         each group await its members and await the round blob — every one of them a
+         separate round-trip taken one at a time, with nothing on screen until the
+         whole nest unwound. Two events x two days x four groups is roughly forty
+         sequential requests before Home could finish painting.
+         Nothing in the nest depends on a sibling's answer, only on its parent's, so
+         it collapses into four WAVES: (1) every event's players+days together,
+         (2) every day's groups together, (3) every group's members together,
+         (4) every candidate round blob together.
+         The selection rule is deliberately unchanged: groups are still considered in
+         their original order, still filtered to ones I am a member of, and still at
+         most ONE card per event-day — that is what the old `break` did, reproduced
+         here by _dayDone. A candidate whose round turns out to be finished still
+         falls through to the next group on that day, exactly as `continue` did. */
+      const _t2evs = (_mine || []).filter(ev => ev && ev.status !== 'complete');
+      // WAVE 1+2+3 — per event, then flattened across all its days and groups.
+      const _perEvent = await Promise.all(_t2evs.map(async ev => {
+        try {
+          const _pd = await Promise.all([
+            Promise.resolve(t2GetPlayers(ev.id)).catch(() => []),
+            Promise.resolve(t2GetDays(ev.id)).catch(() => [])
+          ]);
+          const _pl = _pd[0] || [], _days = _pd[1] || [];
+          const _meIds = new Set((_pl || [])
+            .filter(p => p && ((p.user_id && p.user_id === _uid2) || (_meN2 && _t2n(p.display_name) === _meN2)))
+            .map(p => p.id));
+          if (!_meIds.size) return null;                       // not my event — stop here, as before
+          const _dayGroups = await Promise.all((_days || []).map(d =>
+            Promise.resolve(t2GetGroups(d.id)).catch(() => []).then(gs => ({ d: d, gs: gs || [] }))
+          ));
+          const _flat = [];
+          _dayGroups.forEach(x => (x.gs || []).forEach(g2 => { if (g2 && g2.game_code) _flat.push({ d: x.d, g2: g2 }); }));
+          const _mems = await Promise.all(_flat.map(x => Promise.resolve(t2GetGroupMembers(x.g2.id)).catch(() => [])));
+          const _memBy = new Map();
+          _flat.forEach((x, i) => _memBy.set(x.g2.id, _mems[i] || []));
+          return { ev: ev, meIds: _meIds, days: _days, flat: _flat, memBy: _memBy };
+        } catch (e) { return null; }
+      }));
+      // Candidates, in the SAME order the old loops visited them.
+      const _cands = [];
+      _perEvent.forEach(pe => {
+        if (!pe) return;
+        pe.flat.forEach(x => {
+          const _mem = pe.memBy.get(x.g2.id) || [];
+          if (!_mem.some(m => m && pe.meIds.has(m.tournament_player_id))) return;
+          _cands.push({ ev: pe.ev, meIds: pe.meIds, days: pe.days, d: x.d, g2: x.g2 });
+        });
+      });
+      // WAVE 4 — the round blobs.
+      const _t2Loaded = await Promise.all(_cands.map(c =>
+        Promise.resolve(loadGame(c.g2.game_code)).catch(() => null)));
+      const _dayDone = new Set();
+      _cands.forEach((c, i) => {
+        try {
+          const ev = c.ev, d = c.d, g2 = c.g2, _days = c.days, _meIds = c.meIds;
+          const _dayKey = String(ev.id) + ':' + String(d.id);
+          if (_dayDone.has(_dayKey)) return;                   // the old `break`
+          if (_seenT2.has(g2.game_code)) return;
+          const _g0 = _t2Loaded[i];
+          if (!_g0 || _g0.finishedAt) return;                  // the old `continue`
+          _dayDone.add(_dayKey);
+          _seenT2.add(g2.game_code);
+          let _thru = 0; try { if (_g0.scores) { for (const pid in _g0.scores) { const a = _g0.scores[pid]; if (Array.isArray(a)) { let c2 = 0; for (let h = 0; h < 18; h++) if (a[h] != null) c2++; if (c2 > _thru) _thru = c2; } } } } catch (e) {}
+          let _cid2 = _g0.courseId || ''; if (!_cid2) { try { const _dc = ev.settings && ev.settings.dayCourses && ev.settings.dayCourses[d.day_number]; if (_dc && _dc.id) _cid2 = _dc.id; else { const _nm = (_g0.course || '').trim().toLowerCase(); if (_nm && typeof COURSE_LIBRARY !== 'undefined' && Array.isArray(COURSE_LIBRARY)) { const _m = COURSE_LIBRARY.find(c3 => c3 && (c3.name || '').trim().toLowerCase() === _nm); if (_m) _cid2 = _m.id; } } } catch (e) {} }
+          rows.push({
+            kind: 't2round', code: g2.game_code, tournamentId: ev.id, courseId: _cid2, dayNumber: d.day_number,
+            ownerId: ev.commissioner_id || null, myTpId: (function(){ try { return Array.from(_meIds)[0]; } catch (e) { return null; } })(), isCreator: !!(ev.commissioner_id && _authUser && ev.commissioner_id === _authUser.id),
+            course: _g0.course || ev.name || 'Tournament round',
+            // v902: the trophy moved OUT of this subtitle and up beside the
+            // course name, so a live tournament round and a finished one wear
+            // it in the same place instead of two different ones.
+            sub: (ev.name || 'Tournament') + ((_days || []).length > 1 ? ' · Day ' + d.day_number : '') + ' · Group ' + g2.group_number + (_thru ? ' · thru ' + _thru : ''),
+            action: 'Open'
+          });
+        } catch (e) {}
+      });
     }
   } catch (e) { console.warn('home t2 rounds fetch', e); }
 
@@ -50674,11 +50765,32 @@ async function renderHomeInvites() {
   try {
     const _seenLiveCodes = new Set(rows.map(r => r.code).filter(Boolean));
     let _recentAll = [];
-    try { _recentAll = (await getRecent()) || []; } catch (e) {}
+    try { _recentAll = _pfRecent || (await getRecent()) || []; } catch (e) {}          // v1366: from the batch
     let _activeCode = null;
-    try { _activeCode = await getLastGameCode(); } catch (e) {}
+    try { _activeCode = _pfActiveSet ? _pfActiveCode : await getLastGameCode(); } catch (e) {}
     let _hiddenCodes = [];
     try { _hiddenCodes = (typeof getHiddenRounds === 'function' && getHiddenRounds()) || []; } catch (e) {}
+    // v1366 PERF: the v925 blob verify below is a network read per candidate round,
+    // and it sat INSIDE the loop — so on a phone with several unfinished rounds in
+    // the recent list the home card waited on them one at a time. Same reads, same
+    // loadGame, same guards; issued together instead of in a queue. Capped so a long
+    // recent list can't open forty sockets at once.
+    const _preload = new Map();
+    try {
+      const _cands = (_recentAll || []).filter(r =>
+        r && r.code && !r.finishedAt
+        && !_seenLiveCodes.has(r.code)
+        && _hiddenCodes.indexOf(r.code) < 0
+        && !(meName && typeof recentRowHasName === 'function' && !recentRowHasName(r, meName))
+        && (!!(r.scoreLine && String(r.scoreLine).trim()) || (!!_activeCode && r.code === _activeCode))
+        && !(typeof isRoundStale === 'function' && isRoundStale(r))
+      ).map(r => r.code);
+      const _uniq = Array.from(new Set(_cands)).slice(0, 12);
+      if (_uniq.length) {
+        const _got = await Promise.all(_uniq.map(c => Promise.resolve(loadGame(c)).catch(() => null)));
+        _uniq.forEach((c, i) => _preload.set(c, _got[i]));
+      }
+    } catch (e) {}
     const _myLiveRows = [];
     for (const r of (_recentAll || [])) {   /* v1366: _justFinishedRows is declared above section 5 */
       try {
@@ -50700,7 +50812,7 @@ async function renderHomeInvites() {
         // re-stamps finishedAt + the final score line) so the Rounds tab and the
         // LIVE badge converge too. Blob unreachable (offline) → behave as before.
         let _gv = null;
-        try { _gv = await loadGame(r.code); } catch (e) {}
+        try { _gv = _preload.has(r.code) ? _preload.get(r.code) : await loadGame(r.code); } catch (e) {}
         if (_gv && _gv.finishedAt) {
           try { await addToRecent(_gv); } catch (e) {}
           // v1366 (Tyler): dropping the row here is what made a JUST-finished round
@@ -55796,10 +55908,40 @@ async function openRoundBetsSheet(code, courseName, opts) {
   let _evSettle = null, _evNameOf = null, _evPlayerOf = null;
   let _evRaw = [], _evPay = null;   // v1320: hoisted for the breakdown + the share text
   let t = null;
-  try { if (g.t2 && g.t2.tournamentId && typeof t2Get === 'function') t = await t2Get(g.t2.tournamentId); } catch (e) {}
-  if (t) {
-    html += '<div id="rb-scope-event" hidden>';   // v1320: shown by the Tournament tab
-    html += '<div style="font-weight:800;font-size:15px;margin:16px 0 6px">\u{1F3C6} ' + escapeHtml(t.name || 'Tournament') + '</div>';
+  /* v1366 (Tyler, 1 Sep 2026) — "it takes a while to build the bet summary when you
+     click a round… it feels like it is having to rebuild it every time."
+     MEASURED before changing anything: computeAllGameMoney (all 36 calculators,
+     extracted from this file and benched in node) costs 0.8 ms for a 2-player round,
+     2.1 ms for 8 players with 15 games, and 4.4 ms in the absolute worst case — 8
+     players, every game on, plus the recursive group-games pass. The arithmetic is
+     free. Caching the computed summary would have bought nothing, so none of the
+     money math is cached or changed.
+     The wait is ALL network, and on a tournament round this block is nearly all of
+     it: t2Get, and then loadTourneyRawRounds, which pages down the FULL round blob
+     of every round in the event. All of it used to be awaited BEFORE the single
+     body.innerHTML at the bottom, so a player who only wanted to see his own cart's
+     skins sat on "Loading the money…" while the whole field downloaded.
+     Split in two. The group scope — which needs nothing but the round itself —
+     paints immediately; the event scope is filled in afterwards, into its own div.
+     The group half is never re-rendered, so nothing the user is already reading or
+     tapping gets pulled out from under them. Same fetches, same math, same output:
+     only the order changed. This is the pattern #rb-evextra (v1336) already used,
+     applied to the block that actually costs the time. */
+  const _isT2Round = !!(g.t2 && g.t2.tournamentId);
+  let _rbEventState = _isT2Round ? 'loading' : 'none';   // loading | ready | empty | none
+  if (_isT2Round) {
+    html += '<div id="rb-scope-event" hidden>'
+      + '<div id="rb-ev-load" class="bg-inline-load" style="padding:18px 4px"><span class="sp"></span>'
+      + 'Pulling the whole field\u2019s money\u2026</div></div>';
+  }
+  // Filled in after the first paint. Builds into its OWN string and injects, so the
+  // group scope on screen is left completely alone.
+  let _rbEventPromise = null;
+  const _rbFillEvent = async function () {
+    let evHtml = '';
+    try { if (typeof t2Get === 'function') t = await t2Get(g.t2.tournamentId); } catch (e) { t = null; }
+    if (t) {
+    evHtml += '<div style="font-weight:800;font-size:15px;margin:16px 0 6px">\u{1F3C6} ' + escapeHtml(t.name || 'Tournament') + '</div>';
     // v1108 (Tyler, 8/19): "make that the results screen but make sure it shows
     // who pays who and there is access to see every single bet both group and
     // tourney bets."
@@ -55882,41 +56024,74 @@ async function openRoundBetsSheet(code, courseName, opts) {
       } catch (e) {}
     } catch (e) {}
     // v1113: standings first — on a team-format event this is the main game.
-    if (_evStdHtml) html += '<div style="margin-bottom:10px">' + _evStdHtml + '</div>';
+    if (_evStdHtml) evHtml += '<div style="margin-bottom:10px">' + _evStdHtml + '</div>';
     // v1332: the whole-field leaderboard, the one thing Tournament Results had that
     // this sheet did not. Rendered by the SAME builder that screen uses, so removing
     // the button loses nothing.
     try {
       const _fs = _t2FieldStandingsHtml(_evScores, _evPl);
-      if (_fs) html += '<div style="margin-bottom:10px">' + _fs + '</div>';
+      if (_fs) evHtml += '<div style="margin-bottom:10px">' + _fs + '</div>';
     } catch (e) {}
     // v1336 (Tyler, 8/31): the last three Event-Leaderboard-only blocks — cup
     // standings, per-day team standings, money by day. Filled in after first paint
     // (see #rb-evextra below): the cup needs a load and money-by-day runs one payout
     // pass PER DAY, so awaiting them here would hold the whole sheet shut on a cell
     // connection. Same builders openEventLeaderboard uses, so the two cannot drift.
-    html += '<div id="rb-evextra"></div>';
+    evHtml += '<div id="rb-evextra"></div>';
     // v1320: the two breakdowns Tyler asked for — the event total for every player,
     // then each cart's own bets — both stated as TOTALS, above the single payout.
-    try { html += bgEventBreakdownHtml(_evPay, _evRaw); } catch (e) {}
+    try { evHtml += bgEventBreakdownHtml(_evPay, _evRaw); } catch (e) {}
     if (_evLines.length) {
-      html += '<div style="font-weight:800;font-size:15px;margin:16px 0 4px">\u{1F4B0} Settle up — FINAL <span class="small-text" style="font-weight:400;color:var(--text-muted)">— covers everything above</span></div>';
-      if (_evProv) html += '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">' + escapeHtml(_evProv) + '</div>';
+      evHtml += '<div style="font-weight:800;font-size:15px;margin:16px 0 4px">\u{1F4B0} Settle up — FINAL <span class="small-text" style="font-weight:400;color:var(--text-muted)">— covers everything above</span></div>';
+      if (_evProv) evHtml += '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">' + escapeHtml(_evProv) + '</div>';
       // v1314: cards. _evSettle / _evNameOf are the rows _evLines was built from,
       // already hoisted for the share handler — so screen and text stay one answer.
-      html += '<div id="rb-settle-event" style="margin-bottom:10px">'
+      evHtml += '<div id="rb-settle-event" style="margin-bottom:10px">'
         + bgSettleCardsHtml(_evSettle, _evNameOf) + '</div>';
     }
-    if (_evPotHtml) html += '<div style="margin-bottom:10px">' + _evPotHtml + '</div>';
-    if (_otherPotHtml) html += '<div style="margin-bottom:10px">' + _otherPotHtml + '</div>';
+    if (_evPotHtml) evHtml += '<div style="margin-bottom:10px">' + _evPotHtml + '</div>';
+    if (_otherPotHtml) evHtml += '<div style="margin-bottom:10px">' + _otherPotHtml + '</div>';
     // v1332 (Tyler, 8/31): the Tournament Results button is gone. Everything it
     // showed is on this sheet now — the whole-field standings above, the pot table,
     // the field scorecard, the single settle-up — so a second screen was one more tap
     // to reach the same facts, and one more place for the two to disagree.
     // openEventLeaderboard itself is untouched and still reachable from the Events
     // tab; only this shortcut is retired.
-    html += '</div>';   // v1320: /#rb-scope-event
-  }
+    }
+    // ---- inject, or say plainly that there was nothing to show --------------
+    try {
+      const _eHost = body.querySelector('#rb-scope-event');
+      if (!_eHost || !_eHost.isConnected) return;          // sheet closed while we were fetching
+      if (t && evHtml) {
+        _eHost.innerHTML = evHtml;
+        _rbEventState = 'ready';
+      } else {
+        _eHost.innerHTML = '<div class="help-text" style="padding:14px 4px">'
+          + (t ? 'No tournament money on this event yet.' : 'Couldn\u2019t load the tournament \u2014 check your connection and reopen.')
+          + '</div>';
+        _rbEventState = 'empty';
+      }
+      // The shared scorecard / putts-greens card follows the selected tab, and the
+      // field version only exists now — repaint if the user is already on that tab.
+      try { if (typeof _bgRbPaintCard === 'function' && !_eHost.hidden) _bgRbPaintCard('event'); } catch (e) {}
+      // v1336's extras, moved in here: they need _evPay, which only exists now.
+      try {
+        const _xh = body.querySelector('#rb-evextra');
+        if (_xh && t && t.id && typeof _t2EventExtrasHtml === 'function') {
+          _t2EventExtrasHtml(t, _evPay).then(function (h) {
+            try { if (h && _xh.isConnected) _xh.innerHTML = h; } catch (e) {}
+          }).catch(function () {});
+        }
+      } catch (e) {}
+      // v897/v1118's gold field-skin repaint, also moved: it is only correct once we
+      // know whether a whole-field scorecard was built.
+      try {
+        if (!_fieldScHtml && typeof _t2FetchFieldSkinMap === 'function') {
+          _t2FetchFieldSkinMap(g).then(m => { try { const sc = body.querySelector('#rb-scorecard'); if (m) { const fresh = buildRoundScorecardHtml(g, m); if (fresh) { _grpScHtml = fresh; if (sc && (function () { try { const _e = body.querySelector('#rb-scope-event'); return !_e || _e.hidden; } catch (_x) { return true; } })()) sc.innerHTML = fresh; } } } catch (e) {} }).catch(() => {});
+        }
+      } catch (e) {}
+    } catch (e) {}
+  };
   // v1108: one way into EVERY bet from here -- on a tournament round that screen
   // pulls the whole event (field pots AND every group's own side bets), on a plain
   // round just this round. Passing g explicitly matters: this sheet can be opened
@@ -56002,28 +56177,22 @@ async function openRoundBetsSheet(code, courseName, opts) {
     }
   } catch (e) {}
 
-  // v897 (Tyler): tournament rounds — repaint the sheet's scorecard with the
-  // GOLD field-skin circles once the cross-group fetch lands (same pattern as
-  // the GPS mini-scorecard / renderScorecard async repaints).
-  // v1118: swap this group's scorecard for the whole field's.
-  try {
-    // v1118: skipped in field mode — _t2FieldScorecardHtml already marked the field's
-    // skins, and this repaint would overwrite the whole field with this group again.
-    if (!_fieldScHtml && g.t2 && g.t2.tournamentId && typeof _t2FetchFieldSkinMap === 'function') {
-      _t2FetchFieldSkinMap(g).then(m => { try { const sc = body.querySelector('#rb-scorecard'); if (m) { const fresh = buildRoundScorecardHtml(g, m); if (fresh) { _grpScHtml = fresh; if (sc) sc.innerHTML = fresh; } } } catch (e) {} }).catch(() => {});   // v1337: keep _grpScHtml in step so a later tab switch does not drop the gold circles
-    }
-  } catch (e) {}
-  // v1336: fill #rb-evextra once the sheet is up. Fire-and-forget on purpose —
-  // a slow or failed load leaves the placeholder empty and every other section of
-  // the sheet still renders, rather than the whole sheet waiting on it.
-  try {
-    const _xh = body.querySelector('#rb-evextra');
-    if (_xh && t && t.id) {
-      _t2EventExtrasHtml(t, _evPay).then(function (h) {
-        try { if (h && _xh.isConnected) _xh.innerHTML = h; } catch (e) {}
-      }).catch(function () {});
-    }
-  } catch (e) {}
+  // v1366: START THE EVENT FETCH. The sheet is already on screen and usable at this
+  // point — this is the slow half (t2Get, then every round blob in the event) and it
+  // now runs with the group's money already readable. Deliberately not awaited.
+  // Placed AFTER the tab wiring above so _bgRbPaintCard and the tab state exist by
+  // the time it resolves. Both of the post-paint blocks that used to sit here — the
+  // v897/v1118 gold field-skin repaint and the v1336 #rb-evextra fill — moved INSIDE
+  // _rbFillEvent: each depends on something (_fieldScHtml, _evPay, t) that does not
+  // exist until the fetch lands, and leaving them here would have fired them against
+  // an empty t and a blank scorecard on every tournament round.
+  if (_isT2Round) {
+    try { _rbEventPromise = Promise.resolve(_rbFillEvent()).catch(function () {}); } catch (e) {}
+  } else {
+    // A plain round still wants the gold field-skin pass skipped and nothing else —
+    // there is no event to fetch, so nothing is deferred.
+    _rbEventState = 'none';
+  }
   { const lb = body.querySelector('#rb-lb'); if (lb) lb.onclick = () => { try { openEventLeaderboard(t, { fromCode: (g && g.code) || '' }); } catch (e) { try { showToast('Could not open the leaderboard'); } catch (e2) {} } }; }
   // v1108: opens ON TOP of this sheet (z 100062 vs 100045), so closing it drops
   // the user back here rather than unwinding the whole stack.
@@ -56054,6 +56223,15 @@ async function openRoundBetsSheet(code, courseName, opts) {
     }; }
   { const sh = body.querySelector('#rb-share'); if (sh) sh.onclick = async () => {
       try {
+        // v1366: the event scope now fills in after the sheet paints, so this button
+        // can be tapped while `t` is still null. Without this wait the `if (!t)`
+        // branch below would send THIS GROUP'S money under a bare "Settle up:"
+        // heading on a tournament round — the exact mislabelling v1320 fixed. Wait
+        // for the fetch that is already in flight rather than texting a half answer.
+        if (_isT2Round && _rbEventState === 'loading' && _rbEventPromise) {
+          try { showToast('Getting the whole event\u2019s money first\u2026'); } catch (e) {}
+          try { await _rbEventPromise; } catch (e) {}
+        }
         const where = g.course ? (' — ' + g.course) : '';
         const lines = ['⛳ Bad Golf — settle up' + where];
         // v1111 (Tyler, 8/19): the per-game list that used to lead this text is on
@@ -60690,8 +60868,20 @@ async function getFriendLiveRounds() {
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
-      const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */.order('updated_at', { ascending: false }).limit(40);
-      rows = data || [];
+      /* v1366 PERF: this was a byte-for-byte duplicate of the query inside
+         _homeLiveRows() — same table, same columns, same filter, same order, same
+         limit — and renderHome() fires BOTH on every render (renderHomeLive ->
+         _homeLiveRows, renderHomeActiveWagers -> here). The v963 note below is why
+         that matters: the 40-row window is measured in megabytes. _homeLiveRows
+         already has the in-flight promise + 2.5s TTL from v1140, so routing through
+         it collapses the pair into one fetch and keeps every later caller on the
+         same snapshot. Falls back to its own read if that helper is unavailable. */
+      if (typeof _homeLiveRows === 'function') {
+        rows = (await _homeLiveRows()) || [];
+      } else {
+        const { data } = await supa.from('games').select('code,data,updated_at').not('code', 'like', '%:%')   /* v963 PERF: real game codes never contain a colon. The old 'shared:%' filter still let every roster:/recent:/scorecard:/course: key-value row through, so this 40-row window came back ~96% non-game blobs (roster: rows average 178KB each) — 1.5-2.1MB downloaded and thrown away on every open, and a genuine live round could be pushed OUT of the window by them. */.order('updated_at', { ascending: false }).limit(40);
+        rows = data || [];
+      }
     }
   } catch (e) { console.warn('getFriendLiveRounds fetch', e); }
   const cutoff = Date.now() - 3 * 60 * 60 * 1000;
