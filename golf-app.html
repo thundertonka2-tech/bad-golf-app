@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1446-->
+<!--BGVER=v2026.11.1447-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9173,7 +9173,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1446';
+const BG_BUILD = 'v2026.11.1447';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -81884,10 +81884,17 @@ async function renderLeague() {
         '<div class="bg-evseg">' +
           '<button class="lg-row-details" data-id="' + lgEsc(s.id) + '"><span class="ei">\uD83D\uDCCB</span>Details</button>' +
           '<button class="lg-row-board" data-id="' + lgEsc(s.id) + '"><span class="ei">\uD83C\uDFC6</span>Board</button>' +
-          '<button class="lg-row-sched" data-id="' + lgEsc(s.id) + '"><span class="ei">\uD83D\uDCC5</span>Weeks</button>' +
+          /* v1447: Chat takes the third slot, as it does on a tournament card, so
+             the two strips no longer do different things in the same position.
+             The schedule keeps its own routes — the Details modal lists every
+             week, and the league screen has Full schedule. */
+          '<button class="lg-row-chat" data-id="' + lgEsc(s.id) + '" data-com="' + (_amc ? '1' : '') + '"><span class="ei">\uD83D\uDCAC</span>Chat</button>' +
           (_cid ? '<button class="lg-row-gps" data-cid="' + lgEsc(_cid) + '"><span class="ei">\uD83D\uDCCD</span>GPS</button>' +
                   '<button class="lg-row-card" data-cid="' + lgEsc(_cid) + '"><span class="ei">\uD83D\uDDC2</span>Card</button>' : '') +
         '</div>' +
+        /* v1447: the chat opens IN PLACE, between the strip and the week, exactly
+           where a tournament's does. */
+        '<div class="lgchat-host" id="lgchat-host-' + lgEsc(s.id) + '" style="display:none"></div>' +
         '<button class="full lg-row-edit" data-id="' + lgEsc(s.id) + '" style="margin-top:8px;background:#fff;color:var(--accent);border:1px solid var(--accent);font-weight:700;padding:10px;border-radius:10px">\u2699\uFE0F Edit settings</button>' +
         _weekHtml +
         '<button class="full lg-row-total" data-id="' + lgEsc(s.id) + '" style="margin-top:10px;background:var(--accent);color:#fff;border:none;font-weight:800;font-size:15px;padding:14px;border-radius:10px;white-space:normal;line-height:1.25">\uD83C\uDFC6 League Standings</button>' +
@@ -81964,8 +81971,13 @@ async function renderLeague() {
     _q('.lg-row-total', function (b) {
       b.onclick = function (e) { e.stopPropagation(); lgOpenStandings(b.dataset.id); };
     });
+    /* v1447: the Weeks button is gone from the strip; this stays as a harmless
+       no-op so a cached page mid-deploy still works, and costs nothing. */
     _q('.lg-row-sched', function (b) {
       b.onclick = function (e) { e.stopPropagation(); lgOpenSchedule(b.dataset.id); };
+    });
+    _q('.lg-row-chat', function (b) {
+      b.onclick = function (e) { e.stopPropagation(); lgChatToggle(b.dataset.id, b.dataset.com === '1'); };
     });
     _q('.lg-row-edit', function (b) {
       b.onclick = function (e) { e.stopPropagation(); lgOpenSettings(b.dataset.id); };
@@ -82336,6 +82348,96 @@ async function lgOpenSeason(sid) {
    rather than reusing openT2Summary / openEventLeaderboard: both take a
    tournament row and read tournament tables throughout. Same shell, same
    z-index, same tap-outside-to-close, same Close button. */
+/* ---- v1447: league chat ---------------------------------------------------
+   The last button that had no twin. The tournament's third slot is a message
+   board; the league's held the schedule instead, so the two strips still did
+   different things in the same position.
+
+   The valuable part of the tournament's chat is not the UI — it is t2ChatPost's
+   compare-and-swap. The messages live in ONE `games` row as a bare array, and
+   v986 found that a plain read-append-write silently DROPPED a message whenever
+   two people posted at once (measured: 4 simultaneous posts, 3 lost). t2ChatPost
+   solves that with a CAS on updated_at, a union merge by message id, a forced
+   +1ms stamp so same-millisecond writers cannot all believe they won, and a
+   trusted-read guard on the last-resort path. Reimplementing that for leagues
+   would mean reimplementing every one of those four fixes.
+
+   So the league reuses it, passing the SEASON id where a tournament id goes. The
+   row lands under `t2chat-<season-uuid>`: both are UUIDs from different tables so
+   they cannot collide, and the code is an opaque key nobody reads. The honest
+   alternative was threading a prefix through t2ChatCode / Load / Post /
+   Subscribe — five functions, one of them the concurrency-critical one — to buy a
+   tidier string, and that trade is not worth putting the tournament chat at risk.
+
+   The feed and the panel are the league's own, because t2ChatUpdateFeed and
+   t2ChatToggle both address DOM ids by `t2chat-…` and t2ChatToggle calls t2Get
+   (a tournaments read) to decide the placeholder. */
+function lgChatFeed(sid, msgs) {
+  const feed = document.getElementById('lgchat-feed-' + sid); if (!feed) return;
+  msgs = Array.isArray(msgs) ? msgs : [];
+  const atBottom = (feed.scrollHeight - feed.scrollTop - feed.clientHeight) < 50;
+  const rows = msgs.slice().sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); }).map(function (m) {
+    const when = m.ts ? new Date(m.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+    if (m.kind === 'system') {
+      return '<div style="text-align:center;margin:7px 0;color:var(--accent);font-size:12px;font-weight:700">' + lgEsc(m.body || '') + '</div>';
+    }
+    const who = lgEsc(m.author || 'Player') + (m.director ? ' \u00b7 \uD83D\uDDE3\uFE0F' : '');
+    return '<div style="margin:6px 0"><div class="small-text" style="color:var(--text-muted);font-size:11px">' +
+      who + (when ? ' \u00b7 ' + when : '') + '</div>' +
+      '<div style="font-size:13px;white-space:pre-wrap;word-break:break-word">' + lgEsc(m.body || '') + '</div></div>';
+  }).join('');
+  feed.innerHTML = rows || '<div class="help-text" style="text-align:center;padding:10px">No messages yet \u2014 say something \uD83C\uDFCC\uFE0F</div>';
+  if (atBottom) feed.scrollTop = feed.scrollHeight;
+}
+
+async function lgChatToggle(sid, amCommish) {
+  const host = document.getElementById('lgchat-host-' + sid); if (!host) return;
+  if (host.dataset.open === '1') {
+    host.style.display = 'none'; host.dataset.open = ''; host.innerHTML = '';
+    try { t2ChatUnsubscribe(); } catch (e) {}
+    return;
+  }
+  /* One chat open at a time, across both kinds — the tournament list does the
+     same, and the subscription globals are shared. */
+  try { document.querySelectorAll('.lgchat-host[data-open="1"], .t2chat-host[data-open="1"]').forEach(function (h) {
+    h.style.display = 'none'; h.dataset.open = ''; h.innerHTML = '';
+  }); } catch (e) {}
+  try { t2ChatUnsubscribe(); } catch (e) {}
+
+  host.style.display = 'block'; host.dataset.open = '1';
+  host.innerHTML =
+    '<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-top:8px">' +
+      '<div style="padding:7px 10px;background:var(--surface-2);font-weight:700;font-size:13px">\uD83D\uDCAC League chat <span class="small-text" style="font-weight:400;color:var(--text-muted)">\u00b7 smack talk + live updates</span></div>' +
+      '<div id="lgchat-feed-' + lgEsc(sid) + '" style="max-height:300px;overflow-y:auto;padding:8px 10px;background:var(--surface)"><div class="help-text" style="padding:8px">Loading\u2026</div></div>' +
+      '<div style="display:flex;gap:6px;padding:8px;border-top:1px solid var(--border)">' +
+        '<input type="text" id="lgchat-inp-' + lgEsc(sid) + '" placeholder="' + (amCommish ? 'Message the league\u2026' : 'Talk some smack\u2026') + '" maxlength="300" style="flex:1;min-width:0">' +
+        '<button class="primary" id="lgchat-send-' + lgEsc(sid) + '" style="flex:0 0 auto">Send</button>' +
+      '</div></div>';
+
+  const inp = document.getElementById('lgchat-inp-' + sid);
+  const send = async function () {
+    const v = (inp && inp.value || '').trim(); if (!v) return;
+    if (inp) inp.value = '';
+    let me = 'Player'; try { me = (await getMeName()) || 'Player'; } catch (e) {}
+    try {
+      await t2ChatPost(sid, { author: me, authorId: (_authUser && _authUser.id) || null,
+                              body: v, kind: 'chat', director: !!amCommish });
+    } catch (e) {}
+    try { lgChatFeed(sid, await t2ChatLoad(sid)); } catch (e) {}
+  };
+  { const sb = document.getElementById('lgchat-send-' + sid); if (sb) sb.onclick = send; }
+  if (inp) inp.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); send(); } };
+
+  try { lgChatFeed(sid, await t2ChatLoad(sid)); } catch (e) {}
+  try {
+    t2ChatSubscribe(sid, function (arr) {
+      const h = document.getElementById('lgchat-host-' + sid);
+      if (h && h.dataset.open === '1') lgChatFeed(sid, arr);
+    });
+  } catch (e) {}
+}
+window.lgChatToggle = lgChatToggle;
+
 async function lgOpenSummary(sid) {
   sid = sid || window._lgSeason;
   if (!sid) { try { showToast('Open the league first'); } catch (e) {} return; }
