@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1440-->
+<!--BGVER=v2026.11.1443-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9173,7 +9173,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1440';
+const BG_BUILD = 'v2026.11.1443';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -61708,6 +61708,35 @@ async function t2ListMine() {
     // tab could even start fetching the actual tournament rows). Same logic,
     // same error isolation per branch, just run concurrently.
     await Promise.all([
+      /* v1443 (Tyler): "make sure Kevin Wells can see any tournament or league
+         that is in the system."
+
+         Leagues already worked -- renderLeague selects league_seasons with no
+         client-side filter, and that table's SELECT policy has always been
+         `league_is_member(id) OR bg_is_app_admin()`, so an admin got the lot.
+         Tournaments needed BOTH halves fixing:
+           - RLS: tournaments_select was tourney_is_member(id) alone, so an admin
+             could UPDATE and DELETE a tournament (bg_tournaments_admin_* have
+             existed for a while) that they could not READ. Migration
+             tournaments_select_app_admin adds `or bg_is_app_admin()`.
+           - This list: it is built from four "how am I connected to this event"
+             routes, so opening RLS alone changed nothing -- nothing was ASKING
+             for the others. This is the fifth route, and it only runs for an app
+             admin.
+
+         Deliberately joins the same byId/linked collection as every other route,
+         so the rest of the function -- the hide lists, the past-events toggle,
+         the enrichment, the claim offers -- treats these exactly like any other
+         event and there is no second code path to keep in step. Not added to
+         `linked`: an admin looking at somebody else's event is not a participant
+         in it, and linked drives the silent slot-claim. */
+      (async () => {
+        try {
+          if (typeof isAdmin !== 'function' || !isAdmin()) return;
+          const { data } = await _bgRead(() => supa.from('tournaments').select('*'), 't2ListMine:adminAll');
+          (data || []).forEach(t => { if (t && t.id && !byId[t.id]) byId[t.id] = t; });
+        } catch (e) {}
+      })(),
       (async () => { try { const { data } = await _bgRead(() => supa.from('tournaments').select('*').eq('commissioner_id', uid), 't2ListMine:commissioner'); (data || []).forEach(t => { byId[t.id] = t; linked.add(t.id); }); } catch (e) {} })(),
       (async () => { try { const { data } = await _bgRead(() => supa.from('tournament_players').select('tournament_id').eq('user_id', uid), 't2ListMine:myPlayerRows'); (data || []).forEach(r => { if (r.tournament_id) { need.push(r.tournament_id); linked.add(r.tournament_id); } }); } catch (e) {} })(),
       // (2b) Events where a roster slot matches MY NAME but was never linked to my
@@ -82089,8 +82118,14 @@ async function lgOpenSeason(sid) {
         (myCard.approved_at ? 'Your card is in and counted.' : 'Your card is in, waiting to be signed for.') + '</p>' +
         '<button class="full" onclick="lgOpenWeek(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Open the week</button>';
     } else if (open && myMu) {
+      /* v1441 (Tyler): "remove the round code from the top, we don't use codes
+         anymore — that is only in the background, users never use them." Right:
+         a league round is CLAIMED for the week (or, since v1435, for the fixture)
+         and opened by a button, so nobody types this and nobody shares it. The
+         code is still generated and still what league_claim_* locks on — it just
+         stopped being something to read. */
       body2 += (launched
-        ? '<p class="help-text" style="margin:0 0 10px">The round is live — code ' + lgEsc(launched) + '.</p>' +
+        ? '<p class="help-text" style="margin:0 0 10px">The round is live.</p>' +
           '<button class="primary full" onclick="lgOpenLaunchedRound(\'' + lgEsc(launched) + '\')">Open the round</button>'
         : '<button class="primary full" onclick="lgLaunchWeekRound(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Start this week’s round</button>') +
         /* The second route, in Tyler's words: a round you already played, on
@@ -83210,7 +83245,7 @@ async function lgOpenCourse(sid) {
   }
 
   h += '<div class="card" style="padding:12px 14px">' +
-    (nm ? '<button class="primary full" onclick="lgNextSetupStep(\'' + lgEsc(sid) + '\')">Next step</button>' : '') +
+    ((nm && lgInSetup(sid)) ? '<button class="primary full" onclick="lgNextSetupStep(\'' + lgEsc(sid) + '\')">Next step</button>' : '') +   /* v1442 */
     '<button class="danger full" style="margin-top:' + (nm ? '8px' : '0') + '" onclick="lgStepBack(\'' + lgEsc(sid) + '\')">Back</button></div>';
   if (lgNavStale(_nav)) return;
   lgPaint(body, h);
@@ -83448,8 +83483,16 @@ async function lgOpenSchedule(sid) {
     /* v1372: the second argument is what tells lgBuildSchedule it is about to
        REPLACE pairings -- the only case that still stops to ask. A first build
        goes straight through. */
-    (amCommish ? '<button class="' + (_courseNm ? 'primary ' : '') + 'full" style="margin-top:8px" onclick="lgBuildSchedule(\'' + lgEsc(sid) + '\'' + (mus.length ? ', true' : '') + ')">' +
-      (mus.length ? 'Rebuild the schedule' : 'Build the schedule') + '</button>' : ''));
+    /* v1442 (Tyler): "remove the rebuild schedule, that is done at setup only."
+       BUILD still has to be offered to a league that has no fixtures yet — that is
+       the step itself, and hiding it would strand a half-set-up season with no way
+       to finish. What goes is REBUILD on a league already being played: it throws
+       away fixtures people are playing to, and it sat one tap from Change the day
+       on a screen a commissioner opens every week to check who plays who. It is
+       still reachable while the league is in setup. */
+    ((amCommish && (!mus.length || lgInSetup(sid)))
+      ? '<button class="' + (_courseNm ? 'primary ' : '') + 'full" style="margin-top:8px" onclick="lgBuildSchedule(\'' + lgEsc(sid) + '\'' + (mus.length ? ', true' : '') + ')">' +
+        (mus.length ? 'Rebuild the schedule' : 'Build the schedule') + '</button>' : ''));
 
   /* v1378 (Tyler, 9/1): "if it's a nine hole league they have an option here front
      or back. If it's an 18 hole league this does not even appear." A nine-hole
@@ -83590,9 +83633,9 @@ async function lgOpenSchedule(sid) {
      league." Every setup screen is a dead end without this — the commissioner
      has to go back and re-enter the checklist to find out what is next. */
   h += '<div class="card" style="padding:12px 14px">' +
-    (amCommish && mus.length
+    (amCommish && mus.length && lgInSetup(sid)   /* v1442: a played league is not a wizard */
       ? '<button class="primary full" onclick="lgNextSetupStep(\'' + lgEsc(sid) + '\')">Next step</button>' : '') +
-    '<button class="danger full" style="margin-top:' + (amCommish && mus.length ? '8px' : '0') + '" onclick="lgStepBack(\'' + lgEsc(sid) + '\')">Back</button></div>';
+    '<button class="danger full" style="margin-top:' + (amCommish && mus.length && lgInSetup(sid) ? '8px' : '0') + '" onclick="lgStepBack(\'' + lgEsc(sid) + '\')">Back</button></div>';
   if (lgNavStale(_nav)) return;
   lgPaint(body, h);
 }
@@ -85029,7 +85072,8 @@ async function lgOpenWeek(sid, weekId) {
     const _lc = (w.format_config || {}).launched_code;
     h += lgCard('<div class="bg-sec" style="margin-bottom:6px">League night</div>' +
       (_lc
-        ? '<p class="help-text" style="margin:0 0 10px">The round is live — code ' + lgEsc(_lc) + '.</p>' +
+        /* v1441: the code is background plumbing, not something to read. */
+        ? '<p class="help-text" style="margin:0 0 10px">The round is live.</p>' +
           '<button class="primary full" onclick="lgOpenLaunchedRound(\'' + lgEsc(_lc) + '\')">Open the round</button>'
         : '<p class="help-text" style="margin:0 0 10px">Playing together tonight? Start the round here and everyone\u2019s card posts to the league on its own.</p>' +
           '<button class="primary full" onclick="lgLaunchWeekRound(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Start this week\u2019s round</button>'));
@@ -87724,9 +87768,9 @@ async function lgOpenTeams(sid, quiet) {
         (_short.length === 1 ? ' still needs a player' : ' still need players') +
         '. You can carry on setting the league up — the schedule won’t build until they’re full.</p>'
       : '') +
-    (amCommish && teams.length >= 2
+    (amCommish && teams.length >= 2 && lgInSetup(sid)   /* v1442 */
       ? '<button class="primary full" onclick="lgNextSetupStep(\'' + lgEsc(sid) + '\')">Next step</button>' : '') +
-    '<button class="danger full" style="margin-top:' + (amCommish && teams.length >= 2 ? '8px' : '0') + '" onclick="lgStepBack(\'' + lgEsc(sid) + '\')">Back</button></div>';
+    '<button class="danger full" style="margin-top:' + (amCommish && teams.length >= 2 && lgInSetup(sid) ? '8px' : '0') + '" onclick="lgStepBack(\'' + lgEsc(sid) + '\')">Back</button></div>';
   if (lgNavStale(_nav)) return;
   /* v1429: reseed the roster map from what the server just told us. This is the
      one place the map is allowed to go BACKWARDS, and it is safe here because
@@ -88130,6 +88174,25 @@ function lgWizSteps(st) {
     } catch (e) { done = false; }
     return { key: s.key, title: s.title, icon: s.icon, hint: s.hint, open: s.open, done: done };
   });
+}
+
+/* v1442 (Tyler): "if the league has been set up, I should not see a next step
+   button here" — and, on the same screen, "remove the rebuild schedule, that is
+   done at setup only."
+
+   Both are the same question: is this league still being SET UP, or is it being
+   PLAYED? The wizard header already answers it — lgWizHtml nulls _lgWizAt first
+   and only writes it when setup is unfinished AND this screen is one of the
+   steps. So a finished league draws no header, and these buttons should go with
+   it rather than each screen re-deriving the answer and drifting.
+
+   It is also what lgStepBack already keys on, so the header, the Back button,
+   Next step and Rebuild now agree by construction.
+
+   MUST be called after lgWizHtml for the same screen — every caller builds the
+   header into `h` before the footer, so that holds. */
+function lgInSetup(sid) {
+  try { return !!(window._lgWizAt && window._lgWizAt.sid === sid); } catch (e) { return false; }
 }
 
 function lgWizHtml(sid, key) {
