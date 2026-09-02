@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1407-->
+<!--BGVER=v2026.11.1408-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9071,7 +9071,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1407';
+const BG_BUILD = 'v2026.11.1408';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -87004,14 +87004,64 @@ async function lgLaunchWeekRound(sid, weekId) {
 }
 
 /* Open a launched league round through the app's own round path, so it behaves
-   exactly like any other round from here on. */
+   exactly like any other round from here on.
+
+   v1408 (Tyler, 2026-09-02): "I clicked start this week's round and nothing
+   happens here." Nothing happened because nothing here ever OPENED anything.
+
+     - `loadGame(code)` reads the payload, JSON.parses it and RETURNS the object.
+       It does not touch state.game, does not enable the game tabs and does not
+       switch a tab. This function awaited it, threw the result away and
+       returned -- so the round was fetched into a local variable and discarded.
+     - The `joinGameByCode` fallback could never run, because loadGame exists and
+       does not throw. It could not have helped anyway: THERE IS NO
+       joinGameByCode ANYWHERE IN THE APP. This call site was its only mention.
+     - So both branches were dead, and the toast at the bottom was unreachable.
+
+   That is why a league night could be started but never played: the very first
+   tap DID create the round (saveGame succeeded, league_claim_week_round stamped
+   format_config.launched_code), and every tap afterwards found that code, came
+   in here, and silently did nothing. Tyler's week 1 has been sitting on a real
+   round -- code PITCH19, five players -- that the app had no way to open.
+
+   The fix is to do what the Play button does when it resumes a round: put the
+   round in state, come out of view-only, position on the hole in play, enable
+   the game tabs and switch to Score. Copied from that path deliberately rather
+   than invented, so a league round resumes exactly like every other round. */
 async function lgOpenLaunchedRound(code) {
   if (!code) return;
+  let g = null;
+  try { g = await loadGame(code); } catch (e) { g = null; }
+  if (!g) {
+    /* The round is genuinely not there -- deleted, or never saved. Say so with
+       the code in hand, because that code is what the group needs to join. */
+    try { showToast('Couldn\u2019t open the round \u2014 code ' + code); } catch (e) {}
+    return;
+  }
   try {
-    if (typeof loadGame === 'function') { await loadGame(code); return; }
-  } catch (e) {}
-  try { if (typeof joinGameByCode === 'function') { await joinGameByCode(code); return; } } catch (e) {}
-  try { showToast('Round code ' + code); } catch (e) {}
+    state.game = g;
+    state.viewOnlyMode = false;   /* you PLAY a league night, you don't watch it */
+    state.currentHole = (g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
+    try { await safeSet(KEY_LAST, g.code, false); } catch (e) {}
+    try { await addToRecent(g); } catch (e) {}
+    try { enableGameTabs(true); } catch (e) {}
+    /* Rejoining part-way through lands on the hole still to be played, not on 1. */
+    try {
+      if (state.currentHole === 1 && typeof findNextUnscoredHole === 'function') {
+        const nh = findNextUnscoredHole(g);
+        if (nh > 1) state.currentHole = nh;
+      }
+    } catch (e) {}
+    /* A league night is several people scoring one card at once -- the same
+       live sync every shared round uses. */
+    try { if (!g.finishedAt && typeof subscribeToGame === 'function') subscribeToGame(code); } catch (e) {}
+    state._scoreResumeAsked = true;   /* don't nag the resume prompt on arrival */
+    try { switchTab('score'); } catch (e) {}
+    try { await openPlayGps(); } catch (e) {}
+  } catch (e) {
+    try { console.error('lgOpenLaunchedRound failed', e); } catch (e2) {}
+    try { showToast('Couldn\u2019t open the round \u2014 code ' + code); } catch (e2) {}
+  }
 }
 
 
