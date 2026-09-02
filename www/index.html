@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1425-->
+<!--BGVER=v2026.11.1427-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9122,7 +9122,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1425';
+const BG_BUILD = 'v2026.11.1427';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -32121,6 +32121,10 @@ async function renderRosterList() {
       if (!window._rosterFriendSet || (now - (window._rosterFriendSetAt || 0)) > 60000) {
         const meId = _authUser && _authUser.id;
         const [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]);
+        /* v1427: the avatar heal below reads _rosterAllProfiles. The Friends
+           filter never populated it, so the same player showed a photo under All
+           and initials under Friends. Same fetch, kept rather than dropped. */
+        try { window._rosterAllProfiles = profiles; window._rosterAllProfilesAt = now; } catch (e) {}
         const byId = {}; (profiles || []).forEach(pr => { if (pr) byId[pr.id] = pr; });
         const set = new Set();
         (edges || []).filter(e => e && e.status === 'accepted' && meId && (e.requester === meId || e.addressee === meId))
@@ -32164,6 +32168,43 @@ async function renderRosterList() {
       if (extra.length) roster = roster.concat(extra);
     } catch (e) {}
   }
+
+  /* v1427 (Tyler): "I should see Gregory and Bryan Myers profile picture here,
+     they both have one."
+
+     They did — on their PROFILE. The merge above only reaches for a profile when
+     the name is NOT already in the saved roster, so anybody you have played with
+     before comes off the local roster row, and a photo added to their account
+     afterwards never arrives. The row then renders initials for a player who is
+     staring at their own face everywhere else in the app.
+
+     So: heal it here. A roster entry with no avatar borrows its profile's,
+     matched on the same normalised name the merge uses, plus the profile's
+     my_player alias so "Bryan Myers" finds "Brian Myers"' account if that is how
+     it was linked. Display only — nothing is written back, so a photo the user
+     set locally always wins, and this cannot overwrite one. */
+  try {
+    const _prs = window._rosterAllProfiles;
+    if (Array.isArray(_prs) && _prs.length) {
+      const _av = {};
+      const _put = function (s, a) {
+        try { const k = normalizeNameSegment(String(s || '').trim()); if (k && !_av[k]) _av[k] = a; } catch (e) {}
+      };
+      _prs.forEach(function (pr) {
+        if (!pr || !pr.avatar) return;
+        const full = friendFullName(pr);
+        if (full && full !== 'Player') _put(full, pr.avatar);
+        _put(pr.my_player, pr.avatar);
+        const dn = String(pr.display_name || '');
+        if (dn && dn.indexOf('@') < 0 && !/\d/.test(dn)) _put(dn, pr.avatar);
+      });
+      roster.forEach(function (p) {
+        if (!p || p.avatar) return;
+        const nm = p.name || ((p.firstName || '') + ' ' + (p.lastName || '')).trim();
+        try { const a = _av[normalizeNameSegment(nm)]; if (a) p.avatar = a; } catch (e) {}
+      });
+    }
+  } catch (e) {}
 
   // Match by full first+last name to identify "already in setup"
   const inSetup = new Set(
@@ -84604,6 +84645,26 @@ async function lgOpenWeek(sid, weekId) {
     if (_cmdActions) {
       h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Commissioner</div>' + _cmdActions);
     }
+
+    /* v1427: this week's side games. Its own card rather than a line in
+       Commissioner, because it is the one thing on this screen that changes what
+       gets PLAYED rather than what happens to a week that has been. Hidden once
+       the week is final -- what a settled week played is a result. */
+    if (w.status !== 'final') {
+      let _wkOwn = false;
+      try { _wkOwn = !!((w.format_config || {}).side_games); } catch (e) {}
+      h += lgCard('<div class="bg-sec" style="margin-bottom:6px">Side games this week</div>' +
+        '<p class="help-text" style="margin:0 0 10px;font-size:12px">' +
+        (_wkOwn
+          ? 'Week ' + w.week_number + ' is set up differently from the rest of the season.'
+          : 'Week ' + w.week_number + ' plays the league’s usual games. Change it here for this week only — the league’s stay as they are.') +
+        '</p>' +
+        '<button class="full" style="min-height:48px" onclick="lgOpenSideGames(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">' +
+        (_wkOwn ? '🎲 Edit week ' + w.week_number + '’s games' : '🎲 Play something else this week') + '</button>' +
+        (_wkOwn
+          ? '<button class="full" style="margin-top:8px;min-height:44px" onclick="lgClearWeekSideGames(\'' + lgEsc(w.id) + '\',' + w.week_number + ')">Use the league’s games instead</button>'
+          : ''));
+    }
   }
 
   /* v1383 (Tyler, 9/1): "you can also remove the other weeks section, this is not
@@ -86667,7 +86728,7 @@ async function lgAdvancePlayoffs(sid) {
    The server owns every rule (size, one team per player, no new teams once week
    one opens, no deleting a team that owns a result). This screen shows state
    and reports refusals; it never decides. */
-async function lgOpenTeams(sid) {
+async function lgOpenTeams(sid, quiet) {
   const body = document.getElementById('league-body'); if (!body || !sid) return;
   window._lgSeason = sid;
   /* Order matters: switchTab('league') calls renderLeague(), which claims a
@@ -86676,7 +86737,11 @@ async function lgOpenTeams(sid) {
      first invalidates this screen a line later and the list wins every time. */
   try { lgEnterTab(); } catch (e) {}
   const _nav = lgNavStart();
-  lgLoadingCard(body, 'Loading the teams…');
+  /* v1426: quiet re-renders. Every tap on this screen writes and re-reads,
+     and flashing "Loading the teams…" over a card the commissioner is halfway
+     through filling is the flicker Tyler kept reporting. lgPaint still swaps the
+     finished HTML in one go. */
+  if (!quiet) lgLoadingCard(body, 'Loading the teams…');
 
   const sr = await _bgRead(function () {
     return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
@@ -86687,15 +86752,37 @@ async function lgOpenTeams(sid) {
   let tr = null, rr = null;
   try { tr = await supa.rpc('league_teams_get', { p_season_id: sid }); } catch (e) { tr = null; }
   try { rr = await supa.rpc('league_roster', { p_season_id: sid }); } catch (e) { rr = null; }
-  const teams = (tr && !tr.error && Array.isArray(tr.data)) ? tr.data : [];
+  let teams = (tr && !tr.error && Array.isArray(tr.data)) ? tr.data : [];   /* v1426: autocreate may replace it */
   const roster = (rr && !rr.error && Array.isArray(rr.data)) ? rr.data : [];
   const me = roster.filter(function (m) { return m.user_id === _authUser.id; })[0];
   const amCommish = !!(me && (me.role === 'commissioner' || me.role === 'co_commissioner'));
 
+  /* v1426: lay the grid out before anybody looks at it. league_teams_autocreate
+     only ever ADDS, and only up to ceil(roster / size), so calling it on every
+     visit is safe -- a season that already has its teams gets nothing back.
+     _lgTeamsAutoFor stops it re-creating a team the commissioner has just
+     deliberately removed: once this season has been offered its grid, adding
+     more is something they ask for. */
+  const _players = roster.filter(function (m) {
+    return m.status === 'active' && m.role !== 'sub';
+  });
+  if (amCommish && !teams.length && _players.length >= size && window._lgTeamsAutoFor !== sid) {
+    window._lgTeamsAutoFor = sid;
+    try {
+      const _ar = await supa.rpc('league_teams_autocreate', { p_season_id: sid });
+      if (_ar && !_ar.error && _ar.data && Number(_ar.data.created) > 0) {
+        const _tr2 = await supa.rpc('league_teams_get', { p_season_id: sid });
+        if (_tr2 && !_tr2.error && Array.isArray(_tr2.data)) teams = _tr2.data;
+      }
+    } catch (e) { try { console.warn('league_teams_autocreate failed:', e); } catch (e2) {} }
+  }
+
   const onTeam = {};
   teams.forEach(function (t) { (t.players || []).forEach(function (p) { onTeam[p.member_id] = t.name; }); });
-  const free = roster.filter(function (m) { return m.status === 'active' && !onTeam[m.id]; });
-  const pick = Array.isArray(window._lgTeamPick) ? window._lgTeamPick : [];
+  /* v1426: subs were never entrants and are not team players either -- they
+     were only ever offered here because this filter predated the sub role. */
+  const free = _players.filter(function (m) { return !onTeam[m.id]; });
+  const _short = teams.filter(function (t) { return (t.players || []).length < size; });
 
   /* v1375: the same round-robin verdict the roster picker and the schedule screen
      give, said in TEAMS, on the screen where the teams are actually made -- so a
@@ -86713,64 +86800,114 @@ async function lgOpenTeams(sid) {
   let h = lgWizHtml(sid, 'teams') + lgCard('<h2 style="margin:0">Teams</h2>' +
     '<p class="help-text" style="margin:6px 0 0">' + size + ' players a team. One ball, one card — the team posts a single score each week.</p>' +
     (_tFit ? '<p class="help-text" style="margin:6px 0 0">' + lgEsc(_tFit) + '</p>' : '') +
-    (free.length
-      ? '<p class="help-text" style="margin:6px 0 0">' + free.length + ' player' + (free.length === 1 ? '' : 's') +
-        ' not on a team yet.</p>'
-      : ''));
-
-  if (teams.length) {
-    h += '<div class="card"><div class="bg-sec">Set <span class="bg-sec-count">' + teams.length + '</span></div>' +
-      teams.map(function (t) {
-        return '<div class="team-col" style="margin-top:8px">' +
-          '<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">' +
-          '<div style="flex:1;min-width:0;font-weight:700;font-size:14px">' + lgEsc(t.name) + '</div>' +
-          (amCommish ? '<button class="small" onclick="lgTeamDelete(\'' + lgEsc(sid) + '\',\'' + lgEsc(t.team_id) + '\')">Remove</button>' : '') +
-          '</div>' +
-          (t.players || []).map(function (p) {
-            return '<div class="player-chip" style="cursor:default">' + lgEsc(p.name) + '</div>';
-          }).join('') + '</div>';
-      }).join('') + '</div>';
-  }
-
-  if (amCommish) {
-    if (window._lgTeamBuilding) {
-      h += '<div class="card"><div class="bg-sec">New team</div>' +
-        lgLbl('Team name') +
-        /* v1272 FIX (QA P-12): no value attribute, so only lgTeamToggle's
-           save-and-restore hack kept what was typed. Anything else that
-           re-entered this screen -- lgTeamDelete, for one -- wiped it. */
-        '<input id="lg-team-name" type="text" maxlength="40" autocomplete="off" autocapitalize="words" value="' + lgEsc(window._lgTeamName || '') + '" placeholder="e.g. The Sandbaggers">' +
-        '<p class="help-text" style="margin:10px 0 6px">Tap ' + size + ' player' + (size === 1 ? '' : 's') +
-          ' — <span id="lg-team-count">' + pick.length + '</span> of ' + size + ' picked.</p>' +
-        '<div class="team-col">' +
+    /* v1426: the teams are already laid out by the time this paints, so the
+       instruction is no longer "build some" -- it is "fill these in". */
+    (teams.length
+      ? '<p class="help-text" style="margin:6px 0 0">' +
         (free.length
-          ? free.map(function (m) {
-              const on = pick.indexOf(m.id) >= 0;
-              return '<button type="button" class="player-chip" id="lg-tp-' + lgEsc(m.id) + '" data-nm="' + lgEsc(m.display_name) + '" aria-pressed="' + (on ? 'true' : 'false') + '"' +
-                (on ? ' style="border-color:var(--bg-brand);font-weight:700"' : '') +
-                ' onclick="lgTeamToggle(\'' + lgEsc(sid) + '\',\'' + lgEsc(m.id) + '\')">' +
-                (on ? '✓ ' : '') + lgEsc(m.display_name) + '</button>';
-            }).join('')
-          : '<p class="help-text" style="margin:0">Everybody is on a team already.</p>') +
-        '</div>' +
-        '<button class="primary full" id="lg-team-save" data-size="' + size + '" style="margin-top:12px"' + (pick.length === size ? '' : ' disabled') +
-          ' onclick="lgTeamSave(\'' + lgEsc(sid) + '\')">Save the team</button>' +
-        '<button class="danger full" style="margin-top:8px" onclick="lgTeamCancel(\'' + lgEsc(sid) + '\')">Cancel</button>' +
-        '</div>';
-    } else {
-      h += lgCard(
-        (free.length >= size
-          ? '<button class="primary full" onclick="lgTeamBuild(\'' + lgEsc(sid) + '\')">+ Add a team</button>'
-          : '<p class="help-text" style="margin:0">' +
-            (free.length ? (free.length + ' player' + (free.length === 1 ? '' : 's') + ' left over — you need ' + size + ' for a team.')
-                         : 'Everybody is on a team.') + '</p>'));
-    }
+          ? 'Tap <strong>+ Add player</strong> on a team to drop somebody in. ' + free.length +
+            ' still to place.'
+          : 'Everybody is on a team. Rename any of them by typing over the name.') + '</p>'
+      : (free.length
+          ? '<p class="help-text" style="margin:6px 0 0">' + free.length + ' player' + (free.length === 1 ? '' : 's') +
+            ' not on a team yet.</p>'
+          : '')));
+
+  /* ---- v1426 (Tyler, 2026-09-02) -----------------------------------------
+     "This should automatically create the teams and then just have you go in and
+     assign a players and a team name. Make it simple and make sure its mobile
+     friendly."
+
+     The old screen made you BUILD each team: press Add a team, type a name, tick
+     exactly two players, save, and again, and again. Nothing about a ten-man
+     two-man league is uncertain -- it is five teams -- so the app lays the five
+     out itself (league_teams_autocreate, above) and leaves the commissioner the
+     only two things it cannot know: who is on which, and what they are called.
+
+     One card a team. The name is the field itself rather than a label with an
+     edit button, because renaming is the common act here, not the rare one. The
+     player picker opens INSIDE the card it fills: no modal, which is also why it
+     cannot dismiss somebody out of the wizard the way the roster sheet did
+     (v1425), and no re-render, so nothing moves under a thumb mid-tap (v1425
+     again -- the Next button that travelled 155px between press and release).
+
+     Every tap target is 44px. */
+  h += teams.map(function (t) {
+    const ps  = t.players || [];
+    const tid = lgEsc(t.team_id);
+    const ids = lgEsc(ps.map(function (p) { return p.member_id; }).join(','));
+    return '<div class="card">' +
+      '<div style="display:flex;gap:10px;align-items:center">' +
+        (amCommish
+          ? '<input type="text" id="lg-tn-' + tid + '" data-ids="' + ids + '" maxlength="40" ' +
+            'autocomplete="off" autocapitalize="words" placeholder="Team name" ' +
+            'data-nm="' + lgEsc(t.name) + '" value="' + lgEsc(t.name) + '" ' +
+            'style="flex:1;min-width:0;min-height:44px;font-weight:700;margin:0" ' +
+            'onchange="lgTeamRename(\'' + lgEsc(sid) + '\',\'' + tid + '\')">'
+          : '<div class="bg-sec" style="flex:1;min-width:0">' + lgEsc(t.name) + '</div>') +
+        '<div class="help-text" style="margin:0;flex:0 0 auto;font-size:12px;font-variant-numeric:tabular-nums">' +
+          ps.length + ' of ' + size + '</div>' +
+      '</div>' +
+      ps.map(function (p) {
+        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="flex:1;min-width:0;font-weight:600;font-size:14px">' + lgEsc(p.name) + '</div>' +
+          (amCommish
+            /* Neutral, not danger. Tyler's red is for Back and Cancel; taking a
+               player off a team is a routine part of arranging them, and five
+               dark-red blocks down a card reads as five warnings. */
+            ? '<button type="button" class="small" style="flex:0 0 auto;min-height:40px" ' +
+              'onclick="lgTeamDrop(\'' + lgEsc(sid) + '\',\'' + tid + '\',\'' + lgEsc(p.member_id) + '\')">Remove</button>'
+            : '') +
+          '</div>';
+      }).join('') +
+      (amCommish && ps.length < size
+        ? '<button type="button" class="full" id="lg-tadd-' + tid + '" style="margin-top:10px;min-height:44px" ' +
+            'onclick="lgTeamPick(\'' + tid + '\')">+ Add player</button>' +
+          '<div id="lg-tpick-' + tid + '" hidden style="margin-top:10px">' +
+            (free.length
+              ? '<div class="team-col">' + free.map(function (m) {
+                  return '<button type="button" class="player-chip" style="min-height:44px" ' +
+                    'onclick="lgTeamAdd(\'' + lgEsc(sid) + '\',\'' + tid + '\',\'' + lgEsc(m.id) + '\')">' +
+                    lgEsc(m.display_name) + '</button>';
+                }).join('') + '</div>'
+              : '<p class="help-text" style="margin:0">Everybody is on a team already. Take somebody off another team first.</p>') +
+            '<button type="button" class="danger full" style="margin-top:8px;min-height:44px" ' +
+              'onclick="lgTeamPick(\'\')">Cancel</button>' +
+          '</div>'
+        : '') +
+      (amCommish && !ps.length
+        ? '<button type="button" class="small" style="margin-top:10px;min-height:40px" ' +
+          'onclick="lgTeamDelete(\'' + lgEsc(sid) + '\',\'' + tid + '\')">Remove this team</button>'
+        : '') +
+      '</div>';
+  }).join('');
+
+  /* The roster grew after the grid was laid out. autocreate only ever ADDS, and
+     only up to what the roster needs, so this is the same call again -- offered
+     rather than automatic, because by now the commissioner has arranged these
+     teams by hand and should be the one to say the shape changed. */
+  if (amCommish && !_short.length && free.length >= size) {
+    const _more = Math.ceil(free.length / size);
+    h += lgCard('<button class="primary full" style="min-height:48px" onclick="lgTeamsAuto(\'' + lgEsc(sid) + '\')">' +
+      '+ Add ' + _more + ' more team' + (_more === 1 ? '' : 's') + '</button>' +
+      '<p class="help-text" style="margin:8px 0 0;font-size:12px">' + free.length + ' player' +
+      (free.length === 1 ? ' is' : 's are') + ' not on a team.</p>');
   }
 
   /* v1375: every other setup screen can advance to the next step. This one was a
      dead end -- which mattered a great deal more the moment it became a REQUIRED
      step in lgNextSetupStep. */
   h += '<div class="card" style="padding:12px 14px">' +
+    /* v1426 (Tyler chose this): a short team WARNS here and does not stop you --
+       "lets you set the rest of the league up and come back to teams". The real
+       refusal lives where an incomplete team actually breaks something, at
+       league_generate_schedule, which will not pair a team with an empty seat. */
+    (_short.length
+      ? '<p class="help-text" style="margin:0 0 10px;font-size:12px">' +
+        lgEsc(_short.map(function (t) { return t.name; }).join(', ')) +
+        (_short.length === 1 ? ' still needs a player' : ' still need players') +
+        '. You can carry on setting the league up — the schedule won’t build until they’re full.</p>'
+      : '') +
     (amCommish && teams.length >= 2
       ? '<button class="primary full" onclick="lgNextSetupStep(\'' + lgEsc(sid) + '\')">Next step</button>' : '') +
     '<button class="danger full" style="margin-top:' + (amCommish && teams.length >= 2 ? '8px' : '0') + '" onclick="lgStepBack(\'' + lgEsc(sid) + '\')">Back</button></div>';
@@ -86778,66 +86915,121 @@ async function lgOpenTeams(sid) {
   lgPaint(body, h);
 }
 
-function lgTeamBuild(sid) {
-  window._lgTeamBuilding = true; window._lgTeamPick = [];
-  try { lgOpenTeams(sid); } catch (e) {}
-}
-function lgTeamCancel(sid) {
-  window._lgTeamBuilding = false; window._lgTeamPick = [];
-  try { lgOpenTeams(sid); } catch (e) {}
-}
-function lgTeamToggle(sid, mid) {
-  const pick = Array.isArray(window._lgTeamPick) ? window._lgTeamPick : [];
-  const i = pick.indexOf(mid);
-  // Keep whatever name has been typed. v1272 (QA P-12) also renders the input
-  // with value="…", so it survives every other re-entry too.
-  let nm = ''; try { const el = document.getElementById('lg-team-name'); if (el) nm = el.value; } catch (e) {}
-  if (i >= 0) pick.splice(i, 1); else pick.push(mid);
-  window._lgTeamPick = pick;
-  window._lgTeamName = nm;
-  /* v1275 FIX (QA SP-9): this used to call lgOpenTeams(sid) — a full re-render
-     from the network for one tap: three reads of its own plus the four
-     switchTab kicked off, and it destroyed and rebuilt the text input the user
-     was typing in. Ticking a name changes nothing on the server, so nothing
-     needs re-reading. Flip the chip, move the counter, enable or disable Save.
-     If any of that is missing from the DOM, fall back to the old full render
-     rather than leave the screen lying about what is selected. */
+/* ---- v1426: the teams step's writes -------------------------------------
+   Everything here goes through ONE call, league_save_team, which takes a team's
+   whole intended roster every time and clears anybody left out of it. So each
+   handler sends the FULL set, read back off the card it is acting on, never a
+   delta -- there is no second code path that could disagree with the first.
+
+   The server changed to match (migration league_teams_autocreate_and_partial_teams):
+   an under-filled team is legal while the season has not started, because a grid
+   you fill in over five minutes is half-empty for most of them. Over-filled is
+   still refused, and league_generate_schedule will not pair a team that is short.
+   Setup is allowed to be unfinished; a fixture is not. */
+
+/* Reads a card's current truth out of the DOM: the name as typed (which may not
+   be saved yet) and the member ids the last render put on it. */
+function _lgTeamCur(tid) {
+  let nm = '', raw = '', saved = '';
   try {
-    const el = document.getElementById('lg-tp-' + mid);
-    const c = document.getElementById('lg-team-count');
-    const sv = document.getElementById('lg-team-save');
-    if (!el || !c || !sv) { lgOpenTeams(sid); return; }
-    const on = pick.indexOf(mid) >= 0;
-    el.setAttribute('aria-pressed', on ? 'true' : 'false');
-    el.style.borderColor = on ? 'var(--bg-brand)' : '';
-    el.style.fontWeight = on ? '700' : '';
-    el.textContent = (on ? '✓ ' : '') + (el.getAttribute('data-nm') || '');
-    c.textContent = String(pick.length);
-    sv.disabled = (pick.length !== Number(sv.dataset.size || 0));
-  } catch (e) {
-    try { lgOpenTeams(sid); } catch (e2) {}
-  }
+    const el = document.getElementById('lg-tn-' + tid);
+    if (el) {
+      nm = String(el.value || '').trim();
+      raw = String(el.getAttribute('data-ids') || '');
+      saved = String(el.getAttribute('data-nm') || '').trim();
+    }
+  } catch (e) {}
+  /* `saved` is the name the server last confirmed. Adding or removing a player
+     has to send a name too, and taking the box's value alone means an emptied
+     box quietly renames the team on the next tap -- so the last good name is the
+     fallback, and only lgTeamRename treats an empty box as something to say
+     out loud. */
+  return { name: nm, saved: saved, ids: raw ? raw.split(',').filter(Boolean) : [] };
 }
 
-async function lgTeamSave(sid) {
-  const el = document.getElementById('lg-team-name');
-  const nm = el ? String(el.value || '').trim() : '';
-  if (!nm) { try { showToast('Give the team a name'); } catch (e) {} return; }
+async function _lgTeamWrite(sid, tid, name, ids) {
   let res = null;
   try {
     res = await supa.rpc('league_save_team', {
-      p_season_id: sid, p_name: nm, p_member_ids: window._lgTeamPick || []
+      p_season_id: sid, p_name: name, p_member_ids: ids, p_team_id: tid
     });
   } catch (e) { res = { data: null, error: e }; }
   if (!res || res.error) {
     try { console.warn('league_save_team failed:', res && res.error); } catch (e) {}
     try { showToast(lgErrText(res && res.error, 'Couldn’t save the team')); } catch (e) {}
+    return false;
+  }
+  return true;
+}
+
+/* Opens the picker inside ONE card and closes the others. No network and no
+   re-render -- every list is already in the DOM -- so the card cannot flicker
+   and nothing can navigate out from under the tap that opened it. '' closes all. */
+function lgTeamPick(tid) {
+  window._lgTeamPickFor = tid || '';
+  try {
+    const pre = 'lg-tpick-';
+    document.querySelectorAll('[id^="' + pre + '"]').forEach(function (el) {
+      const on = (el.id === pre + tid);
+      el.hidden = !on;
+      const b = document.getElementById('lg-tadd-' + el.id.slice(pre.length));
+      if (b) b.hidden = on;
+    });
+  } catch (e) {}
+}
+window.lgTeamPick = lgTeamPick;
+
+async function lgTeamAdd(sid, tid, mid) {
+  const c = _lgTeamCur(tid);
+  if (c.ids.indexOf(mid) < 0) c.ids.push(mid);
+  /* Close the picker NOW, synchronously -- not when the re-render lands. The
+     list stays on screen for the whole round trip otherwise, and a second tap
+     inside that window reads the SAME stale data-ids and saves a team missing
+     the player just added. */
+  lgTeamPick('');
+  await _lgTeamWrite(sid, tid, c.name || c.saved || 'Team', c.ids);
+  try { lgOpenTeams(sid, true); } catch (e) {}
+}
+window.lgTeamAdd = lgTeamAdd;
+
+async function lgTeamDrop(sid, tid, mid) {
+  const c = _lgTeamCur(tid);
+  const i = c.ids.indexOf(mid);
+  if (i >= 0) c.ids.splice(i, 1);
+  await _lgTeamWrite(sid, tid, c.name || c.saved || 'Team', c.ids);
+  try { lgOpenTeams(sid, true); } catch (e) {}
+}
+window.lgTeamDrop = lgTeamDrop;
+
+/* Fires on blur. Deliberately does NOT repaint when it works: tapping "+ Add
+   player" is what blurs the field, so a repaint here would close the picker that
+   tap was opening. It repaints only to undo itself when the server refuses. */
+async function lgTeamRename(sid, tid) {
+  const c = _lgTeamCur(tid);
+  if (!c.name) {
+    try { showToast('Give the team a name'); } catch (e) {}
+    try { lgOpenTeams(sid, true); } catch (e) {}
     return;
   }
-  window._lgTeamBuilding = false; window._lgTeamPick = []; window._lgTeamName = '';
-  try { showToast('Team saved'); } catch (e) {}
-  try { lgOpenTeams(sid); } catch (e) {}
+  const ok = await _lgTeamWrite(sid, tid, c.name, c.ids);
+  if (!ok) { try { lgOpenTeams(sid, true); } catch (e) {} }
 }
+window.lgTeamRename = lgTeamRename;
+
+async function lgTeamsAuto(sid) {
+  let res = null;
+  try { res = await supa.rpc('league_teams_autocreate', { p_season_id: sid }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_teams_autocreate failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t add the teams')); } catch (e) {}
+    return;
+  }
+  const n = Number((res.data || {}).created) || 0;
+  try { showToast(n ? ('Added ' + n + ' team' + (n === 1 ? '' : 's')) : 'Nothing to add'); } catch (e) {}
+  try { lgOpenTeams(sid, true); } catch (e) {}
+}
+window.lgTeamsAuto = lgTeamsAuto;
 
 async function lgTeamDelete(sid, tid) {
   let ok = false;
@@ -86904,7 +87096,7 @@ function lgAssignFlights(sid) { try { lgOpenFlights(sid); } catch (e) {} }
    league. */
 async function lgSetupState(sid, pre) {
   const out = { members: 0, weeks: 0, matchups: 0, handicaps: 0, course: null, game: false, ready: false,
-                type: 'individual', teams: 0,     /* v1375: a team league has one more setup step */
+                type: 'individual', teams: 0, teamsShort: 0,   /* v1375 / v1426 */
                 money: false,                     /* v1385 */
                 sideGames: false };               /* v1403 */
   /* v1371: has anybody actually CHOSEN the game? Every league already has a
@@ -86940,7 +87132,18 @@ async function lgSetupState(sid, pre) {
   if (out.type !== 'individual') {
     try {
       const _tr = await supa.rpc('league_teams_get', { p_season_id: sid });
-      if (_tr && !_tr.error && Array.isArray(_tr.data)) out.teams = _tr.data.length;
+      if (_tr && !_tr.error && Array.isArray(_tr.data)) {
+        out.teams = _tr.data.length;
+        /* v1426: teams are laid out EMPTY now and filled afterwards, so "there
+           are two teams" stopped meaning "the teams are ready". Counted here so
+           the setup route can send a commissioner back to finish them, instead
+           of letting league_generate_schedule refuse them with a raw
+           LEAGUE_TEAM_INCOMPLETE two screens further on. */
+        const _sz = (out.type === 'team_4man') ? 4 : 2;
+        out.teamsShort = _tr.data.filter(function (t) {
+          return ((t.players || []).length < _sz);
+        }).length;
+      }
     } catch (e) {}
   }
   /* v1272 (QA SP-2): the caller usually already holds the roster and the course.
@@ -87174,6 +87377,19 @@ async function lgNextSetupStep(sid) {
   // longer stops at the §12.2 diff on a FIRST build ("it should build it
   // automatically then present it to you and let you modify"). It writes and
   // opens the schedule, where every week can still be moved or reshuffled.
+  // v1426: the teams exist but somebody is still not on one. This sits AFTER
+  // the course on purpose -- Tyler: warn, but let me set the rest of the league
+  // up and come back. So it is the LAST thing checked before the schedule, which
+  // is the one step an incomplete team genuinely breaks.
+  if (st.type && st.type !== 'individual' && (st.teamsShort || 0) > 0 && !st.matchups) {
+    try {
+      showToast((st.teamsShort === 1)
+        ? 'One team still needs a player — then the schedule can build'
+        : st.teamsShort + ' teams still need players — then the schedule can build');
+    } catch (e) {}
+    try { lgOpenTeams(sid); } catch (e) { try { lgOpenSettings(sid); } catch (e2) {} }
+    return;
+  }
   if (!st.matchups) {
     try { lgBuildSchedule(sid); } catch (e) { try { lgOpenSchedule(sid); } catch (e2) {} }
     return;
@@ -87450,7 +87666,7 @@ function lgMergeLeagueGames(on) {
   } catch (e) { try { console.warn('lgMergeLeagueGames', e); } catch (e2) {} }
 }
 
-async function lgOpenSideGames(sid) {
+async function lgOpenSideGames(sid, weekId) {
   sid = sid || window._lgSeason;
   if (!sid) { try { showToast('Open the league first'); } catch (e) {} return; }
   window._lgSeason = sid;
@@ -87459,7 +87675,35 @@ async function lgOpenSideGames(sid) {
       return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
     }, 'lgOpenSideGames:season');
     if (!sr.ok) { try { showToast('Couldn’t load the league'); } catch (e) {} return; }
-    const existing = ((sr.data && sr.data.settings) || {}).side_games || {};
+    let existing = ((sr.data && sr.data.settings) || {}).side_games || {};
+
+    /* v1427: the last item of the setup spec -- ONE week that plays something
+       else. The league's games are the default and stay the answer for almost
+       every week; this is the scramble night, or the week the group wants wolf
+       instead of skins.
+
+       The week's own games are the starting point when it has them, and the
+       league's when it does not -- so opening this on a normal week shows what
+       that week is actually going to play, and changing nothing changes nothing.
+       Stored in league_weeks.format_config.side_games, which travels with the
+       week; clearing it puts the week back on the league's games rather than on
+       no games at all. */
+    let _wkNum = 0, _wkHasOwn = false;
+    if (weekId) {
+      const _wr2 = await _bgRead(function () {
+        return supa.from('league_weeks').select('week_number,status,format_config')
+          .eq('id', weekId).maybeSingle();
+      }, 'lgOpenSideGames:week-override');
+      const _wk2 = (_wr2.ok && _wr2.data) ? _wr2.data : null;
+      if (!_wk2) { try { showToast('Couldn’t load that week'); } catch (e) {} return; }
+      if (_wk2.status === 'final') {
+        try { showToast('Week ' + _wk2.week_number + ' is settled — what it played can’t be changed'); } catch (e) {}
+        return;
+      }
+      _wkNum = _wk2.week_number;
+      const _own = (_wk2.format_config || {}).side_games;
+      if (_own && typeof _own === 'object') { existing = _own; _wkHasOwn = true; }
+    }
 
     const rr = await supa.rpc('league_roster', { p_season_id: sid });
     const roster = (rr && !rr.error && Array.isArray(rr.data)) ? rr.data : [];
@@ -87527,7 +87771,7 @@ async function lgOpenSideGames(sid) {
       };
     });
 
-    state._lgSideGamesCfg = { sid: sid };
+    state._lgSideGamesCfg = { sid: sid, weekId: weekId || null, weekNum: _wkNum, hasOwn: _wkHasOwn };
     state._t2DayConfig = null; state._t2GroupGamesConfig = null;
     state.editingLiveRound = false;
     try { state._t2GroupSeeded = new Set(); } catch (e) {}
@@ -87587,7 +87831,8 @@ async function lgOpenSideGames(sid) {
     try { const _d = $('edit-round-delete-action'); if (_d) _d.style.display = 'none'; } catch (e) {}
     $('btn-save-tourney').style.display = 'none';
     $('btn-save-edits').style.display = 'none';
-    { const sd = $('btn-save-day'); if (sd) { sd.style.display = ''; sd.textContent = '💾 Save the league’s games'; } }
+    { const sd = $('btn-save-day'); if (sd) { sd.style.display = '';
+        sd.textContent = weekId ? ('💾 Save week ' + _wkNum + '’s games') : '💾 Save the league’s games'; } }
     $('btn-cancel-setup').textContent = 'Cancel';
     lgFilterSideGames(true);
     /* v1412: and again after this tick, for the tiles the form writes
@@ -87597,7 +87842,11 @@ async function lgOpenSideGames(sid) {
     setTimeout(function () { try { updateSetupGates(); } catch (e) {} }, 0);
     try { _gamesManual = true; if (typeof updateGamesCollapse === 'function') updateGamesCollapse(); } catch (e) {}
     try { const _gh = document.getElementById('setup-card-bets'); if (_gh) _gh.scrollIntoView({ block: 'start' }); else window.scrollTo(0, 0); } catch (e) {}
-    try { showToast('Pick what the league plays every week, then Save'); } catch (e) {}
+    try {
+      showToast(weekId
+        ? ('Week ' + _wkNum + ' only — the league’s usual games are untouched')
+        : 'Pick what the league plays every week, then Save');
+    } catch (e) {}
   } catch (e) {
     try { console.error('lgOpenSideGames failed', e); } catch (e2) {}
     try { showToast('Could not open the games screen'); } catch (e2) {}
@@ -87619,17 +87868,52 @@ async function lgSaveSideGames() {
   const setup = gatherSetup();          // validates participant counts, values, pairs
   if (!setup) return false;             // gatherSetup has already said what is wrong
   let res = null;
-  try { res = await supa.rpc('league_set_side_games', { p_season_id: cfg.sid, p_games: setup.games || {} }); }
-  catch (e) { res = { data: null, error: e }; }
+  /* v1427: the same screen writes to the season or to ONE week, decided by
+     whether it was opened from a week. Two RPCs, one form -- the alternative was
+     a second games screen, and v1127's rule about never growing a second layout
+     applies to the setup form just as much as to the pot table. */
+  try {
+    res = cfg.weekId
+      ? await supa.rpc('league_set_week_side_games', { p_week_id: cfg.weekId, p_games: setup.games || {} })
+      : await supa.rpc('league_set_side_games', { p_season_id: cfg.sid, p_games: setup.games || {} });
+  } catch (e) { res = { data: null, error: e }; }
   if (!res || res.error) {
-    try { console.warn('league_set_side_games failed:', res && res.error); } catch (e) {}
+    try { console.warn('league side games save failed:', res && res.error); } catch (e) {}
     try { showToast(lgErrText(res && res.error, 'Couldn’t save the side games')); } catch (e) {}
     return false;
   }
   const n = (res.data && res.data.count) || 0;
-  try { showToast(n ? (n + ' side game' + (n === 1 ? '' : 's') + ' saved') : 'Saved — no side games'); } catch (e) {}
+  try {
+    showToast(cfg.weekId
+      ? (n ? ('Week ' + cfg.weekNum + ': ' + n + ' game' + (n === 1 ? '' : 's')) : ('Week ' + cfg.weekNum + ': no side games'))
+      : (n ? (n + ' side game' + (n === 1 ? '' : 's') + ' saved') : 'Saved — no side games'));
+  } catch (e) {}
   return true;
 }
+
+/* Puts a week back on the league's usual games. Deliberately separate from
+   saving an empty form: "we play nothing special this week" and "we play nothing
+   this week" are different answers, and a screen that could only express the
+   second would make the first unreachable. */
+async function lgClearWeekSideGames(weekId, wn) {
+  let ok = false;
+  try {
+    ok = await uiConfirm('Week ' + wn + ' goes back to the league’s usual side games.',
+      { title: 'Use the league’s games?', okLabel: 'Use the league’s' });
+  } catch (e) { ok = false; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_set_week_side_games', { p_week_id: weekId, p_games: {}, p_clear: true }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_set_week_side_games clear failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn’t reset the week')); } catch (e) {}
+    return;
+  }
+  try { showToast('Week ' + wn + ' is back on the league’s games'); } catch (e) {}
+  try { lgOpenWeek(window._lgSeason, weekId); } catch (e) {}
+}
+window.lgClearWeekSideGames = lgClearWeekSideGames;
 
 
 /* ===================== v1403 - SUBS, THE SIMPLE WAY =======================
@@ -87893,12 +88177,22 @@ async function lgLaunchWeekRound(sid, weekId) {
        through the side-games step is very often setting them after that. The
        snapshot is the fallback, for a week opened by an older build. */
     let _lgSideGames = null;
+    /* v1427: the WEEK's own games win when it has them -- that is what makes the
+       override an override. Checked first and returned whole, including an
+       empty object, because "this week we play nothing" is a real answer and
+       falling through to the league's games would overrule it. */
     try {
-      const _sgr = await _bgRead(function () {
-        return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
-      }, 'lgLaunch:sidegames');
-      if (_sgr.ok && _sgr.data && _sgr.data.settings) _lgSideGames = _sgr.data.settings.side_games || null;
+      const _own = (w.format_config || {}).side_games;
+      if (_own && typeof _own === 'object') _lgSideGames = _own;
     } catch (e) {}
+    if (!_lgSideGames) {
+      try {
+        const _sgr = await _bgRead(function () {
+          return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
+        }, 'lgLaunch:sidegames');
+        if (_sgr.ok && _sgr.data && _sgr.data.settings) _lgSideGames = _sgr.data.settings.side_games || null;
+      } catch (e) {}
+    }
     if (!_lgSideGames) { try { _lgSideGames = (w.settings_snapshot || {}).side_games || null; } catch (e) {} }
 
     let code = null;
