@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1409-->
+<!--BGVER=v2026.11.1410-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9080,7 +9080,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1409';
+const BG_BUILD = 'v2026.11.1410';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -69947,6 +69947,53 @@ function _t2OwnedGameKeys(g) {
   } catch (e) {}
   return owned;
 }
+/* v1410 (Tyler, 2026-09-02): "when I click edit game settings, it takes me into
+   the tournament game settings and not my groups side bets."
+
+   A tournament round has been protected from this since v670/v677: every live
+   edit of one is group-only, because _t2OwnedGameKeys names the games the EVENT
+   owns, enterEditLiveRoundMode strips them out of the form, and
+   applyLiveEditMerge puts them back untouched on save. So a group edits its own
+   bets and cannot touch, or lose, the event's.
+
+   A league round carries g.lg, not g.t2, so none of that ever fired: the form
+   opened with the LEAGUE's own games sitting in it, editable -- which is both
+   the wrong screen to be looking at and a real hazard, because saving over the
+   league's pots would take the week's money out of the round the season is
+   settling from.
+
+   This is the league's half of that mapping. Same shape, same contract.
+
+   The explicit list is what a round launched from v1410 on carries. The
+   fallback matters just as much: every league round launched BEFORE this build
+   (Tyler's week 1, code PITCH19, among them) has no list, so it is reconstructed
+   from what a league stamp actually looks like -- a fieldOnly flag, or one of
+   the six pool keys the league screen is allowed to configure. */
+function _bgLeagueOwnedGameKeys(g) {
+  const owned = new Set();
+  try {
+    if (!g || !g.lg || !g.lg.sid || !g.games) return owned;
+    /* An explicit fieldOnly flag always wins -- it is stamped for the sole
+       purpose of saying "the LEAGUE settles this one, not the foursome". */
+    Object.keys(g.games).forEach(function (k) {
+      const c = g.games[k]; if (c && c.fieldOnly) owned.add(k);
+    });
+    /* What this round was launched with, when it recorded it. */
+    (Array.isArray(g.lg.gameKeys) ? g.lg.gameKeys : []).forEach(function (k) {
+      if (g.games[k] !== undefined) owned.add(k);
+    });
+    /* Pre-v1410 rounds: the league side-games screen can only ever have
+       configured these six, so anything else in g.games was not put there by
+       the league and stays the group's to edit. */
+    if (!Array.isArray(g.lg.gameKeys)) {
+      (typeof LG_SIDE_ALLOW_CFG !== 'undefined' ? LG_SIDE_ALLOW_CFG : []).forEach(function (k) {
+        if (g.games[k] !== undefined) owned.add(k);
+      });
+    }
+  } catch (e) {}
+  return owned;
+}
+
 async function openT2GroupSideBets(code) {
   if (!code) return;
   let g = (state.game && state.game.code === code) ? state.game : await loadGame(code);
@@ -87038,6 +87085,14 @@ async function lgLaunchWeekRound(sid, weekId) {
       updatedAt: Date.now()
     };
     game.players.forEach(function (p) { game.scores[p.id] = new Array(18).fill(null); });
+    /* v1410: which games the LEAGUE put on this round -- its own side games plus
+       the fieldOnly pot stamps. The tournament records the same thing as
+       g.t2.dayGameKeys and _t2OwnedGameKeys reads it to keep a group's live edit
+       away from the event's games; a league round needs the identical guard, so
+       it records the identical list. Stamped here rather than inside the object
+       literal because `games` is built by an IIFE in that literal and cannot
+       refer to itself. */
+    try { game.lg.gameKeys = Object.keys(game.games || {}); } catch (e) {}
     try { bgSnapTeeLabels(game); } catch (e) {}
 
     let ok = false;
@@ -87835,11 +87890,18 @@ async function enterEditLiveRoundMode() {
   try {
     if (g.t2 && g.t2.tournamentId) {   // v677: ANY live edit of a tournament round is group-only (was: only via "Your group's bets")
       _tOwnedGames = _t2OwnedGameKeys(g);
-      if (_tOwnedGames.size) {
-        const keep = {};
-        _tOwnedGames.forEach(k => { keep[k] = g.games[k]; });
-        state._t2PreservedGames = keep;
-      }
+    } else if (g.lg && g.lg.sid) {
+      /* v1410: a LEAGUE round gets the same protection -- the league's own side
+         games and pot stamps are held back from the form and re-attached
+         untouched on save, so this screen is the group's side bets and nothing
+         else. Without this the pencil opened the league's settings, and a save
+         could delete the pots the season settles its money from. */
+      _tOwnedGames = _bgLeagueOwnedGameKeys(g);
+    }
+    if (_tOwnedGames && _tOwnedGames.size) {
+      const keep = {};
+      _tOwnedGames.forEach(k => { keep[k] = g.games[k]; });
+      state._t2PreservedGames = keep;
     }
   } catch (e) {}
   // v863 (Tyler/Kevin): "set up Nassau/Match/Greenies the night before, came back
@@ -87866,7 +87928,13 @@ async function enterEditLiveRoundMode() {
     };
   } catch (e) { state._bgPreEditGames = null; }
   try {
-    if (g.t2 && g.t2.tournamentId && g.groupGames && Object.keys(g.groupGames).length) {
+    /* v1410: g.groupGames is where a group's OWN bets live, kept apart from
+       g.games so a group can run the same game type as a league or event pool
+       with no key collision. A league round has the same two namespaces and the
+       same need to show what is really configured, so it folds in here too --
+       v863's "set it up the night before and it showed unselected" bug, which
+       was fixed for tournaments only. */
+    if (((g.t2 && g.t2.tournamentId) || (g.lg && g.lg.sid)) && g.groupGames && Object.keys(g.groupGames).length) {
       const gok = new Set(Object.keys(g.groupGames).filter(k => !(g.games && g.games[k])));
       if (gok.size) state._t2GroupOwnedGames = gok;
     }
