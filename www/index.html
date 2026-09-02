@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1445-->
+<!--BGVER=v2026.11.1446-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9176,7 +9176,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1445';
+const BG_BUILD = 'v2026.11.1446';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -81954,11 +81954,15 @@ async function renderLeague() {
     _q('.lg-row', function (b) {
       b.onclick = function () { lgOpenSeason(b.dataset.id); };
     });
+    /* v1446: Details and Board are MODALS now, like the tournament's — you glance
+       and dismiss instead of losing your place in the list. Tapping the card
+       header still opens the league itself, which is the tournament's t2-row
+       behaviour too. */
     _q('.lg-row-details', function (b) {
-      b.onclick = function (e) { e.stopPropagation(); lgOpenSeason(b.dataset.id); };
+      b.onclick = function (e) { e.stopPropagation(); lgOpenSummary(b.dataset.id); };
     });
     _q('.lg-row-board', function (b) {
-      b.onclick = function (e) { e.stopPropagation(); lgOpenStandings(b.dataset.id); };
+      b.onclick = function (e) { e.stopPropagation(); lgOpenBoardModal(b.dataset.id); };
     });
     _q('.lg-row-total', function (b) {
       b.onclick = function (e) { e.stopPropagation(); lgOpenStandings(b.dataset.id); };
@@ -82314,6 +82318,222 @@ async function lgOpenSeason(sid) {
    Names: league_roster covers an individual league; a team league's fixtures point
    at TEAM ids, so league_teams_get is read too -- keyed off _lgFitCtx.type, which
    lgOpenSeason has already stashed by the time this row can be tapped. */
+/* ================= v1446: the strip behaves like the tournament's ===========
+   Tyler: "if I click on details in tourney I get this, if I do that in league it
+   takes me to another screen. Make it the same as tourney. Check all the buttons
+   at the top and make sure they all act like the tourney buttons."
+
+   The strip LOOKED right from v1434 but two of its five buttons did something
+   structurally different. On a tournament card:
+
+     Details -> openT2Summary   : a MODAL over the list. You glance and dismiss.
+     Board   -> openEventLeaderboard : also a modal overlay.
+     Chat    -> t2ChatToggle    : opens in place.
+     GPS/Card-> previewCourseGps / renderPreviewScorecard.
+
+   The league's Details and Board NAVIGATED — they replaced the whole screen, so
+   you lost your place in the list and had to come back. GPS and Card already
+   called the identical functions, so those two always matched.
+
+   These are the two modals that close the gap. Deliberately built as lookalikes
+   rather than reusing openT2Summary / openEventLeaderboard: both take a
+   tournament row and read tournament tables throughout. Same shell, same
+   z-index, same tap-outside-to-close, same Close button. */
+async function lgOpenSummary(sid) {
+  sid = sid || window._lgSeason;
+  if (!sid) { try { showToast('Open the league first'); } catch (e) {} return; }
+  const old = document.getElementById('lg-summary-modal'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'lg-summary-modal'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100060';
+  ov.innerHTML = '<div class="modal" style="max-width:480px;width:94%;max-height:88vh;overflow-y:auto">' +
+    '<div id="lg-summary-body"><p class="help-text" style="margin:0">Loading\u2026</p></div>' +
+    '<div class="actions" style="margin-top:14px"><button class="primary full" id="lg-sum-x">Close</button></div></div>';
+  document.body.appendChild(ov);
+  const close = function () { try { ov.remove(); } catch (e) {} };
+  ov.onclick = function (e) { if (e.target === ov) close(); };
+  { const b = ov.querySelector('#lg-sum-x'); if (b) b.onclick = close; }
+  const body = ov.querySelector('#lg-summary-body');
+
+  try {
+    const sr = await _bgRead(function () {
+      return supa.from('league_seasons')
+        .select('id,name,settings,schedule_mode,round_target,start_date,league_id,leagues(name)')
+        .eq('id', sid).maybeSingle();
+    }, 'lgOpenSummary:season');
+    const s = (sr.ok && sr.data) ? sr.data : null;
+    if (!s) { if (document.body.contains(ov)) body.innerHTML = '<p class="help-text" style="margin:0">Couldn\u2019t load that league.</p>'; return; }
+    const st = s.settings || {};
+    const isTeam = !!(st.type && st.type !== 'individual');
+
+    const rr = await supa.rpc('league_roster', { p_season_id: sid });
+    const roster = (rr && !rr.error && Array.isArray(rr.data)) ? rr.data : [];
+    const players = roster.filter(function (m) { return m.status === 'active' && m.role !== 'sub'; });
+    const nameOf = {}; roster.forEach(function (m) { nameOf[m.id] = m.display_name; });
+
+    let teams = [];
+    if (isTeam) {
+      try {
+        const tr = await supa.rpc('league_teams_get', { p_season_id: sid });
+        if (tr && !tr.error && Array.isArray(tr.data)) teams = tr.data;
+      } catch (e) {}
+      teams.forEach(function (t) { nameOf[t.team_id] = t.name; });
+    }
+
+    const wr = await _bgRead(function () {
+      return supa.from('league_weeks').select('id,week_number,status,date,course_id')
+        .eq('season_id', sid).order('week_number', { ascending: true });
+    }, 'lgOpenSummary:weeks');
+    const weeks = (wr.ok && Array.isArray(wr.data)) ? wr.data : [];
+
+    let mus = [], absBy = {};
+    if (weeks.length) {
+      const wids = weeks.map(function (w) { return w.id; });
+      const mr = await _bgRead(function () {
+        return supa.from('league_matchups')
+          .select('id,week_id,kind,entrant_kind,a_entrant_id,b_entrant_id,status').in('week_id', wids);
+      }, 'lgOpenSummary:matchups');
+      if (mr.ok && Array.isArray(mr.data)) mus = mr.data;
+      if (mus.length) {
+        try {
+          const ar = await supa.from('league_absences')
+            .select('matchup_id,member_id,resolution,sub_member_id,current_member_id')
+            .in('matchup_id', mus.map(function (m) { return m.id; }));
+          if (ar && !ar.error && Array.isArray(ar.data)) {
+            ar.data.forEach(function (a) { (absBy[a.matchup_id] = absBy[a.matchup_id] || []).push(a); });
+          }
+        } catch (e) {}
+      }
+    }
+    const muBy = {};
+    mus.forEach(function (m) { (muBy[m.week_id] = muBy[m.week_id] || []).push(m); });
+
+    /* The league's games read the same shape a tournament day's do, so the
+       tournament's own summariser describes them and the two cannot word it
+       differently. */
+    let gsumm = '';
+    try {
+      const sg = st.side_games || {};
+      if (Object.keys(sg).length && typeof t2DayGamesSummary === 'function') gsumm = t2DayGamesSummary(sg) || '';
+    } catch (e) {}
+
+    const bits = [];
+    bits.push(st.competition_mode === 'field' ? 'Everyone posts' : 'Head to head');
+    bits.push((st.base_holes === 9 ? '9' : '18') + ' holes');
+    if (s.schedule_mode === 'open') { if (s.round_target) bits.push(s.round_target + ' rounds'); }
+    else if (st.weeks) { bits.push(st.weeks + ' weeks'); }
+    bits.push(players.length + ' player' + (players.length === 1 ? '' : 's'));
+
+    let h = '<h2 style="margin:0 0 2px">' + lgEsc((s.leagues && s.leagues.name) || 'League') + '</h2>';
+    h += '<div class="small-text" style="color:var(--text-muted);margin-bottom:10px">' +
+      lgEsc(s.name || '') + ' \u00b7 ' + lgEsc(bits.join(' \u00b7 ')) + '</div>';
+    if (gsumm) h += '<div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">\uD83C\uDFAE ' + lgEsc(gsumm) + '</div>';
+
+    if (isTeam && teams.length) {
+      h += teams.map(function (t) {
+        const ps = (t.players || []).map(function (p) { return (p.name || nameOf[p.member_id] || '?').split(/\s+/)[0]; });
+        return '<div style="margin-bottom:8px"><div style="font-weight:700">' + lgEsc(t.name || 'Team') +
+          ' <span class="small-text" style="color:var(--text-muted)">(' + ps.length + ')</span></div>' +
+          '<div style="font-size:13px;color:var(--text-muted)">' + lgEsc(ps.join(', ') || '\u2014') + '</div></div>';
+      }).join('');
+    }
+
+    if (!weeks.length) {
+      h += '<p class="help-text" style="margin:8px 0 0">No weeks yet.</p>';
+    } else {
+      weeks.forEach(function (w) {
+        const cn = w.course_id ? (function () { try { return lgCourseName(w.course_id) || ''; } catch (e) { return ''; } })() : '';
+        h += '<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px">' +
+          '<div style="font-weight:700">Week ' + w.week_number +
+            (cn ? ' \u00b7 ' + lgEsc(cn) : '') + (w.date ? ' \u00b7 ' + lgEsc(w.date) : '') +
+            ' <span class="small-text" style="color:var(--text-muted);font-weight:400">' + lgEsc(w.status || '') + '</span></div>';
+        const list = (muBy[w.id] || []).filter(function (m) { return m.kind !== 'bye'; });
+        if (!list.length) {
+          h += '<div class="small-text" style="color:var(--text-muted)">Nothing scheduled yet.</div>';
+        } else {
+          h += list.map(function (m) {
+            const a = nameOf[m.a_entrant_id] || '\u2014';
+            const b = m.b_entrant_id ? (nameOf[m.b_entrant_id] || '\u2014') : null;
+            return '<div style="font-size:13px;margin-top:3px">\u2694\uFE0F ' + lgEsc(a) +
+              (b ? ' <span class="help-text" style="font-size:12px">v</span> ' + lgEsc(b) : '') + '</div>' +
+              lgSubNoteHtml(absBy[m.id], nameOf);
+          }).join('');
+        }
+        h += '</div>';
+      });
+    }
+
+    if (!document.body.contains(ov)) return;
+    body.innerHTML = h;
+  } catch (e) {
+    try { console.warn('lgOpenSummary failed', e); } catch (e2) {}
+    try { if (document.body.contains(ov)) body.innerHTML = '<p class="help-text" style="margin:0">Couldn\u2019t load the details.</p>'; } catch (e2) {}
+  }
+}
+window.lgOpenSummary = lgOpenSummary;
+
+/* Board, as an overlay — openEventLeaderboard's shape, with the league's own
+   standings inside it. The full-screen table keeps its own screen and is one tap
+   away at the bottom, the same relationship the tournament's modal has with its
+   deeper views. */
+async function lgOpenBoardModal(sid) {
+  sid = sid || window._lgSeason;
+  if (!sid) { try { showToast('Open the league first'); } catch (e) {} return; }
+  const old = document.getElementById('lg-board-modal'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'lg-board-modal'; ov.className = 'modal-overlay show';
+  ov.style.cssText = 'z-index:100050;align-items:flex-start;overflow-y:auto';
+  ov.innerHTML = '<div class="modal" style="max-width:920px;width:96%;margin:12px auto">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+      '<h2 style="margin:0;font-size:18px" id="lg-board-title">Standings</h2>' +
+      '<button id="lg-board-x" aria-label="Close" style="background:transparent;border:none;font-size:22px;line-height:1;cursor:pointer">\u2715</button></div>' +
+    '<div id="lg-board-body"><div class="help-text">Loading the table\u2026</div></div>' +
+    '<div class="actions" style="margin-top:16px;display:flex;flex-direction:column;gap:8px">' +
+      '<button id="lg-board-full" class="full">Full standings screen</button>' +
+      '<button id="lg-board-close" class="primary full" style="width:100%">Close</button></div></div>';
+  document.body.appendChild(ov);
+  const close = function () { try { ov.remove(); } catch (e) {} };
+  ov.onclick = function (e) { if (e.target === ov) close(); };
+  { const b = ov.querySelector('#lg-board-x'); if (b) b.onclick = close; }
+  { const b = ov.querySelector('#lg-board-close'); if (b) b.onclick = close; }
+  { const b = ov.querySelector('#lg-board-full'); if (b) b.onclick = function () { close(); try { lgOpenStandings(sid); } catch (e) {} }; }
+
+  const body = ov.querySelector('#lg-board-body');
+  try {
+    let rows = [];
+    try {
+      const st2 = await supa.rpc('league_standings_get', { p_season_id: sid, p_segment: 'full' });
+      if (st2 && !st2.error && Array.isArray(st2.data)) rows = st2.data;
+    } catch (e) {}
+    if (!document.body.contains(ov)) return;
+    if (!rows.length) {
+      body.innerHTML = '<div class="help-text">Nothing on the table yet — it fills in as weeks are played.</div>';
+      return;
+    }
+    const race = (rows[0] && rows[0].race) || 'points';
+    const toPar = race === 'to_par_total';
+    const par = function (v) {
+      if (v == null) return '\u2014';
+      const n = Number(v); return n === 0 ? 'E' : (n > 0 ? '+' + n : String(n));
+    };
+    body.innerHTML = rows.map(function (r) {
+      const big = toPar ? (r.dq ? 'OUT' : par(r.to_par))
+                        : ((r.pct == null) ? '\u2014' : (Math.round(Number(r.pct) * 10) / 10) + '%');
+      const sub = toPar ? (r.weeks_played + ' round' + (r.weeks_played === 1 ? '' : 's'))
+                        : ((r.wins || r.losses || r.ties) ? (r.wins + '-' + r.losses + '-' + r.ties)
+                                                          : (r.weeks_played + ' played'));
+      return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)' +
+        (r.dq ? ';opacity:.7' : '') + '">' +
+        '<div style="flex:0 0 26px;font-weight:800;font-size:14px;color:var(--text-muted)">' + r.rank + '</div>' +
+        '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(r.name) + '</div>' +
+        '<div class="help-text" style="margin:0;font-size:12px">' + lgEsc(sub) + '</div></div>' +
+        '<div style="flex:0 0 auto;font-weight:800;font-size:15px">' + big + '</div></div>';
+    }).join('');
+  } catch (e) {
+    try { if (document.body.contains(ov)) body.innerHTML = '<div class="help-text">Couldn\u2019t load the table.</div>'; } catch (e2) {}
+  }
+}
+window.lgOpenBoardModal = lgOpenBoardModal;
+
 async function lgWeekPairings(weekId, label) {
   if (!weekId) return;
   const sid = window._lgSeason;
