@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1435-->
+<!--BGVER=v2026.11.1437-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9173,7 +9173,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1435';
+const BG_BUILD = 'v2026.11.1437';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -81531,7 +81531,54 @@ async function renderLeague() {
   try { lgAutoOpenAndSweep(); } catch (e) {}
 
 
+  /* ---- v1436: "existing users should be simple." -------------------------
+     Tyler asked whether somebody added to a league by name is asked who they are
+     after signing in. They are -- the join link shows "Which one are you?" (v1297)
+     -- but that needs the LINK. The tournament side does better: it spots an
+     existing account by name and offers the slot on the Events tab, with no link
+     at all (_t2ClaimOffers). The league had no equivalent.
+
+     Why an RPC rather than the tournament's client-side scan: tournament_players
+     is readable, league_members is not. League RLS is built around
+     league_is_member, so a season you are not on is invisible and there is
+     nothing to scan for. league_my_seat_offers is SECURITY DEFINER and does the
+     matching server-side with league_names_match -- the same matcher
+     league_claim_seat already logs its name_match flag with.
+
+     The offer deliberately carries NO invite token. The tournament's does,
+     because that row was readable anyway; here it would hand out an authority the
+     caller could not otherwise get, and two people sharing a name would be one tap
+     from each other's seat with league money attached. So the offer is just a
+     member id, and league_claim_my_seat re-checks the name itself. */
+  let _lgOffers = [];
+  try {
+    let _dis = {};
+    try { _dis = JSON.parse(localStorage.getItem('golf:lg-claim-dismissed') || '{}') || {}; } catch (e) {}
+    const _or2 = await supa.rpc('league_my_seat_offers');
+    if (_or2 && !_or2.error && Array.isArray(_or2.data)) {
+      _lgOffers = _or2.data.filter(function (o) { return o && o.member_id && !_dis[o.member_id]; });
+    }
+  } catch (e) { /* an offer is a nicety - the list still renders */ }
+
   let h = '';
+
+  if (_lgOffers.length) {
+    h += '<div class="small-text" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin:0 0 4px">\uD83D\uDC4B Is this you?</div>';
+    _lgOffers.slice(0, 5).forEach(function (o) {
+      const mates = Array.isArray(o.mates) ? o.mates.filter(Boolean) : [];
+      h += '<div class="card" style="margin-bottom:6px;padding:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:150px">' +
+          '<div style="font-weight:600">Listed as ' + lgEsc(o.seat || 'a player') + '</div>' +
+          '<div class="small-text" style="color:var(--text-muted)">' +
+            lgEsc(o.league_name || 'A league') + (o.season_name ? ' \u00b7 ' + lgEsc(o.season_name) : '') +
+            (mates.length ? ' \u00b7 with ' + lgEsc(mates.join(', ')) : '') +
+          '</div>' +
+        '</div>' +
+        '<button class="small lg-offer-no" data-mid="' + lgEsc(o.member_id) + '" style="flex:0 0 auto">Not me</button>' +
+        '<button class="small lg-offer-yes" data-mid="' + lgEsc(o.member_id) + '" style="flex:0 0 auto;background:var(--accent);color:#fff;border:none;font-weight:700;padding:8px 12px">That\u2019s me</button>' +
+      '</div>';
+    });
+  }
 
   /* v1297 (Tyler): "once the users create the league they will send out a text
      for everyone to join. We don't need them to accept before being part of
@@ -81568,7 +81615,7 @@ async function renderLeague() {
     const _isDone = function (x) { return /complete|final|archiv|done|ended/i.test(String((x && x.status) || '')); };
     const _openIds = rows.filter(function (x) { return !_isDone(x) || window._lgExpanded[x.id]; })
                          .map(function (x) { return x.id; });
-    const _weekOf = {}, _muOf = {}, _nameOf = {}, _courseOf = {}, _commishOf = {};
+    const _weekOf = {}, _muOf = {}, _nameOf = {}, _courseOf = {}, _commishOf = {}, _meOf = {};
     if (_openIds.length) {
       let _weeks = [];
       try {
@@ -81612,6 +81659,9 @@ async function renderLeague() {
             rr2.data.forEach(function (m) { map[m.id] = m.display_name; });
             const meRow = rr2.data.filter(function (m) { return m.user_id === _authUser.id; })[0];
             _commishOf[sid2] = !!(meRow && (meRow.role === 'commissioner' || meRow.role === 'co_commissioner'));
+            /* v1437: which fixture is MINE. A team league pairs teams, so it is my
+               team's - the same `team_id || id` the week screen and the launcher use. */
+            _meOf[sid2] = meRow || null;
           }
         } catch (e) {}
         try {
@@ -81674,19 +81724,46 @@ async function renderLeague() {
         };
         /* v1434: one line per FIXTURE (Tyler chose this over tee-time groups --
            "Doughboys v Gold Diggers becomes a card the way Group 1 is one"). */
-        /* v1435: each fixture is its own round now, so each one carries its own
-           button — the way a tournament's cards each carry Join now / Group
-           Results. A fixture nobody has started shows Start; once somebody has,
-           everybody else joins THAT round rather than making a second. */
+        /* v1435: each fixture is its own round, so each carries its own button --
+           the way a tournament's cards each carry Join now / Group Results.
+
+           v1437 (Tyler): "I should not see a start round for both, just the one I
+           am able to start. The other one can say pending or In Progress or
+           complete whatever the status is." Right -- Start is not an action you
+           can take on somebody else's match, and offering it twice made the screen
+           look like a choice when only one of them was yours. This is what the
+           tournament already does: t2-start-cart renders on `info.isMine` and
+           nowhere else.
+
+           A fixture with a round is still openable by anyone, because looking is
+           not the same as starting -- and that is the Group Results button on
+           every card of a tournament, not just your own. */
+        const _myEnt = _meOf[s.id] ? (_meOf[s.id].team_id || _meOf[s.id].id) : null;
+        const _fxState = function (m) {
+          if (['final', 'forfeit', 'adjusted'].indexOf(m.status) >= 0) return 'complete';
+          if (m.game_code) return 'in progress';
+          return 'not started';
+        };
         const _fixtures = _mus.map(function (m) {
           if (m.kind === 'vs_field') return '';
+          const _isMine = !!_myEnt && (m.a_entrant_id === _myEnt || m.b_entrant_id === _myEnt);
+          const _st = _fxState(m);
+          const _stCol = _st === 'complete' ? 'var(--money-pos)'
+                       : _st === 'in progress' ? 'var(--accent)' : 'var(--text-muted)';
           return '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--bg-border,#e5e7eb)">' +
-            '<div style="font-size:13px;font-weight:600;line-height:1.35;word-break:break-word">\u2694\uFE0F ' +
-              lgEsc(_entName(m, m.a_entrant_id)) + ' <span class="help-text" style="font-size:12px">v</span> ' +
-              lgEsc(_entName(m, m.b_entrant_id)) + '</div>' +
+            '<div style="display:flex;gap:8px;align-items:baseline">' +
+              '<div style="flex:1;min-width:0;font-size:13px;font-weight:600;line-height:1.35;word-break:break-word">\u2694\uFE0F ' +
+                lgEsc(_entName(m, m.a_entrant_id)) + ' <span class="help-text" style="font-size:12px">v</span> ' +
+                lgEsc(_entName(m, m.b_entrant_id)) +
+                (_isMine ? ' <span class="help-text" style="font-size:11px;color:var(--accent)">\u00b7 yours</span>' : '') +
+              '</div>' +
+              '<div class="small-text" style="flex:0 0 auto;color:' + _stCol + ';font-weight:600">' + _st + '</div>' +
+            '</div>' +
             (m.game_code
-              ? '<button class="full lg-row-round" data-code="' + lgEsc(m.game_code) + '" style="margin-top:5px;background:' + (_fin ? 'var(--money-pos)' : 'var(--accent)') + ';color:#fff;border:none;font-weight:800;padding:10px;border-radius:10px;font-size:14px">' + (_fin ? '\uD83C\uDFC6 Results' : 'Open the round') + '</button>'
-              : (_live
+              /* Green for a finished round, the app's money-positive colour and the
+                 same green a tournament's Group Results uses. */
+              ? '<button class="full lg-row-round" data-code="' + lgEsc(m.game_code) + '" style="margin-top:5px;background:' + (_st === 'complete' ? 'var(--money-pos)' : 'var(--accent)') + ';color:#fff;border:none;font-weight:800;padding:10px;border-radius:10px;font-size:14px">' + (_st === 'complete' ? '\uD83C\uDFC6 Results' : 'Open the round') + '</button>'
+              : ((_live && _isMine)
                   ? '<button class="full lg-row-startfx" data-id="' + lgEsc(s.id) + '" data-wid="' + lgEsc(_cw.id) + '" data-mid="' + lgEsc(m.id) + '" style="margin-top:5px;background:var(--accent);color:#fff;border:none;font-weight:800;padding:10px;border-radius:10px;font-size:14px">\u25B6 Start this round</button>'
                   : '')) +
           '</div>';
@@ -81714,8 +81791,15 @@ async function renderLeague() {
               : (_live && _amc
                   ? '<button class="full lg-row-start" data-id="' + lgEsc(s.id) + '" data-wid="' + lgEsc(_cw.id) + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:800;padding:12px;border-radius:10px;font-size:15px">\u25B6 Start this week\u2019s round</button>'
                   : ''))) +
+          /* v1437 (Tyler): "there is a lot of blue on this screen, make it match
+             the tournament one with the other button colors." A tournament card
+             spends its solid blue on ONE thing (the leaderboard) and its green on
+             results; everything administrative is a white button with an accent
+             outline, like Edit settings. Update players is administrative, so it
+             takes that outline and the screen goes back to having one blue answer
+             at the bottom instead of four competing for it. */
           (_amc && !_fin
-            ? '<button class="full lg-row-players" data-id="' + lgEsc(s.id) + '" data-wid="' + lgEsc(_cw.id) + '" style="margin-top:6px;background:var(--accent);color:#fff;border:none;font-weight:600;padding:8px">Update players</button>' +
+            ? '<button class="full lg-row-players" data-id="' + lgEsc(s.id) + '" data-wid="' + lgEsc(_cw.id) + '" style="margin-top:8px;background:#fff;color:var(--accent);border:1px solid var(--accent);font-weight:700;padding:10px;border-radius:10px">\uD83D\uDD01 Update players</button>' +
               '<div class="small-text" style="color:var(--text-muted);margin-top:2px">Sit somebody out for this week and put a sub in.</div>'
             : '') +
         '</div>';
@@ -81776,6 +81860,33 @@ async function renderLeague() {
     const _q = function (sel, fn) { document.querySelectorAll(sel).forEach(fn); };
     _q('.lg-collapsed-row', function (b) {
       b.onclick = function () { window._lgExpanded[b.dataset.id] = true; renderLeague(); };
+    });
+    /* v1436: "That's me" claims the seat; "Not me" is remembered per device so the
+       card does not come back on every paint. The server re-checks the name. */
+    _q('.lg-offer-yes', function (b) {
+      b.onclick = async function () {
+        b.disabled = true;
+        let res = null;
+        try { res = await supa.rpc('league_claim_my_seat', { p_member_id: b.dataset.mid }); }
+        catch (err) { res = { data: null, error: err }; }
+        if (!res || res.error) {
+          try { showToast(lgErrText(res && res.error, 'Couldn\u2019t take that spot')); } catch (e2) {}
+          b.disabled = false;
+          return;
+        }
+        try { showToast('You\u2019re in \uD83C\uDF89'); } catch (e2) {}
+        renderLeague();
+      };
+    });
+    _q('.lg-offer-no', function (b) {
+      b.onclick = function () {
+        try {
+          const d = JSON.parse(localStorage.getItem('golf:lg-claim-dismissed') || '{}') || {};
+          d[b.dataset.mid] = 1;
+          localStorage.setItem('golf:lg-claim-dismissed', JSON.stringify(d));
+        } catch (e2) {}
+        renderLeague();
+      };
     });
     _q('.lg-row', function (b) {
       b.onclick = function () { lgOpenSeason(b.dataset.id); };
