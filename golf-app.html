@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1396-->
+<!--BGVER=v2026.11.1397-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9035,7 +9035,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1396';
+const BG_BUILD = 'v2026.11.1397';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -9879,7 +9879,10 @@ let _roundCardRemovable = null;
 function openRoundCard(idx) {
   const s = (_statRoundsCache || [])[idx];
   if (!s) return;
-  openRoundCardFor(s);
+  // v1397: third of the three round lists (Home / Rounds+Crew / Stats). A score-only
+  // round gets Remove here too, so all three behave identically. A PLAYED round still
+  // gets the clean card v1208 asked for.
+  openRoundCardFor(s, { canRemove: !!(s.imported || s.manual) });
 }
 
 // v1395: same card, opened from a ROUND RECORD rather than an index into the
@@ -53728,16 +53731,55 @@ async function _swkLoadCourse(id) {
 // The score chips — the payoff of "people shoot a narrow band". Centred on what
 // they have actually typed so far, falling back to their existing rounds.
 function _swkChips() {
-  const vals = _swk.rows.map(r => r.score).filter(v => v != null);
+  const act = _swk.rows[_swk.active];
+  const nine = !!(act && act.holes === 9);
+  // Only average rows with the SAME hole count as the row being filled - mixing an
+  // 18 and a 9 would centre the chips on a score nobody shoots.
+  const vals = _swk.rows.filter(r => r.score != null && ((r.holes === 9) === nine)).map(r => r.score);
   let c;
   if (vals.length) c = Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
-  else if (_swk.seedAvg) c = _swk.seedAvg;
-  else c = 90;
-  return [c - 4, c - 2, c, c + 2, c + 4].filter(v => v >= 40 && v <= 200);
+  else if (_swk.seedAvg) c = nine ? Math.round(_swk.seedAvg / 2) : _swk.seedAvg;
+  else c = nine ? 45 : 90;
+  const step = nine ? 1 : 2;
+  const lo = nine ? 20 : 40, hi = nine ? 125 : 200;
+  return [c - 2 * step, c - step, c, c + step, c + 2 * step].filter(v => v >= lo && v <= hi);
 }
 
-function _swkNewRow(dateMs) {
-  return { dateMs, score: null, courseId: null, courseName: '', tees: [], teeIdx: 0, holes: 18 };
+// Holes banked so far. The gate is 54 HOLES, not 3 rounds - a mix of 9s and 18s
+// counts, which is exactly how calcHandicapIndex measures it.
+function _swkHoles() {
+  return _swkFilled().reduce((a, r) => a + ((r.holes === 9) ? 9 : 18), 0);
+}
+
+function _swkNewRow(dateMs, holes, cardHoles) {
+  // teeIdx null = inherit the locked course's tee until this row overrides it.
+  // cardHoles = how many holes the COURSE CARD is, which is what decides whether a
+  // rating has to be scaled for the row's hole count.
+  return { dateMs, score: null, courseId: null, courseName: '', tees: [], teeIdx: null,
+           holes: holes || 18, cardHoles: cardHoles || 18 };
+}
+
+// The tee list in force for a row: the locked course's in one-course mode, the
+// row's own in many-courses mode.
+function _swkRowTees(r) {
+  if (_swk.mode === 'single') return (_swk.course && _swk.course.tees) ? _swk.course.tees : [];
+  return (r && Array.isArray(r.tees)) ? r.tees : [];
+}
+
+// Which tee this row uses - its own override, else the locked course's.
+function _swkRowTeeIdx(r) {
+  if (r && r.teeIdx != null) return r.teeIdx;
+  if (_swk.mode === 'single' && _swk.course) return _swk.course.teeIdx || 0;
+  return 0;
+}
+
+// The player's index right now, from their existing history. Used for the WHS
+// 9-hole combine below. Null until the 54-hole gate clears.
+function _swkCurrentIndex() {
+  try {
+    const res = calcHandicapIndex(_swk.existing || []);
+    return (res && typeof res.index === 'number' && isFinite(res.index)) ? res.index : null;
+  } catch (e) { return null; }
 }
 
 function _swkSeedRows(n) {
@@ -53754,18 +53796,36 @@ function _swkReladder() {
 
 // Rating/slope in force for a row: the locked course in ONE-COURSE mode, the
 // row's own course in MANY-COURSES mode.
+// Rating/slope for a row, SCALED to the number of holes it was played over.
+// House convention (see the course-master skill): only a real 18-rating is halved,
+// and slope is unchanged in either direction. An 18-hole card played as a nine
+// halves; a 9-hole card played twice around doubles (the v528 play-as-18 semantic).
 function _swkRowRS(r) {
-  if (_swk.mode === 'single') {
-    if (!_swk.course) return { rating: null, slope: null, label: null };
-    return _swkTee(_swk.course.tees, _swk.course.teeIdx);
-  }
-  return _swkTee(r.tees, r.teeIdx);
+  const tees = _swkRowTees(r);
+  const t = _swkTee(tees, _swkRowTeeIdx(r));
+  if (t.rating == null || t.slope == null) return t;
+  const cardHoles = (_swk.mode === 'single')
+    ? ((_swk.course && _swk.course.holes) || 18)
+    : ((r && r.cardHoles) || 18);
+  const rows = (r && r.holes) || 18;
+  let rating = t.rating;
+  if (rows === 9 && cardHoles === 18) rating = Math.round((t.rating / 2) * 10) / 10;
+  else if (rows === 18 && cardHoles === 9) rating = Math.round((t.rating * 2) * 10) / 10;
+  return { rating, slope: t.slope, label: t.label, scaled: rating !== t.rating };
 }
 
+// A 9-hole round's STORED differential is an 18-hole equivalent. This mirrors the
+// app's own recalc path exactly (see the holesScored===9 branch there): combine the
+// raw 9-hole differential with the expected 9-hole differential from the player's
+// current index, or double it when there is no index yet. Do not invent a second rule.
 function _swkRowDiff(r) {
   const rs = _swkRowRS(r);
-  if (r.score == null || rs.rating == null || rs.slope == null) return null;
-  return calcDifferential(r.score, rs.rating, rs.slope, 0);
+  if (!r || r.score == null || rs.rating == null || rs.slope == null) return null;
+  const raw = calcDifferential(r.score, rs.rating, rs.slope, 0);
+  if (raw == null || r.holes !== 9) return raw;
+  const hi = _swkCurrentIndex();
+  const exp9 = (hi == null) ? null : Math.round((hi / 2 + 1.5) * 10) / 10;
+  return (exp9 == null) ? Math.round(raw * 2 * 10) / 10 : Math.round((raw + exp9) * 10) / 10;
 }
 
 // v1394: a typo'd score must NEVER reach calcHandicapIndex. Field-found: a 23
@@ -53780,7 +53840,9 @@ function _swkRowProblem(r) {
   // a beginner shooting 150 is an ordinary round, and flagging it would block a
   // legitimate entry - worse than the bug this guards against. 40 sits below the
   // world record for 18 holes (55), so no real round trips this.
-  if (r.score < 40 || r.score > 250) return 'check this score';
+  // Bounds scale with the hole count - a 9-hole 44 is ordinary, an 18-hole 44 is not.
+  const lo = (r.holes === 9) ? 20 : 40, hi = (r.holes === 9) ? 125 : 250;
+  if (r.score < lo || r.score > hi) return 'check this score';
   const d = _swkRowDiff(r);
   // -15 clears a record-setting round against a normal rating (a 55 at 71.2/128
   // is -14.3) while still catching the two-digit typo that started this.
@@ -53813,7 +53875,7 @@ function _swkRecords() {
       course: cname || '',
       courseId: cid || null,
       gross: r.score,
-      holesScored: 18,
+      holesScored: (r.holes === 9) ? 9 : 18,
       complete: true,
       teeLabel: rs.label,
       rating: rs.rating,
@@ -53884,16 +53946,16 @@ function swkRender() {
 }
 
 function _swkProgressHtml() {
-  const n = _swkFilled().length;
-  const pct = Math.min(100, Math.round((n / 3) * 100));
-  const done = n >= 3;
+  const n = _swkHoles();
+  const pct = Math.min(100, Math.round((n / 54) * 100));
+  const done = n >= 54;
   return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">'
     + '<div style="flex:1;height:8px;border-radius:4px;background:var(--surface-3);border:1px solid var(--border);overflow:hidden">'
     + '<div id="swk-prog-bar" style="width:' + pct + '%;height:100%;background:var(--accent)"></div></div>'
     + '<div id="swk-prog-label" class="small-text" style="font-weight:700;color:' + (done ? 'var(--accent)' : 'var(--text-muted)') + '">'
-    + n + ' of 3</div></div>'
+    + n + ' of 54</div></div>'
     + '<div id="swk-prog-hint" class="small-text" style="color:var(--text-muted);margin:-6px 0 12px">'
-    + (done ? 'Gate cleared — add more if you like, or review.' : 'Three 18-hole rounds clears the 54-hole gate.')
+    + (done ? 'Gate cleared — add more if you like, or review.' : 'You need 54 holes — three 18s, or any mix of 18s and 9s.')
     + '</div>';
 }
 
@@ -53950,7 +54012,7 @@ function _swkRowMeta(r) {
       ? _swkEsc(r.courseName) + (rs.rating != null ? ' · ' + _swkEsc(rs.label || 'Tee') + ' · ' + rs.rating + '/' + rs.slope : ' · no rating')
       : 'Pick a course';
   } else {
-    meta = '18 holes' + (diff != null ? ' · diff ' + diff.toFixed(1) : '');
+    meta = ((r && r.holes === 9) ? '9 holes' : '18 holes') + (diff != null ? ' · diff ' + diff.toFixed(1) : '');
   }
   if (_swk.mode === 'multi' && diff != null) meta += ' · diff ' + diff.toFixed(1);
   const bad = _swkRowProblem(r);
@@ -53965,12 +54027,37 @@ function _swkRowHtml(r, i) {
   const border = active ? '2px solid var(--accent)' : '1px solid var(--border)';
   const meta = _swkRowMeta(r);
 
-  let html = '<div class="swk-row" data-i="' + i + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface);border:' + border + ';border-radius:10px;min-height:56px">'
+  const tees = _swkRowTees(r);
+  const teeIdx = _swkRowTeeIdx(r);
+  // Segmented 18 | 9. A real segmented control rather than a checkbox: two states,
+  // both visible, one tap either way, and it reads at a glance on a phone.
+  const seg = (v, label) => '<button class="swk-holes' + (r.holes === v ? ' primary' : '') + '" data-i="' + i + '" data-h="' + v + '"'
+    + ' style="flex:1;min-width:0;min-height:38px;padding:0;font-size:13px;font-weight:700;border-radius:7px;'
+    + (r.holes === v ? '' : 'background:transparent;border-color:transparent;color:var(--text-muted);') + '">' + label + '</button>';
+
+  let html = '<div class="swk-row" data-i="' + i + '" style="padding:8px 10px;background:var(--surface);border:' + border + ';border-radius:10px">'
+    + '<div style="display:flex;align-items:center;gap:8px">'
     + '<div style="flex:1;min-width:0">'
     + '<input type="date" class="swk-date" data-i="' + i + '" value="' + _swkIso(r.dateMs) + '" max="' + _swkIso(Date.now()) + '" style="width:100%;padding:4px 6px;font-size:13px;font-weight:600;border:none;background:transparent">'
     + '<div class="small-text swk-meta" data-i="' + i + '" style="color:' + (_swkRowProblem(r) ? 'var(--danger)' : 'var(--text-muted)') + ';font-weight:' + (_swkRowProblem(r) ? '600' : '400') + ';padding-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + meta + '</div>'
     + '</div>'
     + '<input class="swk-score" data-i="' + i + '" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="3" enterkeyhint="next" autocomplete="off" value="' + (r.score == null ? '' : r.score) + '" placeholder="––" style="flex:0 0 66px;width:66px;height:48px;min-width:0;padding:0;text-align:center;background:var(--surface-2);border:' + (active ? '2px solid var(--accent)' : '1px solid var(--border)') + ';border-radius:8px;font-size:22px;font-weight:700;color:var(--text)">'
+    + '</div>'
+    // v1397: per-row holes + tee. Both belong on the ROW, not the header - people
+    // play the same course off different tees, and squeeze in a nine after work.
+    + '<div style="display:flex;align-items:center;gap:6px;margin-top:8px">'
+    +   '<div style="flex:0 0 92px;display:flex;gap:2px;background:var(--surface-3);border-radius:9px;padding:3px">'
+    +     seg(18, '18') + seg(9, '9')
+    +   '</div>'
+    +   (tees.length > 1
+        ? '<select class="swk-tee" data-i="' + i + '" style="flex:1;min-width:0;height:44px;font-size:13px;padding:0 8px">'
+          + tees.map((t, k) => '<option value="' + k + '"' + (k === teeIdx ? ' selected' : '') + '>'
+              + _swkEsc(t.label || ('Tee ' + (k + 1))) + ' · ' + t.rating + '/' + t.slope + '</option>').join('')
+          + '</select>'
+        : '<div class="small-text" style="flex:1;min-width:0;color:var(--text-muted);padding-left:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+          + (rs.rating != null ? _swkEsc(rs.label || 'Tee') + ' · ' + rs.rating + '/' + rs.slope : 'no rating')
+          + '</div>')
+    + '</div>'
     + '</div>';
 
   if (_swk.mode === 'multi' && active && !r.courseId) {
@@ -54138,13 +54225,12 @@ function _swkWireEntry() {
         if (warn) { warn.style.display = 'block'; warn.textContent = 'No saved rating or slope for this course yet, so a round here can\'t count toward your handicap. Pick another course, or use "Enter one round in full detail" to type the rating and slope by hand.'; }
         return;
       }
-      if (c.holes === 9) {
-        if (warn) { warn.style.display = 'block'; warn.textContent = 'That\'s a 9-hole course. The Switch Kit posts 18-hole rounds only — use "Enter one round in full detail" for nines.'; }
-        return;
-      }
       c.teeIdx = 0;
       _swk.course = c;
+      // v1397: a 9-hole course is fine now. Rows default to nine; the row toggle can
+      // still say 18 for the twice-around case, and the rating scales either way.
       if (!_swk.rows.length) _swkSeedRows(5);
+      _swk.rows.forEach(rw => { if (rw.score == null) rw.holes = (c.holes === 9) ? 9 : 18; });
       swkRender();
     });
     search.oninput = (e) => run(e.target.value);
@@ -54186,6 +54272,27 @@ function _swkWireEntry() {
       if (e.key === 'Enter') { e.preventDefault(); _swkFocusRow(+el.dataset.i + 1); }
     };
   });
+  // Holes toggle. Full re-render: it changes the rating, the differential and the
+  // progress bar, and it is a deliberate tap, not a keystroke - no focus to protect.
+  document.querySelectorAll('.swk-holes').forEach(b => {
+    b.onclick = () => {
+      const i = +b.dataset.i, h = +b.dataset.h;
+      if (!_swk.rows[i] || _swk.rows[i].holes === h) return;
+      _swk.rows[i].holes = h;
+      _swk.active = i;
+      swkRender();
+    };
+  });
+  // Per-row tee override. Native <select> so iOS gives its own picker wheel.
+  document.querySelectorAll('.swk-tee').forEach(el => {
+    el.onchange = () => {
+      const i = +el.dataset.i;
+      if (!_swk.rows[i]) return;
+      _swk.rows[i].teeIdx = +el.value;
+      _swk.active = i;
+      swkRender();
+    };
+  });
   document.querySelectorAll('.swk-date').forEach(el => {
     el.onchange = () => {
       const i = +el.dataset.i;
@@ -54199,10 +54306,12 @@ function _swkWireEntry() {
   if (rowSearch) {
     const run = (q) => _swkRenderCourseList(q, 'swk-row-list', async (id) => {
       const c = await _swkLoadCourse(id);
-      if (!c.tees.length || c.holes === 9) { showToast(c.holes === 9 ? '9-hole course — use full detail entry' : 'No rating/slope for that course'); return; }
+      if (!c.tees.length) { showToast('No rating/slope for that course'); return; }
       const r = _swk.rows[_swk.active];
       const remembered = _swk.teeMemory[id];
       r.courseId = id; r.courseName = c.name; r.tees = c.tees;
+      r.cardHoles = c.holes || 18;
+      if (r.score == null && c.holes === 9) r.holes = 9;
       r.teeIdx = (remembered != null && c.tees[remembered]) ? remembered : 0;
       _swkRemember(c, r.teeIdx);
       swkRender();
@@ -54287,18 +54396,18 @@ function _swkMarkActive() {
 // keypad survive a keystroke.
 function _swkSyncDerived() {
   if (!_swk) return;
-  const n = _swkFilled().length;
+  const n = _swkHoles();
   const bar = document.getElementById('swk-prog-bar');
-  if (bar) bar.style.width = Math.min(100, Math.round((n / 3) * 100)) + '%';
+  if (bar) bar.style.width = Math.min(100, Math.round((n / 54) * 100)) + '%';
   const lbl = document.getElementById('swk-prog-label');
   if (lbl) {
-    lbl.textContent = n + ' of 3';
-    lbl.style.color = n >= 3 ? 'var(--accent)' : 'var(--text-muted)';
+    lbl.textContent = n + ' of 54';
+    lbl.style.color = n >= 54 ? 'var(--accent)' : 'var(--text-muted)';
   }
   const hint = document.getElementById('swk-prog-hint');
-  if (hint) hint.textContent = n >= 3
+  if (hint) hint.textContent = n >= 54
     ? 'Gate cleared — add more if you like, or review.'
-    : 'Three 18-hole rounds clears the 54-hole gate.';
+    : 'You need 54 holes — three 18s, or any mix of 18s and 9s.';
   _swk.rows.forEach((r, i) => {
     const m = document.querySelector('.swk-meta[data-i="' + i + '"]');
     if (!m) return;
@@ -54314,8 +54423,11 @@ function _swkSyncDerived() {
     b.dataset.v = chips[k];
     b.textContent = chips[k];
   });
+  // v1397: `n` above is HOLES now. The button counts ROUNDS - reusing n here
+  // rendered "Review 54 rounds" for three rounds.
+  const rounds = _swkFilled().length;
   const rev = document.getElementById('swk-review');
-  if (rev) rev.textContent = 'Review ' + n + ' round' + (n === 1 ? '' : 's');
+  if (rev) rev.textContent = 'Review ' + rounds + ' round' + (rounds === 1 ? '' : 's');
 }
 
 function _swkAdvance() {
@@ -56505,6 +56617,11 @@ async function loadRounds() {
       if (s.gameCode && !s.manual && !/^manual-/.test(String(s.gameCode))) {
         try { openRoundBetsSheet(s.gameCode, s.course); return; } catch (e) {}
       }
+      // v1397: a hand-entered / switched-in round has no bets sheet, and silently
+      // switching to Stats made the row look dead with no way to undo a bad import.
+      // Open the same round card every other round opens, with Remove inside it.
+      // `s` is the full score record here, so the card shows real chips.
+      try { openRoundCardFor(s, { canRemove: true }); return; } catch (e) {}
       try { switchTab('stats'); } catch (e) {}
     };
     row.querySelector('.past-row-tap').onclick = _openPast;
