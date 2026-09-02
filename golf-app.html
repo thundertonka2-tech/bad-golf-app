@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1415-->
+<!--BGVER=v2026.11.1416-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9100,7 +9100,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1415';
+const BG_BUILD = 'v2026.11.1416';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -80421,7 +80421,7 @@ function lgOpenCreate() {
       '<input id="lg-dues" type="number" inputmode="decimal" min="0" step="5" value="0" ' +
         'class="lg-in" style="flex:1;min-width:0" placeholder="0">' +
     '</div>' +
-    '<p class="help-text" style="margin:6px 0 0;font-size:12px">What each player pays to join, for the whole season. Leave it at <strong>0</strong> if the league plays for nothing. You can change this later, and set the weekly pots — skins, closest to the pin, longest putt — under <strong>Dues and pots</strong>.</p>' +
+    '<p class="help-text" style="margin:6px 0 0;font-size:12px">What each player puts in for the season. It goes into the season pot and pays out on the final standings. Leave it at <strong>0</strong> if the league plays for nothing. The weekly pots — skins, closest to the pin, longest putt — are set under <strong>Dues and pots</strong> and are settled every week.</p>' +
     /* v1369 (Tyler, 9/1): "we don't need this, the game will be determined by
        what game is chosen in the configure games." So the create screen no
        longer asks. A new league is created as LG_DEFAULT_FORMAT -- stroke play,
@@ -80761,7 +80761,9 @@ async function _lgSubmitCreateInner() {
          commissioner who never opens the money screen would have been on a
          structure they could not see. LG_PAYOUT_DEFAULT is Tyler's pick: the
          winner takes the pot. */
-      money: { dues: dues, payout: LG_PAYOUT_DEFAULT }
+      /* v1416: `buyin`, not `dues` — the fee goes into the season pot and pays
+         out at the end. Dues (money the league kept) no longer exist. */
+      money: { buyin: dues, payout: LG_PAYOUT_DEFAULT }
     }
   };
   let res = null;
@@ -85455,7 +85457,7 @@ async function lgOpenMoney(sid) {
     const _mm = _mset.money || {}, _wkp = _mm.weekly || {};
     const _pl = members.length;
     const _wks = Number(_mset.weeks) || 0;
-    const _dues = (Number(_mm.dues) || 0) * _pl;
+    const _dues = 0;   /* v1416: dues are gone — one fee, and it pays out */
     const _pot  = (Number(_mm.buyin) || 0) * _pl;
     let _perWeekEach = 0;
     Object.keys(_wkp).forEach(function (k) {
@@ -85473,11 +85475,11 @@ async function lgOpenMoney(sid) {
           lgEsc(lgMoney(amt)) + '</div></div>';
       };
       h += '<div class="card"><div class="bg-sec">What the season is worth</div>' +
-        (_pot ? line('Season pot', _pot, _pl + ' × ' + lgMoney(Number(_mm.buyin) || 0) + ' buy-in · pays out on the final table') : '') +
+        (_pot ? line('Season pot', _pot, _pl + ' × ' + lgMoney(Number(_mm.buyin) || 0) + ' league fee · pays out on the final table') : '') +
         (_perWeek ? line('Weekly pots', _weekly,
             lgMoney(_perWeek) + ' a week' + (_wks ? ' × ' + _wks + ' weeks' : '') +
             ' · ' + lgMoney(_perWeekEach) + ' each, each week') : '') +
-        (_dues ? line('Dues', _dues, _pl + ' × ' + lgMoney(Number(_mm.dues) || 0) + ' · stays with the league, not paid back out') : '') +
+
         '<div style="display:flex;gap:10px;align-items:baseline;padding:10px 0 0;border-top:2px solid var(--bg-border,#e5e7eb);margin-top:2px">' +
         '<div style="flex:1;font-weight:800;font-size:15px">In play this season</div>' +
         '<div style="font-weight:800;font-size:17px;font-variant-numeric:tabular-nums">' +
@@ -85487,20 +85489,79 @@ async function lgOpenMoney(sid) {
     }
   } catch (e) {}
 
+  /* ---- v1416 (Tyler, 2026-09-02) -------------------------------------------
+     "Because league fees are not collected and paid out at the end, let's remove
+     anything we had built to try and manage taking payments... All other
+     bets/pools are paid weekly."
+
+     So this screen stopped pretending to be a cashbox. Gone: the per-player
+     "Square up" button, the paid/settled state it wrote, and the "Settled $x"
+     line that reported it. league_money_mark_paid is a raising stub now — the
+     ledger reports, it never records money as taken.
+
+     What replaces it is the shape the cash actually moves in: a block per week,
+     because the pots are settled on the night, and then the season, because the
+     league fee only resolves at the end. Same ledger lines underneath, grouped
+     the way the money really works instead of one undifferentiated season-long
+     running total. */
+  const _row = function (name, amt, note) {
+    return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+      '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(name) + '</div>' +
+      (note ? '<div class="help-text" style="margin:0;font-size:12px">' + note + '</div>' : '') + '</div>' +
+      '<div class="' + lgMoneyCls(amt) + '" style="flex:0 0 auto;font-weight:700;font-variant-numeric:tabular-nums;font-size:15px">' +
+      lgEsc(lgMoney(amt)) + '</div></div>';
+  };
+  const _owes = function (n) { return n < 0 ? 'owes' : (n > 0 ? 'is owed' : 'square'); };
+
+  /* ---- one block per week: what the pots did that night ---- */
+  try {
+    const byWeek = {};
+    lines.forEach(function (l) {
+      if (l.party !== 'member' || !l.week_number) return;
+      const w = byWeek[l.week_number] || (byWeek[l.week_number] = { by: {}, kinds: {} });
+      w.by[l.name] = (w.by[l.name] || 0) + (Number(l.amount) || 0);
+      if (Number(l.amount) > 0) w.kinds[l.kind] = true;
+    });
+    const wks = Object.keys(byWeek).sort(function (a, b) { return Number(a) - Number(b); });
+    const potName = { skins: 'Skins', lowest_net: 'Lowest net', ctp: 'Closest to the pin',
+                      longest_drive: 'Longest drive', longest_putt: 'Longest putt' };
+    wks.forEach(function (wn) {
+      const w = byWeek[wn];
+      const names = Object.keys(w.by).sort(function (a, b) { return w.by[b] - w.by[a]; });
+      if (!names.length) return;
+      const won = Object.keys(w.kinds).map(function (k) { return potName[k] || k; }).sort();
+      h += '<div class="card"><div class="bg-sec">Week ' + lgEsc(wn) + '</div>' +
+        '<p class="help-text" style="margin:6px 0 0;font-size:12px">' +
+          (won.length ? lgEsc(won.join(' · ')) : 'Pots for this week') +
+          ' — settled on the night.</p>' +
+        names.map(function (n) { return _row(n, w.by[n], _owes(w.by[n])); }).join('') +
+        '</div>';
+    });
+  } catch (e) { try { console.warn('lgOpenMoney weekly blocks', e); } catch (e2) {} }
+
+  /* ---- the season: the fee, and what the final table pays it out to ---- */
   if (members.length && anyMoney) {
+    let _seasonAny = false;
+    const seasonBy = {};
+    try {
+      lines.forEach(function (l) {
+        if (l.party !== 'member' || l.week_number) return;
+        seasonBy[l.name] = (seasonBy[l.name] || 0) + (Number(l.amount) || 0);
+        _seasonAny = true;
+      });
+    } catch (e) {}
+    if (_seasonAny) {
+      const names = Object.keys(seasonBy).sort(function (a, b) { return seasonBy[b] - seasonBy[a]; });
+      h += '<div class="card"><div class="bg-sec">The season</div>' +
+        '<p class="help-text" style="margin:6px 0 0;font-size:12px">The league fee, and what the final table pays back out of it. This one only settles when the season ends.</p>' +
+        names.map(function (n) { return _row(n, seasonBy[n], _owes(seasonBy[n])); }).join('') +
+        '</div>';
+    }
+
     h += '<div class="card"><div class="bg-sec">Where everyone stands</div>' +
+      '<p class="help-text" style="margin:6px 0 0;font-size:12px">Everything above, added up. Bad Golf works out who owes who — it never takes or tracks a payment, so square up the way you always have.</p>' +
       members.map(function (m) {
-        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
-          '<div style="min-width:0;flex:1"><div style="font-weight:700;font-size:14px">' + lgEsc(m.name) + '</div>' +
-          '<div class="help-text" style="margin:0;font-size:12px">' +
-            (Number(m.settled) !== 0 ? 'Settled ' + lgEsc(lgMoney(m.settled)) + ' · ' : '') +
-            (Number(m.net) < 0 ? 'owes' : (Number(m.net) > 0 ? 'is owed' : 'square')) + '</div></div>' +
-          '<div class="' + lgMoneyCls(m.net) + '" style="font-weight:700;font-variant-numeric:tabular-nums;font-size:15px">' +
-            lgEsc(lgMoney(m.net)) + '</div>' +
-          (amCommish
-            ? ' <button class="small" style="margin-left:8px" onclick="lgMarkPaid(\'' + lgEsc(sid) + '\',\'' + lgEsc(m.member_id) + '\')">Square up</button>'
-            : '') +
-          '</div>';
+        return _row(m.name, m.net, _owes(Number(m.net)));
       }).join('') + '</div>';
   }
 
@@ -85575,21 +85636,11 @@ async function lgRecomputeMoney(sid) {
   try { lgOpenMoney(sid); } catch (e) {}
 }
 
-async function lgMarkPaid(sid, mid) {
-  let ok = false;
-  try { ok = await uiConfirm('Mark everything they owe or are owed as settled?', { title: 'Square up', okLabel: 'Square up' }); }
-  catch (e) { ok = false; }
-  if (!ok) return;
-  let res = null;
-  try { res = await supa.rpc('league_money_mark_paid', { p_season_id: sid, p_member_id: mid, p_paid: true }); }
-  catch (e) { res = { data: null, error: e }; }
-  if (!res || res.error) {
-    try { showToast(lgErrText(res && res.error, 'Couldn’t mark that settled')); } catch (e) {}
-    return;
-  }
-  try { showToast('Settled'); } catch (e) {}
-  try { lgOpenMoney(sid); } catch (e) {}
-}
+/* v1416: lgMarkPaid is gone with the "Square up" button that was its only
+   caller. Bad Golf does not collect league money and so has no business
+   recording a payment as taken — league_money_mark_paid is a raising stub on the
+   server for the same reason. The ledger's job is to say who owes who; the cash
+   moves the way it always has. */
 
 /* Text, not email — same channel the invites use. */
 async function lgShareSettle(sid) {
@@ -85708,14 +85759,16 @@ async function lgOpenMoneySetup(sid) {
     lgCard('<h2 style="margin:0">Dues and pots</h2>' +
       '<p class="help-text" style="margin:6px 0 0">Bad Golf works out who owes what. It does not move any money — you still collect it the way you always have.</p>') +
     lgCard('<div class="bg-sec" style="margin-bottom:10px">Season</div>' +
-      lgLbl('Dues per player') +
-      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px">$' +
-      '<input type="number" inputmode="decimal" id="lgm-dues" data-orig="' + (Number(m.dues) || 0) + '" value="' + (Number(m.dues) || 0) + '" min="0" step="5" style="flex:1"></div>' +
-      '<p class="help-text" style="margin:-6px 0 12px;font-size:12px">Covers the league’s costs. Stays with the league — it isn’t paid back out.</p>' +
-      lgLbl('Season buy-in per player') +
+      /* v1416 (Tyler, 2026-09-02): "just one fee that pays out at the end."
+         There used to be two season charges — dues, which the pot held and never
+         paid back out, and a buy-in, which did. Two numbers for one question
+         nobody was asking twice. They are now one fee, held in `buyin` because
+         that is the one the payout ladder already reads; the migration folded
+         any existing dues into it. */
+      lgLbl('League fee per player') +
       '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px">$' +
       '<input type="number" inputmode="decimal" id="lgm-buyin" data-orig="' + (Number(m.buyin) || 0) + '" value="' + (Number(m.buyin) || 0) + '" min="0" step="5" style="flex:1"></div>' +
-      '<p class="help-text" style="margin:-6px 0 12px;font-size:12px">Goes into the season pot and pays out on the final standings. Locks once week 1 opens.</p>' +
+      '<p class="help-text" style="margin:-6px 0 12px;font-size:12px">What each player puts in for the season. It all goes into the season pot and pays out on the final standings, by the split below. Locks once week 1 opens.</p>' +
       lgLbl('How the season pot pays') +
       lgPayoutPickerHtml(m.payout) +
       '<p class="help-text" style="margin:8px 0 0;font-size:12px">A tie for a paid place splits that place’s money.</p>') +
@@ -85763,7 +85816,7 @@ async function lgOpenMoneySetup(sid) {
    there is anything to lose. */
 function lgMoneyDirty() {
   try {
-    const ids = ['lgm-dues', 'lgm-buyin', 'lgm-payout'];
+    const ids = ['lgm-buyin', 'lgm-payout'];   /* v1416: dues folded into the fee */
     ['skins', 'lowest_net', 'ctp', 'longest_drive', 'longest_putt'].forEach(function (k) {
       ids.push('lgm-' + k + '-on'); ids.push('lgm-' + k + '-amt');
     });
@@ -85803,7 +85856,7 @@ async function lgSaveMoneySettings(sid, opts) {
   });
   const sel = document.getElementById('lgm-payout');
   const money = {
-    dues: num('lgm-dues'), buyin: num('lgm-buyin'),
+    buyin: num('lgm-buyin'),   /* v1416: the one league fee */
     /* v1411: the picker's hidden field. Falls back to the app default rather
        than the server's historical 60_40, which is no longer offered. */
     payout: (sel && sel.value) || LG_PAYOUT_DEFAULT,
