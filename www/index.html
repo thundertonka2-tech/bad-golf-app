@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1397-->
+<!--BGVER=v2026.11.1398-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9038,7 +9038,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1397';
+const BG_BUILD = 'v2026.11.1398';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -9575,6 +9575,8 @@ function resetSessionIdentity() {
   // v974: and the personal round-tombstone cache, or account B inherits account A's
   // "removed from my list" deletes on a shared device.
   try { _resetMyTombCache(); } catch (e) {}
+  // v1398: and the personal PLAYER-tombstone cache, same shared-device reason.
+  try { _resetMyPlayerTombCache(); } catch (e) {}
   // Non-namespaced per-account localStorage. For a signed-in user, clubs/shots are
   // read from their OWN RLS-protected profile row, so dropping the device cache is
   // safe AND closes the shared-phone leak where loadMyClubs() would migrate the
@@ -9592,7 +9594,7 @@ function resetSessionIdentity() {
   // straight into B's row. signOutUser() now flushes A's pending writes BEFORE
   // calling this, so clearing the flags here can't lose A's edits.
   ['golf:player-roster', 'golf:recent-games', 'golf:hidden-rounds',
-   'golf:deleted-rounds', 'golf:my-round-tombstones', 'golf:roster-tombstones',
+   'golf:deleted-rounds', 'golf:my-round-tombstones', 'golf:my-player-tombstones', 'golf:roster-tombstones',
    'golf:last-hcp-snap'].forEach(function (k) {
     try { localStorage.removeItem(k); } catch (e) {}
     try { if (typeof _singletonDirty !== 'undefined') _singletonDirty[k] = false; } catch (e) {}
@@ -14621,6 +14623,10 @@ const SHARED_SINGLETONS = ['golf:multinine-configs', 'golf:courses', 'golf:recen
   // v974: MY personal round deletes. Routed to a PER-USER row by singletonRowCode
   // (mytomb:<uid>) so "remove from your list" stays yours — see KEY_MY_ROUND_TOMBSTONES.
   'golf:my-round-tombstones',
+  // v1398: MY personal PLAYER deletes. Same shape, same reason as the round row
+  // above — routed to myptomb:<uid> so removing a name from your own player list
+  // can never remove that player from anybody else's. See KEY_MY_PLAYER_TOMBSTONES.
+  'golf:my-player-tombstones',
   // v1141: deleted TOURNAMENT ids. "That event is gone" is GLOBALLY true — same shape
   // as golf:deleted-tourneys — so this goes to the shared row, not a per-user one.
   // Without it, v1140's delete fix only ever reached the phone that pressed Delete;
@@ -14666,6 +14672,10 @@ function singletonRowCode(key) {
   // and v945 recent moves. Guests fall back to the local-only global name.
   if (key === 'golf:my-round-tombstones') {
     try { if (typeof _authUser !== 'undefined' && _authUser && _authUser.id) return 'mytomb:' + _authUser.id; } catch (e) {}
+  }
+  // v1398: personal PLAYER tombstones, same per-user routing as the round row above.
+  if (key === 'golf:my-player-tombstones') {
+    try { if (typeof _authUser !== 'undefined' && _authUser && _authUser.id) return 'myptomb:' + _authUser.id; } catch (e) {}
   }
   return 'shared:' + key.replace(/^golf:/, '');
 }
@@ -14932,6 +14942,7 @@ const _SHARED_MERGE_STRATEGY = {
   // that made course-deletes a stringSet in v582 — never applied to rounds/players.
   'golf:roster-tombstones': 'tombstones',
   'golf:my-round-tombstones': 'stringSet',       // v974: MY per-user round deletes — accumulate across my own devices
+  'golf:my-player-tombstones': 'stringSet',     // v1398: MY per-user player deletes — accumulate across my own devices
   // v980: the last two blind-overwrite blobs. Both express DELETION by omitting the
   // entry, so a plain union would resurrect deleted rows — exactly the trap the v954
   // note below warns about. Both now carry a `deleted` map so the union is safe.
@@ -17499,6 +17510,64 @@ async function addMyRoundTombstones(keys) {
 // Clearing session identity must drop this cache too, or account B inherits
 // account A's personal deletes on a shared device.
 function _resetMyTombCache() { _myTombCache = null; }
+// ===========================================================================
+// v1398 — PERSONAL player tombstones.  THE SAME BUG AS v974, ONE TABLE OVER.
+// deletePlayerFromRoster() wrote EVERY removal into the GLOBAL
+// shared:roster-tombstones row.  That row is read by every account, so one
+// person tidying a name off THEIR OWN player list deleted that player for
+// EVERYONE: applyTombstonesToRoster strips the entry on every read, and
+// savePlayerRoster then physically drops it from the next roster written.
+//
+// Found live on 2 Sep 2026.  "Tar Heel Boy" — an ACTIVE player, 11 distinct
+// rounds across 62 rosters, most recent five days earlier, real money on all of
+// them — was tombstoned by NAME.  Two of his three id-less roster entries were
+// being filtered out on every read and dropped on every save.  The third
+// survived only because whoever typed it split the name differently
+// ("Tar Heel"/"Boy" instead of "Tar"/"Heel Boy"), so it hashed to a key nobody
+// had tombstoned.  Data survived by a typo.  Gary Mahan carried the same
+// tombstone, armed but not yet firing because all his entries still had ids.
+//
+// Fix, mirroring v974 exactly: a per-user row (myptomb:<uid>) that never leaves
+// the account.  It is unioned into the read-side cache so every existing filter
+// honours a personal removal unchanged, and subtracted again before the GLOBAL
+// row is written so a personal delete can never leak out.  The global row is now
+// written only by the ADMIN delete path and the player-merge paths — the two
+// places where "this player is gone" is genuinely true for everybody.
+const KEY_MY_PLAYER_TOMBSTONES = 'golf:my-player-tombstones';   // per-user row: myptomb:<uid>
+let _myPlayerTombCache = null;
+async function getMyPlayerTombstones() {
+  if (_myPlayerTombCache) return _myPlayerTombCache;
+  let arr = [];
+  try { const v = await safeGet(KEY_MY_PLAYER_TOMBSTONES, true); arr = v ? (JSON.parse(v) || []) : []; } catch (e) { arr = []; }
+  _myPlayerTombCache = new Set(Array.isArray(arr) ? arr : []);
+  return _myPlayerTombCache;
+}
+async function addMyPlayerTombstones(keys) {
+  try {
+    const set = await getMyPlayerTombstones();
+    let changed = false;
+    (keys || []).forEach(k => { if (k && !set.has(k)) { set.add(k); changed = true; } });
+    if (!changed) return true;
+    try { if (_tombCache && _tombCache.players) (keys || []).forEach(k => { if (k) _tombCache.players.add(k); }); } catch (e) {}
+    return await safeSet(KEY_MY_PLAYER_TOMBSTONES, JSON.stringify(Array.from(set).slice(-3000)), true);
+  } catch (e) { console.warn('addMyPlayerTombstones', e); return false; }
+}
+// Re-adding a player I personally removed has to clear MY tombstone too, or the
+// read-side union would drop them again the instant they were added back — the
+// same reason addPlayerToRoster already calls unTombstonePlayers.
+async function removeMyPlayerTombstones(keys) {
+  try {
+    const set = await getMyPlayerTombstones();
+    let changed = false;
+    (keys || []).forEach(k => { if (k && set.delete(k)) changed = true; });
+    if (!changed) return true;
+    try { if (_tombCache && _tombCache.players) (keys || []).forEach(k => { if (k) _tombCache.players.delete(k); }); } catch (e) {}
+    return await safeSet(KEY_MY_PLAYER_TOMBSTONES, JSON.stringify(Array.from(set).slice(-3000)), true);
+  } catch (e) { console.warn('removeMyPlayerTombstones', e); return false; }
+}
+// Clearing session identity must drop this cache too, or account B inherits
+// account A's personal player deletes on a shared device.
+function _resetMyPlayerTombCache() { _myPlayerTombCache = null; }
 let _tombCache = null;
 async function getSharedTombstones() {
   try {
@@ -17521,6 +17590,13 @@ async function getSharedTombstones() {
   try {
     const _mine = await getMyRoundTombstones();
     if (_mine && _mine.size) _mine.forEach(k => _tombCache.rounds.add(k));
+  } catch (e) {}
+  // v1398: same union for MY personal PLAYER deletes, so applyTombstonesToRoster
+  // and every other players-set reader honours them without knowing they exist.
+  // _writeSharedTombstones subtracts them again before the global row is written.
+  try {
+    const _minep = await getMyPlayerTombstones();
+    if (_minep && _minep.size) _minep.forEach(k => _tombCache.players.add(k));
   } catch (e) {}
   return _tombCache;
 }
@@ -17561,12 +17637,30 @@ async function _writeSharedTombstones(out) {
       }
     }
   } catch (e) {}
+  // v1398: and the same strip for MY personal PLAYER deletes. Without it the
+  // union in getSharedTombstones would promote "removed from my player list"
+  // into a delete-for-everyone the first time any other tombstone wrote — which
+  // is exactly how Tar Heel Boy ended up on the global list.
+  let _minePPromoted = [];
+  try {
+    const _minep = _myPlayerTombCache;
+    if (_minep && _minep.size) {
+      _minePPromoted = (out.players || []).filter(k => _minep.has(k));
+      if (_minePPromoted.length) {
+        out.players = (out.players || []).filter(k => !_minep.has(k));
+        const _pa = out.playersAt || {};
+        _minePPromoted.forEach(k => { delete _pa[k]; });
+        out.playersAt = _pa;
+      }
+    }
+  } catch (e) {}
   _tombCache = { players: new Set(out.players), rounds: new Set(out.rounds), playersLocked: new Set(out.playersLocked || []), roundsAt: out.roundsAt || {}, playersAt: out.playersAt || {}, roundsCleared: out.roundsCleared || {}, playersCleared: out.playersCleared || {} };
   try { bgLsSet(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
   try { if (typeof isSignedIn === 'function' && isSignedIn() && typeof writeSharedSingleton === 'function') await writeSharedSingleton(KEY_ROSTER_TOMBSTONES, JSON.stringify(out)); } catch (e) {}
   // v974: put the personal keys back into the in-memory view (they were only
   // removed for the write) so nothing between here and the next read resurrects.
   try { _minePromoted.forEach(k => _tombCache.rounds.add(k)); } catch (e) {}
+  try { _minePPromoted.forEach(k => _tombCache.players.add(k)); } catch (e) {}
 }
 async function addSharedTombstones(players, rounds, lockPlayers) {
   try {
@@ -17630,6 +17724,9 @@ async function unTombstonePlayers(players) {
     const _pat = t.playersAt || {};
     const _pcl = t.playersCleared || {};
     let changed = false;
+    // v1398: a deliberate re-add must clear MY personal tombstone as well as the
+    // shared one, or the read-side union re-buries the player immediately.
+    try { await removeMyPlayerTombstones(players || []); } catch (e) {}
     (players || []).forEach(k => {
       if (!k) return;
       if (locked.has(k)) {
@@ -17948,7 +18045,15 @@ async function savePlayerRoster(roster, opts) {
         const _rp = opts.removals.players ? Array.from(opts.removals.players) : [];
         const _rr = [];
         if (opts.removals.rounds) opts.removals.rounds.forEach(set => { if (set && set.forEach) set.forEach(k => _rr.push(k)); });
-        try { await addSharedTombstones(_rp, _rr); } catch (e) {}
+        // v1398: opts.personalPlayers routes the PLAYER keys to my per-user row
+        // instead of the global one. Round keys keep their existing routing —
+        // v974 already handles "remove this round from my list" separately.
+        if (opts.personalPlayers) {
+          try { if (_rp.length) await addMyPlayerTombstones(_rp); } catch (e) {}
+          try { if (_rr.length) await addSharedTombstones([], _rr); } catch (e) {}
+        } else {
+          try { await addSharedTombstones(_rp, _rr); } catch (e) {}
+        }
       }
       try { _tomb = await getSharedTombstones(); } catch (e) {}
       let merged = mergeRosters(cloud, roster, opts.removals);
@@ -18047,6 +18152,9 @@ async function upsertPlayerInRoster(firstName, lastName, hcp, extras) {
   // Re-adding a player must clear any old tombstone, or the shared filter would
   // immediately drop them again.
   try { await unTombstonePlayers([rosterPlayerKey({ firstName: f, lastName: l })]); } catch (e) {}
+  // v1398: unTombstonePlayers clears MY personal row too, but call it explicitly
+  // for the name key here so a re-add works even if the shared read failed.
+  try { await removeMyPlayerTombstones([rosterPlayerKey({ firstName: f, lastName: l })]); } catch (e) {}
   roster.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
   // Cap at 200 (was 50, which silently dropped tail entries for deep rosters).
   await savePlayerRoster(roster.slice(0, 200));
@@ -18069,15 +18177,22 @@ async function deletePlayerFromRoster(firstName, lastName) {
     (p.firstName || '').toLowerCase() === fLower && (p.lastName || '').toLowerCase() === lLower);
   const _tombKeys = _removed.map(p => (p && p.id) ? ('pid:' + p.id) : rosterPlayerKey(p));
   if (!_tombKeys.length) _tombKeys.push(rmKey);
-  await savePlayerRoster(filtered, { removals: { players: new Set(_tombKeys) } });   // v951: id-preferred, so this can't tombstone a same-named stranger
+  // v1398: decide the SCOPE of this delete before writing anything, so the roster
+  // save and the tombstone write can't disagree about where the delete belongs.
+  const _adminLock = (typeof isAdmin === 'function' && isAdmin());
+  await savePlayerRoster(filtered, { removals: { players: new Set(_tombKeys) }, personalPlayers: !_adminLock });   // v951: id-preferred, so this can't tombstone a same-named stranger
   // v699: ALWAYS tombstone a delete so a passive re-add from one of this player's
   // past rounds can't resurrect them (Tyler: "Tyler Test keeps coming back after we
-  // delete it"). Admins get a LOCKED tombstone (only an admin can ever clear it);
-  // everyone else gets a normal tombstone that still blocks passive re-adds but clears
-  // if they deliberately re-add the player later.
+  // delete it").
+  // v1398: but ONLY AN ADMIN DELETE IS GLOBAL. An ordinary user removing a name
+  // from their own player list now gets a PERSONAL tombstone (myptomb:<uid>) that
+  // still blocks passive re-adds on their own devices and still clears if they
+  // deliberately re-add the player — but can never touch anybody else's roster.
+  // Admins keep the LOCKED global tombstone (only an admin can ever clear it),
+  // which is what "Tyler Test keeps coming back" actually needed.
   try {
-    const _adminLock = (typeof isAdmin === 'function' && isAdmin());
-    await addSharedTombstones(_tombKeys, null, _adminLock);
+    if (_adminLock) await addSharedTombstones(_tombKeys, null, true);
+    else await addMyPlayerTombstones(_tombKeys);
   } catch (e) {}
 }
 
