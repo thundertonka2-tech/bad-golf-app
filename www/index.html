@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1430-->
+<!--BGVER=v2026.11.1431-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9135,7 +9135,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1430';
+const BG_BUILD = 'v2026.11.1431';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -32428,7 +32428,8 @@ async function renderRosterList() {
           const _ssid = _rosterLgSubSid;
           try { document.getElementById('roster-modal').classList.remove('show'); } catch (e) {}
           _rosterLgSubClose();
-          try { lgOpenWeek(_ssid, window._lgWeek); } catch (e) {}
+          /* v1431: the Update-players screen is where this was started from. */
+          try { if (!_lgWPResume()) lgOpenWeek(_ssid, window._lgWeek); } catch (e) {}
         }
         return;
       }
@@ -83023,6 +83024,12 @@ async function lgOpenSchedule(sid) {
         ? '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">' +
           '<button class="small" style="flex:1 1 140px;min-width:0" onclick="lgEditWeek(\'' + lgEsc(w.id) + '\',\'' + lgEsc(w.nine) + '\',\'' + lgEsc(w.date || '') + '\',' + (_nineLeague ? '1' : '0') + ')">' +
             (_nineLeague ? 'Change day / nine' : 'Change the day') + '</button>' +
+          /* v1431 (Tyler): "we get to week 2 and someone can't show. How can I go
+             in and edit the players for that week to add in the sub?" -- there was
+             no route. The sub flow started at "I can't play this week", which only
+             the absent player could press, so a commissioner told on the night had
+             nothing to tap. */
+          '<button class="small" style="flex:1 1 140px;min-width:0" onclick="lgWeekPlayers(\'' + lgEsc(sid) + '\',\'' + lgEsc(w.id) + '\')">Update players</button>' +
           '</div>'
         : '') +
       '</div>';
@@ -84340,7 +84347,20 @@ async function lgOpenWeek(sid, weekId) {
     return supa.from('league_matchups').select('id,kind,a_entrant_id,b_entrant_id,status').eq('week_id', w.id);
   }, 'lgOpenWeek:matchups');
   const mus = (mur.ok && Array.isArray(mur.data)) ? mur.data : [];
-  const myMu = mus.filter(function (m) { return me && (m.a_entrant_id === me.id || m.b_entrant_id === me.id); })[0];
+  /* v1431 (Tyler): "the schedule was built, I hit start week and got this" --
+     a week screen saying "You aren't down to play this week yet - the
+     commissioner still has to build the schedule" over a schedule that HAD been
+     built, and with no "Start this week's round" button, because that button is
+     gated on myMu.
+
+     A TEAM league pairs TEAMS, so the entrant ids in league_matchups are team
+     ids and this never matched anybody -- in a team_2man season NOBODY was ever
+     down to play and the week could not be started at all. The league home
+     screen already had this right (`const mine = me.team_id || me.id`, ~line
+     81530); this screen never got the same fix. Same expression, so the two
+     cannot disagree again. */
+  const _myEnt = me ? (me.team_id || me.id) : null;
+  const myMu = mus.filter(function (m) { return _myEnt && (m.a_entrant_id === _myEnt || m.b_entrant_id === _myEnt); })[0];
 
   let cards = [];
   if (mus.length) {
@@ -88290,6 +88310,218 @@ async function _rosterLgSubPick(name, phoneHint, hcpHint) {
   } finally { _rosterLgSubBusy = false; }
 }
 
+/* ---- v1431: UPDATE PLAYERS -- swap somebody out for a week ----------------
+   Tyler: "add another button that says Update players. It allows you to remove a
+   player for that week and add a new one."
+
+   Everything underneath already existed and was simply unreachable for a
+   commissioner: league_declare_absence opens the seat, lgAddSub's picker names
+   the sub (adding a guest to the roster if need be) and asks the number they
+   play off, league_assign_sub seats them, league_clear_sub takes them out again,
+   and lgLaunchWeekRound already swaps the round's field for whoever is actually
+   playing. league_post_card has understood a TEAM sub since v1403 -- it writes
+   the card onto the absent player's team and slot, so league_team_net counts it.
+
+   Server work this needed (migration league_absence_team_entrants_and_undeclare):
+   two membership checks only understood MEMBER entrants, so in a team league you
+   could not declare the absence at all; and there was no way to undo a sit-out,
+   which made a mis-tap permanent for that week. league_undeclare_absence is new.
+
+   Sitting somebody out goes STRAIGHT into the sub picker, because "remove a
+   player and add a new one" is one act, not two screens. Backing out of the
+   picker is fine -- the seat is simply left open and says so. */
+async function lgWeekPlayers(sid, weekId) {
+  const body = document.getElementById('league-body'); if (!body || !sid || !weekId) return;
+  window._lgSeason = sid;
+  try { lgEnterTab(); } catch (e) {}
+  const _nav = lgNavStart();
+  lgLoadingCard(body, 'Loading the week\u2026');
+
+  const wr = await _bgRead(function () {
+    return supa.from('league_weeks').select('id,week_number,status,date').eq('id', weekId).maybeSingle();
+  }, 'lgWeekPlayers:week');
+  const w = (wr.ok && wr.data) ? wr.data : null;
+  if (!w) {
+    if (lgNavStale(_nav)) return;
+    lgPaint(body, lgCard('<p class="help-text" style="margin:0 0 12px">Couldn\u2019t load that week.</p>' +
+      '<button class="danger full" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Back</button>'));
+    return;
+  }
+
+  const rr = await _bgRead(function () { return supa.rpc('league_roster', { p_season_id: sid }); }, 'lgWeekPlayers:roster');
+  const members = (rr.ok && Array.isArray(rr.data)) ? rr.data : [];
+  const me = members.filter(function (m) { return m.user_id === _authUser.id; })[0];
+  const amCommish = !!(me && (me.role === 'commissioner' || me.role === 'co_commissioner'));
+  const nameOf = {}; members.forEach(function (m) { nameOf[m.id] = m.display_name; });
+
+  const mur = await _bgRead(function () {
+    return supa.from('league_matchups').select('id,kind,entrant_kind,a_entrant_id,b_entrant_id,status').eq('week_id', weekId);
+  }, 'lgWeekPlayers:matchups');
+  const mus = (mur.ok && Array.isArray(mur.data)) ? mur.data : [];
+
+  let teams = [];
+  try {
+    const tr = await supa.rpc('league_teams_get', { p_season_id: sid });
+    if (tr && !tr.error && Array.isArray(tr.data)) teams = tr.data;
+  } catch (e) {}
+  const teamOf = {}; teams.forEach(function (t) { teamOf[t.team_id] = t; });
+
+  let absences = [];
+  if (mus.length) {
+    const ar = await _bgRead(function () {
+      return supa.from('league_absences')
+        .select('id,matchup_id,member_id,is_no_show,resolution,claim_status,sub_member_id,current_member_id,note')
+        .in('matchup_id', mus.map(function (m) { return m.id; }));
+    }, 'lgWeekPlayers:absences');
+    if (ar.ok && Array.isArray(ar.data)) absences = ar.data;
+  }
+  const absOf = {};
+  absences.forEach(function (a) { absOf[a.matchup_id + '|' + a.member_id] = a; });
+
+  const isTeam = function (mu) { return mu.entrant_kind === 'team'; };
+  const sideName = function (mu, ent) {
+    if (!ent) return '\u2014';
+    return isTeam(mu) ? ((teamOf[ent] && teamOf[ent].name) || 'Team') : (nameOf[ent] || 'Player');
+  };
+  const sidePlayers = function (mu, ent) {
+    if (!ent) return [];
+    if (isTeam(mu)) {
+      const t = teamOf[ent];
+      return (t && Array.isArray(t.players))
+        ? t.players.map(function (p) { return { id: p.member_id, name: p.name || nameOf[p.member_id] || 'Player' }; })
+        : [];
+    }
+    return [{ id: ent, name: nameOf[ent] || 'Player' }];
+  };
+
+  /* A bye has no fixture to miss and a field week has nobody waiting on you --
+     league_declare_absence refuses both by name, so do not offer the button. */
+  const canSwap = amCommish && w.status !== 'final';
+
+  let h = '<div id="lg-wp-screen" data-sid="' + lgEsc(sid) + '" data-wid="' + lgEsc(weekId) + '">';
+  h += lgCard('<h2 style="margin:0 0 4px">Update players</h2>' +
+    '<p class="help-text" style="margin:0">Week ' + w.week_number + ' \u00b7 ' + lgEsc(lgWeekWhen(w)) + '. ' +
+    (canSwap
+      ? 'Sit somebody out for this week only and put a sub in their place. Everything else about the season stays as it is \u2014 their handicap, their team, the weeks either side.'
+      : (w.status === 'final' ? 'This week is finished \u2014 reopen it before changing who played.'
+                              : 'Your commissioner sets who plays each week.')) + '</p>');
+
+  if (!mus.length) {
+    h += lgCard('<p class="help-text" style="margin:0">Nothing is scheduled for this week yet.</p>');
+  }
+
+  mus.forEach(function (mu) {
+    const bye = (mu.kind === 'bye'), field = (mu.kind === 'vs_field');
+    let inner = '';
+    const sides = field ? [mu.a_entrant_id] : [mu.a_entrant_id, mu.b_entrant_id];
+    sides.forEach(function (ent) {
+      if (!ent) return;
+      const ps = sidePlayers(mu, ent);
+      if (isTeam(mu)) {
+        inner += '<div class="bg-sec" style="margin:10px 0 2px;font-size:13px">' + lgEsc(sideName(mu, ent)) + '</div>';
+      }
+      if (!ps.length) {
+        inner += '<p class="help-text" style="margin:4px 0 0;font-size:12px">Nobody on this team yet.</p>';
+        return;
+      }
+      ps.forEach(function (p) {
+        const a = absOf[mu.id + '|' + p.id];
+        const sub = a ? (a.current_member_id || a.sub_member_id) : null;
+        let note;
+        if (!a) note = isTeam(mu) ? '' : lgEsc(sideName(mu, ent));
+        else if (sub) note = 'Out \u00b7 ' + lgEsc(nameOf[sub] || 'a sub') + ' is in';
+        else note = 'Out \u00b7 ' + lgEsc(lgAbsenceState(a, nameOf));
+
+        inner += '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,#e5e7eb)">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-weight:600;font-size:14px' + (a ? ';opacity:.55;text-decoration:line-through' : '') + '">' +
+              lgEsc(p.name) + '</div>' +
+            (note ? '<div class="help-text" style="margin:0;font-size:12px">' + note + '</div>' : '') +
+          '</div>' +
+          (canSwap && !bye && !field
+            ? (a
+                /* Neutral, not danger: putting the regular player back is the
+                   safe direction and must not read as the scary one. */
+                ? '<div style="flex:0 0 auto;display:flex;gap:6px">' +
+                    '<button type="button" class="small" style="min-height:40px" onclick="lgAddSub(\'' + lgEsc(a.id) + '\')">' +
+                      (sub ? 'Change sub' : 'Add a sub') + '</button>' +
+                    '<button type="button" class="small" style="min-height:40px" onclick="lgWPBackIn(\'' + lgEsc(a.id) + '\')">Back in</button>' +
+                  '</div>'
+                : '<button type="button" class="small" style="flex:0 0 auto;min-height:40px" onclick="lgWPSitOut(\'' + lgEsc(mu.id) + '\',\'' + lgEsc(p.id) + '\')">Sit out</button>')
+            : '') +
+          '</div>';
+      });
+    });
+    const title = field ? 'The field'
+                : bye ? (lgEsc(sideName(mu, mu.a_entrant_id)) + ' \u00b7 bye')
+                : (lgEsc(sideName(mu, mu.a_entrant_id)) + ' <span class="help-text" style="font-size:12px">v</span> ' +
+                   lgEsc(sideName(mu, mu.b_entrant_id)));
+    h += '<div class="card"><div style="font-weight:800;font-size:15px">' + title + '</div>' +
+      (bye ? '<p class="help-text" style="margin:6px 0 0;font-size:12px">A bye has no fixture to miss, so there is nobody to swap.</p>' : '') +
+      (field ? '<p class="help-text" style="margin:6px 0 0;font-size:12px">A field week is everybody against the field \u2014 there is nobody waiting on you, so a missed week is just a missed week.</p>' : '') +
+      inner + '</div>';
+  });
+
+  h += '<div class="card" style="padding:12px 14px">' +
+    '<button class="danger full" onclick="lgOpenSchedule(\'' + lgEsc(sid) + '\')">Back to the schedule</button></div>';
+  h += '</div>';
+
+  if (lgNavStale(_nav)) return;
+  lgPaint(body, h);
+}
+window.lgWeekPlayers = lgWeekPlayers;
+
+/* The Update-players screen is identified by a marker in the DOM rather than by
+   a global, so nothing has to remember to clear it: if that screen is what is on
+   screen, it is what we go back to. Used by every path that finishes a sub
+   change and would otherwise land on the week screen. */
+function _lgWPResume() {
+  try {
+    const el = document.getElementById('lg-wp-screen');
+    if (el && el.dataset.sid && el.dataset.wid) { lgWeekPlayers(el.dataset.sid, el.dataset.wid); return true; }
+  } catch (e) {}
+  return false;
+}
+window._lgWPResume = _lgWPResume;
+
+async function lgWPSitOut(matchupId, memberId) {
+  if (!matchupId || !memberId) return;
+  let res = null;
+  try { res = await supa.rpc('league_declare_absence', { p_matchup_id: matchupId, p_member_id: memberId, p_note: null }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_declare_absence failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn\u2019t sit them out')); } catch (e) {}
+    return;
+  }
+  const absId = (res.data || {}).absence_id;
+  if (!absId) { try { showToast('Marked out'); } catch (e) {} _lgWPResume(); return; }
+  /* One act: the seat is open, so name who is filling it. */
+  try { await lgAddSub(absId); } catch (e) { _lgWPResume(); }
+}
+window.lgWPSitOut = lgWPSitOut;
+
+async function lgWPBackIn(absenceId) {
+  if (!absenceId) return;
+  let ok = false;
+  try {
+    ok = await uiConfirm('They go back into this week\u2019s fixture. Any sub in their seat comes out with them.',
+      { title: 'Put them back in?', okLabel: 'Put back in', cancelLabel: 'Leave it', danger: false });
+  } catch (e) { ok = false; }
+  if (!ok) return;
+  let res = null;
+  try { res = await supa.rpc('league_undeclare_absence', { p_absence_id: absenceId }); }
+  catch (e) { res = { data: null, error: e }; }
+  if (!res || res.error) {
+    try { console.warn('league_undeclare_absence failed:', res && res.error); } catch (e) {}
+    try { showToast(lgErrText(res && res.error, 'Couldn\u2019t put them back in')); } catch (e) {}
+    return;
+  }
+  try { showToast((res.data && res.data.message) || 'Back in'); } catch (e) {}
+  _lgWPResume();
+}
+window.lgWPBackIn = lgWPBackIn;
+
 /* Undo. The seat goes back to open and the commissioner can pick again or settle
    the week the old way (draw / course / forfeit). */
 async function lgClearSub(absenceId) {
@@ -88308,7 +88540,8 @@ async function lgClearSub(absenceId) {
     return;
   }
   try { showToast('That seat is open again'); } catch (e) {}
-  try { lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
+  /* v1431: back to whichever screen asked -- Update players, or the week. */
+  try { if (!_lgWPResume()) lgOpenWeek(window._lgSeason, window._lgWeek); } catch (e) {}
 }
 window.lgClearSub = lgClearSub;
 
@@ -90701,9 +90934,9 @@ async function init() {
   try { updateNaturalBoostVisibility(); } catch (e) {}
 
   // Roster modal wiring
-  $('roster-cancel').onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} try { _rosterLgSubClose(); } catch (e) {}   /* v1403 */ if (_lg) { try { lgNextSetupStep(_lg); } catch (e) { try { lgOpenSettings(_lg); } catch (e2) {} } } };
+  $('roster-cancel').onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; const _wasSub = !!_rosterLgSubAbs; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} try { _rosterLgSubClose(); } catch (e) {}   /* v1403 */ if (_wasSub) { try { _lgWPResume(); } catch (e) {} }   /* v1431: the seat WAS opened before the picker came up, so repaint it */ if (_lg) { try { lgNextSetupStep(_lg); } catch (e) { try { lgOpenSettings(_lg); } catch (e2) {} } } };
   // v946: top Done mirrors the bottom one exactly.
-  try { const _rdt = $('roster-done-top'); if (_rdt) _rdt.onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} try { _rosterLgSubClose(); } catch (e) {}   /* v1403 */ if (_lg) { try { lgNextSetupStep(_lg); } catch (e) { try { lgOpenSettings(_lg); } catch (e2) {} } } }; } catch (e) {}
+  try { const _rdt = $('roster-done-top'); if (_rdt) _rdt.onclick = () => { $('roster-modal').classList.remove('show'); const _lg = _rosterLgSid; const _wasSub = !!_rosterLgSubAbs; try { _rosterT2Close(); } catch (e) {} try { _rosterLgClose(); } catch (e) {} try { _rosterLgSubClose(); } catch (e) {}   /* v1403 */ if (_wasSub) { try { _lgWPResume(); } catch (e) {} }   /* v1431 */ if (_lg) { try { lgNextSetupStep(_lg); } catch (e) { try { lgOpenSettings(_lg); } catch (e2) {} } } }; } catch (e) {}
   // ➕ Add a guest / non-user straight to Bad Golf Users (no round needed) — the
   // modern replacement for the old no-email test users. Stored in the shared
   // roster via upsertPlayerInRoster, so they're findable everywhere. (Tyler, June 2026.)
