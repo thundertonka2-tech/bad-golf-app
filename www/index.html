@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1455-->
+<!--BGVER=v2026.11.1456-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9511,7 +9511,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1455';
+const BG_BUILD = 'v2026.11.1456';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -14609,32 +14609,132 @@ function bgApplyAuthDismissable() {
 // button closes overlays through exactly the same path Escape does. Returns true
 // if it closed something, false if there was nothing open.
 function _bgCloseTopOverlay() {
+  /* v1456: delegates. This used to carry its own copy of "find the topmost
+     .modal-overlay.show and close it", and Escape called this while Android
+     back called it AND handled two more cases inline — two implementations of
+     one idea, drifted apart, which is how the GPS map ended up closable by
+     back but not by Escape. bgDismissTop is now the only implementation; the
+     name is kept because callers and the stale-base guard know it. */
+  return bgDismissTop();
+}
+/* v1456 — ONE dismissal path for Escape and Android back.
+
+   Before this, "close what is on top of me" had two implementations that had
+   drifted apart. Escape called _bgCloseTopOverlay() and stopped there. Android
+   back called it and then handled two more cases inline — the GPS map and the
+   tee-time sheet, neither of which is a .modal-overlay — so those two could
+   not be closed from a keyboard at all.
+
+   Worse, three overlays were invisible to both paths because they are shown
+   with style.display rather than a .modal-overlay/.show class:
+
+     #bnav-sheet        the bottom-nav More sheet (z 902, scrim at 901)
+     #lg-print          the league print sheet (fixed, inset:0, z 99997)
+     #getstarted-overlay  first-run onboarding (fixed, inset:0, z 100095)
+
+   For the first two that is a real trap, not a missing nicety: Android back
+   fell through them to step 4, "not on Home, go Home", which switched tabs
+   UNDERNEATH a sheet still covering the whole screen. The user's next tap went
+   to a screen they could not see.
+
+   #getstarted-overlay is deliberately NOT registered. It is first-run
+   onboarding and its close path (finishGetStarted) also stamps
+   KEY_GETSTARTED_SEEN and starts the home-course chain — dismissing it with a
+   stray Escape would silently skip onboarding and never offer it again. It is
+   exempt for the same reason the launch gate is exempt below.
+
+   To make a new overlay dismissible, register it rather than adding another
+   case here:
+       bgRegisterDismissible('my-sheet', { isOpen: fn, close: fn });          */
+window._bgDismissibles = window._bgDismissibles || [];
+function bgRegisterDismissible(key, spec) {
   try {
-    const open = Array.prototype.slice.call(document.querySelectorAll('.modal-overlay.show'));
-    if (!open.length) return false;
-    const top = open.reduce(function (a, b) {
-      const za = parseInt((getComputedStyle(a).zIndex || '0'), 10) || 0;
-      const zb = parseInt((getComputedStyle(b).zIndex || '0'), 10) || 0;
-      return zb >= za ? b : a;
+    if (!spec || typeof spec.close !== 'function') return;
+    window._bgDismissibles = window._bgDismissibles.filter(function (d) { return d.key !== key; });
+    window._bgDismissibles.push({ key: key, isOpen: spec.isOpen, close: spec.close, el: spec.el || null });
+  } catch (e) {}
+}
+window.bgRegisterDismissible = bgRegisterDismissible;
+
+/* The built-ins. Each says how to tell it is open and how to close it; the
+   resolver never assumes a mechanism. */
+bgRegisterDismissible('bnav-sheet', {
+  isOpen: function () {
+    var sh = document.getElementById('bnav-sheet');
+    return !!(sh && sh.style.display && sh.style.display !== 'none');
+  },
+  close: function () { if (typeof bnavCloseMore === 'function') bnavCloseMore(); },
+  el: function () { return document.getElementById('bnav-sheet'); }
+});
+bgRegisterDismissible('lg-print', {
+  isOpen: function () {
+    var el = document.getElementById('lg-print');
+    return !!(el && el.style.display && el.style.display !== 'none');
+  },
+  close: function () { if (typeof lgClosePrint === 'function') lgClosePrint(); },
+  el: function () { return document.getElementById('lg-print'); }
+});
+bgRegisterDismissible('gps-map', {
+  isOpen: function () { return !!document.body.classList.contains('gps-open'); },
+  close: function () { var g = document.getElementById('gps-close'); if (g) g.click(); }
+});
+bgRegisterDismissible('times-sheet', {
+  isOpen: function () {
+    return !!document.body.classList.contains('times-sheet-open') && typeof timesCloseSheet === 'function';
+  },
+  close: function () { timesCloseSheet(); }
+});
+
+/* Close the topmost dismissible thing. Returns true if it closed something.
+   Registered entries and .modal-overlay.show elements compete on the same
+   scale — the real painted z-index — so a sheet opened on top of a modal
+   closes before the modal underneath it. An entry with no element sorts at 0
+   and therefore loses to any real overlay, which is what we want for the GPS
+   map and the tee-time sheet: they are the backdrop, not the top. */
+function bgDismissTop() {
+  try {
+    var cands = [];
+    try {
+      Array.prototype.slice.call(document.querySelectorAll('.modal-overlay.show'))
+        .forEach(function (el) {
+          if (el.id === 'auth-modal' && el._bgIsGate) { cands.push({ gate: true, z: 1e9 }); return; }
+          cands.push({ el: el, z: parseInt((getComputedStyle(el).zIndex || '0'), 10) || 0 });
+        });
+    } catch (e) {}
+    (window._bgDismissibles || []).forEach(function (d) {
+      try {
+        if (typeof d.isOpen === 'function' && !d.isOpen()) return;
+        var el = (typeof d.el === 'function') ? d.el() : d.el;
+        var z = 0;
+        try { if (el) z = parseInt((getComputedStyle(el).zIndex || '0'), 10) || 0; } catch (e2) {}
+        cands.push({ reg: d, z: z });
+      } catch (e) {}
     });
-    if (!top) return false;
-    if (top.id === 'auth-modal' && top._bgIsGate) return true;   // mandatory gate stays put, but back must NOT fall through and exit the app
-    const closer = top.querySelector('[data-esc-close]')
-      || top.querySelector('#' + (top.id || '') + '-x')
-      || Array.prototype.slice.call(top.querySelectorAll('button')).find(function (b) {
-           const t = (b.textContent || '').trim();
+    if (!cands.length) return false;
+    var top = cands.reduce(function (a, b) { return b.z >= a.z ? b : a; });
+    /* The mandatory launch gate stays put — but back must NOT fall through it
+       and exit the app, so this still reports that it handled the press. */
+    if (top.gate) return true;
+    if (top.reg) { top.reg.close(); return true; }
+    var el = top.el;
+    var closer = el.querySelector('[data-esc-close]')
+      || el.querySelector('#' + (el.id || '') + '-x')
+      || Array.prototype.slice.call(el.querySelectorAll('button')).find(function (b) {
+           var t = (b.textContent || '').trim();
            return t === '\u2715' || t === '\u2716' || t === '\u00d7' || t === 'Close' || t === 'Cancel';
          });
-    if (closer) { closer.click(); } else { top.classList.remove('show'); }
+    if (closer) { closer.click(); } else { el.classList.remove('show'); }
     return true;
   } catch (_e) { return false; }
 }
+window.bgDismissTop = bgDismissTop;
+
 (function bgWireEscapeClose() {
   try {
     document.addEventListener('keydown', function (e) {
       try {
         if (e.key !== 'Escape' && e.keyCode !== 27) return;
-        if (_bgCloseTopOverlay()) e.preventDefault();
+        if (bgDismissTop()) e.preventDefault();
       } catch (_e) {}
     }, true);
   } catch (e) {}
@@ -57282,10 +57382,26 @@ async function loadRounds() {
     `;
     // v905 (Tyler): outline a genuinely LIVE round in red so it stands out in the list.
     try { if (isLive) row.classList.add('bg-live-row'); } catch (e) {}
-    row.querySelector('.recent-row-tap').onclick = () => openRecent(r);
+    // v1456: a FINISHED round in the Recent list opened the Board, while the
+    // same round in the Past list — and from Home — opened the Bets sheet.
+    // v1125 moved those two onto the sheet ("straight into the Bets sheet,
+    // same as Home", on _openPast below) and missed this row, so one list has
+    // been answering the same tap differently ever since.
+    // Only the finished case moves. isLive and isScheduled both require
+    // `unfinished`, so finished is exactly !unfinished — Join now / Start /
+    // Resume still go through openRecent(), which is what joins or resumes
+    // them. Same guard and same fallback as _openPast, so the two lists now
+    // fail over identically too.
+    const _openRecentRow = () => {
+      if (!unfinished && r.code && !r.manual && !/^manual-/.test(String(r.code))) {
+        try { openRoundBetsSheet(r.code, r.course); return; } catch (e) {}
+      }
+      openRecent(r);
+    };
+    row.querySelector('.recent-row-tap').onclick = _openRecentRow;
     // v1143: a completed row renders no button at all (tap the row) and no row
     // ever renders the red x, so both of these are now optional wirings.
-    { const _ob = row.querySelector('.recent-open-btn'); if (_ob) _ob.onclick = () => openRecent(r); }
+    { const _ob = row.querySelector('.recent-open-btn'); if (_ob) _ob.onclick = _openRecentRow; }
     { const _db = row.querySelector('.recent-delete-btn'); if (_db) _db.onclick = async (e) => {
       e.stopPropagation();
       // Admins get an extra choice: wipe the round for EVERYONE (handy for
@@ -81919,8 +82035,8 @@ async function renderLeague() {
              The schedule keeps its own routes — the Details modal lists every
              week, and the league screen has Full schedule. */
           '<button class="bg-btn bg-btn--seg lg-row-chat" data-id="' + lgEsc(s.id) + '" data-com="' + (_amc ? '1' : '') + '"><span class="ei">\uD83D\uDCAC</span>Chat</button>' +
-          (_cid ? '<button class="bg-btn lg-row-gps" data-cid="' + lgEsc(_cid) + '"><span class="ei">\uD83D\uDCCD</span>GPS</button>' +
-                  '<button class="bg-btn lg-row-card" data-cid="' + lgEsc(_cid) + '"><span class="ei">\uD83D\uDDC2</span>Card</button>' : '') +
+          (_cid ? '<button class="bg-btn bg-btn--seg lg-row-gps" data-cid="' + lgEsc(_cid) + '"><span class="ei">\uD83D\uDCCD</span>GPS</button>' +
+                  '<button class="bg-btn bg-btn--seg lg-row-card" data-cid="' + lgEsc(_cid) + '"><span class="ei">\uD83D\uDDC2</span>Card</button>' : '') +
         '</div>' +
         /* v1447: the chat opens IN PLACE, between the strip and the week, exactly
            where a tournament's does. */
@@ -94742,16 +94858,14 @@ async function init() {
         if (_busy) return;
         _busy = true;
         try {
-          // 1. An open sheet or modal? Close the topmost one, same path as Escape.
-          if (_bgCloseTopOverlay()) return;
-
-          // 2. The GPS map and the tee-time sheet are not .modal-overlay elements.
-          try {
-            if (document.body.classList.contains('gps-open')) { const _gx = document.getElementById('gps-close'); if (_gx) { _gx.click(); return; } }
-          } catch (e) {}
-          try {
-            if (document.body.classList.contains('times-sheet-open') && typeof timesCloseSheet === 'function') { timesCloseSheet(); return; }
-          } catch (e) {}
+          // 1. Anything open on top? Close the topmost, same path as Escape.
+          // v1456: this was _bgCloseTopOverlay() plus two hand-written cases for
+          // the GPS map and the tee-time sheet, which Escape never got. Both now
+          // go through bgDismissTop(), which also sees the More sheet and the
+          // league print sheet — the print sheet is fixed/inset:0/z-99997 with no
+          // .modal-overlay class, so back used to skip it and run step 4, tabbing
+          // Home UNDERNEATH a sheet still covering the screen.
+          if (bgDismissTop()) return;
 
           // 3. A live round: ask before leaving, exactly as the popstate guard does.
           const live = state.game && state.game.code && $('tab-score') && !$('tab-score').disabled && !state.viewOnlyMode;
