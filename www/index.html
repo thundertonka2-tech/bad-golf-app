@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1449-->
+<!--BGVER=v2026.11.1451-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9501,7 +9501,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1449';
+const BG_BUILD = 'v2026.11.1451';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -82156,7 +82156,8 @@ async function lgOpenSeason(sid) {
       '<p class="help-text" style="margin:0">This season has no weeks yet.</p>');
   } else {
     const open = ['open','in_play','awaiting_cards'].indexOf(w.status) >= 0;
-    const launched = (w.format_config || {}).launched_code || null;
+    /* v1451 (QA BLOCK-4): my group's round, not "the" week's round. */
+    const launched = _lgMyGroupCode(w, me ? me.id : null);
     let body2 = '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px">' +
       '<div class="bg-sec" style="margin:0;flex:1">' + lgEsc(wkLabel(w)) + '</div>' +
       '<span class="bg-pill">' + lgEsc(w.status || '') + '</span></div>' +
@@ -85132,6 +85133,37 @@ async function lgOpenAddPlayerPicker(sid) {
    Server side is Phase 6a + the self-scheduled RPCs.
    ==================================================================== */
 
+/* v1450 (QA S-2): the halving rule for a nine-hole rating, in one place.
+
+   `_swkRowRS` states it plainly -- "only a real 18-rating is halved" -- and
+   `_bg9CardTo9` / `adminToggleNineHole` both implement it as `>= 46`, because
+   no eighteen is rated under 46 and no nine is rated over it.
+
+   lgCourseSnapshot implemented a different rule: halve whenever the WEEK is
+   nine holes. For the front or back nine of an eighteen-hole card those agree.
+   For a STANDALONE nine-hole course they do not -- its card already carries a
+   nine-hole rating of about 35, and halving that froze 17.5 into
+   league_weeks.course_snapshot. That number is what league_differential scores
+   the week on and, through archiveScoresFromRound, what gets posted to
+   everybody's Bad Golf index -- so a nine-hole league week was corrupting
+   handicaps outside the league every time it ran.
+
+   Reading an OLD snapshot through this is safe for the same reason: a
+   rating18 of 35 was already a nine, so it is left alone rather than halved
+   again. Slope is not scaled in either direction (same house rule). */
+function lgHalfRating(v, holes) {
+  /* null / undefined / '' must not become 0 -- Number(null) is 0 and
+     isFinite(0) is true, so a bare Number() here would turn "this tee has no
+     rating" into "this tee is rated 0" the first time a caller forgets its own
+     != null guard. Every caller has one today; this is so the helper is not a
+     trap for the one that does not. */
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  if (!isFinite(n) || n <= 0) return null;
+  if (holes !== 9) return n;
+  return (n >= 46) ? Math.round((n / 2) * 10) / 10 : n;
+}
+
 /* The course snapshot a week freezes at open (§7.2). Two rating sets, because
    two functions need opposite things from one card:
      rating / slope / par        -> the HOLES PLAYED (league_differential)
@@ -85173,9 +85205,16 @@ async function lgCourseSnapshot(courseId, nine, teeLabel) {
     pars: pars.map(Number),
     si: sis.map(Number),
     par: parPlayed,
-    rating: (r18 != null) ? (holes === 9 ? Math.round((r18 / 2) * 10) / 10 : r18) : parPlayed,
+    rating: (r18 != null) ? lgHalfRating(r18, holes) : parPlayed,
     slope: (s18 != null) ? s18 : 113,
-    rating18: r18, slope18: s18, par18: par18,
+    /* v1450 (QA S-2): rating18 must be a real EIGHTEEN-hole rating --
+       nine_hole_basis 'half_18_ch' reads it as one. On a standalone
+       nine-hole card r18 is already the nine, so the eighteen is that
+       doubled: the inverse of adminToggleNineHole's own `< 46` branch. */
+    rating18: (r18 != null)
+                ? ((holes === 9 && r18 < 46) ? Math.round((r18 * 2) * 10) / 10 : r18)
+                : null,
+    slope18: s18, par18: par18,
     course_id: courseId, tee: tee.label || null,
     // v1270 FIX (QA R-8 / C-12): the launcher reads snap.name and snap.tees and
     // this object has never had either. snap.name undefined meant every league
@@ -85198,7 +85237,7 @@ async function lgCourseSnapshot(courseId, nine, teeLabel) {
        Same halving as `rating` above: a nine is rated on half the card. */
     tees: (function () {
       try {
-        const half = function (v) { return (holes === 9) ? Math.round((Number(v) / 2) * 10) / 10 : Number(v); };
+        const half = function (v) { return lgHalfRating(v, holes); };
         const usable = tees.filter(function (t) {
           return t && t.label && t.rating != null && t.slope != null;
         }).map(function (t) {
@@ -85214,7 +85253,7 @@ async function lgCourseSnapshot(courseId, nine, teeLabel) {
       } catch (e) {
         return (r18 != null && s18 != null)
           ? [{ label: tee.label || 'League',
-               rating: (holes === 9) ? Math.round((r18 / 2) * 10) / 10 : r18,
+               rating: lgHalfRating(r18, holes),   /* v1450 (QA S-2) */
                slope: s18 }]
           : [];
       }
@@ -85442,11 +85481,17 @@ async function lgOpenWeek(sid, weekId) {
 
   /* ---- League night: start the round here ------------------------------ */
   if (me && open && myMu) {
-    const _lc = (w.format_config || {}).launched_code;
+    /* v1451 (QA BLOCK-4): my group's round. Null while other groups are out
+       and mine is not, which is what leaves Start in front of me. */
+    const _lc = _lgMyGroupCode(w, me ? me.id : null);
+    const _gp = _lgGroupProgress(w);
     h += lgCard('<div class="bg-sec" style="margin-bottom:6px">League night</div>' +
       (_lc
         /* v1441: the code is background plumbing, not something to read. */
-        ? '<p class="help-text" style="margin:0 0 10px">The round is live.</p>' +
+        ? '<p class="help-text" style="margin:0 0 10px">Your group\u2019s round is live.' +
+          /* v1451: and whether anybody else is out yet. */
+          (_gp && _gp.total > 1 ? ' ' + _gp.started + ' of ' + _gp.total + ' groups have started.' : '') +
+          '</p>' +
           '<button class="bg-btn bg-btn--primary bg-btn--full primary full" onclick="lgOpenLaunchedRound(\'' + lgJs(_lc) + '\')">Open the round</button>'
         : '<p class="help-text" style="margin:0 0 10px">Playing together tonight? Start the round here and everyone\u2019s card posts to the league on its own.</p>' +
           '<button class="bg-btn bg-btn--primary bg-btn--full primary full" onclick="lgLaunchWeekRound(\'' + lgJs(sid) + '\',\'' + lgJs(w.id) + '\')">Start this week\u2019s round</button>'));
@@ -86444,13 +86489,20 @@ async function lgOpenStandings(sid, seg) {
     /* The group's own bets, off each week's round — same call the round summary
        makes. Loaded in parallel: one round per week, and a week with no round
        launched simply has nothing to show. */
-    const _withRound = _wks2.filter(function (x) {
-      return x.format_config && x.format_config.launched_code;
+    /* v1451 (QA BLOCK-4): a field week is played in several rounds now, so
+       "what did this week pay" is every group's round, not the first one.
+       One row per (week, code); the merge below keys on week_number, so a
+       week with four groups contributes four sets of pot rows to it. */
+    const _withRound = [];
+    _wks2.forEach(function (x) {
+      _lgAllWeekCodes(x).forEach(function (c) {
+        _withRound.push({ week_number: x.week_number, _code: c });
+      });
     });
     let _rounds = [];
     try {
       _rounds = await Promise.all(_withRound.map(function (x) {
-        return Promise.resolve(loadGame(x.format_config.launched_code)).catch(function () { return null; });
+        return Promise.resolve(loadGame(x._code)).catch(function () { return null; });
       }));
     } catch (e) { _rounds = []; }
     const _grp = {};
@@ -86459,7 +86511,10 @@ async function lgOpenStandings(sid, seg) {
       if (!g) return;
       try {
         const rows2 = (typeof bgPotRowsForRound === 'function') ? bgPotRowsForRound(g) : [];
-        if (rows2 && rows2.length) _grp[x.week_number] = rows2;
+        /* v1451: concat, not assign -- several groups can pay in one week. */
+        if (rows2 && rows2.length) {
+          _grp[x.week_number] = (_grp[x.week_number] || []).concat(rows2);
+        }
       } catch (e) {}
     });
 
@@ -89695,6 +89750,68 @@ function _lgFitGameNames(src, players) {
 }
 
 
+/* v1451 (QA BLOCK-4): which round of this week is mine.
+
+   A week used to hold exactly one round and its code lived at
+   format_config.launched_code. v1435 gave each FIXTURE its own round; this
+   build gives each GROUP of a field week its own, at
+   format_config.group_codes -- [{ g, mids, code }] -- because
+   lgLaunchWeekRound was mapping the entire active roster into a single round
+   while ROUND_MAX_PLAYERS is 8 and every other entry point in the app
+   enforces it. A twenty-man field week launched one card with twenty rows and
+   one shared set of side bets.
+
+   Five places ask "has this week started, and what do I open?" and all five
+   have to mean MY group now. They ask here instead of reading launched_code,
+   so they cannot drift apart.
+
+   A week drawn before this build has no group_codes and falls through to
+   launched_code, which is exactly right: it really was one round for everyone.
+   A split week where my own group has not started yet answers null -- which is
+   what puts the Start button back in front of me while other groups are out. */
+function _lgMyGroupCode(w, mid) {
+  const _fc = ((w || {}).format_config) || {};
+  try {
+    const gc = _fc.group_codes;
+    if (Array.isArray(gc) && gc.length) {
+      if (!mid) return null;
+      const mine = gc.filter(function (x) {
+        return x && Array.isArray(x.mids) && x.mids.indexOf(String(mid)) >= 0;
+      })[0];
+      return (mine && mine.code) ? mine.code : null;
+    }
+  } catch (e) {}
+  return _fc.launched_code || null;
+}
+
+/* Every code this week was played under, my group's or anyone's. The standings
+   screen reads each week's group side bets and must not report only one
+   group's pots as though they were the week's. */
+function _lgAllWeekCodes(w) {
+  const out = [];
+  try {
+    const _fc = ((w || {}).format_config) || {};
+    if (_fc.launched_code) out.push(_fc.launched_code);
+    if (Array.isArray(_fc.group_codes)) {
+      _fc.group_codes.forEach(function (x) {
+        if (x && x.code && out.indexOf(x.code) < 0) out.push(x.code);
+      });
+    }
+  } catch (e) {}
+  return out;
+}
+
+/* How many groups are out, for the one line on the week screen that answers
+   "is anybody else playing?". */
+function _lgGroupProgress(w) {
+  try {
+    const gc = (((w || {}).format_config) || {}).group_codes;
+    if (!Array.isArray(gc) || !gc.length) return null;
+    return { total: gc.length,
+             started: gc.filter(function (x) { return x && x.code; }).length };
+  } catch (e) { return null; }
+}
+
 async function lgLaunchWeekRound(sid, weekId, matchupId) {
   if (!sid || !weekId) return;
   if (window._lgLaunching) { try { showToast('Already starting the round…'); } catch (e) {} return; }
@@ -89825,7 +89942,12 @@ async function lgLaunchWeekRound(sid, weekId, matchupId) {
         return ent && _ents.indexOf(ent) >= 0;
       });
     } else {
-      const existing = (w.format_config || {}).launched_code;
+      /* v1451 (QA BLOCK-4): a field week no longer has one round, so
+         "has it started?" is a question about MY group. A week from before
+         this build still answers with launched_code (see _lgMyGroupCode),
+         so nothing already in play changes shape underneath anybody. */
+      const _meRowF = roster.filter(function (m) { return m.user_id === _authUser.id; })[0];
+      const existing = _lgMyGroupCode(w, _meRowF ? _meRowF.id : null);
       if (existing) { await lgOpenLaunchedRound(existing); return; }
     }
 
@@ -89872,7 +89994,13 @@ async function lgLaunchWeekRound(sid, weekId, matchupId) {
       /* v1435: the fixture claims its own code. Same lock, one level down. */
       cl = _fx
         ? await supa.rpc('league_claim_matchup_round', { p_matchup_id: _fx.id, p_code: code })
-        : await supa.rpc('league_claim_week_round', { p_week_id: weekId, p_code: code });
+        /* v1451 (QA BLOCK-4): the GROUP claims its own code. Same
+           optimistic lock as league_claim_week_round, one level down, over
+           groups the SERVER draws -- a split each phone worked out for
+           itself is a split two phones can disagree about, and the sub swap
+           above is exactly where they would. It returns my group's member
+           ids, and they are who is on this card. */
+        : await supa.rpc('league_claim_group_round', { p_week_id: weekId, p_code: code });
     }
     catch (e) { cl = { data: null, error: e }; }
     if (!cl || cl.error) {
@@ -89883,6 +90011,26 @@ async function lgLaunchWeekRound(sid, weekId, matchupId) {
       await lgOpenLaunchedRound(cl.data.code); return;
     }
     code = (cl.data && cl.data.code) || code;
+
+    /* v1451 (QA BLOCK-4): this round is my group, not the whole league.
+       Only ever narrows the field -- if the server sent no list, or a list
+       that matches nobody on this phone's roster, the round is built exactly
+       as it was before rather than being built empty. */
+    let _lgGrp = null;
+    try {
+      const _mids = (cl.data && Array.isArray(cl.data.mids)) ? cl.data.mids : null;
+      if (!_fx && _mids && _mids.length) {
+        const _set = {};
+        _mids.forEach(function (x) { _set[String(x)] = 1; });
+        const _mine = active.filter(function (m) { return _set[String(m.id)]; });
+        if (_mine.length) {
+          active = _mine;
+          _lgGrp = { g: cl.data.g || 1, of: cl.data.groups || 1 };
+        } else {
+          console.warn('league_claim_group_round returned a group matching nobody on the roster');
+        }
+      }
+    } catch (e) { try { console.warn('lgLaunch group filter', e); } catch (e2) {} }
 
     /* v1405: a week that opened BEFORE this build froze a snapshot with only the
        league's own tee in it, so a player since moved to the forward tees would
@@ -89950,9 +90098,10 @@ async function lgLaunchWeekRound(sid, weekId, matchupId) {
               ? snap.tees
               : ((snap.rating18 != null && snap.slope18 != null)
                    ? [{ label: snap.tee || 'League',
-                        rating: (holes === 9)
-                                  ? Math.round((Number(snap.rating18) / 2) * 10) / 10
-                                  : Number(snap.rating18),
+                        /* v1450 (QA S-2): guarded, so a snapshot frozen before
+                           this build -- whose rating18 may already BE a nine --
+                           is not halved a second time on its way onto the card. */
+                        rating: lgHalfRating(snap.rating18, holes),
                         slope: Number(snap.slope18) }]
                    : []),
       players: players,
@@ -90045,6 +90194,11 @@ async function lgLaunchWeekRound(sid, weekId, matchupId) {
         /* v1435: which fixture this round IS. The week is no longer enough to
            identify it now that a week holds several rounds. */
         muid: _fx ? _fx.id : null,
+        /* v1451: which group of a field week this round is, so the summary
+           and anything reading the stamp can say "group 2 of 5" rather than
+           implying this card is the whole league. */
+        grp: _lgGrp ? _lgGrp.g : null,
+        grpOf: _lgGrp ? _lgGrp.of : null,
         members: active.map(function (m) {
           return { mid: m.id, uid: m.user_id || null, name: m.display_name };
         })
@@ -93953,7 +94107,46 @@ async function init() {
       // for league play?" Silent unless this exact round qualifies for a week that
       // is open AND allows self-scheduled rounds. Delayed so the finish save has
       // landed server-side before the eligibility read runs.
-      try { setTimeout(function () { try { lgOfferRoundToLeague(g.code); } catch (e) {} }, 2600); } catch (e) {}
+      /* v1450 (QA BLOCK-1): the round LAUNCHED FROM a league had no route to
+         a league card at all. lgOfferRoundToLeague, the picker button and
+         league_eligible_rounds are all gated on settings.play.self_scheduled,
+         which v1361 made default false and v1414 forces false for every shape
+         that is not `field` -- so a league night played from the league itself
+         hit none of them and the week could never be finalised.
+
+         league_post_round_cards is the missing route and it takes the CODE and
+         nothing else: the week, the fixture, who played, what they shot and who
+         witnessed it all come off rows the server owns, so one call posts a
+         card for everybody in the round and none of it depends on that switch.
+         It upserts on (matchup_id, slot), so a re-finish is harmless.
+
+         The 2600ms is the same wait as the offer below and for the same reason:
+         the finish save has to have landed server-side before anything reads
+         the round back. */
+      try {
+        if (g && g.lg && g.lg.sid && typeof supa !== 'undefined' && supa) {
+          setTimeout(function () {
+            try {
+              Promise.resolve(supa.rpc('league_post_round_cards', { p_game_code: g.code }))
+                .then(function (r) {
+                  try {
+                    if (r && r.error) { console.warn('league_post_round_cards failed:', r.error); return; }
+                    const d = (r && r.data) || {};
+                    if (d.posted > 0) {
+                      showToast(d.posted === 1 ? 'Your league card is in'
+                                               : (d.posted + ' league cards are in'));
+                    } else {
+                      console.warn('league_post_round_cards posted nothing:', d);
+                    }
+                  } catch (e) {}
+                })
+                .catch(function (e) { try { console.warn('league_post_round_cards', e); } catch (e2) {} });
+            } catch (e) {}
+          }, 2600);
+        } else {
+          setTimeout(function () { try { lgOfferRoundToLeague(g.code); } catch (e) {} }, 2600);
+        }
+      } catch (e) {}
       try { if (g.t2 && g.t2.tournamentId) t2MaybeCompleteDay(g); } catch (e) {}   // v1154: last group in → day complete
       // v940: retire any invites still outstanding for this round — nobody should
       // be invited to a round that just ended.
