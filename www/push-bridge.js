@@ -54,8 +54,10 @@
       _flushToken();
       try { if (window.supa && window.supa.auth && window.supa.auth.onAuthStateChange) window.supa.auth.onAuthStateChange(function () { _flushToken(); }); } catch (e) {}
       Push.addListener('registrationError', function (e) { console.warn('push reg error', e); });
-      // Tapped a notification -> deep link by notification type (legacy
-      // wager_round_code still routes to the Wager tab).
+      // Tapped a notification -> deep link by notification type. (v1464: the
+      // wager feature was removed in v1461, so the old default branch called a
+      // function that no longer exists and the tap silently did nothing. Legacy
+      // wager_round_code payloads can still arrive from before the removal.)
       Push.addListener('pushNotificationActionPerformed', function (ev) {
         try {
           var data = (ev && ev.notification && ev.notification.data) || {};
@@ -85,8 +87,11 @@
           if (type === 'friend_request') {
             if (typeof window.switchTab === 'function') return window.switchTab('crew');
           }
-          // Default (wager / round_start / legacy) -> open the Wager tab for that round.
-          if (code && typeof window.openWagerScreen === 'function') return window.openWagerScreen(code);
+          // Default (round_start / legacy / unknown) -> open that round if we have
+          // a code, otherwise land on Home. Never a no-op: a tapped notification
+          // that goes nowhere reads as a broken app.
+          if (code && typeof window.openCrewRound === 'function') return window.openCrewRound(code);
+          if (typeof window.switchTab === 'function') return window.switchTab('home');
         } catch (e) {}
       });
       Push.requestPermissions().then(function (res) {
