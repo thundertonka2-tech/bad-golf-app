@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1477-->
+<!--BGVER=v2026.11.1478-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -9830,7 +9830,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1477';
+const BG_BUILD = 'v2026.11.1478';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -15464,8 +15464,13 @@ async function createMyPlayerFromAccount() {
   await upsertPlayerInRoster(first, last, hcp, phone ? { phone: phone } : undefined); // dedups by name if it exists
   await setMeName(combineName(first, last));
   if (phone) {
-    try { await supa.from('profiles').update({ phone: phone }).eq('id', _authUser.id); }
-    catch (e) { /* phone column may not exist yet - run Profile_Phone.sql; roster copy still saved */ }
+    // v1478: supabase-js resolves with { error } rather than throwing, so the old
+    // bare try/catch swallowed a real failure silently. The roster copy is still
+    // saved either way, so this stays non-fatal - but it is no longer invisible.
+    try {
+      const { error } = await supa.from('profiles').update({ phone: phone }).eq('id', _authUser.id);
+      if (error) console.warn('setup: profiles.phone save failed', error);
+    } catch (e) { console.warn('setup: profiles.phone save threw', e); }
   }
   try { renderAccountUI(); } catch (e) {}
   try {
@@ -59044,7 +59049,7 @@ async function openEditProfile(opts) {
           const { data } = await _bgRead(() => supa.from('profiles').select('phone').eq('id', _authUser.id).maybeSingle(), 'openEditProfile:phone');
           if (data && data.phone) phoneInput.value = formatPhoneDisplay(data.phone);
         }
-      } catch (e) { /* phone column may not exist yet — run Profile_Phone.sql */ }
+      } catch (e) { console.warn('openEditProfile: phone prefill failed', e); }
     }
     const pwInput = document.getElementById('edit-profile-password');
     if (pwInput) pwInput.value = '';
@@ -59079,16 +59084,34 @@ function formatPhoneDisplay(v) {
   if (d.length > 3) return d.slice(0, 3) + '-' + d.slice(3);
   return d;
 }
+// v1478: every failure here used to read "Could not save phone (run Profile_Phone.sql?)"
+// — a developer note that shipped to testers and blamed a missing migration. The real
+// cause was a database policy fault (42P17 infinite recursion on profiles), which made
+// EVERY self-write to the profile row fail with an HTTP 500; that is fixed server-side.
+// This path is hardened three ways so the next failure reports itself honestly:
+//   (a) a blank field clears the number instead of storing an empty string,
+//   (b) the row is read back, so a write that touched zero rows (expired session,
+//       policy change) is reported as a failure instead of a green tick,
+//   (c) the actual reason is shown, trimmed, instead of a guess.
 async function saveProfilePhone() {
   if (!supa || !_authUser) { showToast('Sign in first'); return; }
-  const phone = formatPhoneDisplay((document.getElementById('edit-profile-phone').value || '').trim());
+  const el = document.getElementById('edit-profile-phone');
+  const typed = formatPhoneDisplay(((el && el.value) || '').trim());
+  const digits = typed.replace(/\D/g, '');
+  if (digits && digits.length !== 10) { showToast('Enter a 10-digit mobile number'); return; }
+  const phone = digits ? typed : null;   // blank clears it; never store ''
   try {
-    const { error } = await supa.from('profiles').update({ phone }).eq('id', _authUser.id);
+    const { data, error } = await supa.from('profiles')
+      .update({ phone }).eq('id', _authUser.id)
+      .select('phone').maybeSingle();
     if (error) throw error;
-    showToast('Phone saved ✓');
+    if (!data) { showToast('Couldn\u2019t save phone — try signing out and back in'); return; }
+    if (el) el.value = formatPhoneDisplay(data.phone || '');
+    showToast(phone ? 'Phone saved ✓' : 'Phone cleared ✓');
   } catch (e) {
     console.warn('saveProfilePhone', e);
-    showToast('Could not save phone (run Profile_Phone.sql?)');
+    const why = (e && e.message) ? String(e.message).slice(0, 60) : '';
+    showToast('Couldn\u2019t save phone' + (why ? ' — ' + why : ''));
   }
 }
 
