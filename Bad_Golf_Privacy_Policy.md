@@ -2,7 +2,7 @@
 
 **Effective date:** September 3, 2026  **Last updated:** September 3, 2026
 
-**Michael O'Connor, an individual doing business as Bad Golf** ("Bad Golf," "we," "us," or "our") operates the Bad Golf mobile application and web app (the "Service"). This Privacy Policy explains what information we collect, how we use it, and the choices you have. We've tried to write it in plain English. If anything is unclear, contact us at tyler@simplisticfishing.com.
+**Kevin Wells, an individual doing business as Bad Golf** ("Bad Golf," "we," "us," or "our") operates the Bad Golf mobile application and web app (the "Service"). This Privacy Policy explains what information we collect, how we use it, and the choices you have. We've tried to write it in plain English. If anything is unclear, contact us at support@officialbadgolf.com.
 
 ## Summary (the short version)
 
@@ -109,7 +109,7 @@ We do not authorise any of these providers to use your information for their own
 
 ## 9. Data retention and deletion
 
-- **You can delete your account from inside the app** — Account → **Delete account**. Your account and data are removed immediately. You can also email tyler@simplisticfishing.com with the subject "Bad Golf Account Deletion Request" from the address on your account, and we will process it within 30 days.
+- **You can delete your account from inside the app** — Account → **Delete account**. Your account and data are removed immediately. You can also email support@officialbadgolf.com with the subject "Bad Golf Account Deletion Request" from the address on your account, and we will process it within 30 days.
 - **What deletion removes:** your account and sign-in, your profile and player link, your saved rounds, scores, statistics and handicap history, your game history and final-standing records, and your device push-notification tokens.
 - **What deletion does not remove:** rounds you played with other people remain in *their* round history, because their scorecards include the round you shared. Those rounds are no longer linked to any account of yours.
 - **Crew message board threads** are deleted automatically 30 days after their last activity.
@@ -130,7 +130,7 @@ Bad Golf is not directed to children. You must be at least 18 years old (or the 
 - **Deletion** — see Section 9.
 - **Notifications** — every push category can be turned off in the app's notification settings.
 - **Location** — can be revoked at any time in your device's system settings.
-- Depending on where you live, you may have additional rights over your personal information, including the right to request access to it, correction of it, or deletion of it, and the right not to be discriminated against for exercising those rights. To make a request, email tyler@simplisticfishing.com from the address on your account.
+- Depending on where you live, you may have additional rights over your personal information, including the right to request access to it, correction of it, or deletion of it, and the right not to be discriminated against for exercising those rights. To make a request, email support@officialbadgolf.com from the address on your account.
 
 ## 13. Where your information is held
 
@@ -144,4 +144,4 @@ We may update this Privacy Policy from time to time. Material changes will be re
 
 Questions about this policy, or a request about your information:
 
-Bad Golf — Email: tyler@simplisticfishing.com
+Bad Golf — Email: support@officialbadgolf.com

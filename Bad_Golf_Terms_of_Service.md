@@ -2,7 +2,7 @@
 
 **Effective date:** September 3, 2026  **Last updated:** September 3, 2026
 
-Welcome to Bad Golf. These Terms of Service ("Terms") are a contract between you and **Michael O'Connor, an individual doing business as Bad Golf** ("Bad Golf," "we," "us," or "our"), and they govern your use of the Bad Golf mobile application and web app (collectively, the "Service"). By using the Service, you agree to these Terms. If you don't agree, don't use the Service.
+Welcome to Bad Golf. These Terms of Service ("Terms") are a contract between you and **Kevin Wells, an individual doing business as Bad Golf** ("Bad Golf," "we," "us," or "our"), and they govern your use of the Bad Golf mobile application and web app (collectively, the "Service"). By using the Service, you agree to these Terms. If you don't agree, don't use the Service.
 
 We've written these Terms in plain language. Some sections are legally important and use formal language where required.
 
@@ -155,4 +155,4 @@ These Terms, together with the Privacy Policy, constitute the entire agreement b
 
 Questions about these Terms:
 
-Bad Golf — Email: tyler@simplisticfishing.com
+Bad Golf — Email: support@officialbadgolf.com
