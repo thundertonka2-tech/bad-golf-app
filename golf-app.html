@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1481-->
+<!--BGVER=v2026.11.1482-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -3078,7 +3078,33 @@
      inactive, so the bag list doubles as "what am I carrying today". */
   .club-row.club-out .club-label,
   .club-row.club-out .club-min,
-  .club-row.club-out .club-max { opacity: .42; }
+  .club-row.club-out .club-max,
+  .club-row.club-out .club-measured,
+  .club-row.club-out .club-summary,
+  .club-row.club-out .club-detail { opacity: .42; }
+
+  /* v1482 - §2 and §3 of claude/SPEC_MyBagGlyph_MeasuredDistances_ClubDetail_2026-09-04.md.
+     Both additions are INVISIBLE until they have something to say: the measured line and
+     the collapsed summary are display:none while empty, and the detail fields are hidden
+     until the one toggle above the list is on. A bag with no tracked shots and no brand
+     typed renders exactly as it did in v1481. */
+  .club-measured, .club-summary { display: none; margin-top: 6px; color: var(--text-muted); }
+  .club-measured:not(:empty) { display: block; }
+  /* Entered range and measured range disagree by more than 10% - a signal, shown once,
+     with no badge and no toast. */
+  .club-measured.club-measured--off { color: var(--accent); }
+  /* The one-line brand/model/type recap only appears while the drawer is CLOSED; with it
+     open the fields themselves are on screen and the recap would just be noise. */
+  #clubs-list:not(.show-details) .club-summary:not(:empty) { display: block; }
+  /* §3 deviates from the spec on purpose: the spec put a <details> on every club row, which
+     at the 44px touch target this project holds itself to is +44px x 14 clubs of collapsed
+     chrome. ONE 44px toggle above the list reveals the fields on every row instead. The
+     fields are always in the DOM - only their visibility changes - so collectClubs() reads
+     them whether the drawer is open or shut and a hidden field can never be dropped on save. */
+  .club-detail { display: none; }
+  #clubs-list.show-details .club-detail { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .club-detail label { display: block; font-size: 11px; color: var(--text-muted); }
+  .club-detail input, .club-detail select { width: 100%; min-width: 0; padding: 8px; margin-top: 2px; }
 
   /* v1339: only the LIVE Score tab card is tappable. The same scorecard markup is
      reused read-only by the Games board, the recap and the settle-up sheet, so the
@@ -4930,6 +4956,11 @@ html.bg-modal-lock, body.bg-modal-lock { overflow: hidden !important; }
              Close. The id is unchanged — every handler still resolves. -->
         <button id="btn-clubs-back" class="bg-btn bg-btn--ghost bg-btn--full full" aria-label="Close My clubs" style="display:none;margin:10px 0 0">Close</button>
         <p class="help-text" style="margin:10px 0 12px">Set the real distance range for each club in your bag. The GPS <strong>plays-like</strong> sheet then recommends from <strong>your</strong> bag instead of typical amateur numbers. Ranges are in <strong>yards</strong>. Leave a club blank to skip it, edit any label (wedge lofts included), remove what you don't carry, add anything custom. Use <strong>▲▼</strong> to put a new club where it belongs, and untick a club to take it <strong>out of the bag</strong> for now — it keeps its ranges and stops being recommended until you tick it back.</p>
+        <!-- v1482: one control, not fourteen. See the .club-detail note in the stylesheet. -->
+        <button class="bg-btn bg-btn--ghost bg-btn--full full" type="button" id="btn-club-details"
+                aria-expanded="false" aria-controls="clubs-list"
+                aria-label="Show brand, model and type for each club"
+                style="margin-bottom:8px">&#127991;&#65039; Add brand / model / type</button>
         <div id="clubs-list"></div>
         <div class="actions" style="margin-top:10px">
           <!-- v1353 (Tyler, 8/31): same wrap as the v1351 Edit profile / Settings pair.
@@ -9898,7 +9929,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1481';
+const BG_BUILD = 'v2026.11.1482';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -101929,9 +101960,99 @@ function bgCurrentTabName() {
 }
 window.bgCurrentTabName = bgCurrentTabName;
 
+// v1482 §3. A closed set so the bag can be grouped or filtered later without a cleanup
+// pass over free text. '' is a real option - most people will never set this.
+const CLUB_TYPES = ['Driver', 'Wood', 'Hybrid', 'Iron', 'Wedge', 'Putter'];
+
+// Stable per-club element ids, so FormDraftAutoSave (which only tracks fields that HAVE an
+// id) protects a half-typed brand against a phone call. Keyed off the LABEL, never the row
+// index - an index breaks the moment someone uses the up/down arrows. wireClubRows()
+// uniquifies the rare collision, because two clubs really can be called "Wedge".
+function clubSlug(label) {
+  return String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'club';
+}
+
+// v1482 §2. What the tracked-shot log actually says about one club.
+// Median and p25-p75, NOT mean and min-max: these are GPS estimates, and one mis-parked
+// drive or one shank puts a 40-yard entry in the log. A mean swallows it; the quartiles
+// do not. The shot log stores `club` as the label string, which is why §3 keeps brand and
+// model in their own fields and never folds them into the label.
+function clubShotStats(label) {
+  const key = String(label || '').trim().toLowerCase();
+  if (!key) return null;
+  const ys = (window._myShots || [])
+    .filter(s => s && s.yards != null && String(s.club || '').trim().toLowerCase() === key)
+    .map(s => Number(s.yards))
+    .filter(y => isFinite(y) && y > 0)
+    .sort((a, b) => a - b);
+  if (!ys.length) return null;
+  const q = p => {
+    const i = (ys.length - 1) * p, lo = Math.floor(i), hi = Math.ceil(i);
+    return lo === hi ? ys[lo] : ys[lo] + (ys[hi] - ys[lo]) * (i - lo);
+  };
+  return { n: ys.length, p25: Math.round(q(0.25)), p75: Math.round(q(0.75)), med: Math.round(q(0.5)) };
+}
+
+// Paint the measured line on every row. Reads the label from the INPUT rather than a data
+// attribute so renaming a club re-targets its shots immediately. Called after the shot log
+// loads and after every debounced save; never re-renders a row, so nothing you are typing
+// is disturbed.
+function updateClubMeasured() {
+  document.querySelectorAll('#clubs-list .club-row').forEach(row => {
+    const out = row.querySelector('.club-measured');
+    if (!out) return;
+    const labEl = row.querySelector('.club-label');
+    const st = clubShotStats(labEl ? labEl.value : '');
+    if (!st) { out.textContent = ''; out.classList.remove('club-measured--off'); return; }
+    if (st.n < 5) {
+      // A "measured" range off one or two shots reads as authoritative and is not.
+      out.textContent = '\u{1F4CF} ' + st.n + ' shot' + (st.n === 1 ? '' : 's') + ' \u2014 need 5';
+      out.classList.remove('club-measured--off');
+      return;
+    }
+    out.textContent = '\u{1F4CF} measured ' + st.p25 + '\u2013' + st.p75 + ' \u00b7 ' + st.n + ' shots';
+    const mn = parseInt((row.querySelector('.club-min') || {}).value, 10);
+    const mx = parseInt((row.querySelector('.club-max') || {}).value, 10);
+    let off = false;
+    if (isFinite(mn) && isFinite(mx) && mx > mn) {
+      const mid = (mn + mx) / 2;
+      off = mid > 0 && Math.abs(st.med - mid) / mid > 0.10;
+    }
+    out.classList.toggle('club-measured--off', off);
+  });
+}
+
+// The one-line recap shown while the detail drawer is closed.
+function updateClubSummaries() {
+  document.querySelectorAll('#clubs-list .club-row').forEach(row => {
+    const out = row.querySelector('.club-summary');
+    if (!out) return;
+    const val = sel => { const e = row.querySelector(sel); return e ? String(e.value || '').trim() : ''; };
+    out.textContent = [val('.club-brand'), val('.club-model'), val('.club-type')].filter(Boolean).join(' \u00b7 ');
+  });
+}
+
+// Open the drawer automatically when the bag already HAS details in it - otherwise a
+// returning user sees a blank row and concludes their brand and model were lost.
+function syncClubDetailsToggle() {
+  const list = document.getElementById('clubs-list');
+  const btn = document.getElementById('btn-club-details');
+  if (!list || !btn) return;
+  const on = list.classList.contains('show-details');
+  btn.textContent = on ? '\u{1F3F7}\u{FE0F} Hide brand / model / type' : '\u{1F3F7}\u{FE0F} Add brand / model / type';
+  btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+}
+
 function clubRowHtml(c, placeholder) {
   const ph = (placeholder || '').split('–');
   const inBag = (c.inBag !== false);
+  // v1482 §3. Absent fields read as undefined, so every bag saved before this build
+  // renders exactly as it did - the same back-compatibility shape as v1339's inBag.
+  const slug = clubSlug(c.label);
+  const esc = v => (typeof escapeHtml === 'function' ? escapeHtml(String(v == null ? '' : v))
+                                                     : String(v == null ? '' : v).replace(/"/g, '&quot;'));
+  const typeVal = String(c.type || '');
   const arrow = 'flex:0 0 auto;padding:4px 8px;line-height:1;font-size:13px;min-width:30px';
   /* v1467 (Tyler, 9/3): "can we get this all on one line. The delete is throwing things
      off on mobile and making it look sloppy." The row was ONE wrapping flex holding both
@@ -101962,7 +102083,23 @@ function clubRowHtml(c, placeholder) {
     '<input type="text" class="club-min" inputmode="numeric" pattern="[0-9]*" maxlength="3" value="' + (c.min != null ? c.min : '') + '" placeholder="' + (ph[0] || 'min') + '" style="flex:1;min-width:0;padding:8px;text-align:center">' +
     '<span style="color:var(--text-muted);flex:0 0 auto">–</span>' +
     '<input type="text" class="club-max" inputmode="numeric" pattern="[0-9]*" maxlength="3" value="' + (c.max != null ? c.max : '') + '" placeholder="' + (ph[1] || 'max') + '" style="flex:1;min-width:0;padding:8px;text-align:center">' +
-    '</div></div>';
+    '</div>' +
+    /* v1482 §2: what the shot log measured for this club. Filled by updateClubMeasured()
+       once the log has loaded - empty here, and empty means display:none, so a bag with no
+       tracked shots is byte-for-byte the v1481 layout. */
+    '<div class="club-measured small-text"></div>' +
+    /* v1482 §3: the recap, and the fields themselves. The fields are ALWAYS in the DOM so
+       collectClubs() can never drop them; only their visibility is toggled. */
+    '<div class="club-summary small-text"></div>' +
+    '<div class="club-detail">' +
+      '<label>Brand<input type="text" class="club-brand" id="club-brand-' + slug + '" maxlength="24" value="' + esc(c.brand) + '" placeholder="e.g. TaylorMade"></label>' +
+      '<label>Model<input type="text" class="club-model" id="club-model-' + slug + '" maxlength="24" value="' + esc(c.model) + '" placeholder="e.g. Qi10"></label>' +
+      '<label>Type<select class="club-type" id="club-type-' + slug + '">' +
+        '<option value=""' + (typeVal ? '' : ' selected') + '>\u2014</option>' +
+        CLUB_TYPES.map(t => '<option value="' + t + '"' + (typeVal === t ? ' selected' : '') + '>' + t + '</option>').join('') +
+      '</select></label>' +
+    '</div>' +
+    '</div>';
 }
 async function renderClubs() {
   // Show the "back to my round" button whenever there's a live round to return
@@ -101987,7 +102124,22 @@ async function renderClubs() {
   }).join('');
   wireClubRows();
   updateClubsStatus();
-  try { loadMyShots().then(s => { window._myShots = s; renderMyShots(); }).catch(() => {}); } catch (e) {}
+  // v1482 §3: if anything is already filled in, show it rather than hiding a user's own data
+  // behind a toggle they have to rediscover.
+  try {
+    const hasDetail = clubs.some(c => c && (c.brand || c.model || c.type));
+    if (hasDetail) list.classList.add('show-details');
+    syncClubDetailsToggle();
+  } catch (e) {}
+  // v1482 §2: the rows are already on screen by the time the shot log lands, so repaint the
+  // measured lines in place. Re-rendering the rows here would throw away anything half-typed.
+  try {
+    loadMyShots().then(s => {
+      window._myShots = s;
+      renderMyShots();
+      try { updateClubMeasured(); } catch (e) {}
+    }).catch(() => {});
+  } catch (e) {}
 }
 function collectClubs() {
   const bad = [];
@@ -102003,7 +102155,17 @@ function collectClubs() {
     maxEl.style.borderColor = invalid ? 'var(--danger)' : '';
     if (invalid) { if (label) bad.push(label); min = null; max = null; }
     const bagEl = row.querySelector('.club-inbag');   // v1339
-    return { label, min, max, inBag: bagEl ? !!bagEl.checked : true };
+    // v1482 §3. THE line this feature lives or dies on: clubsChanged() is debounced and
+    // fires on the next keystroke anywhere in the bag, so if these three were not carried
+    // through here every autosave would silently wipe them and nothing in the UI would say
+    // so. Empty strings are dropped rather than stored, to keep old bags byte-identical.
+    const val = sel => { const e = row.querySelector(sel); return e ? String(e.value || '').trim() : ''; };
+    const out = { label, min, max, inBag: bagEl ? !!bagEl.checked : true };
+    const brand = val('.club-brand'), model = val('.club-model'), ctype = val('.club-type');
+    if (brand) out.brand = brand;
+    if (model) out.model = model;
+    if (ctype) out.type = ctype;
+    return out;
   }).filter(c => c.label);
   clubs._bad = bad;
   return clubs;
@@ -102027,6 +102189,9 @@ function clubsChanged() {
     const clubs = collectClubs();
     await saveMyClubs(clubs);
     updateClubsStatus();
+    // v1482: a renamed club points at a different set of tracked shots, so the measured
+    // line has to be re-derived after every save. Cheap, and it never touches the inputs.
+    try { updateClubMeasured(); } catch (e) {}
     const st = document.getElementById('clubs-status');
     if (!st) return;
     if (clubs._bad && clubs._bad.length) {
@@ -102045,6 +102210,24 @@ function wireClubRows() {
   // v1481: yardage boxes take whole numbers only, three digits max. maxlength covers
   // typing; this covers paste, autofill and anything maxlength does not see. The caret
   // is only restored when the value actually changed, so ordinary typing is untouched.
+  // v1482 §3. Two clubs really can both be called "Wedge", and duplicate DOM ids are what
+  // dom_test.py exists to catch. Keep the first of each id and suffix the rest; the common
+  // case (unique labels) is untouched, so a draft still restores to the same field.
+  (function uniquifyClubIds() {
+    const seen = Object.create(null);
+    list.querySelectorAll('.club-brand[id], .club-model[id], .club-type[id]').forEach(el => {
+      const base = el.id;
+      seen[base] = (seen[base] || 0) + 1;
+      if (seen[base] > 1) el.id = base + '-' + seen[base];
+    });
+  })();
+  // The detail fields ride the SAME debounced save as everything else - no second save path.
+  list.querySelectorAll('.club-brand, .club-model, .club-type').forEach(inp => {
+    const h = () => { updateClubSummaries(); clubsChanged(); };
+    inp.oninput = h; inp.onchange = h;
+  });
+  try { updateClubSummaries(); } catch (e) {}
+  try { updateClubMeasured(); } catch (e) {}
   list.querySelectorAll('.club-min, .club-max').forEach(inp => {
     inp.oninput = function () {
       const clean = String(inp.value || '').replace(/\D/g, '').slice(0, 3);
@@ -102116,6 +102299,16 @@ function wireClubRows() {
     if (dc) dc.addEventListener('toggle', () => {
       if (!dc.open) { try { state._clubsReturn = null; } catch (e) {} }
     }); }
+  // v1482 §3: the one control that reveals brand / model / type on every row. It only
+  // flips a class - the fields are always in the DOM, so nothing can be lost by hiding them.
+  { const dt = document.getElementById('btn-club-details');
+    if (dt) dt.onclick = () => {
+      const list = document.getElementById('clubs-list');
+      if (!list) return;
+      list.classList.toggle('show-details');
+      try { syncClubDetailsToggle(); } catch (e) {}
+      try { updateClubSummaries(); } catch (e) {}
+    }; }
   const add = document.getElementById('btn-add-club');
   if (add) add.onclick = () => {
     const list = document.getElementById('clubs-list');

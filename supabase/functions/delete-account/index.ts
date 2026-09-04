@@ -17,6 +17,35 @@
 //   supabase secrets set APPLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 //
 // SUPABASE_URL and SUPABASE_ANON_KEY are provided automatically.
+//
+// ---------------------------------------------------------------------
+// 2026-09-04 — THREE BUGS FIXED HERE. Read this before changing the order.
+//
+// 1. The old step 2 hard-deleted `profiles` BEFORE deleting the auth user,
+//    and returned 500 if the auth delete failed. One real user
+//    (an Apple private-relay account, 29 Aug) was left with an auth account
+//    and no profile row for six days because of exactly that.
+//
+// 2. Every table op in the old step 1 and step 2 named a column that does
+//    not exist:
+//        games.user_id                      -> the column is owner_uid
+//        friendships.user_id/friend_id      -> requester / addressee
+//        game_invites.inviter_id/invitee_id -> from_user / to_user
+//    supabase-js RESOLVES with { error } instead of throwing, so the
+//    try/catch never fired and the report said "anonymized" / "deleted"
+//    for three operations that had done nothing at all.
+//
+// 3. The whole of step 2 was redundant. Verified against pg_constraint:
+//    profiles, friendships (both columns), game_invites (both columns),
+//    player_stats, push_tokens, notif_prefs, handicap_snapshots,
+//    player_claims and tournaments are ALL "on delete cascade" from
+//    auth.users. Deleting the auth user removes them. feedback,
+//    course_requests, outbound_invites and tournament_players are
+//    "on delete set null", which is what we want.
+//
+//    `games` is the ONLY table with no foreign key to auth.users, which is
+//    why it is the only one still handled explicitly below - and it must
+//    stay BEFORE the auth delete, because nothing else will do it.
 // =====================================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -108,49 +137,30 @@ Deno.serve(async (req) => {
   const user = userData.user;
   const uid = user.id;
 
-  // Admin client (service role) for deletes that bypass RLS.
+  // Admin client (service role) for writes that bypass RLS.
   const admin = createClient(url, serviceKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
   const report: Record<string, string> = {};
 
-  // 1) Anonymize the player's name in shared games (don't delete others' rounds).
-  //    We null the personal fields but keep the round intact for the crew.
-  for (const table of ["games"]) {
-    try {
-      await admin.from(table).update({ owner_anonymized: true })
-        .eq("user_id", uid);
-      report[table] = "anonymized";
-    } catch (e) { report[table] = "skip:" + (e as Error).message; }
-  }
-
-  // 1b) v603: hard-delete this user's PER-USER roster row (roster:<uid>) — their
-  //     personal players + lifetime stats. The roster moved off the shared global
-  //     row into a per-user row, which has no user_id set, so the anonymize step
-  //     above never touches it. Without this a deleted account's roster would be
-  //     orphaned in the games table (Apple/GDPR: account deletion must remove it).
+  // 1) Anonymize this user's shared rounds. `games` has NO foreign key to
+  //    auth.users, so this is the one thing the cascade cannot do for us, and
+  //    it has to happen while the user still exists.
+  //    The column is owner_uid. It was `user_id` until 2026-09-04, which is a
+  //    column this table has never had - so this step silently did nothing for
+  //    every account deletion before that date.
+  //    supabase-js resolves with { error }; it does not throw. Read the error.
   try {
-    await admin.from("games").delete().eq("code", "roster:" + uid);
-    report["roster"] = "deleted";
-  } catch (e) { report["roster"] = "skip:" + (e as Error).message; }
-
-  // 2) Hard-delete personal-only rows.
-  for (const table of ["friendships", "game_invites", "profiles"]) {
-    try {
-      // friendships / invites may reference the user in either direction.
-      if (table === "friendships") {
-        await admin.from(table).delete().or(`user_id.eq.${uid},friend_id.eq.${uid}`);
-      } else if (table === "game_invites") {
-        await admin.from(table).delete().or(`inviter_id.eq.${uid},invitee_id.eq.${uid}`);
-      } else {
-        await admin.from(table).delete().eq("id", uid);
-      }
-      report[table] = "deleted";
-    } catch (e) { report[table] = "skip:" + (e as Error).message; }
+    const { error: gErr } = await admin.from("games")
+      .update({ owner_anonymized: true })
+      .eq("owner_uid", uid);
+    report["games"] = gErr ? "FAILED: " + gErr.message : "anonymized";
+  } catch (e) {
+    report["games"] = "FAILED: " + (e as Error).message;
   }
 
-  // 3) Revoke Apple token if the user used Sign in with Apple.
+  // 2) Revoke the Apple token if the user used Sign in with Apple.
   const usedApple = (user.identities || []).some((i) => i.provider === "apple");
   if (usedApple) {
     const providerToken = (user as any)?.user_metadata?.provider_refresh_token ||
@@ -159,10 +169,18 @@ Deno.serve(async (req) => {
     report["apple_revoke"] = providerToken ? "attempted" : "no_token_on_file";
   }
 
-  // 4) Delete the auth user itself.
+  // 3) Delete the auth user. This CASCADES to profiles, friendships,
+  //    game_invites, player_stats, push_tokens, notif_prefs,
+  //    handicap_snapshots, player_claims and tournaments, and SET NULLs
+  //    feedback, course_requests, outbound_invites and tournament_players.
+  //    Nothing is deleted by hand before this point, so a failure here leaves
+  //    the account exactly as it was and the user can simply try again.
   const { error: delErr } = await admin.auth.admin.deleteUser(uid);
   if (delErr) return json({ error: "Auth delete failed: " + delErr.message, report }, 500);
   report["auth_user"] = "deleted";
+  report["cascaded"] =
+    "profiles, friendships, game_invites, player_stats, push_tokens, notif_prefs, " +
+    "handicap_snapshots, player_claims, tournaments";
 
   return json({ ok: true, report });
 });
