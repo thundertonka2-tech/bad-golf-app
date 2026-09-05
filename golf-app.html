@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1489-->
+<!--BGVER=v2026.11.1490-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10109,7 +10109,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1489';
+const BG_BUILD = 'v2026.11.1490';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -20415,10 +20415,41 @@ async function archiveScoresFromRound(g) {
     // This is critical — without it, archiving a round played as "Tyler"
     // after the cleanup merged Tyler→Tyler O'Connor would create a fresh
     // "Tyler" roster entry and undo the merge.
+    // ══ v1490 (Tyler, 9/5): "why do I still see two Rolands here" ══════════════
+    // THIS is where the duplicate was born, and why deleting the roster row never
+    // stuck. The ladder below matches a round player to a roster entry by
+    // firstName+lastName, then firstName alone, then the whole name — and when all
+    // three miss it CREATES A NEW PLAYER. It never looks at the two identity keys the
+    // round player already carries.
+    //
+    // CADDIE70 (Buffalo Creek, 9/1) had Rolo entered as "Roland Castillo" with his
+    // account uid f1229ee6 stamped on the player; every roster already held "Rolo
+    // Castillo" carrying rolo.castillo@gmail.com. "Roland" != "Rolo", so all three
+    // devices that archived that round minted a SECOND Rolo, with his own crew-board
+    // row and his own -10. Deleting the row was useless: the next archive recreated it
+    // from the round. v1323 / v1360 / v1473 each fixed the GUEST PILL — none of them
+    // stopped the split, because the split happens right here.
+    //
+    // Identity first, names second. uid is the account; email is the key the rest of
+    // the app already treats as identity (v951: "the thing that ties an identity
+    // together across every roster is email"). Both are EXACT comparisons — no fuzzy
+    // matching — so this can only ever join a player to the entry that is provably
+    // theirs, never merge two different people. Whatever it learns is stamped onto the
+    // entry so the next archive matches on the first try and the GUEST pill clears.
     let entry = null;
+    const _pIdUid = String((p && (p.uid || p.user_id)) || '').trim();
+    const _pIdEm  = String((p && p.email) || '').trim().toLowerCase();
+    try {
+      if (_pIdUid) entry = roster.find(r => r && String((r.uid || r.user_id) || '').trim() === _pIdUid) || null;
+      if (!entry && _pIdEm && _pIdEm.indexOf('@') > 0) entry = roster.find(r => r && String(r.email || '').trim().toLowerCase() === _pIdEm) || null;
+      if (entry) {
+        if (_pIdUid && !entry.uid) entry.uid = _pIdUid;
+        if (_pIdEm && _pIdEm.indexOf('@') > 0 && !entry.email) entry.email = _pIdEm;
+      }
+    } catch (e) { entry = null; }
     const pFirst = (p.firstName || '').trim();
     const pLast = (p.lastName || '').trim();
-    if (pFirst) {
+    if (!entry && pFirst) {
       const pfLower = pFirst.toLowerCase();
       const plLower = pLast.toLowerCase();
       // Match by firstName + lastName (both case-insensitive). Empty lastName
@@ -20460,6 +20491,14 @@ async function archiveScoresFromRound(g) {
         lastUsed: Date.now(),
         scoreHistory: []
       };
+      // v1490: if we genuinely have to mint a player, mint them WITH their identity.
+      // A brand-new entry that carries no uid and no email is exactly the shape that
+      // produced the second Rolo — unmatchable next time, and a GUEST pill on a real
+      // account holder.
+      try {
+        if (_pIdUid) entry.uid = _pIdUid;
+        if (_pIdEm && _pIdEm.indexOf('@') > 0) entry.email = _pIdEm;
+      } catch (e) {}
       roster.push(entry);
     }
     if (!Array.isArray(entry.scoreHistory)) entry.scoreHistory = [];
@@ -59741,18 +59780,57 @@ async function renderCrewLeaderboard() {
   // identity — the same string used to display, to resolve the base, and to open the
   // profile on tap, so the row and its card agree). No history is unioned here; each
   // row's numbers come from _lbHistory below, exactly like the card.
+  // v1490: the dedupe key was the NAME, so one person under two spellings ranked
+  // against himself — Tyler's board showed "Roland Castillo -10" at #26 and "Rolo
+  // Castillo -181" at #39, the same man twice. Collapse on IDENTITY wherever the entry
+  // proves one (account uid, account email, or a roster id an account has claimed) and
+  // fall back to the name only when it proves nothing. Guests are keyed by name exactly
+  // as before, so nothing about the rest of the board moves.
+  const _lbIdentityKey = (p, nm) => {
+    try {
+      const uid = String((p && (p.uid || p.user_id)) || '').trim();
+      if (uid) return 'uid:' + uid;
+      const em = String((p && p.email) || '').trim().toLowerCase();
+      if (em && em.indexOf('@') > 0) return 'em:' + em;
+      const id = String((p && p.id) || '');
+      if (id && _bgUserPlayerIds && _bgUserPlayerIds.has(id)) return 'pid:' + id;
+    } catch (e) {}
+    return 'nm:' + normalizeNameSegment(nm);
+  };
   const _seen = {};
   const _uniq = [];
   pool.forEach(p => {
     const nm = p ? (p.name || displayFull(p)) : '';
     if (!p || !nm) return;
-    const k = normalizeNameSegment(nm);
-    if (_seen[k]) { const u = _seen[k]; if (u.poolEntry && !u.poolEntry.avatar && p.avatar) u.poolEntry.avatar = p.avatar; return; }
+    const k = _lbIdentityKey(p, nm);
+    if (_seen[k]) {
+      const u = _seen[k];
+      if (u.poolEntry && !u.poolEntry.avatar && p.avatar) u.poolEntry.avatar = p.avatar;
+      (u.alias || (u.alias = [])).push(p);   // v1490: its rounds still belong to this person
+      return;
+    }
     _seen[k] = { name: nm, poolEntry: p };
     _uniq.push(_seen[k]);
   });
   const rows = _uniq.map(u => {
     let base = resolveRosterPlayerByName(roster, u.name) || u.poolEntry;
+    // v1490: an alias entry that collapsed into this row keeps its rounds. The union is
+    // by ROUND KEY — the same key _lbHistory and mergedPlayerHistory already use — so a
+    // round can never be counted twice; the row is a superset, never a double. This is
+    // deliberately NOT the v760 hazard: that was unioning same-NAME duplicates the card
+    // would not have read. Here the card unions the identical set (see openCrewProfile),
+    // so the row and the card it opens still agree.
+    if (u.alias && u.alias.length) {
+      try {
+        const _ak = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+        const _ah = Array.isArray(base.scoreHistory) ? base.scoreHistory.slice() : [];
+        const _ahave = new Set(_ah.map(_ak));
+        u.alias.forEach(a => (Array.isArray(a && a.scoreHistory) ? a.scoreHistory : []).forEach(s => {
+          const kk = _ak(s); if (s && kk && !_ahave.has(kk)) { _ah.push(s); _ahave.add(kk); }
+        }));
+        base = Object.assign({}, base, { scoreHistory: _ah });
+      } catch (e) {}
+    }
     const ep = Object.assign({}, u.poolEntry, base, { scoreHistory: _lbHistory(base, u.name) });
     if (!ep.avatar && u.poolEntry && u.poolEntry.avatar) ep.avatar = u.poolEntry.avatar;
     if (!ep.avatar) { try { const _pa = _profAv[normalizeNameSegment(u.name)]; if (_pa) ep.avatar = _pa; } catch (e) {} }   // v933: cloud-profile photo fallback
@@ -59920,6 +59998,32 @@ async function openCrewProfile(name, _skipHeal) {
     } catch (e) {}
   }
   if (!base) { showToast('No stats yet — they appear once your friend saves a round in Bad Golf'); return; }
+  // v1490: when another roster entry on this device proves the SAME account (uid or
+  // email) under a different spelling of the name, its rounds belong on this card too.
+  // Union by round key — the identical key mergedPlayerHistory uses — so nothing can
+  // double-count, and this card reads the same total as the crew-board row that opens
+  // it (the board collapses those entries the same way). Without this the board would
+  // union and the card would not, which is precisely the -22 / +125 split v760 fixed.
+  try {
+    const _cpUid = String((base.uid || base.user_id) || '').trim();
+    const _cpEm = String(base.email || '').trim().toLowerCase();
+    if (_cpUid || (_cpEm && _cpEm.indexOf('@') > 0)) {
+      const _ck = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+      const _ch = Array.isArray(base.scoreHistory) ? base.scoreHistory.slice() : [];
+      const _chave = new Set(_ch.map(_ck));
+      const _before = _ch.length;
+      (roster || []).forEach(r => {
+        if (!r || r === base) return;
+        const ru = String((r.uid || r.user_id) || '').trim();
+        const re = String(r.email || '').trim().toLowerCase();
+        if (!((_cpUid && ru === _cpUid) || (_cpEm && re && re === _cpEm))) return;
+        (Array.isArray(r.scoreHistory) ? r.scoreHistory : []).forEach(s => {
+          const kk = _ck(s); if (s && kk && !_chave.has(kk)) { _ch.push(s); _chave.add(kk); }
+        });
+      });
+      if (_ch.length !== _before) base = Object.assign({}, base, { scoreHistory: _ch });
+    }
+  } catch (e) {}
   // Self-heal this player's game units: re-archive any recent FINISHED round that
   // includes them but isn't yet in their history WITH units. archiveScoresFromRound
   // writes EVERY player's units to the shared roster (idempotent), so the profile
