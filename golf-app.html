@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1490-->
+<!--BGVER=v2026.11.1491-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10109,7 +10109,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1490';
+const BG_BUILD = 'v2026.11.1491';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -18690,7 +18690,11 @@ function mergeRosters(base, incoming, removals) {
     ex.scoreHistory = hist;
     // Profile fields: the active edit (incoming) wins when it has a real value.
     if (preferIncoming) {
-      ['firstName','lastName','name','hcp','gender','avatar','phone','pay','email'].forEach(f => { if (p[f] !== undefined && p[f] !== null && p[f] !== '') ex[f] = p[f]; });
+      // v1491: 'uid' joined this list because it has to SURVIVE the read-merge-write.
+      // savePlayerRoster reads the cloud copy as the base and layers this device's copy
+      // over it, carrying across only the fields named here -- so a freshly stamped
+      // account uid was being dropped by the very save meant to persist it.
+      ['firstName','lastName','name','hcp','gender','avatar','phone','pay','email','uid'].forEach(f => { if (p[f] !== undefined && p[f] !== null && p[f] !== '') ex[f] = p[f]; });
       // v1114 (Tyler, 8/19): "the clear my home course button seems to be broken."
       // It wasn't the button. `homeCourse` was never in the list above, so NO change
       // to it — set or clear — ever survived a roster merge; the merge always kept
@@ -41196,6 +41200,15 @@ function refreshBgUserNames(force) {
         _bgUserProfileIds = profileIdSet;   // v1360
         _bgUserPlayerIds = playerIdSet;     // v1360
         _bgTestUserNames = testSet;
+        // v1491: adopt name-only guest entries whose account now exists. Deferred a
+        // beat so it never competes with the first paint, and latched so a directory
+        // refresh 5 minutes later cannot re-run it.
+        try {
+          if (!window._bgIdHealRan) {
+            window._bgIdHealRan = true;
+            setTimeout(function () { try { bgRunRosterIdentityHeal(r.data); } catch (e) {} }, 1500);
+          }
+        } catch (e) {}
         // v758: the FIRST time the user set loads, re-render the visible player lists so
         // GUEST/TEST pills appear right away. They render as '' before the set is known — which
         // is why the badges never showed on mobile, where the initial render beat the load.
@@ -41242,6 +41255,104 @@ function bgPersonHasAccount(entry) {
     if (!em || em.indexOf('@') < 1) return false;
     return !!(_bgUserEmails && _bgUserEmails.has(em));
   } catch (e) { return false; }
+}
+// == v1491 (Tyler, 9/5) - a guest who signs up gets ADOPTED, on every device =========
+// v1490 made the round archive match on identity, which shuts the split for anyone
+// whose round player already carries a uid or an email. It left one hole open and
+// Tyler asked for it closed: a GUEST has neither. Bob plays twelve rounds as a
+// name-only roster entry, then signs up. His account exists now, but every roster in
+// the crew still holds him as a bare name -- so the day he edits his display name, or
+// an account name drifts by an apostrophe, he splits exactly the way Rolo did.
+//
+// So adopt him the moment his account shows up in the directory: stamp the account uid
+// (and its email) onto the roster entry that is PROVABLY his. From then on the entry
+// carries a UUID and the name is free to change forever.
+//
+// PROOF ONLY -- Tyler's explicit call. Three sources, strongest first:
+//   1. entry.id === profiles.linked_player_id -- the account CLAIMED this exact row
+//   2. entry.email === the account's email    -- the identity key of record (v951)
+//   3. an exact normalized NAME match, and only when that name resolves to exactly one
+//      account and the entry carries no competing identity of its own
+// Nothing here renames, merges, deletes or reorders anything. A nickname that does not
+// match is deliberately left for the admin merge tool: guessing that "Bob" is "Bobby"
+// would move real money and a handicap onto another man's ledger.
+//
+// The one-account guard on rule 3 is the important one. Matching a name to an account
+// is an inference the app already makes on a dozen surfaces -- but those re-derive it
+// on every render, and stamping FREEZES it. So it may only fire where the name is
+// unambiguous across the WHOLE directory: two accounts normalizing to the same name
+// disqualifies that name outright, for both of them.
+function bgHealRosterIdentities(roster, profiles) {
+  let changed = 0;
+  try {
+    if (!Array.isArray(roster) || !roster.length || !Array.isArray(profiles)) return 0;
+    const AMB = '@@amb@@';   // can never collide with a uuid
+    const emailOf = pr => { const d = String((pr && pr.display_name) || '').trim().toLowerCase(); return (d.indexOf('@') > 0) ? d : ''; };
+    const byName = new Map();    // normalized name  -> account id, or AMB
+    const byEmail = new Map();   // account email    -> account id
+    const byClaim = new Map();   // linked_player_id -> account id
+    const acct = new Map();      // account id       -> profile row
+    profiles.forEach(pr => {
+      try {
+        if (!pr || !pr.id) return;
+        const id = String(pr.id);
+        acct.set(id, pr);
+        const em = emailOf(pr);
+        if (em && !byEmail.has(em)) byEmail.set(em, id);
+        if (pr.linked_player_id) byClaim.set(String(pr.linked_player_id), id);
+        const names = [];
+        if (pr.my_player) names.push(pr.my_player);
+        const dn = String(pr.display_name || '');
+        if (dn && dn.indexOf('@') < 0 && !/\d/.test(dn)) names.push(dn);
+        names.forEach(n => {
+          const k = normalizeNameSegment(n);
+          if (!k) return;
+          const cur = byName.get(k);
+          if (cur === undefined) byName.set(k, id);
+          else if (cur !== id) byName.set(k, AMB);
+        });
+      } catch (e) {}
+    });
+    roster.forEach(ent => {
+      try {
+        if (!ent || typeof ent !== 'object') return;
+        const haveUid = !!String((ent.uid || ent.user_id) || '').trim();
+        const haveEm = String(ent.email || '').trim().toLowerCase();
+        let id = null;
+        if (ent.id && byClaim.has(String(ent.id))) id = byClaim.get(String(ent.id));
+        if (!id && haveEm && haveEm.indexOf('@') > 0 && byEmail.has(haveEm)) id = byEmail.get(haveEm);
+        if (!id && !haveUid && !haveEm) {
+          const k = normalizeNameSegment(ent.name || '');
+          const hit = k ? byName.get(k) : undefined;
+          if (hit && hit !== AMB) id = hit;
+        }
+        if (!id) return;
+        const pr = acct.get(id);
+        if (!pr) return;
+        const em = emailOf(pr);
+        let touched = false;
+        if (!haveUid) { ent.uid = id; touched = true; }          // never overwrites an existing uid
+        if (em && !haveEm) { ent.email = em; touched = true; }   // never overwrites an existing email
+        if (touched) changed++;
+      } catch (e) {}
+    });
+  } catch (e) { return changed; }
+  return changed;
+}
+// Once per session, a beat after the directory lands, and it only writes when it
+// actually stamped something -- so the steady state is zero extra roster writes.
+async function bgRunRosterIdentityHeal(profiles) {
+  try {
+    if (!(typeof isSignedIn === 'function' && isSignedIn())) return;
+    if (typeof supaOnline !== 'undefined' && !supaOnline) return;
+    const roster = await getPlayerRoster();
+    const n = bgHealRosterIdentities(roster, profiles);
+    if (!n) return;
+    await savePlayerRoster(roster);
+    try { invalidatePlayerRosterCache(); } catch (e) {}
+    try { console.log('[BadGolf] v1491 identity heal: stamped ' + n + ' roster entr' + (n === 1 ? 'y' : 'ies')); } catch (e) {}
+    try { if (typeof renderCrewLeaderboard === 'function') renderCrewLeaderboard(); } catch (e) {}
+  } catch (e) { try { console.warn('[BadGolf] identity heal failed', e); } catch (e2) {} }
 }
 // `entry` is optional and only ever REMOVES the pill: a name we cannot match but an
 // account we can prove is not a guest. Callers with no entry behave exactly as before.
