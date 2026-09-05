@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1469
+**Build Version:** v2026.11.1489
 **Documentation Date:** September 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -23,10 +23,9 @@
 15. [Rounds Tab](#rounds-tab)
 16. [Times Tab (Tee-Time Calendar)](#times-tab-tee-time-calendar)
 17. [Tourney Tab (Events & Tournaments)](#tourney-tab-events-tournaments)
-18. [Leagues (BETA)](#leagues-beta)
-19. [Smack-Talk / Trash-Talk Voice](#smack-talk-trash-talk-voice)
-20. [Friends Tab](#friends-tab)
-21. [Admin Side Features](#admin-side-features)
+18. [Leagues](#leagues)
+19. [Friends Tab](#friends-tab)
+20. [Admin Side Features](#admin-side-features)
 ---
 
 ## Account & Authentication
@@ -114,6 +113,8 @@ New-user setup asks for a phone number once, right after the handicap question, 
 
 The Account card lists **Edit profile → Sign out → Delete account**.
 
+> **If you ever saw "Could not save phone (run Profile_Phone.sql?)", that's fixed — and it was never about your phone number.** For a stretch, **every save to your own profile was failing, for every user, on every platform**: your phone number, **My clubs**, your **tracked-shot log**, your avatar, the player you map yourself to, your stats-visibility setting and your home course. It was fixed on the server, so no app update was needed. The message no longer names a SQL file either — it shows the real error — clearing the phone field genuinely clears it, and the app reads your row back after saving, so a write that silently changed nothing is reported as a failure instead of a green tick.
+
 **What you can edit:**
 - **Profile photo** — tap **"📷 Add / change photo"** to upload an image from your device; crew sees it as your avatar
 - **Display name** — first and last name (32-character limit)
@@ -146,7 +147,9 @@ Every editor in the app — round setup, the rating/slope editor, the pars/strok
 
 If a player has two logins (say Google sign-in and email/password), their tournament slots, rounds and units can be pointed at one account while they sign in on the other. Symptoms: "my rounds don't show up", "the invite dumps me on Home", "my handicap is different on my iPad".
 
-The fix is an **admin account merge** (see Admin → User Management). Afterwards the player must sign in with the surviving login only. A merge repoints tournament slots, round players, invites, push tokens, stats and friendships, unions the score histories, and **recomputes the handicap index off the merged history** — which can move it (one merge took an index from 4.6 to 5.2). Rounds already played are not re-settled at the new index.
+**A spelling difference is no longer mistaken for a guest.** A player with a real account whose roster name doesn't match their profile name — "Mike" on the roster, "Michael" on the account — used to wear a **GUEST** pill inside the round. Account holders are identified by **email** now, whatever the name on the card says.
+
+The fix for a genuine duplicate is an **admin account merge** (see Admin → User Management). Afterwards the player must sign in with the surviving login only. A merge repoints tournament slots, round players, invites, push tokens, stats and friendships, unions the score histories, and **recomputes the handicap index off the merged history** — which can move it (one merge took an index from 4.6 to 5.2). Rounds already played are not re-settled at the new index.
 
 ---
 
@@ -160,17 +163,37 @@ The fix is an **admin account merge** (see Admin → User Management). Afterward
 - **Rounds** — open rounds, scheduled rounds, your saved round history and round templates. *(This tab used to be called Events.)*
 - **The middle button** reads **Play** normally and **Round** while a round is live. It used to be the Bad Golf logo artwork; since v1030 it's the word, because nobody knew what the logo did. Its ring is **red while a round is live** and green when nothing is active. On the round-setup screen it hides itself — it sat directly under **"▶ Start round now"** and people were tapping the wrong one.
 - **Friends** — your friends, the roster, the crew message board and a **Live now** list you can spectate from. *(This slot used to be labelled Crew.)*
-- **More** — opens a sheet listing, alphabetically: **Info · League** *(carries a BETA pill)* **· Profile · Stats · Times · Tourney**, with **Admin** on its own row underneath, for admins only.
+- **More** — opens a sheet listing, alphabetically: **Info · League · Profile · Stats · Times · Tourney**, with **Admin** on its own row underneath, for admins only. **League is open to every signed-in user** — the BETA pill and the tester-only access list are both gone. Because there are now six tiles, the sheet draws them as a **3-across, two-row grid**; signed-out users still see a five-across single row without League.
 
 **An info dot and a sync dot sit in the bar's lower-right corner.** Tap the **i** for your build number; the dot beside it colours itself by sync status.
 
 **There is no Games tab in the bottom bar.** The 💵 Games screen still exists and every other route to it works — the units bubble and match chips on the GPS screen, the Games buttons on the Rounds list, the end-of-round summary. It was removed because the same numbers now live on the scoring sheets, and a fifth item appearing and disappearing mid-round made the bar jump under your thumb.
 
-**Side wagering is gone.** The old Wager tab — game slips, a proposal ledger, incoming and outgoing offers, an over/under line — has been removed from the app entirely, along with the one-tap payment buttons. Deleted, not hidden.
+**Side wagering is gone.** The old Wager tab — game slips, a proposal ledger, incoming and outgoing offers, an over/under line — has been removed from the app entirely, along with the one-tap payment buttons. Deleted, not hidden. The last traces went with it: the wager block on the admin dashboard, the wager branch in the **Inbox** invite list (every invite is a round invite now) and the wager icon. **Side games themselves — Skins, Nassau, Wolf, Vegas, Banker, Ryder Cup and the rest — are untouched.** The Get Started **"Side games"** card now carries a trophy icon in place of the old coin.
+
+**Smack-talk voice is gone.** The spoken roasts and hype, the voice engine, the per-hole trigger, the system-voice picker, both **Round settings** rows and Roland's Spanish round-start announcement have all been removed, and the app clears the old saved settings off your phone by itself. If a guide or a screenshot still shows a "Smack-talk voice" toggle, it's out of date.
+
+- **What stayed:** the silent **Roland birdie photo pop-up** — still gated by **Round pop-ups**, just with no audio.
+- **What was never part of it:** **tournament and league chat**. Its own description mentions "smack talk + live updates", but that's typed chat between players and it works exactly as before.
 
 **Back always goes back one step now.** The Games screen can be reached about fifteen different ways — the tab strip, the bottom bar, the floating **"View board"** bar on an active round, the GPS units bubbles, the end-of-round flow, a Crew row. **Back returns you to whichever tab you opened it from**, and from a GPS units bubble it puts you back on the **same hole of the map**. It used to be hardcoded to the Score tab, so opening Games from Home and pressing Back dumped you on a scoring screen — sometimes a disabled one.
 
 **Escape / back:** on web, **Escape** closes any overlay. On Android, the hardware **back** button works inside the app instead of minimizing it and throwing away what you were typing.
+
+### The Welcome Tour — Six Cards
+
+A new account is walked through **six cards**, each with an illustration, a sentence or two, and a mini-phone that lights up the tab the card is talking about. The step counter and the dot row size themselves to the cards, so they always read "Step N of 6".
+
+1. Getting started and your first round
+2. Scoring
+3. GPS
+4. **Side games** *(the card used to be titled "Side games & games"; its icon is now a trophy rather than the old coin)*
+5. **"Leagues — play a season"** — *"A league is a season with the same group — 6 to 12 weeks, one round a week…"* It points at the **More** tab
+6. Stats, handicap & help — also pointing at **More**
+
+The League card sits fifth on purpose: a league is what you graduate to *after* you understand a round and its games, so it follows Side games rather than interrupting the play sequence. It points at the same tab as the card after it, so the two read as one thought — here's the feature, and here's where everything else lives.
+
+*The Info tab's old "Replay the Get Started guide" card and its embedded how-to video were both removed.*
 
 ### Every Button Looks and Behaves the Same Now
 
@@ -236,7 +259,6 @@ Free features outside the game list:
 - **Advanced stat drill-downs** (the basic tiles stay free)
 - **Events / multi-day tournaments** (the "+ New event" button)
 - **Round templates**
-- **Smack-talk voice packs**
 
 *Admin note: Admin → Users carries a per-account Pro toggle (`⭐ Pro: ON` / `☆ Pro: off`). It records who granted it and when. It changes nothing today — it's the plumbing ahead of a future paywall.*
 
@@ -264,6 +286,23 @@ Home **paints your saved rounds immediately** from what's already on the phone, 
 
 **Stat tiles:** the small tiles under the greeting (Rounds, Avg score, and friends) all tap through to the round-by-round stat detail popup. A player with no rounds yet sees **N/A** in every tile rather than the box vanishing or reshaping — the putts / GIR / fairway row is always drawn (tiles stay non-clickable until there's data).
 
+### Three Icons on the Home Card — Bag · Ball · Envelope
+
+The top line of the Home stats card is your **profile photo on the left** and three icons **right-aligned on the same line**, vertically centred on the photo. They're drawn as small filled, multi-colour illustrations in the same style as the app's achievement icons — the bag is gold with silver shafts, the ball sits on green turf, the envelope is blue.
+
+| Icon | Opens | Getting back |
+|------|-------|--------------|
+| **🏌️ Bag** | **My clubs** | **Close** returns you to Home |
+| **⛳ Ball** | **Profile**, with **My shots** already expanded and scrolled to | Back returns you to Home |
+| **✉️ Envelope** | Messages & requests, with the unread badge | Back returns you to Home |
+
+All three are full **44 × 44** tap targets.
+
+**On phone-width screens the card's three header lines are shortened** so the icons and the wording fit on one card without pushing everything down — **"Handicap Index 3.8"** reads **"Index 3.8"**, **"avg of lowest 8 of 20"** reads **"lowest 8 of 20"**, and **"▲ Declining (1.1 worse)"** reads **"▲ Declining"**.
+
+- The short wording is **only on the Home handicap card**. The **Stats tab and the Crew cards keep the full wording at every width**, and the full wording comes back on Home too at tablet width and on a wide web window.
+- Phones narrower than a standard iPhone keep the earlier layout — icons on their own row above the header, full wording.
+
 ### Your Home Course
 
 Tell the app where you normally play and two things happen: your rounds get a badge, and new rounds default to your course.
@@ -290,6 +329,8 @@ Once set, the card collapses to a compact **"🏠 HOME COURSE / <name>"** row wi
 ### Account Card
 
 **Edit profile · Sign out · Delete account.** This is the reliable way into the profile editor — a brand-new user with no rounds used to have no route to change their own name.
+
+**Delete account works properly now.** It used to leave your friendships and game invites behind, never anonymised the rounds you'd shared with other players, and could half-finish — your sign-in gone but your profile left over, or the other way round. It now completes or it doesn't: **a failure leaves the account fully intact and you can just run it again.**
 
 ### Crew Card — Message Board & Highlights
 
@@ -338,7 +379,9 @@ One list for everything you're in — live invites, scheduled rounds, open round
 - **home / away** marker before the course name
 - **🏆 trophy** next to the course name if the round was part of a **tournament**
 - **👥 partner scores** on completed rounds — a second line reading e.g. `👥 Mike 79 · Kevin 82 · Paul 88`, best score first, capped at 5 names with **"+N more"**
-- Extra actions sit in a compact wrapped row underneath: **"Edit details"** / **"Edit settings"** on scheduled rounds, **"Scorecard"** / **"GPS preview"** on tournament rounds, **"Leave round"** on a round you didn't create
+- Extra actions sit in a compact wrapped row underneath: **"Edit details"** / **"Edit settings"** on scheduled rounds, and **"Leave round"** on a round you didn't create
+
+> **The "🗂 Scorecard" and "📍 GPS preview" shortcuts were removed from these Home rows** — from scheduled rows and live tournament rows alike. A scheduled row now carries only Edit/View details, Edit/View settings and Leave round; a live tournament row carries only its primary action and Leave round. **Both features still exist** — the scorecard preview and the GPS course preview are still reachable from the **Rounds tab**, from the **course detail** screen, and from inside a live round. Only the Home shortcuts went away.
 
 **Loading:** only the 10 newest completed rounds draw at first. **"Show all N rounds"** builds the rest; **"Show fewer"** drops back to 10.
 
@@ -375,6 +418,13 @@ The form behaves itself: it shrinks and scrolls so **Send** is always reachable 
 The Home **Beta Invite**, round/game invites and tournament invites all carry both store links, because the sender can't know what phone the recipient has:
 
 > 📱 Get the free app first (best experience): iPhone: *<App Store>* / Android: *<Google Play>*
+
+**Group invites no longer carry a web link.** The two invites you send to a whole group changed:
+
+- **A tournament invite** now reads *"Get the free app, sign in, then open Events and tap your name to join"*, plus the two store links. No URL to tap.
+- **A casual round invite** now carries the **round code in plain text**, plus the two store links. The recipient types the code in rather than following a link.
+
+*Still link-based, because there is no in-app path to them:* the **personal tournament slot claim** and the **guest-account claim** invites both still send their own token links.
 
 ---
 
@@ -532,6 +582,7 @@ Backing out of round setup doesn't wipe what you picked.
 - Save any round setup as a reusable template: in the schedule flow tick **"⭐ Save as reusable template"**
 - Templates keep your format, games, and default course; **"Use"** spins up a fresh copy
 - **Round templates are private to you.** They used to be a shared list where everyone saw everyone else's; they're now filtered to their creator, and deleting one can't remove someone else's. *(Very old untagged templates whose owner can't be determined stay visible to all.)*
+- The templates card on the **Rounds** tab no longer sits on **"Loading…"** forever on a slow connection — it resolves immediately, and when you're signed out it reads **"Sign in to save and use round templates."** Its description line reads **"course, players, games & side games"**
 
 > **Tournament templates have been removed.** The Tourney tab's template card, **"Save as template"** and **"Use template"** are gone. **Round templates, described above, are a different feature and are untouched.**
 
@@ -716,6 +767,9 @@ In a live tournament round, **birdies, eagles, long putt, long drive and lead ch
 - The button can't be double-tapped into a duplicate archive or a doubled "completed a round" push
 - **Everyone else sees the award too.** When the scorer finishes, every other phone opens the same award summary rather than just getting a toast and being dropped home
 - **"📤 Share results"** on the recap sends **both** images — the scorecard **and** the every-game card. It used to send only the scorecard
+- **The round summary appears once.** Finishing a tournament round used to be able to pop a second identical summary a moment after you closed the first. *(If a second screen does appear after **"Save & return home"** on a tournament round, that's the **event leaderboard**, and it's meant to.)*
+- **Finishing a tournament round lands you on the event leaderboard and the tournament results** — not back in the setup wizard. Commissioners were being dumped on wizard step "players", or on **"⚙️ Configure games · Step 6 of 6"**, after every single group finished. The wizard now only reopens if you explicitly tap Edit
+- **"🏁 Finish round" on a round that's already closed says so** — **"That round is already closed — open it from Rounds to reopen or review it"** — and switches you to the Rounds tab. It used to do nothing whatsoever
 
 **Reopening.** A finished round opens read-only with **"🔒 Round complete… Read-only view — tap Reopen to make edits"** and a gold **"🔓 Reopen round"** button (also on the Games sheet).
 
@@ -765,6 +819,7 @@ On a tournament round the Games sheet opens on the scope you came from — open 
 - **Every tournament game is one row** in a single **"Tournament games — who won what"** table. Long Putt and Long Drive used to get their own separate boxes and Birdie Bump was missing from the table altogether
 - **Three buttons were retired** because this screen now shows everything they did: the old **"Every game — who won what"** button, the separate **"Tournament Results"** button, and the leaderboard's **"Group total"** button
 - **Reopen round** is limited to the scorekeeper, an assigned admin or the tournament director. It used to be offered to any spectator
+- **On the event leaderboard, tapping a group tab switches the view in place**, showing that cart's units and scorecard, and the tab you picked survives the 15-second live refresh. Every tap used to stack a whole new full-screen panel on top, leaving the previous groups' panels sitting behind it
 
 **Finishing a round gives you a ✕ at the top right and a Close at the bottom** — both do the same thing and return you wherever you came from, whether that's Home, a tournament or a league. The old "Save & finish" wording is gone.
 
@@ -887,6 +942,8 @@ There is now **one** share button, with **one** label, in all three places it ap
 
 *The one-tap payment buttons that used to sit on each line, and the "Payment handles" setting that fed them, have both been removed from the app.*
 
+*The three-line store footer that used to be appended to every settle-up text — "Scored & settled free with the Bad Golf app ⛳" and the two store links — is gone. A settle-up message is now just the numbers.*
+
 ---
 
 ## GPS Rangefinder
@@ -902,6 +959,8 @@ The GPS is the marquee feature — satellite view of every hole with live distan
 **Spectate mode:** from the Crew tab's **Live now** list, tap any live round to open GPS read-only, following that player.
 
 **It works offline on iPhone.** The map library is bundled on the device, so a course with no signal still draws the map.
+
+*Two cosmetic changes to the GPS screen worth recognising in a screenshot: the club name in the caddie pill is now **yellow in both light and dark mode** (it used to be dark navy on black, and unreadable at night), and the bottom row — HOLE / Score / PAR, the **Track Shot** button, the units chips and the Est. Drive / Long Putt stack — sits slightly higher, opening a gap above the gear / clubs / hazard / satellite chips. Nothing moved tabs and nothing was renamed.*
 
 ### Distances to Green
 
@@ -987,6 +1046,29 @@ Tracked shots are saved in **Stats tab → My Shots** — a searchable log with 
 **"🏌️ My clubs"** (Stats tab): one input per club with a **distance range** in yards, renameable labels, drag-to-reorder, blanks to skip clubs you don't carry, and a **"Reset to standard bag"** button. On GPS, the club recommendation appears on the Plays-Like sheet and updates as you drag the target; **"Pick from My Clubs"** overrides the auto-pick.
 
 *Opening My clubs from Home and pressing Back (or Save) returns you to Home — it used to dump you wherever you last switched tabs, sometimes a round's units screen.*
+
+**The yardage boxes take whole numbers only, up to three digits.** A fourth digit, a decimal point, a minus sign and letters are all refused — including on paste and autofill — and the numeric keypad still comes up on iPhone and Android. The boxes used to swallow `1234`, `12.5`, `-45` and `1e4` and then quietly poison every club recommendation built from them.
+
+#### 📏 Measured Distances — What You Actually Hit
+
+Under each club's entered range, My clubs shows what your **tracked shots** say you really hit that club:
+
+```
+7 Iron      150–160
+📏 measured 253–265 · 11 shots
+```
+
+- **You need 5 tracked shots with a club** before numbers appear. Below that the line reads **`📏 3 shots — need 5`**. A club with no tracked shots shows nothing at all, and its row looks exactly as it always did.
+- **The range is the median and the 25th–75th percentile**, not the average and not min-to-max. One shank, or one bad GPS read, can't blow the range out.
+- **The line is tinted in the accent colour** when the midpoint you typed and the measured median are more than 10% apart. That's the whole signal — no badge, no toast, no nagging.
+- **It is display-only.** There's no "update to this" button, nothing is written back to your entered range, and **your GPS club recommendations are unchanged by it.** It tells you; you decide.
+
+#### 🏷️ Brand, Model and Type
+
+One toggle above the club list — **"🏷️ Add brand / model / type"** — reveals three optional fields on every club row: **Brand**, **Model**, and **Type** (a picker: Driver · Wood · Hybrid · Iron · Wedge · Putter). It's one switch for the whole bag, not a disclosure per club, and it opens itself automatically if you already have details saved.
+
+- With the drawer closed, a one-line recap sits under each club name — e.g. `TaylorMade · Qi10 · Driver`.
+- **The club's name is still what drives everything.** Recommendations and shot history key off the label, never the brand or model, so renaming a club immediately re-targets which tracked shots it shows. Brand/model/type are yours to keep track of and nothing more.
 
 ---
 
@@ -1270,6 +1352,13 @@ The **fewest total putts over 18** takes the prize pool. **Turning this on switc
 - **Must make par or better to win** — unless you turn on the option below.
 - **Hero Tax (optional penalty):** if the Greenie winner **3-putts**, they **forfeit the award** and **pay each other player a fixed Hero Tax** (default 5 units). A sub-row on the scorecard asks "Did the greenie winner 3-putt?" and the chip crosses out.
 - **"3-putts still win" (default OFF):** turn it on and you no longer need par or better to collect, a 3-putt doesn't forfeit, and **Hero Tax is switched off entirely** — its row disappears from the score screen and the game header reads "pays no matter what."
+- **Birdie Override — somebody has to tap it.** If the option is on, a birdie can take the greenie away from the closest-to-the-pin player, **but only when a person taps the birdie chip.** Nothing changes hands on its own any more.
+  - The score screen walks it in two labelled steps: **"Step 1 — was the birdie on the green?"**, shown only for the players the app can't call on its own, then **"Step 2 — tap the birdie that takes the greenie."** The chip that wins reads **"Name 🐦 — takes it"**.
+  - A player the app reads as a **chip-in** is drawn struck through, and is still tappable if you disagree.
+  - **Leave the hole alone and the greenie stays with closest-to-the-pin** — the same result as having Birdie Override switched off.
+  - Marking somebody back **off** the green clears them as the birdie winner too.
+  - *Why it changed:* the app used to reassign the greenie by itself whenever exactly one other player birdied and its derived GIR read them as on the green — with nobody tapping anything, and settling that way even if the score screen was never opened. A chip-in logged as one putt looks identical to a putt holed from the green, so chip-ins were stealing greenies. **The trade-off is one extra tap on a legitimate steal**, which is the price of never having one happen behind your back.
+  - **GIR itself is untouched** — Junk GIR, Arnie, the GIR Pool, your stats and the board all behave exactly as before.
 - **In a tournament:** under the tournament scope, the Greenie card merges **every group's** greenie events into one hole-sorted list.
 
 #### **🎯 Closest to the Pin**
@@ -1364,7 +1453,29 @@ The **Info** tab (More → Info) is the app's built-in **rulebook and help cente
 - **Quit-early final standing rules** — how match-style games, the Stroke Prize Pool, and per-hole games each settle if you stop before 18
 - **Live tweaks** — unit-value changes mid-round apply **retroactively to all 18 holes**
 - **Handicap, par, stroke-index, and tee rating/slope explainers** — including **"🏷️ The 'TEMP' badge"** and "Good to know"
+- **🏅 Leagues** — see below
 - **Documentation & legal** — links to this Player Guide PDF, the Admin Guide (admins only), the Privacy Policy and the Terms of Service. All four are served from **officialbadgolf.com** and open outside the app.
+
+**Support and legal details, as they now read everywhere in the app:**
+
+- **Support address: `support@officialbadgolf.com`.** This is the address on the About card's **Support** row and behind both in-app feedback links. Any older `tyler@simplisticfishing.com` reference is out of date.
+- **The About card's copyright line reads "© 2026 Bad Golf"** — no "LLC", because there isn't one.
+- **The Terms of Service and the Privacy Policy name the party as "Kevin Wells, an individual doing business as Bad Golf."** Same wording on the public terms, privacy, support and delete-account pages, and in the ToS and Privacy PDFs.
+- **The company line is "Bad Golf, Better Times"** (it used to be "Bad Golf, Good Times"), on the splash, the public site, the footer and the share card. The launch image reads **`SCORE · GAME · BRAG`** with **`BAD GOLF, BETTER TIMES`** underneath.
+
+### 🏅 The Leagues Section
+
+Seven drop-down explainers covering league play, written in the same voice as the rest of the tab. They sit **after the two handicap explainers and before "Good to know"** on purpose — a league week is scored net, so the handicap sections have to come first.
+
+| Explainer | What it covers |
+|-----------|----------------|
+| **🏅 What a league is** | the shape of a season, 6–12 weeks, the three kinds of league, and that playoff weeks are *extra* |
+| **🔗 Joining one** | invite only, no code to type, one link for the group, and that your seat belongs to your account rather than to the name on the roster |
+| **📅 Weeks, and missing one** | posting as normal, the commissioner signing off, why there's no excused week, subs, and the six-day flex window |
+| **⛳ Scoring and handicaps** | net off league handicaps, stroke-net as the default, and where the format lives |
+| **🍀 Side games in a league** | the seven pools you can run — and why Wolf, Banker and Nassau aren't among them |
+| **💵 How the money works** | Bad Golf never holds money; weekly pools settle weekly, dues pay out on final standings, and a dues of 0 is perfectly fine |
+| **👑 Running one** | what a commissioner does, how to hand it over, and where every setting lives |
 
 Games and side games carry the gold **PRO** pill here too. The **handicap and help topics are never badged** — they're not games. Hydration entries aren't badged either.
 
@@ -1391,11 +1502,22 @@ There's also a separate **Contact us** form for course problems and general ques
 
 **What lives here:**
 
+- **Appearance** — see below
 - **Account** — your email, sign-in method, and the **Edit profile / Sign out / Delete account** actions
 - **🔔 Push notifications** — see below
 - **Additional settings**
 - **🏌️ My clubs** and **📋 My shots**
 - **🏠 Home course**
+
+### 🌗 Appearance — System / Light / Dark
+
+A plain card at the **top of the Profile tab** with three buttons: **System · Light · Dark**. The one you're on is highlighted.
+
+- **The default is System**, which follows your phone's own light/dark switch — including flipping itself over at sunset if your phone is set to do that.
+- **The choice is per-device**, saved on that phone rather than on your account. Setting your iPhone to Dark doesn't darken the web app, and vice versa.
+- It works from a cold open — you don't have to visit any other tab first.
+
+*Dark mode reaches everywhere it should now: the stats KPI tiles (Rounds, Avg Score, Best, Putts/Rd, GIR %, Fairway %), the Lifetime games bar, the leaderboard's #1 row, the "Update required" screen, the splash wordmark, the GPS caddie pill's club name (now yellow in both themes), the "How it works" and "View real scorecard" buttons, and the three admin panels for GPS import, course removal and rating import. The live and final status pills are the known holdout — their text is still low-contrast in dark mode.*
 
 **My Clubs gained two things:** **▲▼ reorder** arrows, and an **in-the-bag checkbox** per club — so a recommendation only ever draws from clubs you're actually carrying today.
 
@@ -1513,6 +1635,8 @@ Worth knowing, because a tile you used to see may now read **N/A** — that's th
 
 *A player's stat sheets (Rounds, Avg Score, Putts/Rd, GIR%, Fairway%, Best Round) used to be able to show fewer rounds than the tile above them claimed — the sheets read only the local device's copy while the tile read the merged history. They agree now.*
 
+> **A round marked unranked stays out of your handicap index — but it still counts in your stat tiles.** Rounds, Avg Score, GIR % and Fairway % all include it. If your average score looks worse than your index suggests it should, an unranked round is the usual reason. This is a known gap, not a setting you can change.
+
 ### Scoring Trend Chart — Removed
 
 **The Scoring Trend chart is gone.** Everything it showed — the last-20-rounds trend, the best-8 differentials, and whether you're improving or declining — is already on the same tab, in the Handicap card, the arrow on the KPI header, and the Rounds tab.
@@ -1548,13 +1672,13 @@ When a commissioner deletes a tournament, the rounds played in it used to keep t
 - **The deletion syncs to the other players' phones** now — on launch, and at most every 10 minutes while the app is open. Before, only the phone that pressed Delete knew
 - The old ambiguous **"Tournament not found"** message is now two distinct ones: **"That tournament was deleted"** vs **"Couldn't reach the tournament — try again."**
 
+> **One known limitation.** Deleting a tournament reliably removes its rounds from **your** view and from every other player's view — every device drops its copy. But a round **owned by another player** still has its row on the server behind that. It's hidden everywhere and it counts for nothing; it just isn't erased. *(Deleting a **league** is different — it genuinely voids the rounds it launched. See the Leagues section.)*
+
 ### Round Settings Card
 
 **"⚙️ Settings"** (collapsible):
 
 **Round pop-ups** — 🐦 birdies & eagles · 🍺 sips · 💥 blowups, on **this phone**.
-
-**Smack-talk voice** — on/off for this phone, with a package selector (generic or Spanish/Roland).
 
 **Stats visibility** — **Everyone** · **Friends only** · **Just me**. *(When two accounts share a name the app keeps the more restrictive setting of the two. A change that doesn't reach the server now says so — this is a privacy setting and it used to confirm silently either way.)*
 
@@ -1593,6 +1717,8 @@ The Rounds tab holds open rounds, scheduled rounds, your saved round history and
 - **"Search course or player…"** finds rounds by course or player name
 - **View** on a completed round opens the **💵 Games sheet**
 - The list paints from cache immediately and quietly refreshes a moment later if anything actually needed correcting
+
+**A collapsed "Finished" tournament row** is a single card now, not a row inside a wrapper card. The status pill sits on the meta line underneath, and the title column is wide enough that a long event name shortens to one line with an ellipsis instead of stacking down the left edge. The subtitle reads **"1 day · tap for results & details"**.
 
 **Why a finished round sometimes sits at the very top:** the top section shows live rounds **plus** finished rounds that never made it into your stats history. A finished round up there is a deliberate signal that it wasn't recorded to your stats — not a sorting glitch. *(Most of those now heal themselves — see "Missing Rounds Fix Themselves" above.)*
 
@@ -1910,11 +2036,16 @@ Deletions accumulate rather than overwrite, so two commissioners deleting differ
 
 ---
 
-## Leagues *(BETA)*
+## Leagues
 
-**More → League.** A league is a season-long competition — a group of golfers who play a scheduled series of weeks against each other or against the field, with running standings, league handicaps and units tracked automatically. Leagues live in their own tab, separate from casual rounds and tournaments, and the tile carries a **BETA** pill.
+**More → League.** A league is a season-long competition — a group of golfers who play a scheduled series of weeks against each other or against the field, with running standings, league handicaps and units tracked automatically. Leagues live in their own tab, separate from casual rounds and tournaments.
 
-*The League tile only appears for accounts that have been given access.*
+**Leagues are out of beta and open to every signed-in user.** There is no invite list, no access request and no BETA pill — sign in and the **League** tile is in the **More** sheet. It is the one thing on the More sheet that needs an account: a league seat is tied to a user, so a guest has nothing to attach to. Sign in and it appears.
+
+**Two places explain leagues without leaving the app:**
+
+- **More → Info** has its own **Leagues** section — seven drop-down explainers covering what a league is, joining one, weeks and missed weeks, scoring and handicaps, side games, how the money works, and running one. It sits right after the two handicap explainers on purpose, because a league week is scored net and the handicap sections come first.
+- **The welcome tour** has a **"Leagues — play a season"** card, fifth of six, after Side games and before the closing help card. It points at the **More** tab, the same place the card after it points, so the two read as one thought: here's the feature, and here's where it lives.
 
 ### What a League Is
 
@@ -1935,6 +2066,8 @@ Leagues are **invite only**. There is no join code to type.
 - **"👋 Is this you?"** — if your account name matches an unclaimed seat, the League tab offers it to you directly, no link needed. **"That's me"** claims it; **"Not me"** dismisses the card and it won't ask again on that device.
 - A name that doesn't quite match the account claiming it — a nickname, a shortened name — is still allowed. The commissioner sees a flag on the roster rather than the claim being refused.
 - Once every seat is claimed the shared link stops offering anything.
+
+**Tapping the link while signed out works.** The app holds on to the invite, opens the sign-in box and tells you why — *"Sign in to accept your league invite"* — then finishes claiming your seat for you once you're in and your name is set. You don't have to find the text again.
 
 ### The Week Screen
 
@@ -2027,13 +2160,35 @@ If a player can't make a week, the seat is filled directly — there's no invite
 
 **Side games** *(Settings → 🎲 Side games)* — the ordinary round side games (skins, closest to the pin, fewest putts, GIR, low net, longest putt) stamped onto the round when the night is played. These settle **inside the group**, player to player, exactly like a casual round. Set once at league level; every week inherits it unless a week is overridden.
 
-**Dues and pools** *(💵 Dues and pools)* — the league's own units ledger. It holds the **season entry (in units)**, the **distribution structure**, and the **weekly pools** — Skins, Low Net, Closest to the Pin and Longest Putt — tracked across the whole season.
+**Dues and pools** *(💵 Dues and pools)* — the league's own units ledger. It holds the **season entry (in units)**, the **distribution structure**, and the **weekly pools**, tracked across the whole season. **There are seven of them:**
+
+| Weekly pool | Where the winner comes from |
+|-------------|------------------------------|
+| **Skins** | worked out from the posted cards |
+| **Low Net** | worked out from the posted cards |
+| **Most GIRs** | worked out from the posted cards |
+| **Fewest Putts** | worked out from the posted cards |
+| **Closest to the Pin** | claimed on the round card, one row per hole |
+| **Longest Putt** | claimed on the round card |
+| **Longest Drive** | the commissioner picks the winner by hand |
+
+**Most GIRs** and **Fewest Putts** are the two newest. Like the other computed pools they tie-split evenly, and **only players whose card can actually be ranked are charged into them** — if your card has no putts recorded, you're not in the putts pool and you don't pay for it.
+
+*Wolf, Banker and Nassau are deliberately not offered as league pools — they're built around a group of four negotiating hole by hole, which doesn't survive being scored across a whole league night.*
 
 > **This is the one to check when weekly pools don't show up in the season ledger.** Pools set up under *Side games* settle inside the group's round and never reach the league's units screen. Only pools set under *Dues and pools* appear in the season totals.
 
-- **Closest to the Pin** and **Longest Putt** are captured from the round card. **Skins** and **Low Net** are worked out from the posted scores. **Longest drive** cannot be measured automatically anywhere in the app — the commissioner picks that winner by hand on the week screen.
 - **Claimed pools** are asserted by someone tapping "I've got it"; a later claim on the same hole displaces an earlier one, and any member can challenge before the week finalizes. **Computed pools** come straight from the cards.
 - **Everyone on the roster is in every pool that's switched on** by default. The commissioner can uncheck players for a specific week; an opted-out player isn't charged and the pool shrinks by exactly their share.
+- **A pool with no winner recorded charges nobody.** A closest-to-the-pin nobody claimed, a longest drive the commissioner never picked, a skins week where every hole tied, a low net where no card qualified — all of those used to collect everyone's buy-in and pay nothing out, permanently. Record the winner later and the charge and the payout appear together.
+- **A manual pool splits across the winners actually recorded**, not across the number of holes it was set up for. Four CTP holes with two winners recorded pays those two half each, instead of paying a quarter twice and stranding the rest.
+
+**How the pools read on the awards and units screens:**
+
+- **Closest to the pin gets one row per hole**, each with its own winner — *"Closest to the pin · hole 5"*, *"· hole 12"* — rather than four holes merged into a single row carrying three names and one arbitrary hole number.
+- **Skins shows each winner's own skin count and the week's true total** — *"12 skins · 2.50 a skin"* — instead of borrowing the first winner's "1 skin" as everybody's label.
+
+> **What an ordinary member sees vs. what the commissioner sees.** On the standings and money screens a **non-commissioner's** prize-pool cards are titled **"…what you won"** and carry the line *"Only your own winnings are shown here — the commissioner sees the whole field."* The card only ever listed the viewer's own ledger lines; without that title it read like the whole field's results, so a member who won one pool looked to himself like he'd won every pool. **Commissioners see the wording unchanged.**
 
 **Worked example — a scramble team's weekly pool.** A 5-unit skins pool, 8 players, 4 scramble teams. A scramble side plays one ball, so it enters **once**: the pool collects **4 × 5 = 20 units** that week, not 40. The units screen says so out loud — *"5 units each team, each week · 4 teams — a scramble side plays one ball, so it enters once."*
 
@@ -2068,7 +2223,7 @@ After the commissioner enters Charlie's missing card — a real +9 round — Cha
 Bad Golf tracks and reports league units. It does not collect or hold anything.
 
 - **One season entry, in units**, paid into the season pool and distributed at the end. Set on the create screen.
-- **Distribution structures:** **All to first**, **80/20**, or **70/30**. A tie for a paid place **splits that place evenly** — never a coin flip.
+- **Distribution structures:** **All to first**, **80/20**, or **70/30** — all three save correctly now. A tie for a paid place **splits that place evenly** — never a coin flip.
 - **Weekly pools settle every week; the season pool settles at the end of the season.**
 - The units screen shows a card per week naming that week's pools, a season card, and a running season total, with **Unit Totals** as the live who-trails-who summary.
 
@@ -2096,6 +2251,12 @@ Bad Golf tracks and reports league units. It does not collect or hold anything.
 - The Schedule screen prints a round-robin **fit verdict** computed off the actual roster — e.g. *"8 players need 7 weeks to play everyone once. Over 6 you play 6 of the 7 rounds, so each player misses 1 opponent."*
 - **Update players** and a sub flag (**🔁 name in for name** / **⚠ name is out, no sub yet**) appear on each week's card.
 
+**Entering somebody's card by hand.** The commissioner's **"Save their card"** screen carries an optional **per-hole putts** box, shown whenever a putts or GIR pool is switched on. League cards now record per-hole **putts, GIRs and fairways**, so a hand-entered league round produces real statistics for that player instead of a bare score.
+
+**Deleting a league voids every round it launched.** Those rounds come out of everyone's **Rounds** list, out of the shared recent-games and crew feed, and out of **Stats**. The confirmation says so: *"The rounds it launched are voided too, so nothing from this league is left in anyone's Rounds or Stats."*
+
+> This is a **change from how it used to behave**. Deleting a league previously left every round it launched in place, and the old confirmation promised exactly that — *"The rounds people played stay in their own Rounds and Stats."* If you deleted a league expecting the rounds to survive, they no longer do.
+
 ### Known Limitations — Leagues
 
 - **"Start next season" is not reachable from the app.** The rollover exists on the back end but nothing in the current interface calls it, so a commissioner cannot start next season today.
@@ -2104,38 +2265,8 @@ Bad Golf tracks and reports league units. It does not collect or hold anything.
 - **Longest drive can never be measured automatically** — the commissioner always picks that winner by hand.
 - **No flights and no split season.** Standings run as one undivided table for the whole roster.
 - **Playoff bracket size is automatic** and can't be set by hand.
-
----
-
-## Smack-Talk / Trash-Talk Voice
-
-Smack-talk voice adds spoken roasts and hype during the round. It's an **opt-in** toggle and runs per-phone. *(Voice packs carry a PRO badge.)*
-
-### Enabling Smack-Talk
-
-**Stats tab → Round settings → "Smack-talk voice"** toggle.
-
-- Toggle ON to hear spoken callouts on **this phone only**
-- The voice fires at the **end of each hole** and speaks **at most one line per hole**
-- Roasts fire on a **blow-up** (double bogey+ / 3-putt / double par); the single worst blow-up of the hole gets roasted
-- A **birdie-or-better** triggers hype instead
-
-### The Roland Package (full Spanish)
-
-A special package tied to the player **Roland** (recognized by name "Roland" / "Castillo"):
-- **All of Roland's trash-talk is in Spanish**, spoken in a Spanish female voice
-- **Birdie hype in Spanish**
-- When Roland makes a birdie-or-better, his **photo pops up full-screen** (gated by Round pop-ups), and his hype takes priority over any roast that hole
-- **Round-start announcement** in Spanish when a round with Roland kicks off
-- Everyone other than Roland is roasted in **English**
-
-### Voice Picker
-
-On the Round settings card there's a **system-voice selector** (default **"Default"**), populated from your device's installed text-to-speech voices. The chosen voice is used for the English lines; Roland always uses a Spanish female voice. Changing it previews immediately and persists on that device.
-
-### Birdie Hype & Photo
-
-On a birdie with smack-talk on, spoken hype plays and a **crew highlight** is posted to the Home feed (unless pop-ups are off), with the player's photo, hole, course, and reaction buttons.
+- **There is no ringer card and no printable standings sheet.** The **"The season so far"** card that carried both — a **"Ringer card"** button and a **"Print a sheet"** button — was removed from the standings screen, and the ringer view itself has since been deleted.
+- **There is no in-app switch for the public standings board.** The **"Share the table"** card and its **"Send the link"** button were removed, so a season can no longer be published to a link anyone can open — and a season that was already switched on before the card went away stays readable at its link. League members always see the standings inside the app either way; that was never what this switch controlled.
 
 ---
 
@@ -2640,6 +2771,14 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 **Admin reach over tournaments was corrected.** An app-level admin could previously modify or even delete a tournament they were not allowed to *read*. Admins can now see and manage every tournament properly, and the permissions behind **Assign admins** actually match what that screen always implied.
 
+**"Seat filled ✓" only appears when the seat is actually filled.** Filling a tournament seat used to toast success even when the write was refused, so a commissioner walked away believing a seat was taken when it was not.
+
+**Three admin panels follow dark mode now** — **GPS import**, **course removal** and **rating import**. All three were light text on a hard-coded white panel, so they were unreadable for any admin working in dark mode.
+
+**The Admin tile in the More sheet is the right size.** It was being sized to a fifth of the sheet width and pinned to the left edge; it is now the same 111px tile as every other one and lines up under the first tile in the grid above.
+
+**The wager block is gone from the admin dashboard**, along with the wager branch in the Inbox invite list and the wager icon. The `wagers` table was dropped server-side. If an old admin note refers to wager rows, there are none.
+
 ### Two Controls That Were Removed
 
 - **"Assign to account (admin)"** is gone from the detailed past-round entry screen. There is no longer any in-app way to log a round onto somebody else's account. This was dropped deliberately, not hidden.
@@ -2950,6 +3089,6 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 ---
 
-**End of Documentation — v2026.11.1469**
+**End of Documentation — v2026.11.1489**
 
-**For support or questions, contact tyler@simplisticfishing.com**
+**For support or questions, contact support@officialbadgolf.com**
