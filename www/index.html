@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1505-->
+<!--BGVER=v2026.11.1508-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10132,7 +10132,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1505';
+const BG_BUILD = 'v2026.11.1508';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17222,6 +17222,8 @@ const BG_MERGE_RULES = {
   groupHole: 'newestAt', finishOpen: 'newestAt', celebrateHole: 'newestAt',
   sipAnnounce: 'newestAt', settledMoney: 'newestAt', strokeHole: 'newestAt',
   crewAlert: 'newestAt',
+  // v1508: authoritative correction issued server-side; newest stamp wins.
+  adminFix: 'newestAt',
   // --- round configuration: cloud wins unless this device just edited settings -----
   games: 'cloudWins', hcpRules: 'cloudWins', pars: 'cloudWins', sis: 'cloudWins',
   tees: 'cloudWins', teeYards: 'cloudWins', teePars: 'cloudWins', teeSis: 'cloudWins',
@@ -17940,13 +17942,119 @@ async function _mergeGameForWrite(local, opts) {
       });
     }
   } catch (e) { /* any merge failure → fall back to writing local unchanged */ }
+  // v1508: authoritative correction, applied on the copy flushGame persists.
+  try { _bgApplyAdminFix(local, true); } catch (e) {}
   return local;
+}
+
+/* ===== v1508 - AN ADMIN CORRECTION THAT ACTUALLY LANDS =======================
+   Tyler, 2026-09-06: "there is currently no way to correct a live round at all -
+   every repair depends on the player making the taps."
+
+   He is right, and it is not one obstacle but two, both deliberate:
+
+     - the banker pick merged local-wins (fixed in v1505, but only for phones that
+       have the new build); and
+     - `_applyMyTouchedCells` re-asserts EVERY score cell this phone entered over
+       whatever arrives from the cloud, unconditionally and with no stamp
+       comparison. That one is correct and stays: it exists because a concurrent
+       write race really can wipe a cell somebody just tapped (v939), and losing a
+       tapped score is worse than losing an admin edit.
+
+   So a plain UPDATE on games.data cannot win, and must not simply be made to win -
+   that would re-open v939. What is needed is a correction that says out loud that
+   it is authoritative, which is what this is: `adminFix` is a one-way announcement
+   carrying an `at` stamp (registry rule `newestAt`, the same as groupHole and
+   settledMoney), and applying it CLEARS the local touch flags for exactly the cells
+   it names. Nothing else is touched, and the touch registry keeps protecting every
+   cell the fix does not mention.
+
+   It is applied ONCE per device per stamp - `golf:adminfix:<code>` records the last
+   `at` applied - so the players can go on editing those same cells afterwards. Were
+   it re-applied on every merge it would pin the cells forever and nobody could ever
+   correct the correction.
+
+   Issue one by writing the key into the round (hole numbers are 1-based, a null
+   score or pick clears it):
+
+     update games set data = jsonb_set(data, '{adminFix}', '{
+       "at": 1788718000000, "by": "tyler", "note": "hole 8 rebuilt from the group",
+       "scores": { "<playerId>": { "8": 5 } },
+       "bankerPicks": { "8": "<playerId>" }
+     }'::jsonb) where code = 'XXXXX';
+
+   Caveat worth stating plainly: a phone still on an older build ignores `adminFix`
+   entirely and will write its own copy back, so a correction only sticks once every
+   phone in the round is on v1508+. It is not a way to fix a round out from under an
+   old client - it is what makes a fix possible at all once they update. */
+function _bgAdminFixApplied(code) {
+  try { return parseInt(localStorage.getItem('golf:adminfix:' + code) || '0', 10) || 0; } catch (e) { return 0; }
+}
+function _bgApplyAdminFix(g, markApplied) {
+  try {
+    if (!g || !g.code) return g;
+    const fx = g.adminFix;
+    if (!fx || typeof fx !== 'object' || !(fx.at > 0)) return g;
+    if (_bgAdminFixApplied(g.code) >= fx.at) return g;         // already applied on this device
+    let changed = false;
+    // scores: { "<playerId>": { "<hole 1-18>": strokes | null } }
+    try {
+      if (fx.scores && typeof fx.scores === 'object' && g.scores) {
+        const store = _touchStore(g.code);
+        Object.keys(fx.scores).forEach(pid => {
+          const byHole = fx.scores[pid];
+          if (!byHole || typeof byHole !== 'object') return;
+          if (!Array.isArray(g.scores[pid])) return;           // not on this card - ignore, never invent
+          Object.keys(byHole).forEach(hs => {
+            const hole = parseInt(hs, 10);
+            if (!(hole >= 1 && hole <= 18)) return;
+            const v = byHole[hs];
+            g.scores[pid][hole - 1] = (v == null) ? null : v;
+            /* THE POINT: drop this cell's touch flag, or _applyMyTouchedCells puts
+               the player's old value straight back on top - which is exactly why a
+               plain write has never landed. Only the named cells lose their flag. */
+            try { if (store && store.scores && store.scores[pid] && store.scores[pid].delete) store.scores[pid].delete(hole - 1); } catch (e) {}
+            try { _bgStampCell(g, 'scores', pid, hole - 1); } catch (e) {}
+            changed = true;
+          });
+        });
+        try { _bgTouchPersist(store); } catch (e) {}
+      }
+    } catch (e) {}
+    // bankerPicks: { "<hole 1-18>": "<playerId>" | null }   null clears the pick
+    try {
+      if (fx.bankerPicks && typeof fx.bankerPicks === 'object') {
+        if (!g.bankerData) g.bankerData = { holes: {}, picks: {} };
+        if (!g.bankerData.picks) g.bankerData.picks = {};
+        Object.keys(fx.bankerPicks).forEach(hs => {
+          const hole = parseInt(hs, 10);
+          if (!(hole >= 1 && hole <= 18)) return;
+          const pid = fx.bankerPicks[hs];
+          if (pid == null) { try { delete g.bankerData.picks[hole]; } catch (e) {} }
+          else g.bankerData.picks[hole] = pid;
+          try { _bgStampBankerPick(g, hole, pid == null ? null : pid); } catch (e) {}
+          changed = true;
+        });
+      }
+    } catch (e) {}
+    if (markApplied) {
+      try { localStorage.setItem('golf:adminfix:' + g.code, String(fx.at)); } catch (e) {}
+    }
+    if (changed) { try { markGameDirty(g.code); } catch (e) {} }
+    try { console.warn('adminFix applied to ' + g.code + ' (at ' + fx.at + ')' + (fx.note ? ' - ' + fx.note : '')); } catch (e) {}
+  } catch (e) { try { console.warn('adminFix apply failed', e); } catch (e2) {} }
+  return g;
 }
 // Receive side: when another phone's update arrives, keep MY just-edited cells on top
 // so a slightly-stale incoming row can't blank a score I just tapped (mutates + returns).
 function _applyMyTouchedCells(incoming) {
   try {
     const prev = state.game; if (!prev || !incoming) return incoming;
+    /* v1508: BEFORE the re-assert below, not after - applying the fix clears the
+       touch flags for the cells it names, so this loop no longer puts the old
+       values back. Not marked applied here; the flush path owns that, because
+       that is the copy that actually reaches localStorage. */
+    try { _bgApplyAdminFix(incoming, false); } catch (e) {}
     const touch = _touchStore();
     let _wiped = false;   // v939: did the incoming cloud row LOSE cells I entered?
     _bgMergeKeys('perCell').forEach(field => {        // v1503: derived from BG_MERGE_RULES
@@ -38846,6 +38954,13 @@ function renderGameBanners() {
     const presses = hd.presses || [];
     const playerBets = hd.playerBets || {}; // { playerId: betAmount }
     const pickMade = !!g.bankerData.picks[h];
+    // v1507: a recorded pick that matches nobody - say so instead of quietly rotating.
+    let _bgPickWarn = '';
+    try {
+      if (typeof bgBankerPickUnresolved === 'function' && bgBankerPickUnresolved(g, h)) {
+        _bgPickWarn = '<div class="small-text" style="color:var(--danger);margin-top:6px">\u26a0\ufe0f <strong>Hole ' + h + '\u2019s banker pick doesn\u2019t match anyone in this game.</strong> Nothing settles on this hole until someone takes the bank again \u2014 tap <strong>Change pick</strong>.</div>';
+      }
+    } catch (e) { _bgPickWarn = ''; }
 
     const div = document.createElement('div');
     div.className = 'turn-banner';
@@ -38865,6 +38980,7 @@ function renderGameBanners() {
           <div style="flex:1"><strong>Banker:</strong> ${banker ? banker.name : '—'}${isLoserPickHole && pickMade ? ' <span class="small-text">(picked)</span>' : ''}</div>
           ${isLoserPickHole && pickMade ? '<button class="bg-btn bg-btn--primary bg-btn--sm small" id="banker-clear-pick">Change pick</button>' : ''}
         </div>
+        ${_bgPickWarn}
         <div id="banker-player-bets" style="margin-top:8px"></div>
         ${(() => {
           const reps = hd.bankerRepresses || 0;
@@ -41279,7 +41395,49 @@ function maybeAnnounceGroupHole(leaving) {
     // intermittent pattern he saw. The scorer moving IS the signal; the followers'
     // guard rails (never go backward, never yank someone mid-typing) live on the
     // receiving side in reactToGroupHole, which is where they belong.
-    g.groupHole = { hole: state.currentHole, at: Date.now() };
+    /* v1506 (Tyler, 9/6): the marker only ever moves FORWARD, because that is what
+       the RECEIVING side has always assumed. reactToGroupHole and the wake handler
+       both refuse a target that is behind them ("never pull a player BACKWARD"), so
+       a backward broadcast can never move anybody usefully - all it does is make
+       `groupHole` stop meaning "where the group is". Two paths were sending one:
+
+         - `next-hole` WRAPS: on the last hole `leaving >= roundHoles` sets the hole
+           back to 1, so the forward arrow announced hole 1 at the end of a round.
+         - `advanceNextHole` uses `nextUnplayedAfter`, which scans forward with
+           wraparound for the next hole MISSING a score. With the group on 10 and a
+           gap on hole 3, that jumps the scorer back to 3 and announced 3.
+
+       The second one is ordinary play - it is the "go back and fill in the hole we
+       skipped" flow - and it is the damaging one. Phones AHEAD correctly ignored it,
+       but the marker then read 3 while the group stood on 10, so a phone still on
+       hole 2, or one waking from sleep, caught up to a hole the group left an hour
+       ago. Backfilling a score is not the group moving.
+
+       (For the record, paging back with `prev-hole` never broadcast at all - it is
+       not one of this function's two callers - so going back to fix a banker or a
+       score was already silent, and stays silent.)
+
+       Suppressing only the MARKER, never the save: the write still goes out exactly
+       as before, so nothing about score persistence changes. Equal-position still
+       broadcasts, which keeps the `at` refresh that nudges a lagging phone.
+
+       Accepted edge: a marker pushed too far ahead (repeated taps on the forward
+       arrow) can no longer be walked back by a broadcast, and stands until the group
+       genuinely reaches that hole. That costs an idle phone one wrong GPS screen,
+       which a swipe fixes; the alternative - a marker that lies about where the group
+       is - actively drags lagging phones to the wrong hole. This is the safer half. */
+    let _bgSkipMarker = false;
+    try {
+      const _cur = (g.groupHole && g.groupHole.hole >= 1 && g.groupHole.hole <= 18) ? g.groupHole.hole : null;
+      if (_cur !== null) {
+        // Identical play-order comparison to the receiving side, so send and
+        // receive cannot disagree about which way is forward.
+        const _start = (g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
+        const _pos = (h) => ((h - _start + 18) % 18);
+        if (_pos(state.currentHole) < _pos(_cur)) _bgSkipMarker = true;
+      }
+    } catch (e) { _bgSkipMarker = false; }
+    if (!_bgSkipMarker) g.groupHole = { hole: state.currentHole, at: Date.now() };
     try { saveGame(g); } catch (e) {}
   } catch (e) { console.warn('group-hole announce failed:', e); }
 }
@@ -44058,6 +44216,40 @@ function bankerStandingsThrough(g, throughHole) {
 }
 
 // Determine who is banker for a given hole (1-indexed)
+/* v1507 (Tyler, 9/6) - REFUSE, DO NOT GUESS.
+   getBankerForHole validated the recorded pick against the game's participants and,
+   when it did not resolve, fell through to the ROTATION - silently. So a hole that
+   HAS a chosen banker could settle real money against a completely different player,
+   with nothing on screen saying a pick had been discarded.
+
+   That is not hypothetical. On MULLIGAN73 (9/6) hole 8's pick was Jeremy in the
+   cloud and unresolvable on Tommy's phone; the rotation for hole 8 is (8-1) % 3 =
+   Britt, so his phone was about to settle the hole against Britt. Correct: Britt +$10
+   from Jeremy. Rotation: Britt +$20, $10 of it out of Tommy's pocket. A $10 swing,
+   invisible.
+
+   Two cases have to stay apart, and only the second changes:
+     - NO pick recorded for the hole -> rotation fills in silently. Documented,
+       intended, and how "pick each hole" is supposed to degrade. Unchanged.
+     - A pick IS recorded and does not resolve -> return null. Every caller already
+       handles a null banker by skipping the hole (`if (!banker) continue;` in
+       calcBanker, bankerStandingsThrough and computeBankerAutoPress; the banner
+       renders an em dash), so refusing settles NO money on that hole instead of
+       settling it against the wrong person. Nobody is paid on a guess. */
+function bgBankerPickUnresolved(g, hole) {
+  try {
+    if (!g || !g.games || !g.games.banker) return null;
+    const cfg = g.games.banker;
+    const picks = g.bankerData && g.bankerData.picks;
+    if (!picks || !picks[hole]) return null;
+    const loserStart = cfg.loserStart || (((typeof roundHoles === 'function' ? roundHoles(g) : 18) === 9) ? 8 : 16);
+    if (hole < ((cfg.mode === 'pick') ? 1 : loserStart)) return null;
+    const participants = getParticipants(g, cfg);
+    if (!participants.length) return null;
+    if (participants.some(p => p.id === picks[hole])) return null;
+    return picks[hole];
+  } catch (e) { return null; }
+}
 function getBankerForHole(g, hole) {
   if (!g.games.banker) return null;
   const cfg = g.games.banker;
@@ -44080,6 +44272,11 @@ function getBankerForHole(g, hole) {
     const pickedId = g.bankerData.picks[hole];
     const picked = participants.find(p => p.id === pickedId);
     if (picked) return picked;
+    /* v1507: a pick IS recorded and does not resolve. Refuse - do NOT drop
+       through to the rotation, which settles money against a player nobody
+       chose. Every caller skips a null banker, so the hole settles nothing
+       until it is re-picked, and the banner says so. */
+    return null;
   }
   // Default rotation — use saved bankerOrder if present, else setup order.
   // Both filtered to only include participants.
