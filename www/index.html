@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1497-->
+<!--BGVER=v2026.11.1498-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10132,7 +10132,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1497';
+const BG_BUILD = 'v2026.11.1498';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -48415,6 +48415,27 @@ async function _bgSettleShareFilesFor(g) {
   const files = [];
   try {
     if (!g || !Array.isArray(g.players)) return files;
+    /* v1498: THE FIX FOR "the scorecard was only for my group". On a tournament
+       round the pictures must cover the same thing the numbers do - the whole
+       field. Every caller of this helper is already async, and the field fetch is
+       cached, so on the Bets sheet (which has already fetched the event to build
+       its text) this costs no extra round-trip.
+       Deliberately falls through to the group pair if any of it fails: offline,
+       one group still live, an event that will not load. Two pictures of your own
+       cart beat no pictures at all - it just must never happen SILENTLY under
+       tournament-wide numbers, which is what the toast is for. */
+    try {
+      const _tid = g.t2 && g.t2.tournamentId;
+      if (_tid) {
+        const _t = await t2Get(_tid);
+        const _pay = _t ? await t2ComputeCombinedPayouts(_t) : null;
+        if (_t && _pay && Array.isArray(_pay.rows) && _pay.rows.length) {
+          const _ff = await _bgFieldShareFiles(_t, _pay);
+          if (_ff && _ff.length) return _ff;
+        }
+        try { showToast("Couldn't build the field scorecard — attaching this group's instead", 6000); } catch (e) {}
+      }
+    } catch (e) {}
     const sc = await buildScorecardBlob(g);
     if (sc) files.push(new File([sc], 'bad-golf-scorecard.png', { type: 'image/png' }));
     let money = {}; try { money = computeAllGameMoney(g).combined || {}; } catch (e) {}
@@ -48457,24 +48478,35 @@ function _bgOfferImageDownloads(files) {
 // attaches a scorecard for a single round. Falls all the way through to a
 // text-only share (with the image offered as a manual download) if the
 // browser/device doesn't support file-attaching share.
-async function shareCombinedSettleUp(t, combinedPay, opts) {
-  const text = await buildCombinedSettleUpText(t, combinedPay, opts);
-  if (!text) { showToast('Not ready yet'); return; }
-  let file = null;
+/* v1498 (Tyler, 9/6): "I sent the text out for tournament total. The money was
+   tourney wide but the summary sheet and the scorecard were only for my group -
+   it should have shown the scorecard for everyone in the tourney."
+
+   He is describing the Bets sheet's "Text Final Standings" button, and he is
+   exactly right. That button builds FIELD-WIDE text (it waits on the event fetch
+   and uses _evSettle / _evPay) and then attached _bgSettleShareFilesFor(g), whose
+   every roster is g.players - his own cart. So the message read as the whole
+   tournament and the two pictures under it were three men.
+
+   The field-wide pair already existed; it was written inline inside
+   shareCombinedSettleUp in v875/v1045 and never lifted out, so only the ONE share
+   path that happened to live in that function could send it. It is a function
+   now, and every share path that knows it is on a tournament round calls it. */
+async function _bgFieldShareFiles(t, combinedPay, rawIn) {
   const files = [];
   try {
-    const raw = await loadTourneyRawRounds(t).catch(() => []);
+    const raw = (rawIn && rawIn.length) ? rawIn : await loadTourneyRawRounds(t).catch(() => []);
     const headerG = (raw || []).map(r => (r && r.data) ? r.data : r).find(rg => rg && Array.isArray(rg.pars) && rg.pars.length);
     if (headerG) {
       const blob = await buildFieldScorecardBlob(raw, headerG, t && t.name);
-      if (blob) { file = new File([blob], 'bad-golf-tournament-scorecard.png', { type: 'image/png' }); files.push(file); }
+      if (blob) files.push(new File([blob], 'bad-golf-tournament-scorecard.png', { type: 'image/png' }));
     }
     // v1045: second image -- every prize pool and who won it, the final number per
     // player, and who finishes where. Same pair the single-round settle-up now sends.
     try {
-      const _mDict = {}; (combinedPay.rows || []).forEach(r => { _mDict[r.id] = r.net; });
-      let _st = []; try { _st = calculateSettlements(_mDict, combinedPay.players || []) || []; } catch (e) {}
-      const _nmOf = id => { const p = (combinedPay.players || []).find(pp => pp.id === id); return p ? (p.name || p.firstName || '?') : '?'; };
+      const _mDict = {}; ((combinedPay && combinedPay.rows) || []).forEach(r => { _mDict[r.id] = r.net; });
+      let _st = []; try { _st = calculateSettlements(_mDict, (combinedPay && combinedPay.players) || []) || []; } catch (e) {}
+      const _nmOf = id => { const p = ((combinedPay && combinedPay.players) || []).find(pp => pp.id === id); return p ? (p.name || p.firstName || '?') : '?'; };
       const _pots = bgPotRowsForEvent(t, raw);
       (raw || []).forEach(row => { const rg = (row && row.data) ? row.data : row; try { bgPotRowsForRound(rg).forEach(pr => { pr.pot = pr.pot + ' — Group ' + ((rg.t2 && rg.t2.group) || '?'); _pots.push(pr); }); } catch (e) {} });
       const bf = await bgBetsImageFile({
@@ -48482,14 +48514,22 @@ async function shareCombinedSettleUp(t, combinedPay, opts) {
         subtitle: new Date(((headerG && (headerG.finishedAt || headerG.updatedAt)) || Date.now())).toLocaleDateString() + '  ·  every game, every group',
         potRows: _pots,
         statRows: bgStatRowsForRounds(raw),
-        moneyRows: (function () { const _n = bgSettleNets(_mDict, combinedPay.rows || []);
-          return (combinedPay.rows || []).map(r => ({ name: r.name || r.first, net: _n[r.id] || 0 })); })(),
+        moneyRows: (function () { const _n = bgSettleNets(_mDict, (combinedPay && combinedPay.rows) || []);
+          return ((combinedPay && combinedPay.rows) || []).map(r => ({ name: r.name || r.first, net: _n[r.id] || 0 })); })(),
         settlements: _st.map(s => ({ from: _nmOf(s.fromId), to: _nmOf(s.toId), amount: s.amount })),
         footer: (t && t.name) || ''
       });
       if (bf) files.push(bf);
     } catch (e) {}
   } catch (e) {}
+  return files;
+}
+async function shareCombinedSettleUp(t, combinedPay, opts) {
+  const text = await buildCombinedSettleUpText(t, combinedPay, opts);
+  if (!text) { showToast('Not ready yet'); return; }
+  let files = [];
+  try { files = await _bgFieldShareFiles(t, combinedPay); } catch (e) {}
+  const file = files[0] || null;
   // v1109: the v1058 two-mode split is gone with the "Text the numbers" button
   // (removed v1106). Images every time, on every share.
   try {
@@ -48948,6 +48988,32 @@ function buildFieldScorecardBlob(rawRounds, headerG, tourneyName) {
 }
 
 async function shareRoundSummary() {
+  /* v1498: the summary modal's "Share results" built its text from g.players only,
+     so on a tournament round it sent this cart's standings while the Board's own
+     settle-up button sent the event's. Two buttons, two different answers, same
+     round. Route a tournament round through the one combined share - the same
+     reroute shareSettleUpSms has done since v1050 - so every share of a tournament
+     round says the same thing. */
+  try {
+    const _g = (typeof state !== 'undefined') ? state.game : null;
+    const _tid = _g && _g.t2 && _g.t2.tournamentId;
+    if (_tid) {
+      const _t = await t2Get(_tid);
+      const _pay = _t ? await t2ComputeCombinedPayouts(_t) : null;
+      if (_t && _pay && Array.isArray(_pay.rows) && _pay.rows.length) {
+        if (!_pay.allFinished) {
+          const _go = await uiConfirm(
+            (_pay.roundsFinished || 0) + ' of ' + (_pay.roundsTotal || 0)
+            + ' groups have finished, so these totals can still change.\n\nSend them anyway?',
+            { title: 'Event still in progress', okLabel: 'Send anyway', cancelLabel: 'Cancel' });
+          if (!_go) return;
+        }
+        await shareCombinedSettleUp(_t, _pay, { allowProvisional: true, scopeLabel: 'tournament total' });
+        return;
+      }
+      try { showToast("Couldn't reach the event totals — sending this group's results", 6000); } catch (e) {}
+    }
+  } catch (e) {}
   const text = await buildRoundShareText();
   if (!text) { showToast('No round loaded'); return; }
   // v1127 (Tyler, 8/19): "I clicked the share results button it looks good but it
