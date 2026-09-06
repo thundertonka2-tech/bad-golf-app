@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1502-->
+<!--BGVER=v2026.11.1504-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10129,7 +10129,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1502';
+const BG_BUILD = 'v2026.11.1504';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17161,7 +17161,103 @@ function _promiseTimeout(p, ms, tag) {
 // written on every touch, restored on demand (per round code), and removed when
 // the round's dirty entry clears. All additive + try/catch — any failure falls
 // back to the old in-memory-only behavior.
-const _BG_TOUCH_FIELDS = ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData'];
+/* ===== v1503 - THE MERGE REGISTRY ==========================================
+   Tyler, 2026-09-06: "Can we make each field have a value so this stops happening
+   or is there anything we could do to further protect against this?"
+
+   Yes. The recurring defect was never any one field - it was that _mergeGameForWrite
+   decided what to do by consulting FOUR separate hard-coded lists, and a key that
+   appeared in none of them fell through to an unwritten default of "local wins,
+   always". Silent, invisible, and only ever discovered when somebody's units was
+   wrong: v1223 (broadcast markers), v1161 (longPuttData), v1499 (settledMoney),
+   v1500 (sixteen more), v1502 (the rank rule existing in one direction only).
+
+   BG_MERGE_RULES is now the single declaration of what happens to every top-level
+   key of a round. Critically it is NOT documentation - the four lists below are
+   DERIVED from it at runtime (see _bgMergeKeys), so the table and the behaviour
+   cannot drift apart. Change the table, change the merge.
+
+   Enforcement is at COMMIT time, by scripts/guard_merge_registry.py, which reads
+   this object out of the source, scans for every key written onto a round anywhere
+   in the file, and blocks the commit if one is missing here. Adding a new field to
+   a round now forces you to say how it merges before it can ship. Runtime behaviour
+   for an unregistered key is deliberately UNCHANGED (local wins) so nothing already
+   in flight can be surprised by this - the guard is the protection, not a new rule.
+
+   The rules:
+     identity    written at creation, never merged (code, course, createdAt, t2 ...)
+     perCell     per-hole arrays merged cell by cell, newest cellAt stamp wins (v1497)
+     holeMap     additive {hole: ...} map, union (cloud base, local wins per hole)
+     holeMap:holes  same, but the map lives under a .holes sub-key
+     newestAt    one-way announcement carrying an `at` stamp - newest wins (v1223)
+     cloudWins   config - the cloud wins unless this device edited settings <60s ago
+     custom      handled by bespoke code below; listed so the guard can see it is
+                 deliberate rather than forgotten                                    */
+const BG_MERGE_RULES = {
+  // --- identity: written once, never merged -------------------------------------
+  code: 'identity', createdAt: 'identity', createdBy: 'identity', course: 'identity',
+  courseId: 'identity', tourneyId: 'identity', t2: 'identity', updatedAt: 'identity',
+  editedAt: 'identity', conditions: 'identity', holes: 'identity',
+  // `bracket` is an ORDERED commissioner-owned structure; a blind union corrupts it.
+  bracket: 'identity',
+  // --- per-cell score/stat arrays (v1497 recency) --------------------------------
+  scores: 'perCell', puttsData: 'perCell', girData: 'perCell', fairwaysData: 'perCell',
+  penaltiesData: 'perCell', sandData: 'perCell',
+  // --- additive per-hole maps -----------------------------------------------------
+  junkData: 'holeMap', sipManual: 'holeMap', p3greenieData: 'holeMap', ctpData: 'holeMap',
+  bbbData: 'holeMap', ryderCupData: 'holeMap',
+  /* v1504 - THE GUARD'S FIRST CATCH. scripts/guard_merge_registry.py found these
+     four on the very first run: per-hole maps for Scramble, Animals, Marks and Hot
+     Potato, written by their game engines and in NO merge list, so a second phone's
+     entry was dropped on the next save exactly like junkData used to be. They are
+     absent from all 211 production rounds only because nobody has played those four
+     games yet — they were the NEXT one of these bugs, found before it cost anybody
+     anything, which is the entire point of the guard. */
+  scrambleData: 'holeMap', animalData: 'holeMap', marksData: 'holeMap', potatoData: 'holeMap',
+  wolfData: 'holeMap:holes', hammerData: 'holeMap:holes',
+  // --- one-way announcements, newest `at` wins -------------------------------------
+  groupHole: 'newestAt', finishOpen: 'newestAt', celebrateHole: 'newestAt',
+  sipAnnounce: 'newestAt', settledMoney: 'newestAt', strokeHole: 'newestAt',
+  crewAlert: 'newestAt',
+  // --- round configuration: cloud wins unless this device just edited settings -----
+  games: 'cloudWins', hcpRules: 'cloudWins', pars: 'cloudWins', sis: 'cloudWins',
+  tees: 'cloudWins', teeYards: 'cloudWins', teePars: 'cloudWins', teeSis: 'cloudWins',
+  unranked: 'cloudWins', nineMode: 'cloudWins', startHole: 'cloudWins',
+  trackPutts: 'cloudWins', trackGirs: 'cloudWins', trackFairways: 'cloudWins',
+  trackPenalties: 'cloudWins', trackSands: 'cloudWins', naturalBoost: 'cloudWins',
+  hydration: 'cloudWins',
+  // --- bespoke, each with its own reason -------------------------------------------
+  players:            'custom',  // id-matched merge + removedPlayerIds tombstone
+  cellAt:             'custom',  // the recency stamps themselves — max per cell
+  bankerData:         'custom',  // .holes + .picks union AND .bankerOrder filter
+  groupGames:         'custom',  // same treatment as `games`, kept beside it
+  finishedAt:         'custom',  // once finished, only an explicit reopen clears it
+  reopenedAt:         'custom',  // latest wins — gates the finishedAt rule
+  firstScoreAt:       'custom',  // earliest wins
+  longPuttData:       'custom',  // newest `at`, else the longer putt
+  longDriveData:      'custom',  // v1504: same idea, longest yardage wins (see below)
+  forceFinishedBy:    'identity',// stamped once when an admin force-finishes a round
+  paidFlags:          'custom',  // MONEY — union, and `true` wins
+  holeDoneAt:         'custom',  // union, max per hole
+  statsCleared:       'custom',  // union — a deliberate clear must not be undone
+  acceptedBy:         'custom',  // union by name
+  declinedBy:         'custom',  // union by name
+  consentReq:         'custom',  // union by name
+  brags:              'custom',  // union by at+who
+  bigShots:           'custom',  // union by at
+  huckleData:         'custom',  // union .huckles by id
+  removedPlayerIds:   'custom',  // tombstone — union, never shrinks
+  removedPlayerNames: 'custom',  // tombstone — union, never shrinks
+  lg:                 'custom'   // league stamp; .members purged on removal (v1497)
+};
+try { window.BG_MERGE_RULES = BG_MERGE_RULES; } catch (e) {}
+// The lists the merge actually runs off. Derived, so the table above is load-bearing.
+function _bgMergeKeys(rule) {
+  try { return Object.keys(BG_MERGE_RULES).filter(k => BG_MERGE_RULES[k] === rule); }
+  catch (e) { return []; }
+}
+
+const _BG_TOUCH_FIELDS = _bgMergeKeys('perCell');   // v1503: derived, was a third copy of the same list
 function _bgTouchEmpty(code) {
   return { code: code, scores: {}, puttsData: {}, girData: {}, fairwaysData: {}, penaltiesData: {}, sandData: {} };
 }
@@ -17428,7 +17524,7 @@ function _mergeGameArrays(local, cloud, opts) {
     const a = auth[field];
     return Array.isArray(a) ? (a.indexOf(pid) !== -1) : (a && typeof a.has === 'function' && a.has(pid));
   };
-  ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData'].forEach(field => {
+  _bgMergeKeys('perCell').forEach(field => {          // v1503: derived from BG_MERGE_RULES
     const cc = cloud[field]; if (!cc || typeof cc !== 'object') return;
     if (!local[field]) local[field] = {};
     const lf = local[field];
@@ -17632,19 +17728,15 @@ async function _mergeGameForWrite(local, opts) {
     _mergeGameArrays(local, cloud, opts);
     _unionHoleMap(local, 'bankerData', 'holes', cloud);
     _unionHoleMap(local, 'bankerData', 'picks', cloud);
-    _unionHoleMap(local, 'wolfData', 'holes', cloud);
-  _unionHoleMap(local, 'hammerData', 'holes', cloud);
-    _unionHoleMap(local, 'junkData', null, cloud);
-    _unionHoleMap(local, 'sipManual', null, cloud);
+    // (wolfData / hammerData / junkData / sipManual now come off the registry below)
     // v1033 (Tyler, 8/15): these three were missing from the recovery whitelist, so a
     // client that locally blanked them (see the off-reset bug fixed in
     // applyLiveEditMerge) pushed the blank straight to the cloud with nothing to heal
     // it — which is why the Greenie loss was permanent while Banker/Wolf were not.
-    _unionHoleMap(local, 'p3greenieData', null, cloud);
-    _unionHoleMap(local, 'ctpData', null, cloud);
-    // v1500 audit: two more per-hole maps that were never listed.
-    _unionHoleMap(local, 'bbbData', null, cloud);
-    _unionHoleMap(local, 'ryderCupData', null, cloud);
+    // v1503: every additive per-hole map, straight off the registry — adding one to
+    // BG_MERGE_RULES is now the only step needed to have it merged.
+    _bgMergeKeys('holeMap').forEach(k => _unionHoleMap(local, k, null, cloud));
+    _bgMergeKeys('holeMap:holes').forEach(k => _unionHoleMap(local, k, 'holes', cloud));
     /* v1500 audit - the additive lists and maps. Every one of these was
        local-wins, so a second phone's entry was simply dropped on the next save. */
     try {
@@ -17687,6 +17779,17 @@ async function _mergeGameForWrite(local, opts) {
         else if (_lpIn(C) > _lpIn(L)) local.longPuttData = C;
       }
     } catch (e) {}
+    /* v1504: longDriveData ({pid, yds}) is the same shape of prize as longPuttData
+       and had the same hole — it was in no merge list, so the next routine save from
+       any phone still holding the old drive wrote it back over the new one. That is
+       verbatim the v1161 long-putt bug ("I had to add it two or three times to get it
+       to take"), sitting unfixed in the field beside it. No `at` stamp on this one, so
+       the rule is the only one the prize cares about: the LONGER drive wins. */
+    try {
+      const L = local.longDriveData, C = cloud.longDriveData;
+      const _yd = d => (d && d.pid && d.yds != null) ? Number(d.yds) : -1;
+      if (C && (C.pid || C.yds != null) && _yd(C) > _yd(L)) local.longDriveData = C;
+    } catch (e) {}
     // v1223 (Tyler, 8/25): the broadcast markers — group hole, finish-open, hole
     // celebration, sip — were in NO merge list, so for them "local wins" unconditionally.
     // Any phone doing a routine background save wrote ITS copy of the marker back over
@@ -17710,10 +17813,9 @@ async function _mergeGameForWrite(local, opts) {
        one-way announcement must never beat a newer one. A phone that genuinely
        re-settles writes a new `at` and still wins.                              */
     try {
-      // v1500 audit: strokeHole is the same {at, hole} shape as groupHole and was
-      // simply missed by v1223; crewAlert is the same kind of one-way announcement.
-      ['groupHole', 'finishOpen', 'celebrateHole', 'sipAnnounce', 'settledMoney',
-       'strokeHole', 'crewAlert'].forEach(function (k) {
+      // v1503: derived. v1500 added strokeHole (the same {at, hole} shape as
+      // groupHole, simply missed by v1223) and crewAlert; both are just table rows now.
+      _bgMergeKeys('newestAt').forEach(function (k) {
         const L = local[k], C = cloud[k];
         if (C && C.at && (!L || !L.at || C.at > L.at)) local[k] = C;
       });
@@ -17730,7 +17832,7 @@ async function _mergeGameForWrite(local, opts) {
       // v1467: 'startHole' joins 'nineMode' here. Without it a second phone still
       // holding startHole:1 would win the merge and push the old start hole straight
       // back over the edit - the same change looking like it "did not take" again.
-      ['games', 'hcpRules', 'pars', 'sis', 'tees', 'teeYards', 'teePars', 'teeSis', 'unranked', 'nineMode', 'startHole', 'trackPutts', 'trackGirs', 'trackFairways', 'trackPenalties', 'trackSands', 'naturalBoost', 'hydration'].forEach(k => {
+      _bgMergeKeys('cloudWins').forEach(k => {        // v1503: derived from BG_MERGE_RULES
         if (cloud[k] === undefined) return;
         if (k === 'games') {
           // Cloud wins per game, BUT keep a locally-stamped tournament fieldOnly game
@@ -17767,7 +17869,7 @@ function _applyMyTouchedCells(incoming) {
     const prev = state.game; if (!prev || !incoming) return incoming;
     const touch = _touchStore();
     let _wiped = false;   // v939: did the incoming cloud row LOSE cells I entered?
-    ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData'].forEach(field => {
+    _bgMergeKeys('perCell').forEach(field => {        // v1503: derived from BG_MERGE_RULES
       const pf = prev[field]; if (!pf) return;
       const tf = touch[field] || {};
       Object.keys(tf).forEach(pid => {
