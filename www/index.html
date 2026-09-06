@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1501-->
+<!--BGVER=v2026.11.1502-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10132,7 +10132,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1501';
+const BG_BUILD = 'v2026.11.1502';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -18598,8 +18598,13 @@ async function topUpMyRoundsFromBackup(roster) {
     backup.forEach(s => {
       if (!s) return;
       if (del.has(statsRoundKey(s))) return;        // I deleted it on purpose — never resurrect
-      const k = contentKey(s); if (!k || have.has(k)) return;
-      mine.scoreHistory.push(s); have.add(k);
+      const k = contentKey(s); if (!k) return;
+      if (!have.has(k)) { mine.scoreHistory.push(s); have.add(k); return; }
+      // v1502: the other half of the additive-only defect — this runs on EVERY roster
+      // read, so leaving it additive would re-assert the stale row between renders even
+      // after healMyRoundsFromCloud had upgraded it.
+      const _i = mine.scoreHistory.findIndex(x => contentKey(x) === k);
+      if (_i >= 0 && _bgStatsRank(s) > _bgStatsRank(mine.scoreHistory[_i])) mine.scoreHistory[_i] = s;
     });
     try { mine.scoreHistory = dedupeScoreHistory(mine.scoreHistory); } catch (e) {}
   } catch (e) {}
@@ -18858,6 +18863,15 @@ function _bgMoneyRank(s) {
     if (s.moneyFinal === true && src !== 'manual' && src !== 'settled') r += 1;
     return r;
   } catch (e) { return 0; }
+}
+/* v1502 - ONE strength rank for a stored round, used by every path that has to
+   choose between two copies of the same round.
+
+   It already existed, inline, inside syncMyStatsToCloud (v1348) - and ONLY there,
+   which turned out to be the whole problem. See healMyRoundsFromCloud. */
+function _bgStatsRank(s) {
+  try { return s ? (((s.complete ? 1000 : 0) + (s.holesScored || 0)) * 10 + _bgMoneyRank(s)) : -1; }
+  catch (e) { return -1; }
 }
 // v1328 (Tyler, 8/31): "if we do have a code problem, I think a message would be
 // appropriate here and you would need to notify me and Kevin there is a scoring issue
@@ -30647,17 +30661,37 @@ async function healMyRoundsFromCloud() {
     const dayOf = bgDayKey;   // v980: LOCAL day, not UTC — see bgDayKey
     const contentKey = s => s ? (norm(s.course) + '|' + dayOf(s.date) + '|' + (s.gross == null ? '' : s.gross) + '|' + (s.holesScored == null ? '' : s.holesScored)) : '';
     const have = new Set(p.scoreHistory.map(contentKey));
-    let added = 0;
+    let added = 0, upgraded = 0;
+    /* v1502 (Tyler, 9/6): "This is 1501 - it still shows I won 40.00 ... I am using
+       the web for my test here not my phone ... however my phone is showing the exact
+       same thing."
+
+       Both, because this loop - and topUpMyRoundsFromBackup, the other cloud->local
+       path - were ADDITIVE ONLY. `if (have.has(k)) return;` meant a round already in
+       my roster was never re-read from the backup, whatever the backup said. And
+       contentKey is course|day|gross|holesScored: it does not include the MONEY, so a
+       corrected figure looks identical to the stale one and is skipped.
+
+       The consequence is the important part: a units correction written to
+       player_stats could NEVER reach a client that already held that round. Not on
+       the next launch, not ever. v1348 taught the UPLOAD direction to keep the
+       stronger of two copies and the DOWNLOAD direction was left additive, so the
+       cloud could be repaired and every device would quietly ignore the repair.
+
+       Same rank, same rule, both directions now. Strictly greater, so a tie leaves
+       the local copy alone and repeated launches cannot oscillate. */
     cloud.forEach(s => {
       if (!s) return;
       if (_del.has(statsRoundKey(s))) return;            // I deleted it on purpose — never resurrect
-      const k = contentKey(s); if (!k || have.has(k)) return;
-      p.scoreHistory.push(s); have.add(k); added++;
+      const k = contentKey(s); if (!k) return;
+      if (!have.has(k)) { p.scoreHistory.push(s); have.add(k); added++; return; }
+      const _i = p.scoreHistory.findIndex(x => contentKey(x) === k);
+      if (_i >= 0 && _bgStatsRank(s) > _bgStatsRank(p.scoreHistory[_i])) { p.scoreHistory[_i] = s; upgraded++; }
     });
     const _preDedupLen = p.scoreHistory.length;
     try { p.scoreHistory = dedupeScoreHistory(p.scoreHistory); } catch (e) {}
     const _dedupChanged = p.scoreHistory.length !== _preDedupLen;
-    if (added > 0 || _dedupChanged) {
+    if (added > 0 || upgraded > 0 || _dedupChanged) {
       p.lastUsed = Date.now();
       await savePlayerRoster(roster);                     // merge-on-write, additive
       try { renderStats(); } catch (e) {}
@@ -55121,7 +55155,7 @@ async function syncMyStatsToCloud(roster, visOverride){
         // already compares with this rank. player_stats was the one table that did not,
         // which made it the weak link in an otherwise guarded chain. Same formula, so a
         // record that would win in the roster wins here too — no new precedence rules.
-        const _psRank = s => s ? (((s.complete ? 1000 : 0) + (s.holesScored || 0)) * 10 + _bgMoneyRank(s)) : -1;
+        const _psRank = _bgStatsRank;   // v1502: hoisted — the download path needs it too
         const byKey = new Map();
         stats.forEach((s, i) => { const k = keyOf(s); if (k) byKey.set(k, i); });
         cloud.forEach(s => {
