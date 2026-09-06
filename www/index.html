@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1498-->
+<!--BGVER=v2026.11.1501-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10132,7 +10132,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1498';
+const BG_BUILD = 'v2026.11.1501';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17340,6 +17340,9 @@ function bgPurgePlayerFromRound(g, ids, names, opts) {
     });
     try { if (g.longPuttData && hitId(g.longPuttData.pid)) g.longPuttData = null; } catch (e) {}
     try { if (g.settledMoney && g.settledMoney.net) idSet.forEach(id => { try { delete g.settledMoney.net[id]; } catch (e) {} }); } catch (e) {}
+    // v1500: paidFlags keys are "fromId>toId" — a removed player must not leave a
+    // debt line behind on either side of the arrow.
+    try { if (g.paidFlags && typeof g.paidFlags === 'object') Object.keys(g.paidFlags).forEach(k => { const parts = String(k).split('>'); if (parts.some(x => hitId(x))) delete g.paidFlags[k]; }); } catch (e) {}
     try { if (Array.isArray(g.acceptedBy)) g.acceptedBy = fNm(g.acceptedBy); } catch (e) {}
     try { if (Array.isArray(g.consentReq)) g.consentReq = fNm(g.consentReq); } catch (e) {}
     // The league's launch-time roster stamp, frozen since v1297 and never re-read.
@@ -17462,6 +17465,80 @@ function _unionHoleMap(local, parentKey, subKey, cloud) {
     if (subKey) local[parentKey][subKey] = merged; else local[parentKey] = merged;
   } catch (e) {}
 }
+/* ===== v1500 - THE MERGE-LIST AUDIT ========================================
+   Prompted by v1499. `settledMoney` had been in NO merge list for its whole life,
+   and the default for anything unlisted in _mergeGameForWrite is "local wins,
+   always" - so a stale phone silently reinstated old money. That is the THIRD bug
+   of that exact shape (v1223 broadcast markers, v1161 longPuttData, v1499
+   settledMoney), which made it worth enumerating every key instead of waiting for
+   the fourth.
+
+   Census of all 211 real rounds in the games table, checked against every list in
+   _mergeGameForWrite. SIXTEEN keys were defaulting to local-wins. In risk order:
+
+     paidFlags     MONEY. {"fromId>toId": bool} - who has settled with whom. A
+                   phone that had not seen a payment marked wrote `false` back
+                   over it. Marking paid is an ASSERTION, so true wins here; a
+                   stale copy can never un-pay somebody.
+     strokeHole    {at, hole} - byte-identical in shape to groupHole, and simply
+                   MISSED when v1223 fixed the other four broadcast markers.
+     crewAlert     {at, by, city, course} - same, a one-way announcement.
+     holeDoneAt    {hole: ts} - purely additive; local-wins dropped the other
+                   cart's hole times, which the pace-of-play read is built on.
+     acceptedBy    additive name lists. Two players accepting on two phones and
+     declinedBy    only the last writer's name survived.
+     consentReq
+     brags         additive record lists (crew feed, long drives). Same loss.
+     bigShots
+     huckleData    {huckles:[...]} - an additive list of called huckles, keyed by id.
+     bbbData       per-hole maps, exactly like junkData/p3greenieData - they simply
+     ryderCupData  never got a _unionHoleMap line.
+     statsCleared  {field:[pids]} - a deliberate clear, must not be un-done.
+     groupGames    the sibling of `games`, which IS cloud-wins. One of the pair was
+                   listed and the other was not.
+     firstScoreAt  earliest wins (the round started when the FIRST score landed).
+     reopenedAt    latest wins - it is load-bearing for the finishedAt rule above.
+
+   Deliberately left alone: `bracket` (commissioner-owned, an ordered structure a
+   blind union would corrupt), `conditions` (written once from the weather read),
+   and the immutable identity keys (code/course/courseId/createdAt/createdBy/t2).  */
+
+// Union two additive lists of NAMES (case/punctuation-insensitive), keeping the
+// local spelling where both sides have the same person.
+function _bgUnionNameList(local, cloud, key) {
+  try {
+    const C = cloud[key], L = local[key];
+    if (!Array.isArray(C) || !C.length) return;
+    if (!Array.isArray(L)) { local[key] = C.slice(); return; }
+    const seen = new Set(L.map(x => _bgPurgeKey(x)));
+    const out = L.slice();
+    C.forEach(x => { const k = _bgPurgeKey(x); if (k && !seen.has(k)) { seen.add(k); out.push(x); } });
+    local[key] = out;
+  } catch (e) {}
+}
+// Union two additive lists of RECORDS by a stable identity (id, or the timestamp
+// plus who it belongs to when there is no id).
+function _bgUnionRecordList(local, cloud, key, idOf) {
+  try {
+    const C = cloud[key], L = local[key];
+    if (!Array.isArray(C) || !C.length) return;
+    if (!Array.isArray(L)) { local[key] = C.slice(); return; }
+    const seen = new Set(L.map(idOf).filter(x => x != null));
+    const out = L.slice();
+    C.forEach(r => { const k = idOf(r); if (k != null && !seen.has(k)) { seen.add(k); out.push(r); } });
+    local[key] = out;
+  } catch (e) {}
+}
+// Union a {key: number} map keeping the LARGER value per key (hole completion times).
+function _bgUnionMaxMap(local, cloud, key) {
+  try {
+    const C = cloud[key]; if (!C || typeof C !== 'object') return;
+    const L = (local[key] && typeof local[key] === 'object') ? local[key] : {};
+    Object.keys(C).forEach(k => { const c = Number(C[k]), l = Number(L[k]);
+      if (!isFinite(c)) return; if (!isFinite(l) || c > l) L[k] = C[k]; });
+    local[key] = L;
+  } catch (e) {}
+}
 // v970: per-round stamp of "did the pre-write cloud read succeed" — replaces the
 // shared window._bgMergeReadOk global, which two concurrent writers could race on.
 // Non-enumerable so JSON.stringify (localStorage cache AND the cloud upsert) skips it.
@@ -17568,6 +17645,36 @@ async function _mergeGameForWrite(local, opts) {
     // it — which is why the Greenie loss was permanent while Banker/Wolf were not.
     _unionHoleMap(local, 'p3greenieData', null, cloud);
     _unionHoleMap(local, 'ctpData', null, cloud);
+    // v1500 audit: two more per-hole maps that were never listed.
+    _unionHoleMap(local, 'bbbData', null, cloud);
+    _unionHoleMap(local, 'ryderCupData', null, cloud);
+    /* v1500 audit - the additive lists and maps. Every one of these was
+       local-wins, so a second phone's entry was simply dropped on the next save. */
+    try {
+      ['acceptedBy', 'declinedBy', 'consentReq'].forEach(k => _bgUnionNameList(local, cloud, k));
+      _bgUnionRecordList(local, cloud, 'brags',    r => r && (r.at != null ? (r.at + '|' + (r.who || r.name || '')) : null));
+      _bgUnionRecordList(local, cloud, 'bigShots', r => r && (r.at != null ? String(r.at) : null));
+      if (cloud.huckleData && Array.isArray(cloud.huckleData.huckles)) {
+        if (!local.huckleData) local.huckleData = {};
+        _bgUnionRecordList(local.huckleData, cloud.huckleData, 'huckles', r => r && (r.id || null));
+      }
+      _bgUnionMaxMap(local, cloud, 'holeDoneAt');
+      /* paidFlags is MONEY and is not symmetric: marking a debt paid is an
+         assertion, un-marking it is almost always just a stale copy. true wins. */
+      if (cloud.paidFlags && typeof cloud.paidFlags === 'object') {
+        const _pf = (local.paidFlags && typeof local.paidFlags === 'object') ? local.paidFlags : {};
+        Object.keys(cloud.paidFlags).forEach(k => { if (cloud.paidFlags[k]) _pf[k] = true; else if (_pf[k] === undefined) _pf[k] = cloud.paidFlags[k]; });
+        local.paidFlags = _pf;
+      }
+      // A deliberate "clear my fairway data" must survive the other phone's save.
+      if (cloud.statsCleared && typeof cloud.statsCleared === 'object') {
+        if (!local.statsCleared || typeof local.statsCleared !== 'object') local.statsCleared = {};
+        Object.keys(cloud.statsCleared).forEach(f => _bgUnionRecordList(local.statsCleared, cloud.statsCleared, f, x => x));
+      }
+      // Earliest first score, latest reopen (reopenedAt gates the finishedAt rule).
+      if (cloud.firstScoreAt && (!local.firstScoreAt || cloud.firstScoreAt < local.firstScoreAt)) local.firstScoreAt = cloud.firstScoreAt;
+      if (cloud.reopenedAt && (!local.reopenedAt || cloud.reopenedAt > local.reopenedAt)) local.reopenedAt = cloud.reopenedAt;
+    } catch (e) {}
     // v1161 (Tyler, Kerbo 8/22): "I had to add [the long putt] two or three times
     // to get it to take." longPuttData was not in this merge at all, so the next
     // routine save from ANY phone whose copy still held the old putt wrote it
@@ -17589,8 +17696,27 @@ async function _mergeGameForWrite(local, opts) {
     // the cloud, and a phone still holding the previous hole quietly reverted the group
     // hole for everyone who read the row after it. Newest stamp wins instead, which is
     // the only sane rule for a one-way announcement.
+    /* v1499 (Tyler, 9/6, an hour after v1497 shipped): "mine shows I won 40.00
+       today, I won 20.00." His stats row was correct in the database and his own
+       phone put the old number back.
+
+       `settledMoney` - the frozen {playerId: net} map written at finish, which every
+       device copies its own line out of into player_stats.money on sync - was in NO
+       merge list whatsoever. Not cloud-wins, not union, not newest-wins. So "local
+       wins, always": any phone still holding the pre-correction snapshot wrote it
+       straight back over a corrected one on its next routine save. Gregory Jackson's
+       repaired +50 lasted sixty seconds before his own phone reset it to 0, and
+       Tyler's read +40 for the rest of the morning.
+
+       It carries an `at` stamp already, so it belongs in exactly this list, for
+       exactly the reason the v1223 broadcast markers do: a stale copy of a
+       one-way announcement must never beat a newer one. A phone that genuinely
+       re-settles writes a new `at` and still wins.                              */
     try {
-      ['groupHole', 'finishOpen', 'celebrateHole', 'sipAnnounce'].forEach(function (k) {
+      // v1500 audit: strokeHole is the same {at, hole} shape as groupHole and was
+      // simply missed by v1223; crewAlert is the same kind of one-way announcement.
+      ['groupHole', 'finishOpen', 'celebrateHole', 'sipAnnounce', 'settledMoney',
+       'strokeHole', 'crewAlert'].forEach(function (k) {
         const L = local[k], C = cloud[k];
         if (C && C.at && (!L || !L.at || C.at > L.at)) local[k] = C;
       });
@@ -17618,6 +17744,17 @@ async function _mergeGameForWrite(local, opts) {
           const _lg = local.games || {};
           Object.keys(_lg).forEach(gk => { if (_lg[gk] && _lg[gk].fieldOnly && _cg[gk] === undefined) _cg[gk] = _lg[gk]; });
           local.games = _cg;
+          /* v1500 audit: `groupGames` is the same shape and the same idea as
+             `games` (v863 split them so a tournament group's own bets live in one
+             bucket and the event's in the other) - but only `games` was listed
+             here, so a stale phone's copy of the group's bets won every time. */
+          try {
+            if (cloud.groupGames && typeof cloud.groupGames === 'object') {
+              const _cgg = Object.assign({}, cloud.groupGames), _lgg = local.groupGames || {};
+              Object.keys(_lgg).forEach(gk => { if (_lgg[gk] && _lgg[gk].fieldOnly && _cgg[gk] === undefined) _cgg[gk] = _lgg[gk]; });
+              local.groupGames = _cgg;
+            }
+          } catch (e) {}
         } else {
           local[k] = cloud[k];
         }
@@ -17802,6 +17939,18 @@ let _watchHeartbeatBusy = false;
 function _watchHeartbeat() {
   try {
     if (_watchHeartbeatBusy) return;
+    /* v1501 (Tyler, 9/6): "Matt entered the wrong score on one of the par 3s.
+       When he went in on his watch and changed it, it never took. I had to do it
+       on my phone."
+
+       This heartbeat rebuilds the wearer's WHOLE score map from phone state and
+       ships it to the wrist as truth, every 8 seconds, unconditionally. A watch
+       edit takes a moment to reach the phone (WCSession hop) and then another to
+       be saved (saveGame does up to two Supabase reads with 3s and 5s timeouts).
+       Fire in that window and the phone hands the watch back its own pre-edit
+       value - the change vanishes off the wrist, and if the watch has already
+       been ACKed it is gone for good. Hold the push until the write has landed. */
+    if (window._bgWatchWriteBusyUntil && Date.now() < window._bgWatchWriteBusyUntil) return;
     if (document.visibilityState !== 'visible') return;
     if (typeof isNativeApp !== 'function' || !isNativeApp()) return;
     const g = (typeof state !== 'undefined' && state) ? state.game : null;
@@ -30908,11 +31057,34 @@ function _bgWatchSyncSoon() {
 window.__onWatchScore = async function (u) {
   try {
     if (!u) return;
-    const g = (typeof state !== 'undefined' && state) ? state.game : null;
-    if (!g || !g.code || g.finishedAt || state.viewOnlyMode) return;      // no live round → ignore
-    if (u.roundId && u.roundId !== g.code) return;                        // different round → ignore
+    /* v1501 - THE OTHER HALF OF "it never took". Every guard below used to be a
+       bare `return`: no toast, no retry, and - critically - the NATIVE side has
+       already replied {ok:true} to the watch by the time we get here
+       (PhoneWCSession.didReceiveMessage replyHandler), so the watch clears the
+       hole out of `pendingHoles`. Once it does, RoundStore.applyPayload stops
+       protecting that hole from the phone's next handoff and the edit is gone
+       from both devices. A drop here is silent AND permanent.
+
+       Two changes: work off the round the WATCH named rather than only whatever
+       happens to be on screen (a phone that has navigated away, or was cold-
+       launched by the incoming message, used to drop the score outright), and
+       say something out loud whenever we genuinely cannot take it. */
+    window._bgWatchWriteBusyUntil = Date.now() + 20000;   // hold the heartbeat off
+    let g = (typeof state !== 'undefined' && state) ? state.game : null;
+    const _wantCode = u.roundId || (g && g.code);
+    if (_wantCode && (!g || g.code !== _wantCode)) {
+      // Not the round on screen - fetch it rather than binning the score.
+      try { const _lg = await loadGame(_wantCode); if (_lg && _lg.code === _wantCode) g = _lg; } catch (e) {}
+    }
+    if (!g || !g.code) { try { showToast('\u231A Watch score couldn\u2019t be saved \u2014 no round open on this phone', 6000); } catch (e) {} return; }
+    if (u.roundId && u.roundId !== g.code) { try { showToast('\u231A Watch score was for a different round \u2014 not saved', 6000); } catch (e) {} return; }
+    if (g.finishedAt) { try { showToast('\u231A That round is finished \u2014 reopen it to change a score', 6000); } catch (e) {} return; }
     const pid = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null;
-    if (!pid) return;
+    // viewOnlyMode used to bin the write outright. It means "you are watching
+    // someone else's round" - but if gpsResolveMyId finds the wearer ON the card
+    // then it is their own line and theirs to change, which is the whole point of
+    // the watch. Not being on the card is still a refusal, and now says so.
+    if (!pid) { try { showToast('\u231A Couldn\u2019t tell which player you are \u2014 watch score not saved', 6000); } catch (e) {} return; }
     const incoming = u.scores || {};
     if (!g.scores) g.scores = {};
     if (!g.scores[pid]) g.scores[pid] = new Array(18).fill(null);
@@ -30928,6 +31100,11 @@ window.__onWatchScore = async function (u) {
       g.scores[pid][h - 1] = val;
       try { _markScoreTouched('scores', pid, h - 1); } catch (e) {}
       if (val !== null && !g.firstScoreAt) g.firstScoreAt = Date.now();
+      // v1501: a wrist edit is a real edit and must carry a real recency stamp,
+      // or the v1497 cell merge falls back to "first toucher owns it forever" and
+      // the phone's older value wins. _markScoreTouched only stamps state.game,
+      // so stamp the round we actually resolved above.
+      try { _bgStampCell(g, 'scores', pid, h - 1); } catch (e) {}
       try { syncGirJunk(g, h); } catch (e) {}
       try { syncSandyJunk(g, h); } catch (e) {}
       try { syncRoloJunk(g, h); } catch (e) {}
@@ -30945,6 +31122,10 @@ window.__onWatchScore = async function (u) {
     // Refresh the score screen if it's what's on screen, and confirm on-phone.
     try { const _at = document.querySelector('.tab.active'); if (_at && _at.dataset.tab === 'score' && typeof renderScoreEntry === 'function') renderScoreEntry(); } catch (e) {}
     try { showToast('⌚ Score from your watch saved'); } catch (e) {}
+    /* v1501: the save has landed, so release the heartbeat and push the CONFIRMED
+       card back to the wrist immediately. The watch then shows the value the phone
+       actually holds instead of waiting up to 8s to find out. */
+    try { window._bgWatchWriteBusyUntil = 0; } catch (e) {}
     // Echo the saved round back to the watch so its "queued" state confirms.
     try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
   } catch (e) {}

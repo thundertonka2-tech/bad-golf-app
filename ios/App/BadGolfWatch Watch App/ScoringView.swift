@@ -57,12 +57,31 @@ struct ScoringView: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Color.badGolfBlue)
 
+            // v1501 (Tyler, 9/6): "the forward and back arrows work but you have to
+            // click them several times to get them to take." They were bare
+            // `Image(systemName:)` labels, so the tappable area was the glyph's own
+            // intrinsic size - roughly 16x16pt against Apple's 44x44 minimum - and
+            // the parent ZStack is .focusable with a digitalCrownRotation competing
+            // for the gesture. Most taps simply missed. goTo() was always instant;
+            // nothing was debounced and nothing was being overwritten. It is a hit
+            // target, not a sync bug. Bigger glyph, real 44pt frame, and an explicit
+            // contentShape so the whole frame is tappable and not just the strokes.
             HStack {
-                Button { store.prev() } label: { Image(systemName: "chevron.left") }
-                Spacer()
+                Button { store.prev() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 22, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                Spacer(minLength: 0)
                 Text(syncLabel).font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.7))
-                Spacer()
-                Button { store.next() } label: { Image(systemName: "chevron.right") }
+                Spacer(minLength: 0)
+                Button { store.next() } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 22, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
             }
             .buttonStyle(.plain)
             .foregroundStyle(Color.badGolfBlue)
