@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1508-->
+<!--BGVER=v2026.11.1509-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -8800,10 +8800,6 @@ html.bg-modal-lock, body.bg-modal-lock { overflow: hidden !important; }
          t2c-location read in the create handler and the draft save keeps working
          and simply resolves to ''. -->
     <div class="field" style="display:none"><label for="t2c-location">Location <span class="small-text" style="color:var(--text-muted)">(optional)</span></label><input type="text" id="t2c-location" data-no-draft="1" placeholder="Club or city"></div>
-    <div class="row">
-      <div class="field"><label for="t2c-days">Days</label><input type="number" id="t2c-days" data-no-draft="1" value="1" min="1" max="10" inputmode="numeric"></div>
-      <div class="field"><label for="t2c-players">Players</label><input type="number" id="t2c-players" data-no-draft="1" value="8" min="1" max="200" inputmode="numeric" oninput="try{updateT2CreateType()}catch(e){}"></div>
-    </div>
     <div class="field"><label for="t2c-type">Tournament type</label>
       <select id="t2c-type">
         <option value="team">Two Large Teams</option>
@@ -8818,6 +8814,23 @@ html.bg-modal-lock, body.bg-modal-lock { overflow: hidden !important; }
       </select>
       <div class="small-text" id="t2c-type-help" style="color:var(--text-muted);line-height:1.4;margin-top:4px"></div>
     </div>
+    <!-- v1509 (Tyler): "I think we should move the tournament type above the days
+         and players. If bracket is picked the days are determined by the number of
+         players." Type (and, for a bracket, the elimination style) now comes FIRST,
+         because it decides whether Days is even a question. -->
+    <div class="field" id="t2c-bkmode-row" style="display:none">
+      <label for="t2c-bkmode">Elimination</label>
+      <select id="t2c-bkmode">
+        <option value="consolation">Single elimination + consolation bracket</option>
+        <option value="single">Single elimination (losers play side games only)</option>
+        <option value="double">Double elimination (losers bracket + grand final)</option>
+      </select>
+    </div>
+    <div class="row" id="t2c-dp-row">
+      <div class="field" id="t2c-days-field"><label for="t2c-days">Days</label><input type="number" id="t2c-days" data-no-draft="1" value="1" min="1" max="10" inputmode="numeric"></div>
+      <div class="field"><label for="t2c-players">Players</label><input type="number" id="t2c-players" data-no-draft="1" value="8" min="1" max="200" inputmode="numeric" oninput="try{updateT2CreateType()}catch(e){}"></div>
+    </div>
+    <div class="small-text" id="t2c-bkdays-help" style="display:none;color:var(--text-muted);line-height:1.4;margin:-4px 0 10px"></div>
     <!-- v980 (Tyler code review): updateT2CreateType() has always toggled
          #t2c-teams-row and submitT2Create() has always read #t2c-teama / #t2c-teamb —
          but NONE of that markup existed, so both fell through to the literals
@@ -10132,7 +10145,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1508';
+const BG_BUILD = 'v2026.11.1509';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -65369,6 +65382,8 @@ function wireT2() {
   // to a single playing day.
   const ty = document.getElementById('t2c-type');
   if (ty) ty.onchange = () => updateT2CreateType();
+  const bm = document.getElementById('t2c-bkmode');
+  if (bm) bm.onchange = () => updateT2CreateType();   // v1509: the day count follows the elimination style
   const hc = document.getElementById('t2-home-close');
   if (hc) hc.onclick = async () => { try { await t2FlushHcpInputs(); } catch (e) {} document.getElementById('t2-home-modal').classList.remove('show'); t2UnsubscribeHome(); switchTab('tourneys'); };
   const hm = document.getElementById('t2-home-modal');
@@ -66343,6 +66358,113 @@ function bgBracketNineFor(cfg, dayNumber) { if (!cfg || Number(cfg.holes) !== 9)
 // v1179: prize pool split → [champion %, runner-up %, consolation-champion %]
 function bgBracketSplit(cfg) { const v = cfg && cfg.split; return v === '100' ? [100, 0, 0] : (v === '80/20' ? [80, 20, 0] : (v === '80/20C' ? [80, 0, 20] : [70, 30, 0])); }
 function bgBracketCfg(t) { return Object.assign({}, BG_BRACKET_DEFAULTS, (t && t.settings && t.settings.bracket) || {}); }
+// v1509 (Tyler): a bracket's length is not a number you type in - it falls out of the
+// field. Rather than a formula that can drift from the scheduler, this DRY-RUNS the
+// real one: bgBracketPlanDay puts every ready match on the day (so the consolation /
+// losers rounds ride alongside the winners rounds), pick arbitrary winners, repeat
+// until the bracket is decided, count the passes. 8 players = 3 days single or
+// consolation, 6 double. Byes shorten a lopsided double-elimination ladder, which is
+// exactly the case a closed-form ceil(log2 n) answer gets wrong. Falls back to that
+// formula (the upper bound) if anything in the dry run throws.
+function bgBracketDayCount(nPlayers, mode) {
+  const n = Math.max(2, Math.min(64, parseInt(nPlayers, 10) || 2));
+  let size = 2; while (size < n) size *= 2;
+  const k = Math.round(Math.log(size) / Math.LN2);
+  const fallback = Math.max(1, (mode === 'double') ? (2 * k) : k);
+  try {
+    const players = []; for (let i = 1; i <= n; i++) players.push({ id: 'bkd' + i });
+    const seeds = players.map(p => p.id);
+    const spec = bgBracketSpec(n, mode);
+    const results = {}; const t0 = { settings: {} };
+    let days = 0;
+    for (let guard = 0; guard < 40; guard++) {
+      const rs = bgBracketResolve(spec, seeds, results);
+      const left = Object.keys(rs.m).filter(id => { const s = rs.m[id].status; return s !== 'final' && s !== 'bye' && s !== 'empty'; });
+      if (!left.length) break;
+      const plan = bgBracketPlanDay(t0, players, { spec: spec, m: rs.m, seedOf: rs.seedOf });
+      if (!plan.matches.length) return fallback;
+      days++;
+      plan.matches.forEach(mm => { results[mm.id] = { winner: mm.a, loser: mm.b }; });
+    }
+    return Math.max(1, days);
+  } catch (e) { return fallback; }
+}
+
+// v1509 (Tyler: "I setup a tournament with bracket play, when I went to configure
+// carts, I get stuck on this screen and no way to get to the carts screen"). A bracket
+// had NO carts screen at all - openT2Carts handed straight to the day BUILDER, and the
+// builder refuses with a toast the moment a cart has launched, so the button did
+// nothing you could see. This is that screen. The pairings belong to the bracket
+// (moving one player splits a match across two carts), so they are shown, not edited;
+// tee times and a rebuild of an unplayed day are what a director actually needs.
+async function openBracketDayCarts(dayNumber, dayId) {
+  const t = _t2Current; if (!t) return;
+  const dn = parseInt(dayNumber, 10) || 1;
+  if (!dayId) return openBracketDayBuilder(dn, dayId);
+  const amCommish = (typeof t2CanManage === 'function') ? t2CanManage(t) : false;
+  const old = document.getElementById('t2-bkcarts-modal'); if (old) { try { old.remove(); } catch (e) {} }
+  const ov = document.createElement('div');
+  ov.id = 't2-bkcarts-modal'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100060';
+  ov.innerHTML = '<div class="modal" style="max-width:460px;width:94%;max-height:88vh;overflow-y:auto"><div id="t2-bkcarts-body">Loading…</div></div>';
+  document.body.appendChild(ov);
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  try { if (typeof bgKeyboardSafe === 'function') bgKeyboardSafe(ov.querySelector('.modal')); } catch (e) {}
+  // Both Done and the X go back to the event, never leave the user on a dead screen.
+  const _exit = async () => { close(); try { const hm = document.getElementById('t2-home-modal'); if (hm) hm.classList.add('show'); } catch (e) {} try { await renderT2Home(); } catch (e) {} };
+  const render = async () => {
+    const body = document.getElementById('t2-bkcarts-body'); if (!body) return;
+    let groups = [];
+    let data = { players: [], st: null };
+    try { data = await bgBracketLoad(t); } catch (e) {}
+    try { groups = await t2GetGroups(dayId); } catch (e) {}
+    const players = data.players || [];
+    const st = data.st;
+    const pById = {}; players.forEach(p => pById[p.id] = p);
+    const membersByGroup = {};
+    try { await Promise.all((groups || []).map(async g => { membersByGroup[g.id] = await t2GetGroupMembers(g.id); })); } catch (e) {}
+    const bd = (t.settings && t.settings.bracketDays && t.settings.bracketDays[dn]) || null;
+    const byPid = {};
+    ((bd && bd.matches) || []).forEach(m => { byPid[m.a] = m; byPid[m.b] = m; });
+    const started = (groups || []).some(g => g && g.game_code);
+    const fn = (id) => { const p = pById[id]; if (!p || !p.display_name) return '?'; const pp = String(p.display_name).trim().split(/\s+/); return t2esc(pp[0] + (pp.length > 1 ? ' ' + pp[pp.length - 1].charAt(0).toUpperCase() + '.' : '')); };
+    const rlabel = (mid) => { try { const r = st.spec.rounds.find(x => x.ids.indexOf(mid) >= 0); return r ? r.label : ''; } catch (e) { return ''; } };
+    const _nine = (typeof bgBracketNineFor === 'function') ? bgBracketNineFor(bgBracketCfg(t), dn) : null;
+    let h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px"><h2 style="margin:0">🛺 Day ' + dn + ' carts</h2><button class="bg-btn bg-btn--ghost bg-btn--icon" id="bkc-x" aria-label="Close" style="line-height:1">✕</button></div>';
+    h += '<p class="help-text" style="margin:0 0 10px">' + (_nine ? 'The ' + (_nine === 'front9' ? 'front' : 'back') + ' nine. ' : '') + 'The bracket sets these pairings — two matches ride together, and nobody can be moved without splitting a match. ' + (started ? 'This day is underway, so the carts are locked; tee times can still change.' : 'Set the tee times here.') + '</p>';
+    if (!(groups && groups.length)) h += '<div class="help-text" style="padding:12px;text-align:center">This day has no carts yet.</div>';
+    else {
+      const ordered = groups.slice().sort((a, b) => (a.group_number || 0) - (b.group_number || 0));
+      ordered.forEach(g => {
+        const mem = (membersByGroup[g.id] || []).slice().sort((a, b) => (a.slot || 0) - (b.slot || 0));
+        const seen = {}; const lines = []; const spare = [];
+        mem.forEach(m => {
+          const mm = byPid[m.tournament_player_id];
+          if (!mm) { spare.push(fn(m.tournament_player_id)); return; }
+          if (seen[mm.id]) return; seen[mm.id] = 1;
+          const rl = rlabel(mm.id);
+          lines.push('<div style="font-size:13px;padding:3px 0"><span style="font-weight:700">' + fn(mm.a) + '</span> v <span style="font-weight:700">' + fn(mm.b) + '</span>' + (rl ? ' <span style="color:var(--text-muted)">· ' + t2esc(rl) + '</span>' : '') + '</div>');
+        });
+        if (spare.length) lines.push('<div style="font-size:13px;padding:3px 0;color:var(--text-muted)">' + spare.join(', ') + ' — side games only</div>');
+        h += '<div style="padding:9px 0;border-top:1px solid var(--border)">'
+          + '<div style="display:flex;align-items:center;gap:10px"><div style="flex:1;min-width:0;font-weight:600">Cart ' + g.group_number + (g.game_code ? ' <span class="small-text" style="color:var(--money-pos)">· started</span>' : '') + '</div>'
+          + (amCommish ? '<button class="bg-btn bg-btn--sm small bkc-tt" data-gid="' + t2esc(String(g.id)) + '" data-cur="' + t2esc(g.tee_time || '') + '" style="flex:0 0 auto;min-width:92px">' + (g.tee_time ? '⏱ ' + t2esc(g.tee_time) : 'Set time') + '</button>'
+                       : '<div class="small-text" style="color:var(--text-muted)">' + (g.tee_time ? t2esc(g.tee_time) : '') + '</div>') + '</div>'
+          + (lines.length ? lines.join('') : '<div class="help-text">Empty</div>') + '</div>';
+      });
+      if (amCommish) h += '<button class="bg-btn bg-btn--full full" id="bkc-stagger" style="margin-top:12px">↔ Stagger tee times</button>';
+    }
+    if (amCommish && !started) h += '<button class="bg-btn bg-btn--full full" id="bkc-rebuild" style="margin-top:8px">🏆 Rebuild Day ' + dn + ' from the bracket</button>';
+    h += '<div class="actions" style="margin-top:12px"><button class="bg-btn bg-btn--ghost bg-btn--full primary full" id="bkc-done">Done</button></div>';
+    body.innerHTML = h;
+    { const x = body.querySelector('#bkc-x'); if (x) x.onclick = () => { _exit(); }; }
+    { const d = body.querySelector('#bkc-done'); if (d) d.onclick = () => { _exit(); }; }
+    body.querySelectorAll('.bkc-tt').forEach(bx => bx.onclick = async () => { try { await t2EditGroupTeeTime(bx.dataset.gid, bx.dataset.cur || ''); } catch (e) {} await render(); });
+    { const sg = body.querySelector('#bkc-stagger'); if (sg) sg.onclick = async () => { try { await t2StaggerTeeTimes(dayId); } catch (e) {} await render(); }; }
+    { const rb = body.querySelector('#bkc-rebuild'); if (rb) rb.onclick = () => { close(); try { openBracketDayBuilder(dn, dayId); } catch (e) {} }; }
+  };
+  await render();
+}
 
 // Standard seeding order for a power-of-two bracket: [1,16,8,9,4,13,5,12,2,15,7,10,3,14,6,11]
 // — #1 and #2 can only meet in the final, the top seeds get the byes.
@@ -66622,7 +66744,7 @@ async function openBracketDayBuilder(dayNumber, dayId) {
   const st = data.st;
   // a day that already has live rounds is never rebuilt
   let gs = []; try { gs = dayId ? await t2GetGroups(dayId) : []; } catch (e) {}
-  if ((gs || []).some(g => g.game_code)) { showToast('Day ' + dn + ' has already started — its carts are locked'); return; }
+  if ((gs || []).some(g => g.game_code)) { showToast('Day ' + dn + ' has already started — its carts are locked'); return openBracketDayCarts(dn, dayId); }   // v1509: was a dead end
   const ties = Object.values(st.m).filter(x => x.status === 'tied');
   const live = Object.values(st.m).filter(x => x.status === 'live');
   const plan = bgBracketPlanDay(t, data.players, st);
@@ -66920,7 +67042,7 @@ function _bgBracketCardHtml(t, data, amCommish, opts) {
     if (st.champion) h += '<div style="font-size:18px;font-weight:800;color:var(--accent);margin:4px 0">🥇 Champion: ' + nm(st.champion) + (st.runnerUp ? ' <span style="font-size:13px;color:var(--text-muted);font-weight:600">· runner-up ' + nm(st.runnerUp) + '</span>' : '') + '</div>';
     else h += '<div class="small-text" style="margin:2px 0">' + finals + ' of ' + real + ' matches decided' + (st.pendingCount ? ' · ' + st.pendingCount + ' in play or ready' : '') + '</div>';
     if (st.consolationChamp) h += '<div class="small-text">🎯 Consolation champion: ' + nm(st.consolationChamp) + '</div>';
-    if ((Number(cfg.entry) || 0) > 0) { const pot = (Number(cfg.entry) || 0) * n; const sp = bgBracketSplit(cfg); h += '<div class="small-text" style="color:var(--text-muted)">Prize pool ' + pot + ' — champion ' + (Math.round(pot * sp[0]) / 100).toFixed(2) + (sp[1] ? ' · runner-up ' + (Math.round(pot * sp[1]) / 100).toFixed(2) : '') + (sp[2] ? ' · consolation winner ' + (Math.round(pot * sp[2]) / 100).toFixed(2) : '') + ((Number(cfg.stake) || 0) > 0 ? ' · ' + cfg.stake + ' a match' : '') + '</div>'; }
+    if ((Number(cfg.entry) || 0) > 0) { const pot = (Number(cfg.entry) || 0) * n; const sp = bgBracketSplit(cfg); const _bkAmt = (v) => { const a = Math.abs(Number(v) || 0); return (Math.abs(a - Math.round(a)) < 0.005) ? String(Math.round(a)) : a.toFixed(2); }; /* v1509 (Tyler): no trailing .00 on a whole-unit share */ h += '<div class="small-text" style="color:var(--text-muted)">Prize pool ' + pot + ' — champion ' + _bkAmt(Math.round(pot * sp[0]) / 100) + (sp[1] ? ' · runner-up ' + _bkAmt(Math.round(pot * sp[1]) / 100) : '') + (sp[2] ? ' · consolation winner ' + _bkAmt(Math.round(pot * sp[2]) / 100) : '') + ((Number(cfg.stake) || 0) > 0 ? ' · ' + cfg.stake + ' a match' : '') + '</div>'; }
     h += _bgBracketTreeHtml(st, pById, { tap: true, commish: amCommish });
     if (amCommish && !o.noControls) {
       h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">';
@@ -67818,6 +67940,7 @@ function openT2Create() {
   const vis = document.getElementById('t2c-visibility'); if (vis) vis.value = 'private';
   const ty = document.getElementById('t2c-type');
   if (ty) { ty.value = 'team'; }
+  const _bm = document.getElementById('t2c-bkmode'); if (_bm) _bm.value = 'consolation';   // v1509
   updateT2CreateType();
   document.getElementById('t2-create-modal').classList.add('show');
   try { bgKeyboardSafe(document.querySelector('#t2-create-modal .modal')); } catch (e) {}
@@ -67854,6 +67977,29 @@ function updateT2CreateType() {
   // v980: the comment on this function said it should also "explain each tournament
   // type as it's picked". That half was missing too, so switching the dropdown did
   // nothing at all on screen.
+  // v1509 (Tyler): "if bracket is picked the days are determined by the number of
+  // players." The Days box is not a question for a bracket - it is one knockout round
+  // per day, and the count falls out of the field size + the elimination style. Hide
+  // the box, keep filling its value (submitT2Create and the draft still read it) and
+  // say in words what the bracket will run.
+  try {
+    const _bk = (val === 'bracket');
+    const _bmRow = document.getElementById('t2c-bkmode-row');
+    if (_bmRow) _bmRow.style.display = _bk ? '' : 'none';
+    const _dF = document.getElementById('t2c-days-field');
+    if (_dF) _dF.style.display = _bk ? 'none' : '';
+    const _bh = document.getElementById('t2c-bkdays-help');
+    if (_bk) {
+      const _nP = parseInt((document.getElementById('t2c-players') || {}).value, 10) || 0;
+      const _md = ((document.getElementById('t2c-bkmode') || {}).value) || 'consolation';
+      const _nd = bgBracketDayCount(_nP, _md);
+      const _dIn = document.getElementById('t2c-days'); if (_dIn) _dIn.value = String(_nd);
+      if (_bh) {
+        _bh.style.display = '';
+        _bh.textContent = (_nP || '—') + ' player' + (_nP === 1 ? '' : 's') + ' → ' + _nd + ' round' + (_nd === 1 ? '' : 's') + ', one per day. The days are set by the size of the field, so there is nothing to enter — each new day is built automatically from the results.';
+      }
+    } else if (_bh) _bh.style.display = 'none';
+  } catch (e) {}
   const h = document.getElementById('t2c-type-help');
   if (h) {
     h.textContent = (val === 'bracket')
@@ -67885,8 +68031,13 @@ async function submitT2Create() {
   const oneday = type === 'oneday';
   const isGroup = type === 'group';
   const hasTeams = type === 'team';
-  const numDays = Math.max(1, Math.min(10, parseInt((document.getElementById('t2c-days') || {}).value, 10) || 1));
   const numPlayers = Math.max(1, Math.min(200, parseInt((document.getElementById('t2c-players') || {}).value, 10) || 0));
+  // v1509: a bracket's day count is the field size, not a typed number (see
+  // bgBracketDayCount). Everything else still reads the Days box.
+  const _bkMode = _isBracket ? (((document.getElementById('t2c-bkmode') || {}).value) || 'consolation') : null;
+  const numDays = _isBracket
+    ? Math.max(1, Math.min(14, bgBracketDayCount(numPlayers, _bkMode)))
+    : Math.max(1, Math.min(10, parseInt((document.getElementById('t2c-days') || {}).value, 10) || 1));
   const isPublic = ((document.getElementById('t2c-visibility') || {}).value === 'public');
   const location = ((document.getElementById('t2c-location') || {}).value || '').trim();
   const startDate = ((document.getElementById('t2c-date') || {}).value || '') || null;
@@ -67914,7 +68065,7 @@ async function submitT2Create() {
   // it carries real dayCourses / playerTees / dayGames, so it still merges.
   try {
     const _basics = { type: type, public: isPublic, location: location, numPlayers: numPlayers };
-    if (_isBracket) _basics.bracket = Object.assign({}, BG_BRACKET_DEFAULTS);
+    if (_isBracket) _basics.bracket = Object.assign({}, BG_BRACKET_DEFAULTS, { mode: _bkMode || 'consolation' });   // v1509: elimination style is picked on the create screen now
     if (_pairCount >= 2) _basics.teamCount = _pairCount;
     if (t._t2Adopted) {
       await t2MergeSettings(t.id, s => { Object.assign(s, _basics); });
@@ -69306,7 +69457,15 @@ async function t2AssignTeamsAndCarts(dayId, dayNumber, byHcp, opts) {
 // Configure Day form and the event home. dayId must already exist (day saved).
 async function openT2Carts(dayNumber, dayId) {
   const t = _t2Current; if (!t) return;
-  if (typeof t2IsBracket === 'function' && t2IsBracket(t)) return openBracketDayBuilder(dayNumber, dayId);   // v1155: bracket days are built from the bracket, not hand-paired
+  // v1155: bracket days are built from the bracket, not hand-paired. v1509 (Tyler:
+  // "I get stuck on this screen and no way to get to the carts screen") - once the day
+  // was built this handed to a builder that refuses with a toast, so a bracket had no
+  // carts screen at all. Built day -> the read-only cart sheet (tee times still edit).
+  if (typeof t2IsBracket === 'function' && t2IsBracket(t)) {
+    if (!dayId) return openBracketDayBuilder(dayNumber, dayId);
+    let _bgs = []; try { _bgs = await t2GetGroups(dayId); } catch (e) {}
+    return (_bgs && _bgs.length) ? openBracketDayCarts(dayNumber, dayId) : openBracketDayBuilder(dayNumber, dayId);
+  }
   if (!dayId) { showToast('Save this day first, then configure carts'); return; }
   const od = t2IsOneDay(t);
   const amCommish = t2CanManage(t);
@@ -72600,6 +72759,15 @@ async function renderT2Home() {
       });
     } catch (e) { return false; }
   })();
+  // v1509: t2StartDay's status write is fire-and-forget, so a dropped request can
+  // leave a fully-launched event on 'draft' - and the row then disagrees with its own
+  // carts everywhere else in the app. Heal it here, from what the carts actually show.
+  try {
+    if (_t2Played && amCommish && t.status !== 'live' && !/complete|completed/.test(String(t.status || ''))) {
+      t.status = 'live'; if (_t2Current && _t2Current.id === t.id) _t2Current.status = 'live';
+      supa.from('tournaments').update({ status: 'live' }).eq('id', t.id).then(function () {}, function () {});
+    }
+  } catch (e) {}
   if (amCommish && (!_t2Played || _t2ForceEdit)) {
    try {
     _t2WizActive = true;
@@ -72751,7 +72919,10 @@ async function renderT2Home() {
       if (_dgN) { const _summ = t2DayGamesSummary(t.settings.dayGames[curDay]); if (_summ) sb += '<div style="margin-top:10px;font-size:13px;color:var(--text-muted)">🎮 ' + t2esc(_summ) + '</div>'; }
     } else if (cur.k === 'carts') {
       const gs = groupsByDay[curDay] || [];
-      sb += '<button class="bg-btn bg-btn--full full" id="t2-wiz-carts" data-dayid="' + t2esc(String(dayId)) + '">🛺 ' + (gs.length ? 'Edit carts & groups' : 'Set up carts & teams') + '</button>';
+      const _bkW = (typeof t2IsBracket === 'function' && t2IsBracket(t));   // v1509
+      sb += '<button class="bg-btn bg-btn--full full" id="t2-wiz-carts" data-dayid="' + t2esc(String(dayId)) + '">'
+        + (_bkW ? (gs.length ? '\uD83D\uDEFA View Day ' + curDay + ' carts' : '\uD83C\uDFC6 Build the bracket day')
+                : ('\uD83D\uDEFA ' + (gs.length ? 'Edit carts & groups' : 'Set up carts & teams'))) + '</button>';
       if (!dayId) sb += '<div class="small-text" style="color:var(--danger);margin-top:8px">Set the date first so the day can be saved.</div>';
       if (gs.length) {
         sb += '<div style="margin-top:12px">' + gs.map(g2 => {
@@ -72763,7 +72934,9 @@ async function renderT2Home() {
       // v1091: same treatment as Scorekeepers — say who is still missing.
       { const _why = _wfWhyBlocked('carts', curDay);
         if (_why) sb += '<div style="margin-top:10px;padding:8px 10px;border-radius:10px;background:rgba(209,67,74,0.10);border:1px solid var(--danger);color:var(--danger);font-size:13px;font-weight:600">⚠️ ' + t2esc(_why) + '</div>'; }
-      sb += '<div class="small-text" style="color:var(--text-muted);margin-top:8px">' + (wNoTeams ? 'Build the foursomes and place everyone in a group.' : 'Build the foursomes and set each group’s teams.') + '</div>';
+      sb += '<div class="small-text" style="color:var(--text-muted);margin-top:8px">'
+        + (_bkW ? 'The bracket builds its own carts \u2014 two matches ride together, and anyone without a match today plays for the side games. Tap above to see them and set tee times.'
+                : (wNoTeams ? 'Build the foursomes and place everyone in a group.' : 'Build the foursomes and set each group\u2019s teams.')) + '</div>';
     } else if (cur.k === 'scorer') {
       const gs = groupsByDay[curDay] || [];
       if (!gs.length) sb += '<div class="help-text">Set up carts & groups first.</div>';
