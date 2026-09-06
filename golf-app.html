@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1504-->
+<!--BGVER=v2026.11.1505-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10129,7 +10129,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1504';
+const BG_BUILD = 'v2026.11.1505';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17229,7 +17229,7 @@ const BG_MERGE_RULES = {
   // --- bespoke, each with its own reason -------------------------------------------
   players:            'custom',  // id-matched merge + removedPlayerIds tombstone
   cellAt:             'custom',  // the recency stamps themselves — max per cell
-  bankerData:         'custom',  // .holes + .picks union AND .bankerOrder filter
+  bankerData:         'custom',  // .holes union; .picks newest STAMP wins (v1505); .bankerOrder filter
   groupGames:         'custom',  // same treatment as `games`, kept beside it
   finishedAt:         'custom',  // once finished, only an explicit reopen clears it
   reopenedAt:         'custom',  // latest wins — gates the finishedAt rule
@@ -17415,7 +17415,7 @@ function bgPurgePlayerFromRound(g, ids, names, opts) {
     try {
       if (g.bankerData) {
         if (Array.isArray(g.bankerData.bankerOrder)) g.bankerData.bankerOrder = fId(g.bankerData.bankerOrder);
-        if (g.bankerData.picks) Object.keys(g.bankerData.picks).forEach(h => { if (hitId(g.bankerData.picks[h])) { try { delete g.bankerData.picks[h]; } catch (e) {} } });
+        if (g.bankerData.picks) Object.keys(g.bankerData.picks).forEach(h => { if (hitId(g.bankerData.picks[h])) { try { delete g.bankerData.picks[h]; } catch (e) {} try { if (g.bankerData.pickAt) delete g.bankerData.pickAt[h]; } catch (e) {} } });
         if (g.bankerData.holes) Object.keys(g.bankerData.holes).forEach(h => { const v = g.bankerData.holes[h]; if (v && typeof v === 'object') idSet.forEach(id => { try { delete v[id]; } catch (e) {} }); });
       }
     } catch (e) {}
@@ -17556,6 +17556,83 @@ function _unionHoleMap(local, parentKey, subKey, cloud) {
     const lmCur = subKey ? (local[parentKey][subKey] || {}) : (local[parentKey] || {});
     const merged = Object.assign({}, cm, lmCur);
     if (subKey) local[parentKey][subKey] = merged; else local[parentKey] = merged;
+  } catch (e) {}
+}
+
+/* v1505 - THE BANKER PICK IS NOT ADDITIVE, IT IS EDITED.
+   `_unionHoleMap` is Object.assign({}, cloud, local): cloud as the base, local
+   wins per hole. That is exactly right for junk / presses / player bets, where
+   each phone contributes its OWN entries and nothing is ever taken back. It is
+   wrong for `picks`, where a hole holds ONE value that people change their mind
+   about, and it fails in two directions at once:
+
+     - a phone still holding the OLD banker writes it straight back over the new
+       one on its very next save - a score, a press, anything at all - so a
+       change is reverted by a phone that was not even involved in making it.
+       The picker looks like it "won't take"; tap it again and the next save
+       from the other phone undoes it again; and
+
+     - "Change pick" is `delete picks[h]`, and a union can never carry a DELETE.
+       The cloud's old value is re-added on the very next merge, so CLEARING a
+       pick is structurally impossible across devices.
+
+   Same shape as v1161 / v1223 / v1499 / v1500 / v1502: a merge rule written for
+   ADDITION applied to a field that gets EDITED. Worth naming precisely, because
+   BG_MERGE_RULES did not catch this one and could not have - `bankerData` is
+   classified `custom`, so the guard saw a deliberate decision and passed it. The
+   guard asks whether a key HAS a rule. It cannot ask whether the rule is RIGHT.
+
+   Fix: give the pick recency, the same way v1497 gave the score cells recency.
+   Every pick is stamped with when it was made and who it named -
+   `bankerData.pickAt[h] = { at, pid }`, with `pid: null` meaning deliberately
+   cleared - and the newest stamp wins. The stamp carries the pid so that a stamp
+   which no longer describes its own side's pick (an older build overwrote the
+   value and left the stamp behind) is treated as ABSENT rather than trusted,
+   which is what lets a mixed fleet heal itself instead of deadlocking.
+
+   With no stamp on either side the old local-wins behaviour is reproduced
+   exactly, so rounds already in flight on older builds are not surprised by
+   this - the same principle v1503 was built on. */
+function _bgStampBankerPick(g, h, pid) {
+  try {
+    if (!g.bankerData) g.bankerData = { holes: {}, picks: {} };
+    if (!g.bankerData.pickAt) g.bankerData.pickAt = {};
+    g.bankerData.pickAt[h] = { at: Date.now(), pid: (pid == null ? null : pid) };
+  } catch (e) {}
+}
+function _bgMergeBankerPicks(local, cloud) {
+  try {
+    const cb = cloud.bankerData; if (!cb) return;
+    const cm = (cb.picks && typeof cb.picks === 'object') ? cb.picks : null;
+    if (!cm) return;
+    if (!local.bankerData) local.bankerData = {};
+    const lb = local.bankerData;
+    const lm = (lb.picks && typeof lb.picks === 'object') ? lb.picks : {};
+    const ls = (lb.pickAt && typeof lb.pickAt === 'object') ? lb.pickAt : {};
+    const cs = (cb.pickAt && typeof cb.pickAt === 'object') ? cb.pickAt : {};
+    // A stamp counts only while it still describes its own side's pick.
+    const trust = (stamps, map, h) => {
+      const e = stamps[h];
+      if (!e || typeof e !== 'object' || !(e.at > 0)) return null;
+      const want = (e.pid == null) ? undefined : e.pid;
+      return (map[h] === want) ? e : null;
+    };
+    const holes = {};
+    [cm, lm, cs, ls].forEach(o => { try { Object.keys(o).forEach(h => { holes[h] = 1; }); } catch (e) {} });
+    const picks = {}, pickAt = {};
+    Object.keys(holes).forEach(h => {
+      const a = trust(ls, lm, h), b = trust(cs, cm, h);
+      let mine;
+      if (a && b) mine = (b.at > a.at) ? false : true;   // tie -> local, as before
+      else if (a) mine = true;
+      else if (b) mine = false;
+      else mine = (lm[h] !== undefined);                 // unstamped -> legacy local-wins
+      const map = mine ? lm : cm, st = mine ? a : b;
+      if (map[h] !== undefined) picks[h] = map[h];
+      if (st) pickAt[h] = st;
+    });
+    lb.picks = picks;
+    if (Object.keys(pickAt).length) lb.pickAt = pickAt;
   } catch (e) {}
 }
 /* ===== v1500 - THE MERGE-LIST AUDIT ========================================
@@ -17727,7 +17804,7 @@ async function _mergeGameForWrite(local, opts) {
     } catch (e) { _rmPids = null; }
     _mergeGameArrays(local, cloud, opts);
     _unionHoleMap(local, 'bankerData', 'holes', cloud);
-    _unionHoleMap(local, 'bankerData', 'picks', cloud);
+    _bgMergeBankerPicks(local, cloud);                 // v1505: picks are EDITED, not added
     // (wolfData / hammerData / junkData / sipManual now come off the registry below)
     // v1033 (Tyler, 8/15): these three were missing from the recovery whitelist, so a
     // client that locally blanked them (see the off-reset bug fixed in
@@ -38852,6 +38929,7 @@ function renderGameBanners() {
       pickList.querySelectorAll('[data-pick]').forEach(btn => {
         btn.onclick = async () => {
           g.bankerData.picks[h] = btn.dataset.pick;
+          _bgStampBankerPick(g, h, btn.dataset.pick);   // v1505: newest pick wins the merge
           await saveGame(g);
           renderGameBanners();
         };
@@ -38860,6 +38938,7 @@ function renderGameBanners() {
       if ($('banker-clear-pick')) {
         $('banker-clear-pick').onclick = async () => {
           delete g.bankerData.picks[h];
+          _bgStampBankerPick(g, h, null);               // v1505: null = deliberately cleared
           await saveGame(g);
           renderGameBanners();
         };
