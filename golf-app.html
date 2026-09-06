@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1496-->
+<!--BGVER=v2026.11.1497-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10129,7 +10129,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1496';
+const BG_BUILD = 'v2026.11.1497';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17220,11 +17220,195 @@ function _markScoreTouched(field, pid, holeIdx) {
   try {
     const s = _touchStore(); if (!s[field]) s[field] = {}; if (!s[field][pid]) s[field][pid] = new Set(); s[field][pid].add(holeIdx);
     try { _bgTouchPersist(s); } catch (e) {}
+    // v1497: stamp WHEN the edit happened into the round blob as well. The touch
+    // set above is device-local and timeless, which is what let one phone's stale
+    // cell beat another phone's newer one for the rest of the round.
+    try { if (state && state.game && state.game.code === s.code) _bgStampCell(state.game, field, pid, holeIdx); } catch (e) {}
   } catch (e) {}
 }
 function _isTouched(s, field, pid, holeIdx) {
   return !!(s && s[field] && s[field][pid] && s[field][pid].has(holeIdx));
 }
+/* ===== v1497 - ONE purge path for "he is not in this round" ==================
+   Tyler, 2026-09-06 (Senior Sunday): "Josh said he was playing but never showed
+   up. I removed him from the main game after the round had started. It showed he
+   was removed on my screen but never took. He's in all our best and stayed on
+   Gregory's card. Gregory put in doubles and triples for him for every hole just
+   to get past it."
+
+   He WAS removed - from tournament_players, which is the only thing
+   t2RemovePlayer has ever touched. The live card his cart was scoring still
+   carried him, so Gregory had to invent 18 scores, and the field Birdie Bump
+   settled a SEVEN-man pool instead of six: every birdie paid $10 too much and a
+   man who never left his house "owed" $90.
+
+   Three removal paths existed and not one of them cleaned a started round the
+   same way as the others:
+     - tournament   t2RemovePlayer       roster rows only. No round, at all.
+     - league       lgRemove             the RPC only. No round, at all.
+     - plain round  applyLiveEditMerge   the round, but 7 of the ~15 places a
+                                         player's id or NAME is written - and the
+                                         field engines read the names.
+   All three now go through bgPurgePlayerFromRound. Whatever it forgets, they all
+   forget together, which is the whole point of there being one of them.        */
+const BG_PLAYER_BLOBS = ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData', 'sipManual'];
+function _bgPurgeKey(s) {
+  try { return (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').trim().toLowerCase(); }
+  catch (e) { return String(s || '').trim().toLowerCase(); }
+}
+// Holes this player actually has a score on - the number the confirm dialog
+// quotes back before anything is deleted.
+function bgPlayerScoreCount(g, id) {
+  try {
+    const a = g && g.scores && g.scores[id];
+    if (!Array.isArray(a)) return 0;
+    let n = 0; for (let i = 0; i < a.length; i++) if (a[i] != null) n++; return n;
+  } catch (e) { return 0; }
+}
+function bgPurgePlayerFromRound(g, ids, names, opts) {
+  try {
+    if (!g) return false;
+    const idSet = new Set((Array.isArray(ids) ? ids : (ids ? [ids] : [])).filter(Boolean).map(String));
+    const nmSet = new Set((Array.isArray(names) ? names : (names ? [names] : [])).map(_bgPurgeKey).filter(Boolean));
+    // Resolve across all three identities a round knows a person by: its own
+    // per-round id, the tournament player id (t2pid) and the account id (uid).
+    // The tournament path only HAS the t2pid; the league path only has the name.
+    if (Array.isArray(g.players)) g.players.forEach(p => {
+      if (!p || !p.id) return;
+      if (nmSet.has(_bgPurgeKey(p.name)) || idSet.has(String(p.t2pid)) || idSet.has(String(p.uid))) idSet.add(String(p.id));
+    });
+    if (Array.isArray(g.players)) g.players.forEach(p => { if (p && idSet.has(String(p.id)) && p.name) nmSet.add(_bgPurgeKey(p.name)); });
+    if (!idSet.size && !nmSet.size) return false;
+    const hitId = v => idSet.has(String(v));
+    const hitNm = v => nmSet.has(_bgPurgeKey(v));
+    const fId = a => Array.isArray(a) ? a.filter(x => !hitId(x)) : a;
+    const fNm = a => Array.isArray(a) ? a.filter(x => !hitNm(x)) : a;
+
+    if (Array.isArray(g.players)) g.players = g.players.filter(p => p && !hitId(p.id));
+    // TOMBSTONE, by id AND by name. _mergeGameForWrite honours both, so a second
+    // phone still holding him - or a stale cloud copy - can never hand him back.
+    g.removedPlayerIds = Array.from(new Set([].concat(Array.isArray(g.removedPlayerIds) ? g.removedPlayerIds : [], Array.from(idSet))));
+    g.removedPlayerNames = Array.from(new Set([].concat(Array.isArray(g.removedPlayerNames) ? g.removedPlayerNames : [], Array.from(nmSet))));
+
+    BG_PLAYER_BLOBS.forEach(k => { if (g[k] && typeof g[k] === 'object') idSet.forEach(id => { try { delete g[k][id]; } catch (e) {} }); });
+    try { if (g.cellAt && typeof g.cellAt === 'object') Object.keys(g.cellAt).forEach(f => { const m = g.cellAt[f]; if (m) idSet.forEach(id => { try { delete m[id]; } catch (e) {} }); }); } catch (e) {}
+
+    // Every game config, in BOTH buckets. `participants` are ids, but
+    // `participantNames` / `fieldNames` are NAMES - and the field-wide engines
+    // (t2ComputeFieldBirdiePool, t2ComputeFieldSidePots) read the names, because
+    // they pool players across carts where the per-round ids do not line up.
+    // Leaving the names behind is precisely what kept Josh in the Birdie Bump
+    // after his roster row was gone.
+    [g.games, g.groupGames].forEach(bucket => {
+      if (!bucket || typeof bucket !== 'object') return;
+      Object.keys(bucket).forEach(gk => {
+        const cfg = bucket[gk]; if (!cfg || typeof cfg !== 'object') return;
+        if (Array.isArray(cfg.participants))     cfg.participants     = fId(cfg.participants);
+        if (Array.isArray(cfg.players))          cfg.players          = fNm(cfg.players);
+        if (Array.isArray(cfg.participantNames)) cfg.participantNames = fNm(cfg.participantNames);
+        if (Array.isArray(cfg.fieldNames))       cfg.fieldNames       = fNm(cfg.fieldNames);
+        if (Array.isArray(cfg.instances)) cfg.instances.forEach(inst => {
+          if (!inst || typeof inst !== 'object') return;
+          if (Array.isArray(inst.participants))     inst.participants     = fId(inst.participants);
+          if (Array.isArray(inst.participantNames)) inst.participantNames = fNm(inst.participantNames);
+        });
+        ['pair', 'teamA', 'teamB', 'sides'].forEach(kk => { if (Array.isArray(cfg[kk])) cfg[kk] = fId(cfg[kk]); });
+      });
+    });
+
+    try {
+      if (g.bankerData) {
+        if (Array.isArray(g.bankerData.bankerOrder)) g.bankerData.bankerOrder = fId(g.bankerData.bankerOrder);
+        if (g.bankerData.picks) Object.keys(g.bankerData.picks).forEach(h => { if (hitId(g.bankerData.picks[h])) { try { delete g.bankerData.picks[h]; } catch (e) {} } });
+        if (g.bankerData.holes) Object.keys(g.bankerData.holes).forEach(h => { const v = g.bankerData.holes[h]; if (v && typeof v === 'object') idSet.forEach(id => { try { delete v[id]; } catch (e) {} }); });
+      }
+    } catch (e) {}
+    ['wolfData', 'hammerData'].forEach(k => {
+      try {
+        const hs = g[k] && g[k].holes; if (!hs || typeof hs !== 'object') return;
+        Object.keys(hs).forEach(h => { const v = hs[h]; if (v && typeof v === 'object') idSet.forEach(id => { try { delete v[id]; } catch (e) {} }); });
+      } catch (e) {}
+    });
+    ['junkData', 'p3greenieData', 'ctpData'].forEach(k => {
+      try {
+        const m = g[k]; if (!m || typeof m !== 'object') return;
+        Object.keys(m).forEach(h => { const v = m[h]; if (v && typeof v === 'object') idSet.forEach(id => { try { delete v[id]; } catch (e) {} }); });
+      } catch (e) {}
+    });
+    try { if (g.longPuttData && hitId(g.longPuttData.pid)) g.longPuttData = null; } catch (e) {}
+    try { if (g.settledMoney && g.settledMoney.net) idSet.forEach(id => { try { delete g.settledMoney.net[id]; } catch (e) {} }); } catch (e) {}
+    try { if (Array.isArray(g.acceptedBy)) g.acceptedBy = fNm(g.acceptedBy); } catch (e) {}
+    try { if (Array.isArray(g.consentReq)) g.consentReq = fNm(g.consentReq); } catch (e) {}
+    // The league's launch-time roster stamp, frozen since v1297 and never re-read.
+    try { if (g.lg && Array.isArray(g.lg.members)) g.lg.members = g.lg.members.filter(m => !(m && (hitId(m.id) || hitNm(m.name) || hitNm(m)))); } catch (e) {}
+    // Only a deliberate removal claims the 60s config-wins window. The merge path
+    // calls this too, and must NOT pretend the user just edited settings.
+    if (opts && opts.userInitiated) { try { state._configEditedAt = Date.now(); } catch (e) {} }
+    return true;
+  } catch (e) { console.warn('bgPurgePlayerFromRound', e); return false; }
+}
+// Same thing for a round that is NOT on screen - the tournament and league
+// removals both run from a settings screen, which is why neither of them ever
+// touched the card.
+async function bgPurgePlayerFromRoundCode(code, ids, names) {
+  try {
+    if (!code) return false;
+    let g = null, live = false;
+    try { if (state.game && state.game.code === code) { g = state.game; live = true; } } catch (e) {}
+    if (!g) { try { g = await loadGame(code); } catch (e) { g = null; } }
+    if (!g || !Array.isArray(g.players)) return false;
+    if (!bgPurgePlayerFromRound(g, ids, names, { userInitiated: true })) return false;
+    try { await saveGame(g); } catch (e) {}
+    if (live) { try { renderScoreEntry(); } catch (e) {} }
+    return true;
+  } catch (e) { console.warn('bgPurgePlayerFromRoundCode', e); return false; }
+}
+try { window.bgPurgePlayerFromRound = bgPurgePlayerFromRound; } catch (e) {}
+
+/* ===== v1497 - PER-CELL EDIT STAMPS =========================================
+   Tyler + Frank, 2026-09-06: Matt Irvine's holes 8/13/14/17 kept disappearing
+   and reappearing all morning. Matt was scoring on his own phone while Tyler
+   scored the whole group on his.
+
+   The per-cell "touch" registry (_markScoreTouched / _isTouched) has no sense of
+   TIME. It only records "this device typed in this cell at some point", and a
+   touched cell then beat the cloud unconditionally and permanently - the set is
+   even mirrored into localStorage, so it survives a reload. The FIRST device to
+   touch a cell owned it for the rest of the round. Once Tyler's phone held a
+   null for one of Matt's holes, every save it made wrote that null back over
+   Matt's real score; Matt's phone wrote the score back; the hole flapped in and
+   out depending on who saved last. That is exactly what Frank saw when he got
+   back on the app and "they were there".
+
+   g.cellAt records WHEN each cell was edited, per field/player/hole, and rides
+   along in the round blob so both phones can see whose edit is newer. Newest
+   stamp wins. A round from before this build carries no stamps at all and falls
+   straight through to the old touched-wins rule, unchanged.                     */
+function _bgCellStamps(g, field, pid) {
+  try { const m = g && g.cellAt && g.cellAt[field]; const a = m && m[pid]; return Array.isArray(a) ? a : null; } catch (e) { return null; }
+}
+function _bgStampCell(g, field, pid, i) {
+  try {
+    if (!g || !pid || !(i >= 0)) return;
+    if (!g.cellAt) g.cellAt = {};
+    if (!g.cellAt[field]) g.cellAt[field] = {};
+    if (!Array.isArray(g.cellAt[field][pid])) g.cellAt[field][pid] = [];
+    g.cellAt[field][pid][i] = Date.now();
+  } catch (e) {}
+}
+// Carry the newest stamp per cell onto the row we are about to write, so the
+// NEXT phone to read it also knows which edit is the latest.
+function _bgAdoptCellStamps(local, cloud, field, pid) {
+  try {
+    const c = _bgCellStamps(cloud, field, pid); if (!c) return;
+    if (!local.cellAt) local.cellAt = {};
+    if (!local.cellAt[field]) local.cellAt[field] = {};
+    if (!Array.isArray(local.cellAt[field][pid])) local.cellAt[field][pid] = [];
+    const l = local.cellAt[field][pid];
+    for (let i = 0; i < c.length; i++) { if (c[i] != null && !(l[i] > c[i])) l[i] = c[i]; }
+  } catch (e) {}
+}
+
 // Fold cloud cells THIS device didn't touch into `local` (mutates + returns local).
 // opts.authoritative = { field: [pid,...] } marks (field,player) arrays this device
 // just intentionally rewrote wholesale — e.g. "Clear my fairway data" — so the cloud's
@@ -17249,10 +17433,16 @@ function _mergeGameArrays(local, cloud, opts) {
       const cArr = cc[pid]; if (!Array.isArray(cArr)) return;
       // Authoritative wholesale write for this player's field → keep local as-is.
       if (isAuth(field, pid) && Array.isArray(lf[pid])) return;
-      if (!Array.isArray(lf[pid])) { lf[pid] = cArr.slice(); return; }
+      if (!Array.isArray(lf[pid])) { lf[pid] = cArr.slice(); _bgAdoptCellStamps(local, cloud, field, pid); return; }
+      // v1497: newest EDIT wins, not "whoever touched it first, forever".
+      // See the _bgCellStamps comment block - this is the Matt Irvine defect.
+      const lAt = _bgCellStamps(local, field, pid), cAt = _bgCellStamps(cloud, field, pid);
       for (let i = 0; i < cArr.length; i++) {
-        if (!_isTouched(touch, field, pid, i)) lf[pid][i] = cArr[i];
+        const ls = lAt ? lAt[i] : null, cs = cAt ? cAt[i] : null;
+        if (ls != null || cs != null) { if ((cs || 0) > (ls || 0)) lf[pid][i] = cArr[i]; continue; }
+        if (!_isTouched(touch, field, pid, i)) lf[pid][i] = cArr[i];   // pre-v1497 round: unchanged
       }
+      _bgAdoptCellStamps(local, cloud, field, pid);
     });
   });
   return local;
@@ -17351,8 +17541,15 @@ async function _mergeGameForWrite(local, opts) {
                                    Array.isArray(cloud.removedPlayerIds) ? cloud.removedPlayerIds : []));
       if (_s.size) {
         _rmPids = _s;
-        local.removedPlayerIds = Array.from(_s);
-        if (Array.isArray(local.players)) local.players = local.players.filter(p => p && !_s.has(p.id));
+        // v1497: this was players-only. Every OTHER place the removed player's id
+        // or NAME is written - the per-hole blobs, each game's participants AND
+        // participantNames / fieldNames, banker / wolf / hammer / junk, acceptedBy,
+        // consentReq - survived here and was then union'd straight back out of the
+        // cloud copy a few lines below. Purge BOTH sides through the one helper.
+        const _rmNames = [].concat(Array.isArray(local.removedPlayerNames) ? local.removedPlayerNames : [],
+                                   Array.isArray(cloud.removedPlayerNames) ? cloud.removedPlayerNames : []);
+        try { bgPurgePlayerFromRound(local, Array.from(_s), _rmNames); } catch (e) {}
+        try { bgPurgePlayerFromRound(cloud, Array.from(_s), _rmNames); } catch (e) {}
       }
     } catch (e) { _rmPids = null; }
     _mergeGameArrays(local, cloud, opts);
@@ -63489,6 +63686,29 @@ async function lgVoidLaunchedRounds(sid) {
   return await _bgVoidRoundRows(_r.data, 'league');
 }
 
+/* v1497: the league had the identical hole the tournament did. lgRemove called
+   league_remove_member and stopped there, so a member taken off mid-week stayed on
+   the live card, in every game's participant list, and in g.lg.members - the roster
+   snapshot frozen at launch in v1297 and never re-read by anything since. Same
+   shape as lgVoidLaunchedRounds above: find the season's launched rounds by the
+   stamp, and purge the one person out of the ones that have NOT finished. A
+   finished week is settled history and is left exactly as it stands. */
+async function lgPurgeMemberFromLiveRounds(sid, name) {
+  try {
+    if (!sid || !name || !supa) return 0;
+    const _r = await supa.from('games').select('code,data').eq('data->lg->>sid', sid);
+    if (_r.error || !Array.isArray(_r.data)) return 0;
+    let n = 0;
+    for (const row of _r.data) {
+      const d = row && row.data;
+      if (!d || d.finishedAt || !Array.isArray(d.players)) continue;
+      if (!d.players.some(p => p && _bgPurgeKey(p.name) === _bgPurgeKey(name))) continue;
+      if (await bgPurgePlayerFromRoundCode(row.code, [], [name])) n++;
+    }
+    return n;
+  } catch (e) { console.warn('lgPurgeMemberFromLiveRounds', e); return 0; }
+}
+
 // ---- players / teams ----
 // Notify a linked Bad Golf account that they've just been added to a tournament —
 // pops the invite modal (subscribeToInvites) + queues for their next launch
@@ -63717,8 +63937,79 @@ async function t2FlushHcpInputs() {
     try { const v = inp.value; await t2SetPlayerHcp(inp.dataset.pid, v !== '' ? parseFloat(v) : null); } catch (e) {}
   }
 }
+/* v1497: an event's OWN settings kept the removed player too - his tee, his slot
+   in every day-game's participant list, and the numPlayers the prize pools size
+   themselves from. t2RemovePlayer never opened them, so Josh Varnado was still
+   listed in settings.dayGames[1].birdiePool.participantNames after his roster row
+   was deleted, and settings.numPlayers still said 7. */
+async function t2PurgePlayerFromSettings(tid, tpid, name) {
+  if (!tid) return false;
+  const nk = _bgPurgeKey(name);
+  const scrub = cfg => {
+    if (!cfg || typeof cfg !== 'object') return;
+    // participants[] and participantNames[] are POSITIONALLY paired on a day game
+    // (the names are real, the ids are setup-screen pseudo ids), so drop the pair
+    // by index or the two lists silently fall out of step.
+    let i = -1;
+    if (Array.isArray(cfg.participantNames) && nk) i = cfg.participantNames.findIndex(x => _bgPurgeKey(x) === nk);
+    if (i >= 0) {
+      cfg.participantNames.splice(i, 1);
+      if (Array.isArray(cfg.participants) && cfg.participants.length > i) cfg.participants.splice(i, 1);
+    }
+    if (Array.isArray(cfg.players))    cfg.players    = cfg.players.filter(x => _bgPurgeKey(x) !== nk);
+    if (Array.isArray(cfg.fieldNames)) cfg.fieldNames = cfg.fieldNames.filter(x => _bgPurgeKey(x) !== nk);
+    if (Array.isArray(cfg.participants) && tpid) cfg.participants = cfg.participants.filter(x => x !== tpid);
+  };
+  return await t2MergeSettings(tid, s => {
+    try { if (s.playerTees && tpid) Object.keys(s.playerTees).forEach(cid => { try { delete s.playerTees[cid][tpid]; } catch (e) {} }); } catch (e) {}
+    try { if (Array.isArray(s.withdrawn) && tpid) s.withdrawn = s.withdrawn.filter(x => x !== tpid); } catch (e) {}
+    try { if (s.dayGames) Object.keys(s.dayGames).forEach(d => { const dg = s.dayGames[d]; if (dg && typeof dg === 'object') Object.keys(dg).forEach(k => scrub(dg[k])); }); } catch (e) {}
+    try { ['tourneySkins', 'tourneyLongPutt'].forEach(k => scrub(s[k])); } catch (e) {}
+    try { if (s.tourneySidePots) Object.keys(s.tourneySidePots).forEach(k => scrub(s.tourneySidePots[k])); } catch (e) {}
+    try { if (s.numPlayers != null && Number(s.numPlayers) > 0) s.numPlayers = Number(s.numPlayers) - 1; } catch (e) {}
+  });
+}
 async function t2RemovePlayer(playerId) {
   try {
+    /* v1497 (Tyler, 9/6) - THE BUG THIS WHOLE BUILD IS ABOUT. Everything below
+       this comment used to be the entire function: it deleted two roster rows and
+       reported success. It never opened the round his cart was already scoring, so
+       "removed" was true of the event and false of the card, which is exactly what
+       Tyler saw. Capture the group's game codes and his name BEFORE the delete -
+       once the child rows are gone there is nothing left to look either up by. */
+    let _codes = [], _name = '', _tid = '';
+    try {
+      const { data: _p } = await supa.from('tournament_players').select('display_name, tournament_id').eq('id', playerId).maybeSingle();
+      if (_p) { _name = _p.display_name || ''; _tid = _p.tournament_id || ''; }
+    } catch (e) {}
+    try {
+      const { data: _mem } = await supa.from('tournament_group_members').select('group_id').eq('tournament_player_id', playerId);
+      const _gids = (_mem || []).map(m => m.group_id).filter(Boolean);
+      if (_gids.length) {
+        const { data: _grps } = await supa.from('tournament_groups').select('id, game_code').in('id', _gids);
+        _codes = (_grps || []).map(x => x.game_code).filter(Boolean);
+      }
+    } catch (e) {}
+    /* Never bin a card that has real scores on it without saying so. Gregory had
+       eighteen holes of invented doubles on Josh's line by the time anyone noticed;
+       a scorer deserves to be told what is about to be deleted and re-settled. */
+    try {
+      let _holes = 0;
+      for (const _c of _codes) {
+        let _g = null;
+        try { _g = (state.game && state.game.code === _c) ? state.game : await loadGame(_c); } catch (e) { _g = null; }
+        if (!_g || !Array.isArray(_g.players)) continue;
+        const _pp = _g.players.find(x => x && (x.t2pid === playerId || (_name && _bgPurgeKey(x.name) === _bgPurgeKey(_name))));
+        if (_pp) _holes = Math.max(_holes, bgPlayerScoreCount(_g, _pp.id));
+      }
+      if (_holes > 0 && typeof uiConfirm === 'function') {
+        const _go = await uiConfirm((_name || 'That player') + ' already has ' + _holes + ' hole' + (_holes === 1 ? '' : 's') +
+          ' scored in the live round.\n\nRemoving them deletes those scores and re-settles every game without them.',
+          { title: 'Remove anyway?', okLabel: 'Remove', cancelLabel: 'Keep', danger: true });
+        if (!_go) { try { window._bgRemoveCancelled = true; } catch (e) {} return false; }
+      }
+    } catch (e) {}
+    try { window._bgRemoveCancelled = false; } catch (e) {}
     // The plain delete "did nothing" when the player sat in a cart group: the
     // tournament_group_members FK blocked the delete (error swallowed) so the ×
     // button looked dead. Clear the child rows first, then delete + VERIFY the
@@ -63735,6 +64026,10 @@ async function t2RemovePlayer(playerId) {
     const _v = await _bgRead(() => supa.from('tournament_players').select('id').eq('id', playerId).maybeSingle(), 't2RemovePlayer:verify');
     if (!_v.ok) return false;     // could not check -> do not report success
     if (_v.data) return false;    // still there -> the delete matched zero rows
+    // v1497: and NOW take him off every card his cart already launched, and out of
+    // the event's own settings. Neither was touched before this build.
+    try { for (const _c of _codes) await bgPurgePlayerFromRoundCode(_c, [playerId], _name ? [_name] : []); } catch (e) {}
+    try { await t2PurgePlayerFromSettings(_tid, playerId, _name); } catch (e) {}
     return true;
   }
   catch (e) { return false; }
@@ -69177,7 +69472,7 @@ async function openT2HcpEditor(t) {
         inp.onchange = () => { _pending[inp.dataset.pid] = inp.value; clearTimeout(_tm); _save(); };
       });
       list.querySelectorAll('.t2he-step').forEach(b => b.onclick = () => { try { const wrap = b.parentNode; const inp = wrap && wrap.querySelector('.t2he-input'); if (!inp) return; let v = parseFloat(inp.value); if (!isFinite(v)) v = 0; v = Math.max(-9, Math.min(54, v + (b.dataset.dir === '-1' ? -1 : 1))); inp.value = String(v); inp.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {} });
-      list.querySelectorAll('.t2he-rm').forEach(b => b.onclick = async () => { if (!(await uiConfirm('Remove ' + (b.dataset.nm || 'this player') + ' from the event?', { title: 'Remove player?', okLabel: 'Remove', cancelLabel: 'Cancel', danger: true }))) return; b.disabled = true; let _ok = false; try { _ok = await t2RemovePlayer(b.dataset.pid); } catch (e) {} showToast(_ok ? 'Player removed \u2713' : 'Couldn\u2019t remove \u2014 try again'); await renderList(); });
+      list.querySelectorAll('.t2he-rm').forEach(b => b.onclick = async () => { if (!(await uiConfirm('Remove ' + (b.dataset.nm || 'this player') + ' from the event?', { title: 'Remove player?', okLabel: 'Remove', cancelLabel: 'Cancel', danger: true }))) return; b.disabled = true; let _ok = false; try { _ok = await t2RemovePlayer(b.dataset.pid); } catch (e) {} showToast(_ok ? 'Player removed \u2713' : (window._bgRemoveCancelled ? 'Kept on the card' : 'Couldn\u2019t remove \u2014 try again')); await renderList(); });
     }
   }
   await renderList();
@@ -71959,7 +72254,7 @@ async function renderT2Home() {
         if (!_ok) showToast('Could not move that player — check your connection');
         await renderT2Home();
       });
-      body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { const _ok = await t2RemovePlayer(b.dataset.pid); if (!_ok) showToast('Could not remove that player — they may be locked to a started group'); await renderT2Home(); });   // v986 (T47)
+      body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { const _ok = await t2RemovePlayer(b.dataset.pid); if (!_ok && !window._bgRemoveCancelled) showToast('Could not remove that player — they may be locked to a started group'); await renderT2Home(); });   // v986 (T47)
       body.querySelectorAll('.t2-wd-btn').forEach(b => b.onclick = () => t2ToggleWithdraw(b.dataset.pid));   // v986 (T38)
       body.querySelectorAll('.t2-fill-slot').forEach(b => b.onclick = () => t2FillSlotPrompt(b.dataset.pid));
       body.querySelectorAll('.t2-invite-btn').forEach(b => b.onclick = () => bgShareSlotInvite(b));   // v1336: was bound only on the event home
@@ -72561,7 +72856,7 @@ async function renderT2Home() {
       if (!_ok) showToast('Could not change that pairing — check your connection');
       await renderT2Home();
     });   // v986 (T47)
-    body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { const _ok = await t2RemovePlayer(b.dataset.pid); if (!_ok) showToast('Could not remove that player — they may be locked to a started group'); await renderT2Home(); });   // v986 (T47)
+    body.querySelectorAll('.t2-remove-btn').forEach(b => b.onclick = async () => { const _ok = await t2RemovePlayer(b.dataset.pid); if (!_ok && !window._bgRemoveCancelled) showToast('Could not remove that player — they may be locked to a started group'); await renderT2Home(); });   // v986 (T47)
     body.querySelectorAll('.t2-fill-slot').forEach(b => b.onclick = () => t2FillSlotPrompt(b.dataset.pid));
   body.querySelectorAll('.t2-wd-btn').forEach(b => b.onclick = () => t2ToggleWithdraw(b.dataset.pid));
     // Inline handicap edits — AUTO-SAVE as you type (debounced ~0.7s) AND on blur,
@@ -83362,7 +83657,14 @@ async function lgRemove(mid, expectStatus, name) {
   if (!res || res.error) {
     try { console.warn('league_remove_member failed:', res && res.error); } catch (e) {}
     try { showToast(lgErrText(res && res.error, 'Couldn’t remove them')); } catch (e) {}
-  } else { try { showToast(name + ' removed'); } catch (e) {} }
+  } else {
+    try { showToast(name + ' removed'); } catch (e) {}
+    // v1497: and off any round this season has already launched and not finished.
+    try {
+      const _n = await lgPurgeMemberFromLiveRounds(window._lgSeason, name);
+      if (_n) showToast('Also taken off ' + _n + ' live round' + (_n === 1 ? '' : 's'));
+    } catch (e) {}
+  }
   try { lgOpenSettings(window._lgSeason); } catch (e) {}
 }
 
@@ -85339,6 +85641,7 @@ async function _rosterLgRemove(name) {
       try { showToast(lgErrText(res && res.error, 'Couldn’t take ' + name + ' off')); } catch (e) {}
       return false;
     }
+    try { await lgPurgeMemberFromLiveRounds(_rosterLgSid, name); } catch (e) {}   // v1497
     return true;
   } finally { _rosterLgBusy = false; }
 }
@@ -92063,14 +92366,11 @@ function applyLiveEditMerge(g, setup) {
     if (_explicit && _explicit.size && Array.isArray(g.players)) {
       const _rm = g.players.filter(p => { const k = _bgNameKey(p && p.name); return k && _explicit.has(k) && !_keep.has(k); });
       if (_rm.length) {
-        const _ids = new Set(_rm.map(p => p.id).filter(Boolean));
-        g.players = g.players.filter(p => p && !_ids.has(p.id));
-        g.removedPlayerIds = Array.from(new Set([].concat(Array.isArray(g.removedPlayerIds) ? g.removedPlayerIds : [], Array.from(_ids))));
-        ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData', 'sipManual'].forEach(k => {
-          if (g[k]) _ids.forEach(id => { try { delete g[k][id]; } catch (e) {} });
-        });
-        try { Object.keys(g.games || {}).forEach(gk => { const gv = g.games[gk]; if (gv && Array.isArray(gv.participants)) gv.participants = gv.participants.filter(id => !_ids.has(id)); }); } catch (e) {}
-        try { if (g.bankerData && Array.isArray(g.bankerData.bankerOrder)) g.bankerData.bankerOrder = g.bankerData.bankerOrder.filter(id => !_ids.has(id)); } catch (e) {}
+        // v1497: was seven keys, inline, and it missed participantNames and
+        // fieldNames - the two the field-wide money engines actually read. Now the
+        // one shared purge, the same code the tournament and league removals run,
+        // so a player comes off a round identically whichever screen you did it on.
+        bgPurgePlayerFromRound(g, _rm.map(p => p.id).filter(Boolean), _rm.map(p => p.name), { userInitiated: true });
         // v1035: consume the marks so a later auto-save can't re-run this prune
         // against a player who has already gone (or one re-added since).
         try { _rm.forEach(p => _explicit.delete(_bgNameKey(p.name))); } catch (e) {}
