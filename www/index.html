@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1522-->
+<!--BGVER=v2026.11.1523-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10176,7 +10176,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1522';
+const BG_BUILD = 'v2026.11.1523';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -39242,10 +39242,10 @@ function renderGameBanners() {
           row.innerHTML = `
             <div style="flex:1;min-width:90px;font-size:13px">
               <strong>${displayFirst(p)}</strong>
-              <div class="small-text" style="font-size:11px">${statusText}</div>
+              <div class="small-text banker-pbet-status" data-pid="${p.id}" style="font-size:11px">${statusText}</div>
             </div>
             <span class="small-text">u</span>
-            <input type="number" class="banker-pbet-input" data-pid="${p.id}" value="${hasBet ? playerBet : ''}" placeholder="—" min="0" step="0.5" style="width:64px">
+            <input type="number" class="banker-pbet-input" data-pid="${p.id}" data-mult="${playerMult}" data-suffix="${pressed ? ' · pressed' : ''}${autoP ? ' · auto-press' : ''}" value="${hasBet ? playerBet : ''}" placeholder="—" min="0" step="0.5" style="width:64px">
             <button class="bg-btn bg-btn--sm small press-btn${pressed ? ' active' : ''}" data-action="toggle-press" data-pid="${p.id}">
               ${pressed ? '✓ Press' : 'Press'}
             </button>
@@ -39290,31 +39290,167 @@ function renderGameBanners() {
         `;
         playerBetsCtr.appendChild(bankerRow);
 
-        // Wire per-player game inputs
+        /* Wire per-player game inputs.
+           v1523 (Tyler, 9/7): "changing the bets is clunky - I have to delete it or hope
+           it highlights and overwrites", and "I had one today I thought I changed but it
+           never took".
+           CAUSE of the lost change: the value only committed on the input's `change`
+           event, which needs a real blur. Tap from the box straight onto a score, a press
+           button or the next hole - or let the phone lock / the app background - and the
+           typed number was still sitting in the DOM, unsaved, and the next
+           renderGameBanners() painted the OLD value back over it. Nothing warned him.
+           FIX (three parts):
+             1. TAP CLEARS. focus empties the box and parks the old number in the
+                placeholder. Nothing is stored on the tap, and if he taps away without
+                typing, the old number is put straight back - a stray tap can never wipe a
+                match.
+             2. SAVES AS HE TYPES. Every keystroke commits on a 300ms debounce; blur,
+                Enter, and the phone backgrounding all flush a pending commit. The typed
+                number is in the round before he can leave the box.
+             3. PROOF. The player's line flashes a green "checkmark saved" on a good
+                write, and a toast fires if the write failed - so a dead-signal save is
+                never mistaken for a good one. */
+        try {
+          // One-time: flush a half-typed value if the phone locks or the app backgrounds,
+          // where blur/change are not guaranteed to fire.
+          if (!window._bgBetFlushHooked) {
+            window._bgBetFlushHooked = true;
+            const _bgFlushBet = () => {
+              try {
+                const f = window._bgPendingBetCommit;
+                if (f) { window._bgPendingBetCommit = null; f(); }
+              } catch (e) {}
+            };
+            window.addEventListener('pagehide', _bgFlushBet);
+            document.addEventListener('visibilitychange', () => {
+              if (document.visibilityState === 'hidden') _bgFlushBet();
+            });
+          }
+        } catch (e) {}
         playerBetsCtr.querySelectorAll('.banker-pbet-input').forEach(inp => {
-          inp.onchange = async (e) => {
-            const pid = inp.dataset.pid;
-            const raw = e.target.value.trim();
-            // Blank input → clear this player's game for the hole
+          const pid = inp.dataset.pid;
+          const baseMult = parseFloat(inp.dataset.mult) || 1;
+          const sfx = inp.dataset.suffix || '';
+
+          // Re-queried from the live DOM every time: a repaint replaces these nodes.
+          const statusNow = () => {
+            try { return document.querySelector('#banker-player-bets .banker-pbet-status[data-pid="' + pid + '"]'); }
+            catch (e) { return null; }
+          };
+          const liveStatus = (v) => {
+            if (v == null) return '<em style="color:var(--text-muted)">no game set</em>';
+            return baseMult > 1
+              ? baseMult + 'x (' + (v * baseMult).toFixed(2) + ')' + sfx
+              : 'value ' + v.toFixed(2);
+          };
+          const setStatus = (html) => { try { const el = statusNow(); if (el) el.innerHTML = html; } catch (e) {} };
+          const flashSaved = () => {
+            try {
+              const el = statusNow();
+              if (!el) return;
+              el.querySelectorAll('.bg-saved-flash').forEach(n => { try { n.remove(); } catch (e) {} });
+              const s = document.createElement('span');
+              s.className = 'bg-saved-flash';
+              s.style.cssText = 'color:var(--money-pos);font-weight:600';
+              s.textContent = ' ✓ saved';
+              el.appendChild(s);
+              setTimeout(() => { try { s.remove(); } catch (e) {} }, 1600);
+            } catch (e) {}
+          };
+
+          // render=true is the settled commit (blur / Enter / change): repaint the whole
+          // banner so multipliers and totals catch up. Never repaint mid-typing - it
+          // rebuilds this row and takes the keyboard away.
+          const commit = async (render) => {
+            try { clearTimeout(inp._bgBetT); } catch (e) {}
+            inp._bgBetT = null;
+            try { if (window._bgPendingBetCommit && inp._bgBetPending) window._bgPendingBetCommit = null; } catch (e) {}
+            inp._bgBetPending = false;
+            const raw = String(inp.value == null ? '' : inp.value).trim();
+
             if (raw === '') {
+              // Tapped in and tapped straight back out: restore, save nothing.
+              if (inp.dataset.bgTouched !== '1') {
+                try { inp.value = inp.dataset.bgPrev || ''; inp.placeholder = '—'; } catch (e) {}
+                return;
+              }
+              // Deliberately emptied: this player has no match on the hole.
+              const had = !!(g.bankerData.holes[h] && g.bankerData.holes[h].playerBets && g.bankerData.holes[h].playerBets[pid] != null);
               if (g.bankerData.holes[h] && g.bankerData.holes[h].playerBets) {
                 delete g.bankerData.holes[h].playerBets[pid];
               }
-              await saveGame(g);
-              renderGameBanners();
+              inp.dataset.bgPrev = '';
+              // Already gone and already written: repaint, don't burn a second write.
+              if (!had && !inp._bgBetDirty) {
+                if (!render) return;
+                try { renderGameBanners(); } catch (e) {}
+                return;
+              }
+              inp._bgBetDirty = true;
+              if (!render) setStatus(liveStatus(null));
+              let ok = false;
+              try { ok = await saveGame(g, render ? undefined : { deferRecent: true }); } catch (e) { ok = false; }
+              if (ok) inp._bgBetDirty = false;
+              if (render) { try { renderGameBanners(); } catch (e) {} }
+              if (ok) flashSaved(); else { try { showToast("Couldn't save — check signal"); } catch (e) {} }
               return;
             }
+
             const v = parseFloat(raw);
             if (isNaN(v) || v < 0) {
-              showToast('Value must be 0 or more');
-              e.target.value = playerBets[pid] != null ? playerBets[pid] : '';
+              if (!render) return;          // mid-typing ("-", ".") - leave him alone
+              try {
+                showToast('Value must be 0 or more');
+                inp.value = playerBets[pid] != null ? playerBets[pid] : '';
+              } catch (e) {}
               return;
             }
+
             if (!g.bankerData.holes[h]) g.bankerData.holes[h] = {};
             if (!g.bankerData.holes[h].playerBets) g.bankerData.holes[h].playerBets = {};
+            const unchanged = g.bankerData.holes[h].playerBets[pid] === v;
             g.bankerData.holes[h].playerBets[pid] = v;
-            await saveGame(g);
-            renderGameBanners();
+            inp.dataset.bgPrev = String(v);
+            // Unchanged AND the last write came back OK: nothing to persist. _bgBetDirty
+            // stays true after a failed save, so a blur RETRIES it rather than assuming
+            // the number is safe - the exact way a change goes missing.
+            if (unchanged && !inp._bgBetDirty) {
+              if (!render) return;
+              try { renderGameBanners(); } catch (e) {}
+              return;
+            }
+            inp._bgBetDirty = true;
+            if (!render) setStatus(liveStatus(v));
+            let ok = false;
+            try { ok = await saveGame(g, render ? undefined : { deferRecent: true }); } catch (e) { ok = false; }
+            if (ok) inp._bgBetDirty = false;
+            if (render) { try { renderGameBanners(); } catch (e) {} }
+            if (ok) flashSaved(); else { try { showToast("Couldn't save — check signal"); } catch (e) {} }
+          };
+
+          inp.onfocus = () => {
+            try {
+              const cur = String(inp.value == null ? '' : inp.value);
+              inp.dataset.bgPrev = cur;
+              inp.dataset.bgTouched = '0';
+              inp.placeholder = cur || '—';   // old number stays visible, greyed
+              inp.value = '';
+            } catch (e) {}
+          };
+          inp.oninput = () => {
+            try {
+              inp.dataset.bgTouched = '1';
+              clearTimeout(inp._bgBetT);
+              inp._bgBetPending = true;
+              window._bgPendingBetCommit = () => { commit(false); };
+              inp._bgBetT = setTimeout(() => { commit(false); }, 300);
+            } catch (e) {}
+          };
+          inp.onkeydown = (e) => { try { if (e.key === 'Enter') inp.blur(); } catch (err) {} };
+          inp.onchange = () => commit(true);
+          inp.onblur = () => {
+            try { inp.placeholder = '—'; } catch (e) {}
+            if (inp._bgBetT || inp._bgBetPending) commit(true);
           };
         });
 
