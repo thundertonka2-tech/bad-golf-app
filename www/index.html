@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1514-->
+<!--BGVER=v2026.11.1515-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10164,7 +10164,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1514';
+const BG_BUILD = 'v2026.11.1515';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -21624,6 +21624,40 @@ function _bgNoteCardLoaded(courseId, card) {
   try { if (courseId) _cardLoadedTs[courseId] = _bgCardTs(card); } catch (e) {}
 }
 
+// v1515 (Tyler): "I don't know how this happened but we need to protect from it ever
+// happening again." Woodhaven Country Club's card was found holding Texas Star's NAME,
+// tees and ratings - and Oak Cliff Country Club's card was rewritten in the SAME minute,
+// 2026-07-17 19:55, so one sitting on one device damaged two courses.
+//
+// Nothing in persistCourseScorecard ever checked IDENTITY. v947's anti-clobber asks
+// "is the card I am about to write OLDER than the one in the cloud?" and never "is this
+// even the same golf course?" - so a round started while the setup form held course B's
+// name/pars/tees but courseId still pointed at course A wrote B straight over A. The
+// three { auto: true } callers all pass `setup.course`, the typed form name, which is
+// exactly how a lowercase "texas star" ended up in a slug called woodhaven-country-club.
+//
+// The rule below: an AUTOMATIC write may never RENAME a course. A deliberate save still
+// can, because that is how Oak Cliff Country Club legitimately became The Golf Club of
+// Dallas and how the UND course became Ray Richards.
+function _bgCourseNameKey(s) {
+  try {
+    return String(s || '').toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\b(golf|club|course|courses|country|the|at|of|and|cc|gc|links|resort|national|municipal|muni)\b/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+  } catch (e) { return ''; }
+}
+// True when two names plausibly describe the SAME course. Deliberately generous: a
+// blank on either side, or one name containing the other ("Riverside" vs "Riverside
+// North"), passes. It only has to catch names with nothing whatever in common.
+function _bgSameCourseName(a, b) {
+  const ka = _bgCourseNameKey(a), kb = _bgCourseNameKey(b);
+  if (!ka || !kb) return true;
+  if (ka === kb) return true;
+  return ka.indexOf(kb) >= 0 || kb.indexOf(ka) >= 0;
+}
+window._bgSameCourseName = _bgSameCourseName;
+
 async function persistCourseScorecard(courseId, name, pars, sis, tees, opts) {
   if (!courseId) return false;
   // Read the FRESHEST copy right before merging (don't trust the 20s cache) so a
@@ -21640,6 +21674,21 @@ async function persistCourseScorecard(courseId, name, pars, sis, tees, opts) {
   if (opts && opts.auto) {
     try {
       const cur = saves[courseId];
+      // v1515 IDENTITY GUARD - runs BEFORE the freshness checks, because a card for the
+      // wrong course is wrong however new it is.
+      const _known = (cur && cur.name) ? cur.name : (function () {
+        // No card yet? The LIBRARY still knows what this id is called, so an auto-write
+        // of a different course into an empty slot is caught one step earlier.
+        try {
+          const lc = (typeof COURSE_LIBRARY !== 'undefined' && Array.isArray(COURSE_LIBRARY))
+            ? COURSE_LIBRARY.find(c => c && c.id === courseId) : null;
+          return (lc && lc.name) || '';
+        } catch (e) { return ''; }
+      })();
+      if (_known && name && !_bgSameCourseName(_known, name)) {
+        try { console.warn('[bg] refused an automatic card write: "' + name + '" into "' + courseId + '", which is "' + _known + '"'); } catch (e) {}
+        return true;   // treated as a no-op, exactly like the other yields below
+      }
       if (cur) {
         const _same = JSON.stringify([cur.pars || [], cur.sis || [], cur.tees || []]) ===
                       JSON.stringify([pars || [], sis || [], Array.isArray(tees) ? tees : []]);
