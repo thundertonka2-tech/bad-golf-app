@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1543-->
+<!--BGVER=v2026.11.1544-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -3886,6 +3886,10 @@
   .participant-chip.bg-avtoggle .bg-av{ background:var(--bg-brand); }
   .participant-chip.bg-avtoggle .pp-name{ font-size:11px; font-weight:600; color:var(--bgx-ink-27); max-width:56px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .participant-chip.bg-avtoggle .bg-av-ck{ display:none; }
+  /* v1544: photo avatars + team tag on picker chips */
+  .bg-av.bg-av-photo{ background-size:cover; background-position:center; background-repeat:no-repeat; color:transparent; }
+  .bg-av.bg-av-photo.off{ opacity:.55; background-color:var(--bg-surface); }
+  .participant-chip.bg-avtoggle .pp-team{ font-size:9px; font-weight:800; line-height:1.1; max-width:60px; max-height:2.2em; overflow:hidden; text-align:center; white-space:normal; margin-top:-3px; letter-spacing:.01em; }
   .participant-chip.bg-avtoggle.active .bg-av-ck{ display:flex; }
   /* Info tab — game reference as tappable tiles that open a rules window */
   #bg-bets-tiles{ margin-top:4px; }
@@ -10225,7 +10229,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1543';
+const BG_BUILD = 'v2026.11.1544';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -36235,8 +36239,8 @@ function renderParticipantPickers() {
         const active = partSet.has(p.name);
         // v493 Item 2 — avatar toggle (initials + check badge when on). Keeps the
         // .participant-chip class + data-name/data-game so the wired handler fires.
-        const _ini = (p.name || '').trim().split(/\s+/).map(w => w[0] || '').slice(0, 2).join('').toUpperCase() || '?';
-        html += `<button type="button" class="bg-btn bg-btn--seg participant-chip bg-avtoggle ${active ? 'active' : ''}" data-game="${spec.key}" data-name="${escAttr(p.name)}"><span class="bg-av ${active ? '' : 'off'}">${_ini}<span class="bg-av-ck">✓</span></span><span class="pp-name">${escapeHtml(p.name)}</span></button>`;
+        // v1544: shared chip — photo when the roster has one, team ring + name in a two-team event.
+        html += bgPickerChipHtml(p.name, active, 'data-game="' + spec.key + '" data-name="' + escAttr(p.name) + '"');
       });
     }
     html += '</div>';
@@ -60868,6 +60872,75 @@ function wireCrewControls() {
 }
 
 // Avatar markup: photo if set, otherwise initials on the accent circle.
+/* ---- v1544 (Tyler, 9/8): player pickers show PHOTOS and, in a two-team event, the
+   TEAM each player is on. "If I am in a two-team multi-day and select Match play or
+   any game, I need to see the team name the player is assigned to. Also can we show
+   player profile pics in these setups to give it a cleaner look?"
+   Two lazy maps, keyed on the normalised name the roster merge already uses:
+     _bgAvatarByName  <- the roster (already healed from profiles) + _rosterAllProfiles
+     _bgTeamByName    <- tournament_players.team of the OPEN tournament (t2 modes only)
+   Chips render synchronously from whatever is loaded; the first miss kicks off the
+   load and re-paints the pickers once, so a photo appears a beat later at worst. */
+let _bgAvatarByName = null, _bgAvatarLoading = false;
+let _bgTeamByName = null, _bgTeamMapTid = null, _bgTeamLoading = false;
+function _bgRepaintPickers() {
+  try { if (typeof renderParticipantPickers === 'function') renderParticipantPickers(); } catch (e) {}
+  try { if (typeof renderMatchInstances === 'function') renderMatchInstances(); } catch (e) {}
+  try { if (typeof renderNassauInstances === 'function') renderNassauInstances(); } catch (e) {}
+}
+async function bgRefreshAvatarMap() {
+  if (_bgAvatarLoading) return; _bgAvatarLoading = true;
+  const m = {};
+  const put = (nm, av) => { try { const k = normalizeNameSegment(String(nm || '').trim()); if (k && av && !m[k]) m[k] = av; } catch (e) {} };
+  try { const r = await getPlayerRoster(); (r || []).forEach(p => { if (p && p.avatar) put(p.name || ((p.firstName || '') + ' ' + (p.lastName || '')), p.avatar); }); } catch (e) {}
+  try { (window._rosterAllProfiles || []).forEach(pr => { if (!pr || !pr.avatar) return; try { put(friendFullName(pr), pr.avatar); } catch (e) {} put(pr.my_player, pr.avatar); put(pr.display_name, pr.avatar); }); } catch (e) {}
+  const had = _bgAvatarByName ? Object.keys(_bgAvatarByName).length : -1;
+  _bgAvatarByName = m; _bgAvatarLoading = false;
+  if (Object.keys(m).length !== had) _bgRepaintPickers();
+}
+function bgAvatarForName(name) {
+  try {
+    if (!_bgAvatarByName) { _bgAvatarByName = {}; setTimeout(bgRefreshAvatarMap, 0); return ''; }
+    const a = _bgAvatarByName[normalizeNameSegment(String(name || '').trim())];
+    return a ? _bgSafeAvatarUrl(a) : '';
+  } catch (e) { return ''; }
+}
+function _bgInT2Setup() { return !!(state && (state._t2DayConfig || state._t2GroupConfig || state._t2GroupGamesConfig)); }
+async function bgRefreshTeamMap() {
+  const t = _t2Current; if (!t || _bgTeamLoading) return; _bgTeamLoading = true;
+  const m = {};
+  try {
+    const pl = await t2GetPlayers(t.id);
+    (pl || []).forEach(p => { if (!p || !p.team) return; const parts = String(p.display_name || '').trim().split(/\s+/); const nm = combineName(parts[0] || 'Player', parts.slice(1).join(' ') || '');
+      [nm, p.display_name].forEach(s => { try { const k = normalizeNameSegment(String(s || '').trim()); if (k) m[k] = p.team; } catch (e) {} }); });
+  } catch (e) {}
+  _bgTeamByName = m; _bgTeamMapTid = t.id; _bgTeamLoading = false;
+  if (Object.keys(m).length) _bgRepaintPickers();
+}
+/* -> { key:'A'|'B', name, color } or null. Only inside a tournament's own setup screens
+   (Configure Day, a cart's games), only for a two-team event. */
+function bgTeamForName(name) {
+  try {
+    const t = _t2Current;
+    if (!t || !_bgInT2Setup() || !(t.settings && t.settings.type === 'team')) return null;
+    if (!_bgTeamByName || _bgTeamMapTid !== t.id) { _bgTeamByName = {}; _bgTeamMapTid = t.id; setTimeout(bgRefreshTeamMap, 0); return null; }
+    const k = _bgTeamByName[normalizeNameSegment(String(name || '').trim())];
+    if (k !== 'A' && k !== 'B') return null;
+    return { key: k, name: t2TeamName(t, k), color: t2TeamColor(k) };
+  } catch (e) { return null; }
+}
+/* The one avatar-toggle chip every picker draws. `attrs` = extra data-* attributes. */
+function bgPickerChipHtml(name, active, attrs, extraCls) {
+  const ini = (name || '').trim().split(/\s+/).map(w => w[0] || '').slice(0, 2).join('').toUpperCase() || '?';
+  const av = bgAvatarForName(name);
+  const tm = bgTeamForName(name);
+  const ring = tm ? 'box-shadow:0 0 0 2.5px ' + tm.color + ';' : '';
+  return '<button type="button" class="bg-btn bg-btn--seg participant-chip bg-avtoggle ' + (active ? 'active' : '') + (extraCls ? ' ' + extraCls : '') + '" ' + (attrs || '') + '>' +
+    '<span class="bg-av ' + (active ? '' : 'off') + (av ? ' bg-av-photo' : '') + '" style="' + ring + (av ? 'background-image:url(\'' + av + '\')' : '') + '">' + (av ? '' : escapeHtml(ini)) + '<span class="bg-av-ck">✓</span></span>' +
+    '<span class="pp-name">' + escapeHtml(name) + '</span>' +
+    (tm ? '<span class="pp-team" style="color:' + tm.color + '" title="' + escapeHtml(tm.name) + '">' + escapeHtml(tm.name) + '</span>' : '') +
+    '</button>';
+}
 function _bgAvatarColor(p) {
   // Deterministic per-person color for photoless avatars, so two same-initials tiles
   // (e.g. lots of "T O") are visually distinct. (Kevin: hard to tell people apart.)
@@ -71611,13 +71684,8 @@ function _t2RenderPickerSections(sections, pair, idx) {
   // used to render plain text pills; this brings them in line so player selection
   // looks identical for every game. Keeps .participant-chip + data-name/data-idx
   // so the existing click wiring in renderMatch/NassauInstances still fires.
-  const _ini = nm => ((nm || '').trim().split(/\s+/).map(w => w[0] || '').slice(0, 2).join('').toUpperCase() || '?');
-  const chipsFor = sec => (sec.players || []).map(p => {
-    const active = (pair || []).includes(p.name);
-    return '<button type="button" class="bg-btn bg-btn--seg participant-chip bg-avtoggle ' + (active ? 'active' : '') + (sec.mine ? '' : ' pp-ext') + '" data-name="' + escapeHtml(p.name) + '" data-idx="' + idx + '">' +
-      '<span class="bg-av ' + (active ? '' : 'off') + '">' + escapeHtml(_ini(p.name)) + '<span class="bg-av-ck">✓</span></span>' +
-      '<span class="pp-name">' + escapeHtml(p.name) + '</span></button>';
-  }).join('');
+  // v1544: shared chip — photo when the roster has one, team ring + name in a two-team event.
+  const chipsFor = sec => (sec.players || []).map(p => bgPickerChipHtml(p.name, (pair || []).includes(p.name), 'data-name="' + escapeHtml(p.name) + '" data-idx="' + idx + '"', sec.mine ? '' : 'pp-ext')).join('');
   // Single group: lay out with the same .pp-chips grid the top-of-screen picker
   // uses, so the avatars flow horizontally (not stacked). The card template's
   // outer wrapper is .pp-mount (a plain block) so this grid isn't nested inside
