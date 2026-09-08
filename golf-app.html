@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1523-->
+<!--BGVER=v2026.11.1524-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10173,7 +10173,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1523';
+const BG_BUILD = 'v2026.11.1524';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -20800,11 +20800,19 @@ async function archiveScoresFromRound(g) {
   //     rather than after the fact. (Tournament rounds legitimately do not net zero
   //     per round — one round carries a player's whole event net and the others carry
   //     0 — so the check applies at the event level there, inside _bgEventMoney.)
-  let _settledById = null;
+  let _settledById = null, _settledCorrected = false;
   try {
     const _sm = g.settledMoney;
     if (_sm && _sm.net && g.finishedAt && _sm.at === g.finishedAt) {
       _settledById = _sm.net;                       // authoritative — read, never recompute
+      // v1524: a map marked corrected:true was verified by a human (the DB guard v3
+      // only lets another corrected map replace it). Its archive must be able to
+      // REPLACE the stale 'settled' row a phone archived before the correction —
+      // and dedupeScoreHistory / mergeRosters only replace on a strictly HIGHER
+      // rank, so settled(7) could never displace settled(7). PITCH35 sat at +109
+      // on every roster for a day after the round itself said +94 for exactly this
+      // reason. A corrected map therefore archives at the 'manual' tier (9).
+      _settledCorrected = (_sm.corrected === true);
     } else if (g.finishedAt && g.code) {
       const _isT2 = !!(g.t2 && g.t2.tournamentId);
       const _t2Resolved = (g.players || []).some(p => p && _moneySrcById[p.id]);
@@ -21279,7 +21287,7 @@ async function archiveScoresFromRound(g) {
       // v1035: where this units came from, so provisional vs final vs hand-corrected is
       // legible and _bgMoneyRank can stop a weaker archive overwriting a stronger one.
       // Absent on a plain non-tournament round (group units is simply the whole truth).
-      moneySource: (_settledById && _settledById[p.id] != null) ? 'settled' : (_moneySrcById[p.id] || undefined),
+      moneySource: (_settledById && _settledById[p.id] != null) ? (_settledCorrected ? 'manual' : 'settled') : (_moneySrcById[p.id] || undefined),   // v1524: corrected map -> 'manual'
       // v1327: WHICH BUILD produced this figure. Senior Sunday could not be diagnosed
       // from the stored rows — every one said 'event' and nothing recorded that they
       // were computed by five different versions of the units engine. Costs a dozen
@@ -35136,10 +35144,19 @@ function renderTeamPickers() {
       // it would have had him re-pairing people the event had already paired.
       let _tnc = 0;
       try { _tnc = (typeof _t2Current !== 'undefined' && _t2Current && typeof t2TeamCount === 'function') ? t2TeamCount(_t2Current) : 0; } catch (e) {}
-      if (_tnc > 2) {
+      // v1524 (Tyler, Day 1 games on a two-team multi-day event): "I selected Team
+      // Quota so that I could setup the teams but I am not seeing any player tables."
+      // A TEAM event (settings.type === 'team') has its own two sides even at a count
+      // of two, and they are assigned on the wizard's Carts & teams step, which comes
+      // AFTER the games step. The 2-v-2-per-cart note below is for a big-group event
+      // with no event teams; on a team event it sent him looking for a picker that is
+      // never on this screen. Say where the teams actually get set instead.
+      let _isTeamEvt = false;
+      try { _isTeamEvt = !!(_t2Current && _t2Current.settings && _t2Current.settings.type === 'team'); } catch (e) {}
+      if (_tnc > 2 || _isTeamEvt) {
         let _tnames = '';
         try { _tnames = t2TeamKeys(_t2Current).map(function (k) { return t2TeamDot(k) + ' ' + t2TeamName(_t2Current, k); }).join(' · '); } catch (e) {}
-        container.innerHTML = '<div class="small-text" style="color:var(--text-muted);padding:6px 4px">🤝 This event already has <strong>' + _tnc + ' teams</strong> — this game uses them, so there is nothing to pair here. Change who is on which team under <strong>Carts &amp; teams</strong>, or rename them under <strong>Team names &amp; logos</strong>.'
+        container.innerHTML = '<div class="small-text" style="color:var(--text-muted);padding:6px 4px">🤝 This event runs <strong>' + _tnc + ' teams</strong> and this game uses them, so there is nothing to pair on this screen. Put players on their teams under <strong>Carts &amp; teams</strong> (a later step in this setup), and rename them under <strong>Team names &amp; logos</strong>.'
           + (_tnames ? '<div style="margin-top:5px">' + t2esc(_tnames) + '</div>' : '') + '</div>';
       } else {
       container.innerHTML = '<div class="small-text" style="color:var(--text-muted);padding:6px 4px">🤝 Teams are set per cart group, not a whole-field split. Build your cart groups (' + _grps + ' group' + (_grps === 1 ? '' : 's') + ' of 4), then tap the players on each foursome\'s card to set its 2 v 2. Rotating games (6’s) and 4-man games set their teams automatically.</div>';
@@ -67794,10 +67811,15 @@ function openT2TeamNamesEditor() {
   const close = () => ov.remove();
   // v1086: this modal now sets HOW MANY teams the event runs (2-8) as well as their
   // names and logos. A row is drawn per active team key.
-  const row = (k) => { const logo = t2TeamLogo(t, k); return '<div class="card" style="padding:12px;margin-bottom:10px"><div style="display:flex;align-items:center;gap:10px">'
+  // v1524 (Tyler): "I added a team but now I realized I meant to add another day not
+  // a team. We need to be able to delete a team from here." Each row carries a
+  // remove control once there are more than two teams (t2RemoveTeam does the work).
+  const row = (k, canDel) => { const logo = t2TeamLogo(t, k); return '<div class="card" style="padding:12px;margin-bottom:10px"><div style="display:flex;align-items:center;gap:10px">'
     + '<button type="button" class="bg-btn t2tn-logo" data-team="' + k + '" style="flex:0 0 auto;border:1px solid var(--border);background:var(--surface-2);border-radius:12px;width:54px;height:54px;font-size:24px;cursor:pointer">' + (logo ? t2LogoHtml(logo, 40) : '🎨') + '</button>'
     + '<div style="flex:1;min-width:0"><label class="small-text" style="color:var(--text-muted);display:block;margin-bottom:3px">' + t2TeamDot(k) + ' Team ' + k + ' name</label>'
-    + '<input type="text" class="t2tn-name" data-team="' + k + '" value="' + t2esc(t2TeamName(t, k)) + '" style="width:100%;font-size:16px;padding:8px"></div></div></div>'; };
+    + '<input type="text" class="t2tn-name" data-team="' + k + '" value="' + t2esc(t2TeamName(t, k)) + '" style="width:100%;font-size:16px;padding:8px"></div>'
+    + (canDel ? '<span role="button" tabindex="0" class="t2tn-del" data-team="' + k + '" title="Remove this team" aria-label="Remove team ' + k + '" style="flex:0 0 auto;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:50%;border:1px solid var(--border);color:var(--danger);font-size:18px;line-height:1;cursor:pointer;user-select:none">\u2715</span>' : '')
+    + '</div></div>'; };
   const draw = () => {
     const keys = t2TeamKeys(t);
     const opts = [];
@@ -67806,7 +67828,8 @@ function openT2TeamNamesEditor() {
       + '<div class="field" style="margin-bottom:10px"><label for="t2tn-count">How many teams?</label>'
       + '<select id="t2tn-count" style="width:100%">' + opts.join('') + '</select>'
       + '<div class="help-text" style="margin-top:6px">Two big sides, or up to twelve small ones — e.g. <strong>8 teams of 2</strong> from a 16-player field, or 12 pairs from 24. Every team needs the same number of players.</div></div>'
-      + keys.map(row).join('')
+      + keys.map(k => row(k, keys.length > 2)).join('')
+      + (keys.length > 2 ? '<div class="small-text" style="color:var(--text-muted);margin:-4px 0 8px">Tap \u2715 to remove a team. Anyone on it goes back to Unassigned; the teams below it move up and keep their names and logos.</div>' : '')
       + '<div class="actions" style="margin-top:8px"><button class="bg-btn bg-btn--ghost bg-btn--full primary full" id="t2tn-done">Done</button></div></div>';
     wire();
   };
@@ -67830,6 +67853,17 @@ function openT2TeamNamesEditor() {
   const wire = () => {
     ov.querySelectorAll('.t2tn-name').forEach(inp => { inp.onchange = () => saveName(inp); inp.addEventListener('blur', () => saveName(inp)); });
     ov.querySelectorAll('.t2tn-logo').forEach(b => b.onclick = () => t2OpenLogoPicker(b.dataset.team));
+    // v1524: per-team remove.
+    ov.querySelectorAll('.t2tn-del').forEach(d => {
+      const go = async () => {
+        if (d.dataset.busy) return; d.dataset.busy = '1';
+        try { if (await t2RemoveTeam(t, d.dataset.team)) { showToast(t2TeamCount(t) + ' teams \u2713'); draw(); } }
+        catch (e) { showToast('Could not remove that team'); }
+        finally { delete d.dataset.busy; }
+      };
+      d.onclick = go;
+      d.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } };
+    });
     const cnt = ov.querySelector('#t2tn-count');
     if (cnt) cnt.onchange = async () => {
       const n = Math.max(2, Math.min(T2_MAX_TEAMS, parseInt(cnt.value, 10) || 2));
@@ -67852,8 +67886,9 @@ function openT2TeamNamesEditor() {
       // real teams, promote those to proper names so no screen shows "Players".
       try {
         const _fix = {};
-        if (!t.team_a_name || t.team_a_name === 'Players') _fix.team_a_name = 'Team A';
-        if (!t.team_b_name) _fix.team_b_name = 'Team B';
+        // v1524: promote to the fun defaults (what a new team event is born with).
+        if (!t.team_a_name || t.team_a_name === 'Players') _fix.team_a_name = T2_FUN_TEAM_NAMES.A || 'Team A';
+        if (!t.team_b_name) _fix.team_b_name = T2_FUN_TEAM_NAMES.B || 'Team B';
         if (Object.keys(_fix).length && await t2Update(t.id, _fix)) {
           Object.assign(t, _fix);
           if (_t2Current) Object.assign(_t2Current, _fix);
@@ -67872,6 +67907,78 @@ function openT2TeamNamesEditor() {
   document.body.appendChild(ov);
   ov.onclick = (e) => { if (e.target === ov) close(); };
   draw();
+}
+
+// v1524: remove ONE team from a multi-team event. Teams are positional keys (A..L),
+// so removing team k means: players on k go back to Unassigned, every team after k
+// moves up one slot carrying its name, logo, player assignments and per-cart team
+// marks with it, and the count drops by one. Names are read through t2TeamName so a
+// team that was still on its default keeps that exact default after the move.
+async function t2RemoveTeam(t, k) {
+  if (!t || !k) return false;
+  const keys = t2TeamKeys(t); const n = keys.length;
+  if (n <= 2) { showToast('An event needs at least two teams'); return false; }
+  const idx = keys.indexOf(k); if (idx < 0) return false;
+  const later = keys.slice(idx + 1);
+  let players = [], members = [];
+  try { players = (await t2GetPlayers(t.id)) || []; } catch (e) {}
+  try {
+    const days = (await t2GetDays(t.id)) || [];
+    const dayIds = days.map(d => d.id).filter(Boolean);
+    if (dayIds.length) {
+      const gr = await supa.from('tournament_groups').select('id').in('day_id', dayIds);
+      const gids = ((gr && gr.data) || []).map(g => g.id).filter(Boolean);
+      if (gids.length) { const mr = await supa.from('tournament_group_members').select('id,team').in('group_id', gids); members = (mr && mr.data) || []; }
+    }
+  } catch (e) {}
+  const onK = players.filter(p => p && p.team === k);
+  let msg = 'Remove ' + t2TeamName(t, k) + '?';
+  if (onK.length) msg += ' ' + onK.length + ' player' + (onK.length === 1 ? ' is' : 's are') + ' on it and will go back to Unassigned.';
+  if (later.length) msg += ' ' + later.map(j => t2TeamName(t, j)).join(', ') + (later.length === 1 ? ' moves' : ' move') + ' up a slot and ' + (later.length === 1 ? 'keeps its' : 'keep their') + ' name' + (later.length === 1 ? '' : 's') + ' and logo' + (later.length === 1 ? '' : 's') + '.';
+  const go = await uiConfirm(msg, { title: 'Remove a team', okLabel: 'Remove', cancelLabel: 'Cancel' });
+  if (!go) return false;
+  const names = {}, logos = {};
+  keys.forEach(j => { names[j] = t2TeamName(t, j); logos[j] = t2TeamLogo(t, j); });
+  const newKeys = keys.slice(0, n - 1);
+  const from = {};                                   // new key -> the old key that now fills it
+  newKeys.forEach((j, i) => { from[j] = (i < idx) ? j : keys[i + 1]; });
+  const last = keys[n - 1];
+  // 1. A/B live in real columns.
+  const cols = {};
+  if (from.A !== 'A') cols.team_a_name = names[from.A];
+  if (from.B !== 'B') cols.team_b_name = names[from.B];
+  if (Object.keys(cols).length) {
+    if (!(await t2Update(t.id, cols))) { showToast('Could not save the teams'); return false; }
+    Object.assign(t, cols); if (_t2Current) Object.assign(_t2Current, cols);
+  }
+  // 2. C.. names, logos and the count live in settings.
+  let fresh = null;
+  const okS = await t2MergeSettings(t.id, s => {
+    fresh = s;
+    s.teamCount = n - 1;
+    s.teamNames = s.teamNames || {};
+    newKeys.forEach(j => {
+      if (from[j] === j) return;
+      if (j !== 'A' && j !== 'B') s.teamNames[j] = names[from[j]];
+      if (logos[from[j]]) s['logo' + j] = logos[from[j]]; else delete s['logo' + j];
+    });
+    delete s.teamNames[last]; delete s['logo' + last];
+  });
+  if (!okS) { showToast('Could not save the team count'); return false; }
+  if (fresh) { t.settings = fresh; if (_t2Current) _t2Current.settings = fresh; }
+  // 3. Player assignments and per-cart team marks follow their team to its new key.
+  const toNew = {}; newKeys.forEach(j => { toNew[from[j]] = j; });
+  for (const p of players) {
+    if (!p || !p.team) continue;
+    if (p.team === k) { try { await t2SetPlayerTeam(p.id, null); } catch (e) {} continue; }
+    const nk = toNew[p.team]; if (nk && nk !== p.team) { try { await t2SetPlayerTeam(p.id, nk); } catch (e) {} }
+  }
+  for (const m of members) {
+    if (!m || !m.team) continue;
+    if (m.team === k) { try { await t2SetMemberTeam(m.id, null); } catch (e) {} continue; }
+    const nk = toNew[m.team]; if (nk && nk !== m.team) { try { await t2SetMemberTeam(m.id, nk); } catch (e) {} }
+  }
+  return true;
 }
 
 async function openT2ScorekeepersEditor(day) {
@@ -68451,10 +68558,16 @@ async function submitT2Create() {
   // removes the duplicate question entirely. A team event is born as plain
   // "Team A" / "Team B" and is renamed on the wizard's "Team names & logos" step,
   // which is also where its logos and its 2–12 team count are set.
+  // v1524 (Tyler): "use these defaults on the previous screen or when a new team is
+  // added but never override what someone keys in as a team name." A team event is
+  // now BORN with the two fun defaults stored in its columns, so the 2-team step, the
+  // Change-teams modal and every later count all read the same two names; and
+  // t2TeamName no longer swaps a stored plain 'Team A' for a fun name in a multi-team
+  // event, so whatever is on record is what shows, at any count.
   const t = await t2Create({
     name, numDays,
-    teamAName: hasTeams ? 'Team A' : 'Players',
-    teamBName: hasTeams ? 'Team B' : ''
+    teamAName: hasTeams ? ((typeof T2_FUN_TEAM_NAMES !== 'undefined' && T2_FUN_TEAM_NAMES.A) || 'Team A') : 'Players',
+    teamBName: hasTeams ? ((typeof T2_FUN_TEAM_NAMES !== 'undefined' && T2_FUN_TEAM_NAMES.B) || 'Team B') : ''
   });
   if (!t) return;
   // Store the rest of the "Basics" in settings (jsonb — no schema change needed). v455.
@@ -72653,11 +72766,16 @@ function t2TeamName(t, key) {
     // In a multi-team event ANY plain "Team X" sitting in the A/B columns counts as
     // unset: 'Team A'/'Team B' are the untouched defaults, and 'Team H' in the B
     // column is the wizard bug's wreckage (naming team H overwrote team B).
-    const _colJunk = v => multi && /^Team [A-L]$/.test(String(v || '').trim());
+    // v1524 (Tyler): the v1089 rule above went too far — it ALSO discarded a plain
+    // 'Team A' sitting in its OWN column, so going 2 -> 3 teams renamed both existing
+    // sides to fun names and 3 -> 2 renamed them straight back. Only ANOTHER team's
+    // label in the column is wreckage now ('Team H' stored as team B); a stored
+    // 'Team A' for team A is what is on record and is kept at every count.
+    const _colJunk = (v, k) => { const m = /^Team ([A-L])$/.exec(String(v || '').trim()); return !!(m && m[1] !== k); };
     if (key === 'A' && t && t.team_a_name && t.team_a_name !== 'Players'
-        && !_colJunk(t.team_a_name)) return t.team_a_name;
+        && !_colJunk(t.team_a_name, 'A')) return t.team_a_name;
     if (key === 'B' && t && t.team_b_name
-        && !_colJunk(t.team_b_name)) return t.team_b_name;
+        && !_colJunk(t.team_b_name, 'B')) return t.team_b_name;
     const n = t && t.settings && t.settings.teamNames && t.settings.teamNames[key];
     // v1089: ignore a stored value that is another team's generic label — that is the
     // wizard save bug's wreckage, and the default should win instead.
@@ -73416,11 +73534,9 @@ async function renderT2Home() {
       _tmKeys.forEach(k => { sb += _trow(k); });
       // v1089: "both teams" is wrong at eight, and the fun defaults deserve a word.
       sb += '<div class="small-text" style="color:var(--text-muted)">'
-        + (_tmKeys.length > 2
-            ? 'Every name is pre-filled with something daft — keep them or type over any of them. '
-            : 'Name each side. ')
+        + 'Every name is pre-filled with something daft — keep them or type over any of them; a name you type is never replaced. '   // v1524
         + 'Tap a badge to set a logo (or photo). They show on leaderboards and scorecards. Tap Next when ready.</div>';
-      if (_tmKeys.length > 2) sb += '<button type="button" class="bg-btn bg-btn--full full t2-team-plain" style="margin-top:8px">Use Team A, B, C… instead</button>';
+      sb += '<button type="button" class="bg-btn bg-btn--full full t2-team-plain" style="margin-top:8px">Use plain Team A, B… instead</button>';   // v1524: at any count
     } else if (cur.k === 'pot') {
       /* v1514 (Tyler): "We need the ability to setup the primary team match for the
          overall tournament. The primary match is just which team gets the most points
