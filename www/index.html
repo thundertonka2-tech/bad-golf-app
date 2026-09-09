@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1595-->
+<!--BGVER=v2026.11.1597-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10253,7 +10253,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1595';
+const BG_BUILD = 'v2026.11.1597';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -55533,14 +55533,18 @@ async function renderHomeLive() {
       // round is re-opened or re-finished, which made rounds played DAYS ago
       // resurface in "last 24h". createdAt keeps the window honest.
       .map(r => { const g = r.data || {}; const upd = r.updated_at ? Date.parse(r.updated_at) : 0; const played = g.createdAt || g.firstScoreAt || (g.finishedAt || upd); return { g, t: played, code: r.code }; })
-      .filter(x => x.g && Array.isArray(x.g.players) && x.t >= hlCut && (_scope === 'everyone' || _amAdmin || isCrewGame(x.g)))
+      .filter(x => x.g && Array.isArray(x.g.players) && x.t >= hlCut && (_scope === 'everyone' || isCrewGame(x.g)))
+      // v1596 (Tyler): "Friends highlights is showing me highlights from all users not just
+      // my friends." The admin bypass (_amAdmin) that lets admins FOLLOW any live round
+      // was also leaking every user's highlights into the friends feed for admins.
+      // Highlights are friends-only for everyone; admins still see all under Everyone.
       .forEach(x => {
         const g = x.g;
         const course = g.course || 'a round';
         const gc = x.code || g.code || 'g'; // stable game id for reaction keys
         g.players.forEach(p => {
           if (!p || !p.name) return;
-          if (_scope !== 'everyone' && !_amAdmin && !names.has(normalizeNameSegment(p.name))) return;
+          if (_scope !== 'everyone' && !names.has(normalizeNameSegment(p.name))) return;
           const sc = g.scores && g.scores[p.id];
           if (!sc || !Array.isArray(g.pars)) return;
           const isMine = !!(meNorm && normalizeNameSegment(p.name) === meNorm);
@@ -55624,7 +55628,8 @@ async function renderHomeLive() {
       // v895 (Tyler): show N, collapse the rest behind "Show more".
       // v909 (Tyler): "limit this to seven lines then collapse them" — 10 pushed the
       // message board and everything under it too far down the Home screen.
-      const HL_PREVIEW = 7, HL_MAX = 40;
+      // v1596 (Tyler): "limit this to five like we do everything else."
+      const HL_PREVIEW = 5, HL_MAX = 40;
       const _hlExpanded = !!state._homeHighlightsExpanded;
       const _hlShown = items.slice(0, _hlExpanded ? HL_MAX : HL_PREVIEW);
       hlEl.innerHTML = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">' +
@@ -83041,7 +83046,109 @@ async function openEventLeaderboard(t, opts) {
   // _renderEvlbBody - the 15s live refresh below calls that function and rewrites the whole
   // body, so a tab stored inside it would snap back to Tournament every 15 seconds.
   let _evlbTab = '';
+  // v1596 (Tyler): "I have to click these buttons twice in order to get them to take."
+  // A tab tap used to start the FULL live refresh (settings + six fetches) and painted
+  // nothing until it all came back, so the first tap looked dead and the second was either
+  // swallowed by the same-tab check or landed just before the paint. Now a tap repaints
+  // instantly from the last loaded data (_evlbCache) and the refresh runs behind it; a
+  // sequence counter stops a stale in-flight render from painting over a newer one.
+  let _evlbCache = null;
+  let _evlbSeq = 0;
+  const _evlbPaint = (_rawRounds, html) => {
+    let _tabsHtml = '';
+    let _grpHtml = '';
+    try {
+      const _grps = (_rawRounds || []).map(r => (r && r.data) ? r.data : r)
+        .filter(r => r && r.code && r.t2)
+        .map(r => ({ n: r.t2.group, day: Number(r.t2.day) || 1, code: r.code, course: r.course || '' }))
+        .sort((a, b) => (a.day - b.day) || ((Number(a.n) || 0) - (Number(b.n) || 0)));
+      /* v1579 (Tyler): "it duplicated the groups at the top here." A multi-day event has a
+         Group 1 on every day, and the tabs only said "Group 1" - three of them in a row.
+         When more than one day is present the tab (and the group heading) carry the day. */
+      const _multiDay = new Set(_grps.map(g2 => g2.day)).size > 1;
+      const _tabLbl = g2 => (_multiDay ? ('D' + g2.day + ' \u00b7 G') : 'Group ') + String(g2.n == null ? '?' : g2.n);   // v1582: compact pill text
+      // A group that has left the event must not strand the view on a dead tab.
+      if (_evlbTab && !_grps.some(g2 => g2.code === _evlbTab)) _evlbTab = '';
+      if (_grps.length) {
+        /* v1582 (Tyler, phone): seven two-line "Day 1 · Group 1" buttons ate half the
+           screen before the standings began. One row of compact pills that scrolls
+           sideways (D1 · G1), the board starts right under it. */
+        const _seg = (on) => 'flex:0 0 auto;padding:7px 12px;font-weight:700;font-size:13px;border-radius:999px;white-space:nowrap;line-height:1.2;touch-action:manipulation;'
+          + (on ? 'background:var(--accent);color:#fff;border:1px solid var(--accent)'
+                : 'background:var(--surface);color:var(--text);border:1px solid var(--border)');
+        _tabsHtml = '<div class="evlb-tabs" style="display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;touch-action:pan-x;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;margin:0 -4px 12px;padding:2px 4px 6px;scrollbar-width:none">'   /* v1589 (Tyler, iOS): the strip could scroll a few px vertically under a held finger and the pill "moved up and down"; pan-x only */
+          + '<button class="bg-btn bg-btn--seg evlb-tab" data-code="" style="' + _seg(!_evlbTab) + '">\u{1F3C6} Tournament</button>'
+          + _grps.map(g2 => '<button class="bg-btn bg-btn--seg evlb-tab" data-code="' + escapeHtml(g2.code) + '" data-course="' + escapeHtml(g2.course) + '" style="' + _seg(_evlbTab === g2.code) + '">' + escapeHtml(_tabLbl(g2)) + '</button>').join('')
+          + '</div>';
+      }
+      if (_evlbTab) {
+        const _rg = (_rawRounds || []).map(r => (r && r.data) ? r.data : r).find(r => r && r.code === _evlbTab);
+        if (_rg) {
+          const _one = (typeof bgGroupBetRows === 'function') ? (bgGroupBetRows([_rg]) || []) : [];
+          let _lbl = (_one[0] && _one[0].label) || 'Group';
+          try { const _gd = _grps.find(g2 => g2.code === _evlbTab); if (_gd && _multiDay) _lbl = 'Day ' + _gd.day + ' \u00b7 ' + _lbl; } catch (e) {}   // v1579
+          let _u = '';
+          try {
+            const _urows = (_one[0] && _one[0].rows) || [];
+            _u = '<div class="card"><div class="bg-sec">' + escapeHtml(_lbl) + ' — units</div>'
+              + (_urows.length
+                  ? _urows.map(r => '<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--border)">'
+                      + '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(String(r.name || '?')) + '</span>'
+                      + '<span style="flex:0 0 auto;font-weight:700;color:' + (Number(r.net) >= 0 ? 'var(--money-pos)' : 'var(--danger)') + '">'
+                      + (Number(r.net) >= 0 ? '+' : '') + bgWhole(Number(r.net)) + '</span></div>').join('')
+                  : '<div class="help-text">No units games were played in this group.</div>')
+              + '</div>';
+          } catch (e) { _u = ''; }
+          let _sc = '';
+          try { _sc = (typeof buildRoundScorecardHtml === 'function') ? (buildRoundScorecardHtml(_rg) || '') : ''; } catch (e) { _sc = ''; }
+          _grpHtml = _u + (_sc ? ('<div class="card"><div class="bg-sec">Scorecard</div>' + _sc + '</div>') : '');
+        }
+        if (!_grpHtml) _grpHtml = '<div class="help-text">That group has no scores yet.</div>';
+      }
+    } catch (e) { _tabsHtml = ''; _grpHtml = ''; }
+    body.innerHTML = _tabsHtml + (_evlbTab ? _grpHtml : (html || '<div class="help-text">No scores in this event yet.</div>'));
+    try { const _act = body.querySelector('.evlb-tabs .evlb-tab[data-code="' + (_evlbTab || '') + '"]'); if (_act && _act.scrollIntoView) _act.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) {}   // v1582
+    body.querySelectorAll('.evlb-tab').forEach(b => b.onclick = () => {
+      const _c = b.dataset.code || '';
+      if (_c === _evlbTab) return;   // already on that tab
+      _evlbTab = _c;
+      try { body.scrollTop = 0; } catch (e) {}
+      // v1596: repaint NOW from the last loaded data, then refresh behind it.
+      if (_evlbCache) { try { _evlbPaint(_evlbCache.raw, _evlbCache.html); _evlbWire(_evlbCache.evPlayers); } catch (e) {} }
+      try { Promise.resolve(_renderEvlbBody()).catch(function () {}); }
+      catch (e) { try { showToast("Couldn't open that group"); } catch (e2) {} }
+    });
+  };
+  const _evlbWire = (evPlayers) => {
+    body.querySelectorAll('.evlb-ld-set').forEach(b => b.onclick = () => openLongDriveWinnerPicker(t, parseInt(b.dataset.day, 10), evPlayers || [], () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    body.querySelectorAll('.evlb-nassau-cfg').forEach(b => b.onclick = () => openTourneyNassauConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    body.querySelectorAll('.evlb-lp-cfg').forEach(b => b.onclick = () => openTourneyLongPuttConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    body.querySelectorAll('.evlb-sp-cfg').forEach(b => b.onclick = () => openTourneySidePotsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    // v1107 (Build A): both award buttons now navigate to the real Board
+    // (Results) with the scope preset, the way Group award already did. The
+    // z-100060 openT2PayoutBoard overlay is deleted -- no more award screen
+    // stacked on top of this overlay with its own back behaviour. The scope is
+    // set BEFORE the board paints because renderT2PayoutFilterBar defaults an
+    // unset code to 'total'.
+    body.querySelectorAll('.evlb-pay-group').forEach(b => b.onclick = async () => {
+      _evlbClose(true);   // v1094: this handler navigates itself \u2014 don't also bounce to GPS
+      try { _t2BoardFilterScope[b.dataset.code] = 'group'; } catch (e) {}
+      try { await openT2GroupBoardReadOnly(b.dataset.code); } catch (e) {}
+    });
+    // v1355: the Tournament total button is gone (the units renders inline on this
+    // screen now). Handler left wired and simply finds nothing, exactly as the
+    // v1333 .evlb-pay-group handler was left.
+    body.querySelectorAll('.evlb-pay-total').forEach(b => b.onclick = async () => {
+      const _c = b.dataset.code;
+      if (!_c) { try { showToast('No rounds in this event yet'); } catch (e) {} return; }
+      _evlbClose(true);
+      try { _t2BoardFilterScope[_c] = 'total'; } catch (e) {}
+      try { await openT2GroupBoardReadOnly(_c); } catch (e) {}
+    });
+  };
   const _renderEvlbBody = async () => {
+   const _mySeq = ++_evlbSeq;
    try {
     // Always read the LATEST event settings so a just-saved Tournament Skins / Nassau /
     // Long Putt shows immediately — the passed-in t can be a stale snapshot, which made
@@ -83315,93 +83422,10 @@ async function openEventLeaderboard(t, opts) {
     // one. A tab is a view of the screen you are already on, not a place to navigate to.
     // The group view is built from the SAME shared builders the round sheet uses
     // (bgGroupBetRows / buildRoundScorecardHtml), so this is not a second implementation.
-    let _tabsHtml = '';
-    let _grpHtml = '';
-    try {
-      const _grps = (_rawRounds || []).map(r => (r && r.data) ? r.data : r)
-        .filter(r => r && r.code && r.t2)
-        .map(r => ({ n: r.t2.group, day: Number(r.t2.day) || 1, code: r.code, course: r.course || '' }))
-        .sort((a, b) => (a.day - b.day) || ((Number(a.n) || 0) - (Number(b.n) || 0)));
-      /* v1579 (Tyler): "it duplicated the groups at the top here." A multi-day event has a
-         Group 1 on every day, and the tabs only said "Group 1" - three of them in a row.
-         When more than one day is present the tab (and the group heading) carry the day. */
-      const _multiDay = new Set(_grps.map(g2 => g2.day)).size > 1;
-      const _tabLbl = g2 => (_multiDay ? ('D' + g2.day + ' \u00b7 G') : 'Group ') + String(g2.n == null ? '?' : g2.n);   // v1582: compact pill text
-      // A group that has left the event must not strand the view on a dead tab.
-      if (_evlbTab && !_grps.some(g2 => g2.code === _evlbTab)) _evlbTab = '';
-      if (_grps.length) {
-        /* v1582 (Tyler, phone): seven two-line "Day 1 · Group 1" buttons ate half the
-           screen before the standings began. One row of compact pills that scrolls
-           sideways (D1 · G1), the board starts right under it. */
-        const _seg = (on) => 'flex:0 0 auto;padding:7px 12px;font-weight:700;font-size:13px;border-radius:999px;white-space:nowrap;line-height:1.2;touch-action:manipulation;'
-          + (on ? 'background:var(--accent);color:#fff;border:1px solid var(--accent)'
-                : 'background:var(--surface);color:var(--text);border:1px solid var(--border)');
-        _tabsHtml = '<div class="evlb-tabs" style="display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;touch-action:pan-x;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;margin:0 -4px 12px;padding:2px 4px 6px;scrollbar-width:none">'   /* v1589 (Tyler, iOS): the strip could scroll a few px vertically under a held finger and the pill "moved up and down"; pan-x only */
-          + '<button class="bg-btn bg-btn--seg evlb-tab" data-code="" style="' + _seg(!_evlbTab) + '">\u{1F3C6} Tournament</button>'
-          + _grps.map(g2 => '<button class="bg-btn bg-btn--seg evlb-tab" data-code="' + escapeHtml(g2.code) + '" data-course="' + escapeHtml(g2.course) + '" style="' + _seg(_evlbTab === g2.code) + '">' + escapeHtml(_tabLbl(g2)) + '</button>').join('')
-          + '</div>';
-      }
-      if (_evlbTab) {
-        const _rg = (_rawRounds || []).map(r => (r && r.data) ? r.data : r).find(r => r && r.code === _evlbTab);
-        if (_rg) {
-          const _one = (typeof bgGroupBetRows === 'function') ? (bgGroupBetRows([_rg]) || []) : [];
-          let _lbl = (_one[0] && _one[0].label) || 'Group';
-          try { const _gd = _grps.find(g2 => g2.code === _evlbTab); if (_gd && _multiDay) _lbl = 'Day ' + _gd.day + ' \u00b7 ' + _lbl; } catch (e) {}   // v1579
-          let _u = '';
-          try {
-            const _urows = (_one[0] && _one[0].rows) || [];
-            _u = '<div class="card"><div class="bg-sec">' + escapeHtml(_lbl) + ' — units</div>'
-              + (_urows.length
-                  ? _urows.map(r => '<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--border)">'
-                      + '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(String(r.name || '?')) + '</span>'
-                      + '<span style="flex:0 0 auto;font-weight:700;color:' + (Number(r.net) >= 0 ? 'var(--money-pos)' : 'var(--danger)') + '">'
-                      + (Number(r.net) >= 0 ? '+' : '') + bgWhole(Number(r.net)) + '</span></div>').join('')
-                  : '<div class="help-text">No units games were played in this group.</div>')
-              + '</div>';
-          } catch (e) { _u = ''; }
-          let _sc = '';
-          try { _sc = (typeof buildRoundScorecardHtml === 'function') ? (buildRoundScorecardHtml(_rg) || '') : ''; } catch (e) { _sc = ''; }
-          _grpHtml = _u + (_sc ? ('<div class="card"><div class="bg-sec">Scorecard</div>' + _sc + '</div>') : '');
-        }
-        if (!_grpHtml) _grpHtml = '<div class="help-text">That group has no scores yet.</div>';
-      }
-    } catch (e) { _tabsHtml = ''; _grpHtml = ''; }
-    body.innerHTML = _tabsHtml + (_evlbTab ? _grpHtml : (html || '<div class="help-text">No scores in this event yet.</div>'));
-    try { const _act = body.querySelector('.evlb-tabs .evlb-tab[data-code="' + (_evlbTab || '') + '"]'); if (_act && _act.scrollIntoView) _act.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) {}   // v1582
-    body.querySelectorAll('.evlb-tab').forEach(b => b.onclick = () => {
-      const _c = b.dataset.code || '';
-      if (_c === _evlbTab) return;   // already on that tab
-      _evlbTab = _c;
-      try { body.scrollTop = 0; } catch (e) {}
-      try { Promise.resolve(_renderEvlbBody()).catch(function () {}); }
-      catch (e) { try { showToast("Couldn't open that group"); } catch (e2) {} }
-    });
-    body.querySelectorAll('.evlb-ld-set').forEach(b => b.onclick = () => openLongDriveWinnerPicker(t, parseInt(b.dataset.day, 10), evPlayers || [], () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
-    body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
-    body.querySelectorAll('.evlb-nassau-cfg').forEach(b => b.onclick = () => openTourneyNassauConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
-    body.querySelectorAll('.evlb-lp-cfg').forEach(b => b.onclick = () => openTourneyLongPuttConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
-    body.querySelectorAll('.evlb-sp-cfg').forEach(b => b.onclick = () => openTourneySidePotsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
-    // v1107 (Build A): both award buttons now navigate to the real Board
-    // (Results) with the scope preset, the way Group award already did. The
-    // z-100060 openT2PayoutBoard overlay is deleted -- no more award screen
-    // stacked on top of this overlay with its own back behaviour. The scope is
-    // set BEFORE the board paints because renderT2PayoutFilterBar defaults an
-    // unset code to 'total'.
-    body.querySelectorAll('.evlb-pay-group').forEach(b => b.onclick = async () => {
-      _evlbClose(true);   // v1094: this handler navigates itself \u2014 don't also bounce to GPS
-      try { _t2BoardFilterScope[b.dataset.code] = 'group'; } catch (e) {}
-      try { await openT2GroupBoardReadOnly(b.dataset.code); } catch (e) {}
-    });
-    // v1355: the Tournament total button is gone (the units renders inline on this
-    // screen now). Handler left wired and simply finds nothing, exactly as the
-    // v1333 .evlb-pay-group handler was left.
-    body.querySelectorAll('.evlb-pay-total').forEach(b => b.onclick = async () => {
-      const _c = b.dataset.code;
-      if (!_c) { try { showToast('No rounds in this event yet'); } catch (e) {} return; }
-      _evlbClose(true);
-      try { _t2BoardFilterScope[_c] = 'total'; } catch (e) {}
-      try { await openT2GroupBoardReadOnly(_c); } catch (e) {}
-    });
+    if (_mySeq !== _evlbSeq) return;   // v1596: a newer render is already on its way
+    _evlbCache = { raw: _rawRounds, html: html, evPlayers: evPlayers };
+    _evlbPaint(_rawRounds, html);
+    _evlbWire(evPlayers);
    } catch (e) { body.innerHTML = '<div class="help-text">Could not load the event leaderboard.</div>'; }
   };
   await _renderEvlbBody();
