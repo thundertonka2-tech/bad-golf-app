@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1590-->
+<!--BGVER=v2026.11.1591-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10250,7 +10250,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1590';
+const BG_BUILD = 'v2026.11.1591';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -84368,7 +84368,16 @@ function lgPaint(body, html) {
   /* v1429: a render that early-returns on lgNavStale never reaches the line
      below, so clear the strip by hand too rather than relying on the swap. */
   try { const _u = document.getElementById('lg-updating'); if (_u) _u.remove(); } catch (e) {}
+  /* v1591 (Tyler, Teams step): "the screen keeps flickering and knocking me off center."
+     Swapping the whole body resets every scroller to the top. Remember where the page
+     and the nearest scrolling ancestor were and put them back after the swap. */
+  let _sc = null;
+  try {
+    let el = body; while (el && el !== document.body) { const cs = getComputedStyle(el); if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight) break; el = el.parentElement; }
+    _sc = { el: (el && el !== document.body) ? el : null, top: (el && el !== document.body) ? el.scrollTop : 0, win: window.scrollY };
+  } catch (e) { _sc = null; }
   try { if (body) body.innerHTML = html; } catch (e) {}
+  try { if (_sc) { if (_sc.el) _sc.el.scrollTop = _sc.top; else window.scrollTo(0, _sc.win); requestAnimationFrame(function () { try { if (_sc.el) _sc.el.scrollTop = _sc.top; else window.scrollTo(0, _sc.win); } catch (e) {} }); } } catch (e) {}
 }
 
 /* ---- v1414: Back goes back a STEP while the league is being set up --------
@@ -92506,11 +92515,11 @@ async function lgOpenTeams(sid, quiet) {
             'style="flex:1;min-width:0;min-height:44px;font-weight:700;margin:0" ' +
             'onchange="lgTeamRename(\'' + lgJs(sid) + '\',\'' + tid + '\')">'
           : '<div class="bg-sec" style="flex:1;min-width:0">' + lgEsc(t.name) + '</div>') +
-        '<div class="help-text" style="margin:0;flex:0 0 auto;font-size:12px;font-variant-numeric:tabular-nums">' +
+        '<div class="help-text" id="lg-tcount-' + tid + '" data-size="' + size + '" style="margin:0;flex:0 0 auto;font-size:12px;font-variant-numeric:tabular-nums">' +
           ps.length + ' of ' + size + '</div>' +
       '</div>' +
       ps.map(function (p) {
-        return '<div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,var(--bg-border))">' +
+        return '<div class="lg-trow" data-mid="' + lgEsc(p.member_id) + '" style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,var(--bg-border))">' +
           '<div style="flex:1;min-width:0;font-weight:600;font-size:14px">' + lgEsc(p.name) + '</div>' +
           (amCommish
             /* Neutral, not danger. Tyler's red is for Back and Cancel; taking a
@@ -92527,8 +92536,8 @@ async function lgOpenTeams(sid, quiet) {
           '<div id="lg-tpick-' + tid + '" hidden style="margin-top:10px">' +
             (free.length
               ? '<div class="team-col">' + free.map(function (m) {
-                  return '<button type="button" class="bg-btn bg-btn--chip player-chip" ' +
-                    'onclick="lgTeamAdd(\'' + lgJs(sid) + '\',\'' + tid + '\',\'' + lgJs(m.id) + '\')">' +
+                  return '<button type="button" class="bg-btn bg-btn--chip player-chip" data-mid="' + lgEsc(m.id) + '" ' +
+                    'onclick="lgTeamAdd(\'' + lgJs(sid) + '\',\'' + tid + '\',\'' + lgJs(m.id) + '\', this)">' +
                     lgEsc(m.display_name) + '</button>';
                 }).join('') + '</div>'
               : '<p class="help-text" style="margin:0">Everybody is on a team already. Take somebody off another team first.</p>') +
@@ -92703,19 +92712,42 @@ function lgTeamPick(tid) {
 }
 window.lgTeamPick = lgTeamPick;
 
-async function lgTeamAdd(sid, tid, mid) {
+async function lgTeamAdd(sid, tid, mid, chipEl) {
   const c = _lgTeamCur(tid);
   if (c.ids.indexOf(mid) < 0) c.ids.push(mid);
   /* v1429: the map, now -- not when the re-render lands. Anything that fires in
      between (a blur-driven rename, above all) reads this. */
   try { (window._lgTeamIds = window._lgTeamIds || {})[tid] = c.ids.slice(); } catch (e) {}
-  /* Close the picker NOW, synchronously -- not when the re-render lands. The
-     list stays on screen for the whole round trip otherwise, and a second tap
-     inside that window reads the SAME stale data-ids and saves a team missing
-     the player just added. */
-  lgTeamPick('');
-  await _lgTeamWrite(sid, tid, c.name || c.saved || 'Team', c.ids);
-  try { lgOpenTeams(sid, true); } catch (e) {}
+  /* v1591 (Tyler): "allow me to select two players at one time here. Also the screen
+     keeps flickering and knocking me off center." The list used to close on the first
+     tap and the whole step repainted after every write. Now the card is updated IN
+     PLACE (member row added, counter bumped, the chip pulled from every team's list)
+     and the picker stays open until the team is full; the write still goes out per
+     tap, serialised, and only a failed write repaints. */
+  let size = 2, full = false;
+  try {
+    const cnt = document.getElementById('lg-tcount-' + tid);
+    if (cnt) { size = parseInt(cnt.dataset.size, 10) || 2; cnt.textContent = c.ids.length + ' of ' + size; }
+    full = c.ids.length >= size;
+    const name = chipEl ? String(chipEl.textContent || '').trim() : '';
+    const addBtn = document.getElementById('lg-tadd-' + tid);
+    if (addBtn && name && !document.querySelector('.lg-trow[data-mid="' + CSS.escape(mid) + '"]')) {
+      const row = document.createElement('div');
+      row.className = 'lg-trow'; row.dataset.mid = mid;
+      row.style.cssText = 'display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--bg-border,var(--bg-border))';
+      row.innerHTML = '<div style="flex:1;min-width:0;font-weight:600;font-size:14px">' + lgEsc(name) + '</div>' +
+        '<button type="button" class="bg-btn bg-btn--danger bg-btn--sm small" style="flex:0 0 auto" onclick="lgTeamDrop(\'' + lgJs(sid) + '\',\'' + tid + '\',\'' + lgJs(mid) + '\')">Remove</button>';
+      addBtn.parentNode.insertBefore(row, addBtn);
+    }
+    document.querySelectorAll('[id^="lg-tpick-"] .player-chip[data-mid="' + CSS.escape(mid) + '"]').forEach(function (b) { b.remove(); });
+    if (full) {
+      lgTeamPick('');
+      if (addBtn) addBtn.hidden = true;
+      const pick = document.getElementById('lg-tpick-' + tid); if (pick) pick.hidden = true;
+    }
+  } catch (e) {}
+  const ok = await _lgTeamWrite(sid, tid, c.name || c.saved || 'Team', c.ids);
+  if (!ok) { try { lgOpenTeams(sid, true); } catch (e) {} }
 }
 window.lgTeamAdd = lgTeamAdd;
 
