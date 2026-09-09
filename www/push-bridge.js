@@ -87,6 +87,22 @@
           if (type === 'friend_request') {
             if (typeof window.switchTab === 'function') return window.switchTab('crew');
           }
+          // v1601: self-submit league pushes. The reminder lands on the week
+          // ("pick the round that counts"); week-complete lands on the standings.
+          // The app may still be booting when the tap arrives, so wait for the
+          // league functions to exist (up to ~15s) instead of dropping the tap.
+          if (type === 'league_reminder' || type === 'league_week_complete') {
+            var _sid = data.season_id, _wid = data.week_id, _tries = 0;
+            (function _go() {
+              try {
+                if (type === 'league_reminder' && typeof window.lgOpenWeek === 'function' && _sid && _wid) return window.lgOpenWeek(_sid, _wid);
+                if (type === 'league_week_complete' && typeof window.lgOpenStandings === 'function' && _sid) return window.lgOpenStandings(_sid);
+              } catch (e) {}
+              if (++_tries > 30) { try { if (typeof window.switchTab === 'function') window.switchTab('league'); } catch (e) {} return; }
+              setTimeout(_go, 500);
+            })();
+            return;
+          }
           // Default (round_start / legacy / unknown) -> open that round if we have
           // a code, otherwise land on Home. Never a no-op: a tapped notification
           // that goes nowhere reads as a broken app.
