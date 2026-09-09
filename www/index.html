@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1586-->
+<!--BGVER=v2026.11.1587-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10262,7 +10262,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1586';
+const BG_BUILD = 'v2026.11.1587';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -16065,7 +16065,13 @@ window.addEventListener('offline', () => { supaOnline = false; updateSyncIndicat
 // the moment the fetch resolves the entry is cleared — so read-modify-write
 // flows on scores/games stay correct.
 const _singletonInFlight = {};
-const _singletonWroteAt = {};   // key -> last local write time; blocks the cache-refresh from clobbering a just-saved value
+const _singletonWroteAt = {};
+/* v1587 PERF: readSharedSingleton returns the local copy at once and fires a background
+   cloud refresh EVERY call. At boot the tombstone row alone was re-fetched ~50 times and
+   the roster row ~14 times (every getRecent / getSharedTombstones / roster read). One
+   refresh per key per 20 s is plenty - writes still bypass this via _singletonWroteAt. */
+const _singletonRefreshedAt = {};
+const SINGLETON_REFRESH_MS = 20000;   // key -> last local write time; blocks the cache-refresh from clobbering a just-saved value
 const _singletonDirty = {};     // key -> true when local edits AREN'T yet confirmed in the cloud (blocks clobber + drives retry)
 // Persist the dirty set so unsaved admin edits survive a reload BEFORE the cloud
 // confirms — otherwise a fresh load would forget they're unsaved and the next
@@ -16164,6 +16170,8 @@ async function _readSharedSingletonNow(key) {
   if (cached != null) {
     const refresh = () => {
       try {
+        if (Date.now() - (_singletonRefreshedAt[key] || 0) < SINGLETON_REFRESH_MS) return;   // v1587
+        _singletonRefreshedAt[key] = Date.now();
         if (supa && supaOnline) {
           supa.from('games').select('data').eq('code', rowCode).maybeSingle()
             .then(r => {
@@ -19043,7 +19051,7 @@ async function topUpMyRoundsFromBackup(roster) {
 // to collapse a single tap's fan-out, far too short to serve stale data to a later
 // screen. Writers can force a re-read with invalidatePlayerRosterCache().
 let _rosterCacheAt = 0, _rosterCacheVal = null, _rosterInFlight = null;
-const ROSTER_CACHE_MS = 1500;
+const ROSTER_CACHE_MS = 15000;   // v1587 PERF: was 1.5 s - the roster row was read 14x per boot
 function invalidatePlayerRosterCache() { _rosterCacheAt = 0; _rosterCacheVal = null; }
 async function getPlayerRoster() {
   try {
@@ -33298,12 +33306,9 @@ function bgBuildInfoBets() {
         s.className = 'bg-btn bg-btn--full full t2-collapsed-row gg-crow';
         s.innerHTML = '<span class="t2-crow-img gg-crow-ico">' + _icoTxt + '</span>' +
           '<span class="t2-crow-txt"><span class="t2-crow-ttl">' + escapeHtml(_lbl) + '</span>' +
-          '<span class="t2-crow-sub"><span class="t2-crow-meta gg-count">' + explainers.length + _unit + ' \u00B7 tap to show</span></span></span>' +
+          '</span>' +   /* v1587 (Tyler): the "N games · tap to show" line under each Info heading is gone */
           '<span class="t2-crow-caret">\u25BE</span>';
         secEl.appendChild(s);
-        secEl.addEventListener('toggle', function () {
-          try { const m = s.querySelector('.gg-count'); if (m) m.textContent = explainers.length + _unit + ' \u00B7 tap to ' + (secEl.open ? 'hide' : 'show'); } catch (e) {}
-        });
       } else {
         const h = document.createElement('div');
         h.className = 'bg-info-sec-h';
@@ -53682,7 +53687,20 @@ function tourneyTrophy(is) {
   return is ? ' <span title="Tournament round" aria-label="Tournament round" style="font-size:12px;vertical-align:1px">\u{1F3C6}</span>' : '';
 }
 
-async function renderHomeInvites() {
+/* v1587 PERF: renderHomeInvites was fired three times per boot (renderHome, the rounds
+   refresh, the away-view refresh), and each run re-scanned the tournaments. Overlapping
+   calls now share the run in flight; a call that arrives mid-run queues ONE more run
+   after it, so the card still ends on fresh data. */
+let _homeInvP = null, _homeInvAgain = false;
+function renderHomeInvites() {
+  if (_homeInvP) { _homeInvAgain = true; return _homeInvP; }
+  _homeInvP = (async () => {
+    try { await _renderHomeInvitesNow(); }
+    finally { _homeInvP = null; if (_homeInvAgain) { _homeInvAgain = false; try { renderHomeInvites(); } catch (e) {} } }
+  })();
+  return _homeInvP;
+}
+async function _renderHomeInvitesNow() {
   const card = document.getElementById('home-invites-card');
   const list = document.getElementById('home-invites-list');
   if (!card || !list) return;
@@ -59666,7 +59684,17 @@ function dropGhostRounds(history) {
     return hasGross || hasHoles || hasMoney;
   });
 }
+/* v1587 PERF: the heal ran on every Rounds / Stats open and re-read ~20 rounds each time,
+   almost always changing nothing. A no-change heal is remembered for 10 minutes; anything
+   that changes history (a round finishing) still gets a fresh heal next open after that. */
+let _reconcileAt = 0;
 async function reconcileMyScoreHistory() {
+  if (Date.now() - _reconcileAt < 600000) return false;
+  const r = await _reconcileMyScoreHistoryNow();
+  if (!r) _reconcileAt = Date.now();
+  return r;
+}
+async function _reconcileMyScoreHistoryNow() {
   try {
     const me = await getMeName(); if (!me) return;
     let roster = await getPlayerRoster();
@@ -99104,7 +99132,12 @@ async function init() {
   // rounds that ended early (< 18 holes) which the old archive skipped.
   // Not awaited — startup shouldn't wait for it. Stats tab will re-render
   // automatically if the user navigates there after backfill completes.
-  backfillStatsFromSavedRounds().then(() => {
+  /* v1587 PERF: this walked 30 rounds (one read each) and archived every one - each
+     archive re-reading the tombstones and re-writing player_stats - on EVERY boot.
+     It is idempotent, so once a day per account on this device is enough. */
+  const _bfKey = 'golf:backfill-at:' + ((typeof _authUser !== 'undefined' && _authUser && _authUser.id) || 'anon');
+  let _bfDue = true; try { _bfDue = (Date.now() - (parseInt(localStorage.getItem(_bfKey) || '0', 10) || 0)) > 86400000; } catch (e) {}
+  (_bfDue ? backfillStatsFromSavedRounds().then(() => { try { localStorage.setItem(_bfKey, String(Date.now())); } catch (e) {} }) : Promise.resolve()).then(() => {
     // If the user is sitting on the Stats tab when backfill finishes, refresh it
     const statsPanel = document.getElementById('panel-stats');
     if (statsPanel && statsPanel.classList.contains('active')) {
