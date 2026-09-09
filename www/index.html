@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1591-->
+<!--BGVER=v2026.11.1593-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10253,7 +10253,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1591';
+const BG_BUILD = 'v2026.11.1593';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -32698,7 +32698,12 @@ const _BG_SCRAMBLE_BLOCKED = [
   'game-animals','game-marks','game-hot-potato','game-stableford','game-quota',
   'game-team-quota','game-team-match','game-team-lowball','game-combo-score','game-ryder-cup','game-umbrella',
   'game-potofgold','game-junk','game-snake','game-bbb','game-lownet','game-girpool',
-  'game-puttspool','game-match'
+  'game-puttspool','game-match',
+  /* v1593 (Tyler, 9/9): "make this consistent across the tourney side." The four field
+     pools on Configure Day (Tournament Skins, Low Net, GIR, Fewest Putts) settle off
+     individual scorecards too, and were the only tiles this gate did not reach - so a
+     scramble day still offered them. CTP, Long Drive and Long Putt stay. */
+  'tpot-skins-on','tpot-lownet-on','tpot-girs-on','tpot-putts-on'
 ];
 function syncScrambleGameGates() {
   try {
@@ -33058,11 +33063,21 @@ function bgStepperizeField(field) {
     const plus = document.createElement('button');
     plus.type = 'button'; plus.className = 'bg-stbtn plus'; plus.textContent = '＋';
     plus.setAttribute('aria-label', 'increase');
+    /* v1592 (Tyler, Banker "Default value per player" video): the box started empty
+       ("e.g. 5"), − showed 0, and + walked 0.5 → 3.5 → 5.5 in half units. Units are
+       whole numbers everywhere now (v1581), so every units stepper steps by 1 and lands
+       on a whole number; an EMPTY box starts from the number in its placeholder
+       ("e.g. 5" → 5) on the first +, and − on an empty box just shows the minimum. */
+    const _phN = (() => { try { const m = String(num.placeholder || '').match(/-?\d+(\.\d+)?/); return m ? parseFloat(m[0]) : null; } catch (e) { return null; } })();
+    try { num.step = '1'; } catch (e) {}
     const bump = dir => {
       const min = (num.min !== '' && num.min != null) ? parseFloat(num.min) : -Infinity;
-      let v = (parseFloat(num.value) || 0) + dir * step;
+      const empty = String(num.value || '').trim() === '';
+      let v;
+      if (empty) v = (dir > 0) ? ((_phN != null && _phN > 0) ? _phN : 1) : (isFinite(min) ? min : 0);
+      else v = (parseFloat(num.value) || 0) + dir;
       if (v < min) v = min;
-      v = Math.round(v * 100) / 100;
+      v = (typeof bgWhole === 'function') ? bgWhole(v) : Math.round(v);
       num.value = v;
       num.dispatchEvent(new Event('input', { bubbles: true }));
       num.dispatchEvent(new Event('change', { bubbles: true }));
@@ -88254,6 +88269,16 @@ async function lgOpenHandicaps(sid, weekNumber) {
   }
   const rows = Array.isArray(res.data) ? res.data : [];
   window._lgHcpRows = rows;
+  /* v1593 (Tyler, 9/9): "In league and tourney we need to allow for zero handicap when a
+     scramble format is being played. Typically you don't give strokes on a scramble...
+     Leaving zero gets me stuck here." Every box blank meant Next had nothing to send and
+     said 'Nothing to save' - a dead end on the last setup step. On a scramble a blank box
+     now saves as 0.0 (no strokes); on any other format Next says which boxes are blank. */
+  window._lgHcpScramble = false;
+  try {
+    const _fr = await _bgRead(function () { return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle(); }, 'lgOpenHandicaps:season');
+    window._lgHcpScramble = !!(_fr.ok && _fr.data && _fr.data.settings && _fr.data.settings.format === 'scramble');
+  } catch (e) {}
 
   /* v1405 (Tyler, 9/2): "I created a new league with 5 people one of them was
      a woman. I need the ability to set the tees per person as well."
@@ -88348,6 +88373,9 @@ async function lgOpenHandicaps(sid, weekNumber) {
       '</div>';
   }
 
+  if (window._lgHcpScramble && !locked && rows.length) {   /* v1593 */
+    h += lgCard('<p class="help-text" style="margin:0">\u26f3 <strong>Scramble</strong> \u2014 strokes are optional. Leave a box blank and that player saves at 0.0 (no strokes); type a number only for anyone you want to give strokes to.</p>');
+  }
   h += '<div class="card">' + rows.map(function (r, i) {
     /* v1271 FIX (QA C-1): league_suggest_handicaps returns `stored` -- what is
        ALREADY WRITTEN for this week -- and this box never read it. A commissioner
@@ -88665,11 +88693,17 @@ async function lgSaveHandicaps(opts) {
   if (!sid || !rows.length) return;
   const btn = document.getElementById('lg-hcp-save');
   const out = [];
+  let _blank = 0;   /* v1593 */
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const el = document.getElementById('lg-hcp-' + i);
     let v = el ? lgNum(el.value) : null;
-    if (v === null || isNaN(v)) continue;
+    let _autoZero = false;
+    if (v === null || isNaN(v)) {
+      /* v1593: a blank box on a scramble is 'no strokes' - save 0.0. Anywhere else it is
+         counted so Next can say what is missing instead of 'Nothing to save'. */
+      if (window._lgHcpScramble) { v = 0; _autoZero = true; } else { _blank++; continue; }
+    }
     /* v1429: the same 0.0-54.0 in tenths lgHcpFix applies on blur, repeated on
        the way out. A value can reach here without a blur -- Save tapped from a
        box still focused, or a stale draft -- and this is the last gate before
@@ -88686,7 +88720,9 @@ async function lgSaveHandicaps(opts) {
       // §10: a note is REQUIRED on any override of 2 or more. Ask here rather
       // than letting the server's refusal be the first the commissioner hears
       // of it — the server still enforces it either way.
-      if (suggested !== null && Math.abs(v - suggested) >= 2) {
+      if (_autoZero && suggested !== null && Math.abs(v - suggested) >= 2) {
+        note = 'Scramble \u2014 no strokes';   /* v1593: the reason is the format, not a judgement call */
+      } else if (suggested !== null && Math.abs(v - suggested) >= 2) {
         try {
           note = window.prompt('Why is ' + r.name + '’s handicap ' + v.toFixed(1) +
             ' instead of the suggested ' + Number(suggested).toFixed(1) + '?\n\nThis goes on the record.');
@@ -88705,6 +88741,10 @@ async function lgSaveHandicaps(opts) {
       // silently overwriting their number.
       expect_previous: (r.stored === undefined ? null : r.stored)
     });
+  }
+  if (_blank) {   /* v1593 */
+    try { showToast(_blank + ' player' + (_blank === 1 ? ' still has' : 's still have') + ' no handicap \u2014 type a number for each (0 is fine)'); } catch (e) {}
+    return false;
   }
   if (!out.length) { try { showToast('Nothing to save'); } catch (e) {} return false; }
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
@@ -93376,6 +93416,13 @@ const LG_SIDE_ALLOW_CFG = ['skins', 'lowNetPool', 'girPool', 'puttsPool',
    Putts, GIRs, Low Net (with its handicap slider) and Long Drive are the SIDE
    prize pools. Anything allowed and not named here goes to Side. */
 const LG_MAIN_TILES = new Set(['skins', 'ctp']);
+/* v1593 (Tyler, 9/9): "I'm in league, choose scramble, go to this page and I am getting
+   options for single player games only. All I should see here is extras that can be
+   played if a scramble is being played at the same time." One ball per team means no
+   individual skins and no per-player pools (low net, putts, GIRs). What a scramble CAN
+   settle inside the round is a shot: closest to the pin, long drive, long putt. */
+const LG_SIDE_ALLOW_SCRAMBLE = new Set(['ctp', 'longdrive', 'longputt']);
+window._lgSideScramble = false;
 
 function lgFilterSideGames(hide) {
   try {
@@ -93383,7 +93430,7 @@ function lgFilterSideGames(hide) {
       const key = cb.id.slice(5);
       const card = cb.closest('.game-toggle');
       const opts = document.getElementById('opts-' + key);
-      const drop = !!(hide && !LG_SIDE_ALLOW.has(key));
+      const drop = !!(hide && !((window._lgSideScramble ? LG_SIDE_ALLOW_SCRAMBLE : LG_SIDE_ALLOW).has(key)));   /* v1593 */
       /* v1414: .lg-off is the durable record of "the league dropped this",
          readable by anything else that manages the same tile's display. */
       if (card) {
@@ -93433,6 +93480,7 @@ async function lgOpenSideGames(sid, weekId) {
       return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle();
     }, 'lgOpenSideGames:season');
     if (!sr.ok) { try { showToast('Couldn’t load the league'); } catch (e) {} return; }
+    try { window._lgSideScramble = (((sr.data && sr.data.settings) || {}).format === 'scramble'); } catch (e) { window._lgSideScramble = false; }   /* v1593 */
     let existing = ((sr.data && sr.data.settings) || {}).side_games || {};
 
     /* v1427: the last item of the setup spec -- ONE week that plays something
