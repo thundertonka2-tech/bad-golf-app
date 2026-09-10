@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1636-->
+<!--BGVER=v2026.11.1638-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10409,7 +10409,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1636';
+const BG_BUILD = 'v2026.11.1638';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -64630,7 +64630,7 @@ async function renderInviteFriendsList() {
   ).join('');
   el.querySelectorAll('.inv-row').forEach(b => b.onclick = async () => {
     b.disabled = true;
-    await sendGameInvite(b.dataset.id);
+    await sendGameInvite(b.dataset.id, { force: true });   /* v1638: an explicit resend */
     b.textContent = '✓ Invited — tap to resend';
     b.disabled = false;
   });
@@ -64745,8 +64745,18 @@ function consentBlockToast(g, pid) {
   return true;
 }
 
-async function sendGameInvite(toId) {
+async function sendGameInvite(toId, opts) {
   if (!supa || !_authUser || !state.game) return;
+  /* v1638 (Tyler): "make sure we don't send users multiple invites in app for the same
+     round, they only need one." Unless this is an explicit resend (opts.force — the
+     friends list's 'tap to resend'), a person who already holds an invite for this
+     round is left alone. */
+  try {
+    if (!(opts && opts.force) && !(state.game.t2 && state.game.t2.tournamentId)) {
+      const _ex = await supa.from('game_invites').select('id').eq('to_user', toId).eq('game_code', state.game.code).limit(1);
+      if (_ex && !_ex.error && Array.isArray(_ex.data) && _ex.data.length) return;
+    }
+  } catch (e) {}
   // v912 (Tyler): the same bug as the shared join link — an in-app invite sent
   // from inside a TOURNAMENT round carried THIS group's game_code, so accepting
   // it dropped the friend onto the sender's scorecard. Send the EVENT invite
@@ -70294,6 +70304,7 @@ async function submitT2Create() {
   // completely. Awaiting it just made the wizard appear one round trip later.
   try { renderT2List(); } catch (e) {}
   openT2Home(t.id);
+  try { setTimeout(function () { bgInvitePrompt('tourney', t.id); }, _isBracket ? 1500 : 700); } catch (e) {}   /* v1638 */
 }
 
 async function openT2Home(id, _opts) {
@@ -94275,8 +94286,10 @@ const LG_WIZ = [
      bets. One games screen in the app, so the two cannot drift apart.
      Set ONCE, at league level, exactly as the pots are (Tyler, 9/1: "this
      should be set at the league level not weekly level"). */
-  { key: 'sidegames', title: 'Side games',        icon: '🎯', hint: 'Skins, wolf, greenies \u2014 what your group plays every week. Saving it empty is a fine answer.', open: 'lgOpenSideGames' },
-  { key: 'money',     title: 'Dues and prize pools',     icon: '🏅', hint: 'Last one. Leave it all at zero if you play for nothing.', open: 'lgOpenMoneySetup' }
+  /* v1638 (Tyler): the games step is the LAST one and its button says Create League;
+     dues and prize pools moved up in front of it. Finishing it prompts the invites. */
+  { key: 'money',     title: 'Dues and prize pools',     icon: '🏅', hint: 'Leave it all at zero if you play for nothing.', open: 'lgOpenMoneySetup' },
+  { key: 'sidegames', title: 'Side games',        icon: '🎯', hint: 'Last one \u2014 the games your group plays every week. Saving it empty is a fine answer.', open: 'lgOpenSideGames' }
 ];
 
 /* The same answers lgNextSetupStep routes on, in the same order. */
@@ -94530,17 +94543,21 @@ async function _lgNextSetupStepInner(sid) {
     try { lgOpenHcpRules(sid); } catch (e) { try { lgOpenSeason(sid); } catch (e2) {} }
     return;
   }
-  if (!st.sideGames) {
-    try { showToast('Rules are set \u2014 now the side games'); } catch (e) {}
-    try { lgOpenSideGames(sid); } catch (e) { try { lgOpenSeason(sid); } catch (e2) {} }
-    return;
-  }
-  if (!st.money) {
-    try { showToast('Side games are set \u2014 last thing, the units'); } catch (e) {}
+  if (!st.money) {   /* v1638: dues before games */
+    try { showToast('Rules are set \u2014 now the dues and prize pools'); } catch (e) {}
     try { lgOpenMoneySetup(sid); } catch (e) { try { lgOpenSeason(sid); } catch (e2) {} }
     return;
   }
-  try { lgOpenSeason(sid); } catch (e) {}
+  if (!st.sideGames && !st.selfOn) {
+    try { showToast('Dues are set \u2014 last one, the games'); } catch (e) {}
+    try { lgOpenSideGames(sid); } catch (e) { try { lgOpenSeason(sid); } catch (e2) {} }
+    return;
+  }
+  try { await lgOpenSeason(sid); } catch (e) {}
+  /* v1638 (Tyler): "once the league is created prompt the commissioner with a send
+     invite prompt." Setup just completed (every branch above fell through). Once per
+     season per device. */
+  try { bgInvitePrompt('league', sid); } catch (e) {}
 }
 
 /* The same state, as a checklist on the season screen, so the commissioner can
@@ -94682,6 +94699,14 @@ function lgFilterSideGames(hide) {
       if (card) {
         card.classList.toggle('lg-off', drop);
         if (drop) card.style.display = 'none'; else card.style.removeProperty('display');
+        /* v1637 (Tyler): "Long drive should be an option here on scramble league but it
+           is not showing up." The tile carries .ld-tourney-only, and the v670 rule
+           `body.t2-group-config .game-toggle.ld-tourney-only { display:none !important }`
+           hides it on every group screen -- the league games step included, since it
+           borrows that body class. The league allows it (LG_SIDE_ALLOW and
+           LG_SIDE_ALLOW_SCRAMBLE both name it), so out-rank that rule here; taken off
+           again on the way out (hide=false). */
+        if (key === 'longdrive') { if (hide && !drop) card.style.setProperty('display', 'flex', 'important'); else if (!hide) card.style.removeProperty('display'); }
       }
       if (opts) {
         /* v1415: the options panel gets the same unbeatable class, or a dropped
@@ -94921,7 +94946,11 @@ async function lgOpenSideGames(sid, weekId) {
     $('btn-save-tourney').style.display = 'none';
     $('btn-save-edits').style.display = 'none';
     { const sd = $('btn-save-day'); if (sd) { sd.style.display = '';
-        sd.textContent = weekId ? ('💾 Save week ' + _wkNum + '’s games') : '💾 Save the league’s games'; } }
+        /* v1638: 'Create League' while the wizard is still open (this is its last step);
+           a later visit from Settings is just saving the games. */
+        let _inSetup = false; try { const _st = (window._lgSetupStSid === sid) ? window._lgSetupSt : null; _inSetup = !!(_st && typeof lgWizSteps === 'function' && lgWizSteps(_st).some(function (x) { return !x.done; })); } catch (e) { _inSetup = false; }
+        sd.textContent = weekId ? ('💾 Save week ' + _wkNum + '’s games') : (_inSetup ? 'Create League' : '💾 Save the league’s games'); } }
+    try { const _sj = $('btn-share-join'); if (_sj) _sj.style.setProperty('display', 'none', 'important'); } catch (e) {}   /* v1638: the round's invite button has no place here */
     $('btn-cancel-setup').textContent = 'Cancel';
     lgFilterSideGames(true);
     /* v1412: and again after this tick, for the tiles the form writes
@@ -99244,6 +99273,7 @@ async function init() {
     openPlayGps(); // GPS is the default play screen (opens on state.currentHole / chosen start hole)
     hideRoundLoading(_rl);
     showToast('Round started');
+    try { setTimeout(function () { try { bgInvitePrompt('round', game.code); } catch (e) {} }, 1800); } catch (e) {}   /* v1638: after the loader clears */
 
     // Background, non-blocking: scorecard for next time, roster saves (parallel),
     // linked-player pings, and tourney-live marking. Failures here never affect
@@ -106746,6 +106776,45 @@ function bgGamesPlayingText(g) {
   return bgJoinAnd(out);
 }
 
+/* ===== v1638 (Tyler): "On all games once the game is created prompt the creator with a
+   simple push invite button that sends it via the app and via text." One prompt, three
+   kinds. In-app invites: a round pings its linked players at start (sendGameInvite, one
+   per person), an event pings its seated players when the day starts (t2NotifyAllPlayers)
+   and when a player is added later (_t2NotifyAdded); a league has no invite pipe, so the
+   prompt pushes to every roster member with an account. The text half is the existing
+   share for each kind. Asked once per thing per device. */
+function _bgInvitePromptedOnce(key) {
+  try {
+    const k = 'golf:invite-prompted'; const l = JSON.parse(localStorage.getItem(k) || '[]');
+    if (l.indexOf(key) >= 0) return false;
+    l.push(key); localStorage.setItem(k, JSON.stringify(l.slice(-100))); return true;
+  } catch (e) { return true; }
+}
+async function bgInvitePrompt(kind, id) {
+  try {
+    if (!id || !_bgInvitePromptedOnce(kind + ':' + id)) return;
+    const what = kind === 'league' ? 'league' : (kind === 'tourney' ? 'event' : 'round');
+    let ok = false;
+    try {
+      ok = await uiConfirm('Your ' + what + ' is set. Send the invites now? Players with the app get a notification; everyone else gets the link by text.',
+        { title: 'Invite your players', okLabel: '\ud83d\udce8 Send invites', cancelLabel: 'Later' });
+    } catch (e) { ok = false; }
+    if (!ok) return;
+    if (kind === 'league') {
+      let s = null, uids = [];
+      try { const r = await supa.from('league_seasons').select('name,join_code,leagues(name)').eq('id', id).maybeSingle(); s = r && r.data; } catch (e) {}
+      try { const rr = await supa.rpc('league_roster', { p_season_id: id }); (rr && rr.data || []).forEach(function (m) { if (m && m.user_id && m.user_id !== _authUser.id && uids.indexOf(m.user_id) < 0) uids.push(m.user_id); }); } catch (e) {}
+      const nm = (s && ((s.leagues && s.leagues.name) || s.name)) || 'the league';
+      try { if (uids.length) sendPush(uids, 'You\u2019re in ' + nm, 'Open Bad Golf \u2192 League and tap your name to pick up your spot.', { league: id }, 'lg-invite-' + id); } catch (e) {}
+      try { if (s && s.join_code) await lgShareJoinLink(s.join_code, nm); } catch (e) {}
+    } else if (kind === 'tourney') {
+      try { await shareTourneyInvite(id); } catch (e) {}
+    } else {
+      try { await shareGameInvite(); } catch (e) {}
+    }
+  } catch (e) {}
+}
+window.bgInvitePrompt = bgInvitePrompt;
 async function shareTourneyInvite(tid, opts) {
   let t = null;
   try { if (typeof t2Get === 'function') t = await t2Get(tid); } catch (e) {}
