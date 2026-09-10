@@ -20,10 +20,22 @@ require "xcodeproj"
 require "cfpropertylist"
 
 PROJ_PATH = "ios/App/App.xcodeproj"
-PROFILES_DIR = File.expand_path("~/Library/MobileDevice/Provisioning Profiles")
+# Xcode 16+ reads profiles from ~/Library/Developer/Xcode/UserData/Provisioning Profiles;
+# older Xcode (and older Codemagic CLI) used ~/Library/MobileDevice/Provisioning Profiles.
+# Look in both, plus anything else under ~/Library, so a moved folder can't blind us.
+PROFILE_DIRS = [
+  File.expand_path("~/Library/Developer/Xcode/UserData/Provisioning Profiles"),
+  File.expand_path("~/Library/MobileDevice/Provisioning Profiles"),
+]
+files = PROFILE_DIRS.flat_map { |d| Dir.glob(File.join(d, "*.mobileprovision")) }
+if files.empty?
+  files = `find "#{File.expand_path('~/Library')}" -name "*.mobileprovision" 2>/dev/null`.split("\n").map(&:strip).reject(&:empty?)
+end
+puts "===== .mobileprovision files found: #{files.size} ====="
+files.each { |f| puts "  #{f}" }
 
 profiles = {}   # bundle id => { uuid:, name:, team: }
-Dir.glob(File.join(PROFILES_DIR, "*.mobileprovision")).each do |f|
+files.each do |f|
   begin
     xml = `security cms -D -i "#{f}" 2>/dev/null`
     next if xml.nil? || xml.empty?
@@ -44,8 +56,10 @@ end
 puts "===== Provisioning profiles found (#{profiles.size}) ====="
 profiles.each { |bid, pr| puts "  #{bid.ljust(48)} #{pr[:name]}  (#{pr[:uuid]}, team #{pr[:team]})" }
 if profiles.empty?
-  puts "WARN: no profiles on disk under #{PROFILES_DIR} — nothing to pin"
-  exit 0
+  puts "!! No provisioning profiles found anywhere under ~/Library. fetch-signing-files did not"
+  puts "!! save any (check the lines above this step for its output). Stopping here so the"
+  puts "!! failure is readable instead of a vague 'requires a provisioning profile' at archive."
+  exit 1
 end
 
 proj = Xcodeproj::Project.open(PROJ_PATH)
@@ -75,6 +89,7 @@ proj.save
 puts "Saved #{PROJ_PATH}"
 
 unless missing.empty?
-  puts "!! Targets with NO matching profile on disk (the archive will fail for these):"
+  puts "!! Targets with NO matching profile on disk (the archive would fail for these):"
   missing.each { |m| puts "     #{m}" }
+  exit 1
 end
