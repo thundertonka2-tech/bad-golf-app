@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1620-->
+<!--BGVER=v2026.11.1621-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10384,7 +10384,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1620';
+const BG_BUILD = 'v2026.11.1621';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -85147,6 +85147,15 @@ function lgStepBack(sid) {
   try {
     const at = window._lgWizAt;
     if (at && at.sid === sid && at.prev) { lgWizGo(sid, at.prev); return; }
+    /* v1621: the header is painted from a cached setup state, and a screen that
+       opened before that cache existed has no _lgWizAt for a moment. Rather than
+       fall out to the league home, work the previous step out from what IS known:
+       the last step whose screen matches this one. */
+    if (at && at.sid === sid && at.key && typeof lgWizSteps === 'function' && window._lgSetupSt && window._lgSetupStSid === sid) {
+      const steps = lgWizSteps(window._lgSetupSt);
+      const i = steps.findIndex(function (s) { return s.key === at.key; });
+      if (i > 0) { lgWizGo(sid, steps[i - 1].key); return; }
+    }
   } catch (e) {}
   try { lgOpenSeason(sid); } catch (e) { try { renderLeague(); } catch (e2) {} }
 }
@@ -85956,9 +85965,18 @@ async function _lgSubmitCreateInner() {
      leaves "Creating…" on a dead button is indistinguishable from a create
      that did nothing, and the whole point of this pass is that the screen
      always says what happened. */
-  if (btn) { btn.disabled = false; btn.textContent = 'Next'; }   /* v1390 */
-  if (!res) { try { showToast('No answer from the server — try again'); } catch (e) {} return; }
+  /* v1621 (Tyler, 9/10: "I still have to click this button twice"). Measured in his
+     Chrome: the create RPC succeeded on the FIRST tap, but the button came back
+     to "Next" here and the form stayed on screen for the 3–6 s it took
+     lgOpenSeason + lgOpenGame to paint — so the first tap looked like nothing
+     and the second tap tried to create the league again. The button now comes
+     back only on a failure; on success the form is replaced by a loading card
+     at once and the game screen is opened directly (lgOpenSeason was only ever
+     painted to sit under the old add-players sheet). */
+  const _giveBack = function () { try { if (btn) { btn.disabled = false; btn.textContent = 'Next'; } } catch (e) {} };
+  if (!res) { _giveBack(); try { showToast('No answer from the server — try again'); } catch (e) {} return; }
   if (!res || res.error) {
+    _giveBack();
     /* v1271 FIX (QA C-11): this had its own regex, which needed a colon and a
        message -- so league_create_season's BARE codes (LEAGUE_NAME_REQUIRED,
        LEAGUE_JOIN_CODE_COLLISION) went into the toast as raw identifiers. One
@@ -85978,7 +85996,11 @@ async function _lgSubmitCreateInner() {
   try { showToast('League created \u2014 first, pick the game'); } catch (e) {}   // v1620: game before players
   try { bgBadgeFlag('commish'); } catch (e) {}   // v1611: Commish
   const _sid = (res.data && res.data.season_id) || null;
+  if (!_sid) _giveBack();
   if (_sid) {
+    try { if (btn) btn.textContent = 'Created \u2014 opening\u2026'; } catch (e) {}
+    try { const _lb = document.getElementById('league-body'); if (_lb) lgLoadingCard(_lb, 'League created \u2014 opening the setup\u2026'); } catch (e) {}
+    try { window._lgSeason = _sid; } catch (e) {}
     /* v1418 (Tyler, screen recording): create succeeded, the toast said so, and
        the CREATE FORM stayed on screen with his answers still in it — so the
        obvious next move was to press Next again and make a second league.
@@ -85994,7 +86016,8 @@ async function _lgSubmitCreateInner() {
        Awaiting it is the whole fix: the league screen finishes painting, and
        only then does the picker claim the next token. Now closing that sheet
        really does leave you somewhere, which is what this code always meant. */
-    try { await lgOpenSeason(_sid); } catch (e) {}
+    /* v1621: lgOpenSeason is no longer painted first — nothing sits under a sheet
+       any more, and it cost 3 s of "nothing happened" on Tyler's machine. */
     /* v1620 (Tyler): the game is step 1 now, so a new league opens straight on
        the game screen; saving it runs lgNextSetupStep, which opens the roster and
        the add-players sheet next. */
@@ -88023,7 +88046,7 @@ function _lgCancelSetupInject() {
     if (back.parentNode && back.parentNode.querySelector('.lg-cancel-setup')) return;
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'bg-btn bg-btn--ghost bg-btn--full full lg-cancel-setup';
+    b.className = 'bg-btn bg-btn--danger bg-btn--full danger full lg-cancel-setup';   /* v1621 (Tyler): red */
     b.style.marginTop = '8px';
     b.textContent = 'Cancel setup';
     b.onclick = function () { lgCancelSetup(at.sid); };
@@ -89967,12 +89990,23 @@ function _rosterLgPaintRow(row, on) {
     chk.textContent = on ? '✓' : '';
   } catch (e) {}
 }
+/* v1621 (Tyler): "it said I selected 10 players but really I only selected 9, one of
+   them was me." The commissioner who is NOT playing (v1609 'organizer' seat) is a
+   league_members row, so it was counted. Count PLAYERS — every seat except the
+   organizer's and subs — and say so. */
+function _rosterLgPlayerCount() {
+  try {
+    let n = 0;
+    Object.keys(_rosterLgById).forEach(function (k) { const m = _rosterLgById[k]; if (m && m.status !== 'organizer' && m.role !== 'sub') n++; });
+    return n;
+  } catch (e) { return _rosterLgInSet.size; }
+}
 function _rosterLgPaintCount() {
   try {
     const el = document.getElementById('roster-pick-count');
     if (el) {
-      const n = _rosterLgInSet.size;
-      el.textContent = n + ' in the league';
+      const n = _rosterLgPlayerCount();
+      el.textContent = n + ' player' + (n === 1 ? '' : 's') + ' in the league';
       el.style.display = '';
     }
   } catch (e) {}
@@ -89983,7 +90017,7 @@ function _rosterLgPaintCount() {
   try {
     const note = document.getElementById('roster-lg-fit');
     if (!note) return;
-    const n = _rosterLgInSet.size;
+    const n = _rosterLgPlayerCount();   /* v1621: players, not seats */
     const cx = window._lgFitCtx || null;
     let txt = '';
     if (cx && cx.comp === 'head_to_head' && cx.weeks) {
