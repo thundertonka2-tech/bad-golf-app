@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1603-->
+<!--BGVER=v2026.11.1604-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -6660,6 +6660,10 @@ html.bg-modal-lock, body.bg-modal-lock { overflow: hidden !important; }
             <label class="game-toggle" style="flex-direction:row;text-align:left;min-height:0;margin-top:8px;align-items:center;gap:8px">
               <input type="checkbox" id="potofgold-carry"><span style="font-size:13px">Carry over ties to the next hole</span>
             </label>
+            <!-- v1604 (Tyler, 9/10): "add a new option that allows for 2x the pot for birdies and 3x the pot for eagles or better." -->
+            <label class="game-toggle" style="flex-direction:row;text-align:left;min-height:0;margin-top:8px;align-items:center;gap:8px">
+              <input type="checkbox" id="potofgold-bonus"><span style="font-size:13px">Birdie bonus &mdash; win the hole with a birdie and the pot pays 2&times;, eagle or better 3&times; (gross score)</span>
+            </label>
           </div>
 
           <!-- v916 (Tyler): moved out of Side Games into the main games — these
@@ -7814,6 +7818,7 @@ html.bg-modal-lock, body.bg-modal-lock { overflow: hidden !important; }
             <p><strong>Setting the prize pools:</strong> bulk-set one flat amount for all 18 holes, hand-edit any hole, or tap <strong>Auto-weight</strong> to size each prize pool by difficulty — the hardest hole (stroke index 1) is worth 18, down to 1 on the easiest. The tougher the hole, the bigger the units.</p>
             <p><strong>Carryover (optional):</strong> turn it on and a tied hole's prize pool <em>rolls onto the next hole</em>, building until someone wins it outright (Skins-style). Off, a tie just <em>splits</em> that hole's prize pool among the players who tied.</p>
             <p><strong>Example:</strong> Auto-weighted prize pools. On the No. 1 handicap hole (18) you make the low net — you take 18 from each other player. Two players tie the next hole (15) with carryover on, so its 15 rolls forward and the following hole plays for its own value plus that 15.</p>
+            <p><strong>Birdie bonus (optional):</strong> turn it on and winning a hole with a <em>gross</em> birdie pays <strong>2&times;</strong> that hole's pot (carry included); an eagle or better pays <strong>3&times;</strong>. A net birdie doesn't count &mdash; it has to be the real thing.</p>
             <p><strong>Settlement:</strong> zero-sum across the group — winners take each hole's value from the players they beat. Play it gross or net.</p>
             <p class="bet-note">Any number of players (2+). Everyone competes for every hole's prize pool.</p>
           </div>
@@ -10257,7 +10262,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1603';
+const BG_BUILD = 'v2026.11.1604';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17163,6 +17168,20 @@ function subscribeToGame(code) {
         // skips them.)
         const _prevFinished = !!(state.game && state.game.finishedAt);
 
+        // v1604 (Tyler, 9/10): "This round is over but it's still showing up on my
+        // screen. It may be because Kevin re-opened the round. If the round has been
+        // completed and re-opened do not turn on the spectate." A reopen on another
+        // phone arrives here as finishedAt gone + reopenedAt set, and this line used to
+        // adopt it wholesale: the round on THIS phone went from finished back to open,
+        // the cache lost its finish, and Home called it live again. A phone that saw
+        // the finish and did NOT do the reopening stays closed - the scorer's re-Finish
+        // arrives as a normal finished row (with the corrected scores) and applies as
+        // before. The phone that reopened already cleared its own finishedAt in
+        // bgReopenRoundFlow, so _prevFinished is false there and it is unaffected.
+        try {
+          if (_prevFinished && !incoming.finishedAt && incoming.reopenedAt) return;
+        } catch (e) {}
+
         // Keep MY just-tapped cells on top so a slightly-stale incoming row can't blank
         // a score I entered a moment ago (the merge-on-write makes every cloud write a
         // union, so this only covers the brief in-flight window).
@@ -17348,7 +17367,8 @@ const BG_MERGE_RULES = {
   scores: 'perCell', puttsData: 'perCell', girData: 'perCell', fairwaysData: 'perCell',
   penaltiesData: 'perCell', sandData: 'perCell',
   // --- additive per-hole maps -----------------------------------------------------
-  junkData: 'holeMap', sipManual: 'holeMap', p3greenieData: 'holeMap', ctpData: 'holeMap',
+  junkData: 'holeMap', sipManual: 'holeMap', ctpData: 'holeMap',
+  p3greenieData: 'custom',   // v1604: per-hole newest `at` stamp wins, else local (see _bgMergeGreenie)
   bbbData: 'holeMap', ryderCupData: 'holeMap',
   /* v1504 - THE GUARD'S FIRST CATCH. scripts/guard_merge_registry.py found these
      four on the very first run: per-hole maps for Scramble, Animals, Marks and Hot
@@ -17900,6 +17920,33 @@ function _mergeGameArrays(local, cloud, opts) {
 }
 // Union an additive hole-keyed map (cloud as base, local wins per key) so the other
 // phone's banker/wolf/junk/sip entry on a different hole is never dropped.
+/* v1604 - THE GREENIE WINNER IS EDITED, NOT ADDED (same lesson as the v1505 banker
+   pick). One player is closest; phones change their mind; and every phone that ever
+   looked at the par 3 on an older build wrote an empty placeholder for the hole. A
+   plain "local wins per hole" union let that placeholder erase the winner on the
+   very next save from the other cart. Rule per hole: the entry carrying the NEWER
+   `at` stamp wins; a stamped entry beats an unstamped one (the placeholder); when
+   neither is stamped fall back to the old local-wins so legacy rounds settle exactly
+   as before. */
+function _bgMergeGreenie(local, cloud) {
+  try {
+    const cm = (cloud && cloud.p3greenieData && typeof cloud.p3greenieData === 'object') ? cloud.p3greenieData : null;
+    if (!cm) return;
+    if (!local.p3greenieData || typeof local.p3greenieData !== 'object') local.p3greenieData = {};
+    const lm = local.p3greenieData;
+    const out = {};
+    const holes = {};
+    Object.keys(cm).forEach(h => { holes[h] = 1; });
+    Object.keys(lm).forEach(h => { holes[h] = 1; });
+    Object.keys(holes).forEach(h => {
+      const a = lm[h], b = cm[h];
+      const sa = (a && a.at > 0) ? a.at : 0, sb = (b && b.at > 0) ? b.at : 0;
+      if (a && b) out[h] = (sb > sa) ? b : a;        // newest stamp; tie/unstamped -> local
+      else out[h] = a || b;
+    });
+    local.p3greenieData = out;
+  } catch (e) {}
+}
 function _unionHoleMap(local, parentKey, subKey, cloud) {
   try {
     const cp = cloud[parentKey]; if (!cp) return;
@@ -18166,6 +18213,7 @@ async function _mergeGameForWrite(local, opts) {
     // BG_MERGE_RULES is now the only step needed to have it merged.
     _bgMergeKeys('holeMap').forEach(k => _unionHoleMap(local, k, null, cloud));
     _bgMergeKeys('holeMap:holes').forEach(k => _unionHoleMap(local, k, 'holes', cloud));
+    _bgMergeGreenie(local, cloud);   // v1604: greenie entries are edited, newest stamp wins
     /* v1500 audit - the additive lists and maps. Every one of these was
        local-wins, so a second phone's entry was simply dropped on the next save. */
     try {
@@ -18421,6 +18469,23 @@ function _applyMyTouchedCells(incoming) {
         });
       });
     });
+    // v1604: same protection for the greenie winner I just tapped. If the incoming
+    // row carries an OLDER (or no) stamp for a hole my copy has stamped, my entry
+    // stays on top and the round is re-pushed so the cloud gets it back.
+    try {
+      const pm = prev.p3greenieData;
+      if (pm && typeof pm === 'object') {
+        Object.keys(pm).forEach(h => {
+          const a = pm[h]; if (!a || !(a.at > 0)) return;
+          const b = incoming.p3greenieData && incoming.p3greenieData[h];
+          const sb = (b && b.at > 0) ? b.at : 0;
+          if (sb >= a.at) return;
+          if (!incoming.p3greenieData || typeof incoming.p3greenieData !== 'object') incoming.p3greenieData = {};
+          incoming.p3greenieData[h] = a;
+          _wiped = true;
+        });
+      }
+    } catch (e) {}
     if (_wiped) { try { markGameDirty(prev.code); } catch (e) {} }
   } catch (e) {}
   return incoming;
@@ -33144,7 +33209,7 @@ const GAME_BLURBS = {
   },
   potofgold: {
     title: 'Pot of Gold',
-    body: 'A separate prize pool on every hole, weighted by difficulty. You set one base value; each hole\'s prize pool is that base times the hole\'s difficulty weight — the hardest hole (stroke index 1) is worth 18× the base, down to 1× on the easiest. So at 1.00 the #1 handicap hole is worth 18.00; at 0.25 it\'s 4.50. The low gross or net score wins that hole\'s prize pool from everyone else. Carryover is optional: on, a tied hole rolls its prize pool onto the next hole; off, a tied hole is VOID — the prize pool drops and nobody takes it. Settles zero-sum across the group.'
+    body: 'A separate prize pool on every hole, weighted by difficulty. You set one base value; each hole\'s prize pool is that base times the hole\'s difficulty weight — the hardest hole (stroke index 1) is worth 18× the base, down to 1× on the easiest. So at 1.00 the #1 handicap hole is worth 18.00; at 0.25 it\'s 4.50. The low gross or net score wins that hole\'s prize pool from everyone else. Carryover is optional: on, a tied hole rolls its prize pool onto the next hole; off, a tied hole is VOID — the prize pool drops and nobody takes it. Optional Birdie bonus: win the hole with a gross birdie and the pot pays 2×, eagle or better 3×. Settles zero-sum across the group.'
   },
 };
 
@@ -37042,6 +37107,7 @@ function applySavedConfig(config) {
   if (games.potofgold) {
     if ($('potofgold-net')) $('potofgold-net').value = games.potofgold.net ? 'net' : 'gross';
     if ($('potofgold-carry')) $('potofgold-carry').checked = !!games.potofgold.carry;
+    if ($('potofgold-bonus')) $('potofgold-bonus').checked = !!games.potofgold.bonus;   // v1604
     if ($('potofgold-base')) $('potofgold-base').value = (games.potofgold.base != null ? games.potofgold.base : 1);
   }
   // Animals
@@ -38134,7 +38200,7 @@ function gatherSetup() {
   }
   if ($('game-potofgold') && $('game-potofgold').checked) {
     var _pogBase = parseFloat($('potofgold-base') ? $('potofgold-base').value : '1'); if (isNaN(_pogBase) || _pogBase < 0) _pogBase = 0;
-    games.potofgold = { net: $('potofgold-net').value === 'net', carry: !!($('potofgold-carry') && $('potofgold-carry').checked), base: _pogBase };
+    games.potofgold = { net: $('potofgold-net').value === 'net', carry: !!($('potofgold-carry') && $('potofgold-carry').checked), base: _pogBase, bonus: !!($('potofgold-bonus') && $('potofgold-bonus').checked) };   // v1604: bonus = birdie ×2 / eagle+ ×3
   }
   if ($('game-animals') && $('game-animals').checked) {
     { const _asel = ANIMAL_PENALTIES.filter(function(a){ const _c=$('animal-pick-'+a.id); return !_c || _c.checked; }).map(function(a){ return a.id; }); games.animals = { value: parseFloat($('animals-value').value) || 0, animals: _asel, birdieBasis: ($('animals-birdie-basis') && $('animals-birdie-basis').value === 'net') ? 'net' : 'gross' }; }
@@ -41089,14 +41155,36 @@ function renderP3GreenieEntry() {
   if (g.pars[h - 1] !== 3) return; // par 3s only
 
   if (!g.p3greenieData) g.p3greenieData = {};
-  if (!g.p3greenieData[h]) g.p3greenieData[h] = { winners: [], threePutts: [] };
+  /* v1604 (Tyler, 9/10): "We could not select the greenie winner on v1601. When you
+     click the player name it just flashed on the screen under putts."
+     The tap DID land - the chip lit, saveGame ran, the winner went to the cloud. It
+     was then wiped by the OTHER phones. This render used to write an EMPTY
+     { winners: [], threePutts: [] } entry for the hole into every phone's blob the
+     moment that phone merely LOOKED at the par 3. p3greenieData merges "local wins
+     per hole", so the next routine save from any phone that had looked at the hole
+     (a score, a putt) pushed its empty entry over the winner, the realtime echo
+     replaced state.game, and the chip went dark again - the "flash". Holes 8 and 12
+     survived today only because nobody else saved between the tap and the next
+     hole. Fix, in three parts:
+       1. (here) looking at a par 3 writes NOTHING. The entry is created on the tap.
+       2. every tap stamps the hole entry with `at`; the merge (_bgMergeGreenie) and
+          the realtime apply (_applyMyTouchedCells) keep the NEWEST stamped entry
+          per hole, and a stamped entry always beats an unstamped placeholder from
+          a phone still on an older build.
+       3. nothing else changed - same chips, same rules. */
+  let _p3Fresh = false;
+  if (!g.p3greenieData[h]) { g.p3greenieData[h] = { winners: [], threePutts: [] }; _p3Fresh = true; }
   // Defensive normalization
   if (!Array.isArray(g.p3greenieData[h].winners)) g.p3greenieData[h].winners = [];
   if (!Array.isArray(g.p3greenieData[h].threePutts)) g.p3greenieData[h].threePutts = [];
+  const _p3 = g.p3greenieData[h];
+  if (_p3Fresh) { try { delete g.p3greenieData[h]; } catch (e) {} }   // v1604: a look is not an entry
+  // Re-attach the (possibly detached) entry and stamp it - called by every tap below.
+  const _p3Touch = () => { try { g.p3greenieData[h] = _p3; _p3.at = Date.now(); } catch (e) {} };
 
   const cfg = _p3cfg;
-  const winners = g.p3greenieData[h].winners;
-  const threePutts = g.p3greenieData[h].threePutts;
+  const winners = _p3.winners;
+  const threePutts = _p3.threePutts;
   const bfOn = cfg.bfEnabled !== false && !cfg.ignore3Putt;   // v939: no Hero Tax when 3-putts still win
 
   // Header + winner chips
@@ -41144,8 +41232,7 @@ function renderP3GreenieEntry() {
     const _winBirdied = winners.some(_didBirdie);
     const _birdies = g.players.filter(p => !winners.includes(p.id) && _didBirdie(p.id));
     if (!_winBirdied && _birdies.length > 0) {
-      if (!g.p3greenieData[h].birdieOnGreen) g.p3greenieData[h].birdieOnGreen = {};
-      const _og = g.p3greenieData[h].birdieOnGreen;
+      const _og = (_p3.birdieOnGreen && typeof _p3.birdieOnGreen === 'object') ? _p3.birdieOnGreen : {};   // v1604: read-only until a tap
       // A birdie only STEALS the greenie if it was made ON the green — a chip-in
       // birdie can't steal. Split birdie-makers by on-green status: auto from tracked
       // GIR/putts, and ask for a confirm tap when the round isn't tracking. (Tyler, Jul 2026)
@@ -41174,7 +41261,7 @@ function renderP3GreenieEntry() {
       // can't tell -- but the greenie only moves when a human taps the bird chip. Nothing
       // is auto-awarded here, and calcP3Greenie no longer infers a lone-birdie steal
       // either, so a wrong steal cannot happen without somebody choosing it.
-      const _bw = g.p3greenieData[h].birdieWinner;
+      const _bw = _p3.birdieWinner;   // v1604
       html += `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)">
         <div style="font-size:12px;font-weight:500;margin-bottom:4px">🐦 Birdie Override — closest-to-pin didn't birdie. A birdie ON the green can steal it — tap who takes the greenie (chip-ins don't steal). Leave it untapped and the greenie stays put.</div>`;
       if (_needConfirm.length > 0) {
@@ -41207,22 +41294,23 @@ function renderP3GreenieEntry() {
     chip.onclick = async () => {
       const action = chip.dataset.p3gAction;
       const pid = chip.dataset.pid;
+      _p3Touch();   // v1604: the tap creates + stamps the hole entry
       if (action === 'birdieongreen') {
         // Confirm/undo "the birdie was on the green" (chip-ins can't steal the greenie).
-        if (!g.p3greenieData[h].birdieOnGreen) g.p3greenieData[h].birdieOnGreen = {};
-        const _og = g.p3greenieData[h].birdieOnGreen;
+        if (!_p3.birdieOnGreen) _p3.birdieOnGreen = {};
+        const _og = _p3.birdieOnGreen;
         _og[pid] = (_og[pid] === true) ? false : true;
         // v1486: marking someone OFF the green must also take the greenie back off
         // them -- otherwise the bird chip stays lit on a player who can no longer
         // steal, and the score screen disagrees with what settles.
-        if (_og[pid] !== true && g.p3greenieData[h].birdieWinner === pid) g.p3greenieData[h].birdieWinner = null;
+        if (_og[pid] !== true && _p3.birdieWinner === pid) _p3.birdieWinner = null;
         await saveGame(g);
         renderP3GreenieEntry();
         return;
       }
       if (action === 'birdiewin') {
         // Single-select: which birdie-maker was closest (takes the greenie).
-        g.p3greenieData[h].birdieWinner = (g.p3greenieData[h].birdieWinner === pid) ? null : pid;
+        _p3.birdieWinner = (_p3.birdieWinner === pid) ? null : pid;
         await saveGame(g);
         renderP3GreenieEntry();
         return;
@@ -41231,12 +41319,12 @@ function renderP3GreenieEntry() {
         // v677: closest-to-pin has exactly ONE greenie winner (Tyler). Tap makes that
         // player the sole winner; tapping the current winner clears it. A replaced
         // winner's 3-putt (Hero Tax) mark is dropped with them.
-        const w = g.p3greenieData[h].winners;
+        const w = _p3.winners;
         const wasSole = w.length === 1 && w[0] === pid;
-        g.p3greenieData[h].winners = wasSole ? [] : [pid];
-        g.p3greenieData[h].threePutts = (g.p3greenieData[h].threePutts || []).filter(x => g.p3greenieData[h].winners.indexOf(x) >= 0);
+        _p3.winners = wasSole ? [] : [pid];
+        _p3.threePutts = (_p3.threePutts || []).filter(x => _p3.winners.indexOf(x) >= 0);
       } else {
-        const list = g.p3greenieData[h].threePutts;
+        const list = _p3.threePutts;
         const idx = list.indexOf(pid);
         if (idx >= 0) list.splice(idx, 1);
         else list.push(pid);
@@ -48236,9 +48324,21 @@ function calcPotOfGold(g) {
     if (winners.length === 1) {
       const w = winners[0];
       const losers = scored.filter(s => s.pid !== w.pid);
-      money[w.pid] += holeVal * losers.length;
-      losers.forEach(l => money[l.pid] -= holeVal);
-      results.push({ hole: h + 1, value: holeVal, base: baseVal, carried: incoming, winner: w.name, winnerId: w.pid });
+      // v1604 (Tyler, 9/10): optional birdie bonus. Win the hole with a GROSS birdie
+      // and the whole pot (base + any carry) pays 2×; eagle or better pays 3×. Judged
+      // on the winner's raw score against par so a net birdie never triggers it.
+      let mult = 1;
+      try {
+        if (cfg.bonus && w.raw != null) {
+          const _pw = parFor(g, w.pid, h);
+          const _d = (_pw != null) ? (w.raw - _pw) : 0;
+          if (_d <= -2) mult = 3; else if (_d === -1) mult = 2;
+        }
+      } catch (e) { mult = 1; }
+      const payout = holeVal * mult;
+      money[w.pid] += payout * losers.length;
+      losers.forEach(l => money[l.pid] -= payout);
+      results.push({ hole: h + 1, value: payout, base: baseVal, carried: incoming, winner: w.name, winnerId: w.pid, mult: mult });
       carry = 0;
     } else if (cfg.carry) {
       carry = holeVal;                                  // tie carries the whole prize pool forward
@@ -51571,7 +51671,7 @@ function renderBoard() {
     rows.slice(-8).forEach(r => {
       if (r.carryFwd) div.innerHTML += `<div class="sub">H${r.hole}: ${bgWhole(r.value)} — tied, carries →</div>`;
       else if (r.split) div.innerHTML += `<div class="sub">H${r.hole}: ${bgWhole(r.value)} split — ${escapeHtml(r.winner)}</div>`;
-      else div.innerHTML += `<div class="sub">H${r.hole}: ${escapeHtml(r.winner)} +${bgWhole(r.value)}${r.carried > 0 ? ' (incl. ' + bgWhole(r.carried) + ' carry)' : ''}</div>`;
+      else div.innerHTML += `<div class="sub">H${r.hole}: ${escapeHtml(r.winner)} +${bgWhole(r.value)}${r.mult > 1 ? (r.mult >= 3 ? ' 🦅 eagle ×3' : ' 🐦 birdie ×2') : ''}${r.carried > 0 ? ' (incl. ' + bgWhole(r.carried) + ' carry)' : ''}</div>`;   // v1604: bonus tag
     });
     if (rows.length === 0) div.innerHTML += `<div class="sub">No holes decided yet.</div>`;
     gr.appendChild(div);
@@ -101471,7 +101571,7 @@ const gpsView = (() => {
       const money = n => '' + bgWhole((Math.round(n * 100) / 100));
       const v = b.querySelector('.val'); if (v) v.textContent = money(holeVal + carried);
       const s = b.querySelector('.sub');
-      if (s) s.textContent = carried > 0 ? ('+' + money(carried) + ' carried') : ('SI ' + (si || '—'));
+      if (s) s.textContent = (carried > 0 ? ('+' + money(carried) + ' carried') : ('SI ' + (si || '—'))) + (cfg.bonus ? ' · 🐦×2 🦅×3' : '');   // v1604: bonus hint
       b.style.display = 'block';
     } catch (e) { hide(); }
   }
