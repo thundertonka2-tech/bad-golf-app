@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1601-->
+<!--BGVER=v2026.11.1602-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -1634,6 +1634,7 @@
   }
   .score-entry .name { font-weight: 500; font-size: 14px; }
   .score-entry .meta { font-size: 11px; color: var(--bg-text-muted); }
+  .bg-leave-lnk { color: var(--info); text-decoration: underline; cursor: pointer; font-weight: 600; }   /* v1602 */
   .score-stepper {
     display: flex;
     align-items: center;
@@ -10253,7 +10254,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1601';
+const BG_BUILD = 'v2026.11.1602';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17359,6 +17360,8 @@ const BG_MERGE_RULES = {
   crewAlert: 'newestAt',
   // v1508: authoritative correction issued server-side; newest stamp wins.
   adminFix: 'newestAt',
+  // v1602: who left the round and after which hole; one phone's mark or undo wins by stamp
+  leftRound: 'newestAt',
   // --- round configuration: cloud wins unless this device just edited settings -----
   games: 'cloudWins', hcpRules: 'cloudWins', pars: 'cloudWins', sis: 'cloudWins',
   tees: 'cloudWins', teeYards: 'cloudWins', teePars: 'cloudWins', teeSis: 'cloudWins',
@@ -17500,6 +17503,141 @@ function bgPlayerScoreCount(g, id) {
     if (!Array.isArray(a)) return 0;
     let n = 0; for (let i = 0; i < a.length; i++) if (a[i] != null) n++; return n;
   } catch (e) { return 0; }
+}
+/* ===================== v1602 — A PLAYER LEAVES MID-ROUND ===========================
+   Tyler, 9/9: "Steve had to leave after the 12th hole. I zero'd out his banker bets
+   for the rest of the holes and gave him a par." A par is a real score: it settled
+   real money on six holes he never played.
+   The rule: a player is marked LEFT AFTER HOLE N. Every game settles through hole N
+   with him in it exactly as before. From the next hole in play order he has no
+   scores, cannot be given any, is not a participant of any per-hole game (he is
+   neither charged nor paid), is skipped by the banker rotation and the loser-picks
+   list, and the hole is "complete" without him. Whole-round games (Nassau, match,
+   stroke, Stableford, pools) already settle a walked-in player on the holes he
+   played once the round is finished (the g.finishedAt fallbacks), so they need
+   nothing new. Undo = "Bring back" — it only clears the mark, scores are re-entered.
+   Stored as g.leftRound = { at, byId: { <playerId>: <holeNumber> } } and merged
+   newest-`at`-wins (BG_MERGE_RULES), so one phone's mark or undo reaches every
+   phone in the cart. A round with no leaver takes the fast path in every helper
+   below and behaves byte-for-byte as it did in v1601. */
+function bgPlayIdx(g, hole) {
+  try {
+    const rh = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+    const start = (g && Number(g.startHole)) || 1;
+    return ((((Number(hole) || 1) - start) % rh) + rh) % rh;
+  } catch (e) { return (Number(hole) || 1) - 1; }
+}
+function bgLeftAfter(g, pid) {
+  try {
+    const b = g && g.leftRound && g.leftRound.byId;
+    const v = b ? b[pid] : null;
+    return (v != null && Number(v) > 0) ? Number(v) : null;
+  } catch (e) { return null; }
+}
+function bgHasLeavers(g) {
+  try {
+    const b = g && g.leftRound && g.leftRound.byId;
+    return !!(b && Object.keys(b).some(k => b[k] != null && Number(b[k]) > 0));
+  } catch (e) { return false; }
+}
+// true when `pid` is still playing on `hole` (1-based, play-order aware)
+function bgActiveOnHole(g, pid, hole) {
+  const n = bgLeftAfter(g, pid);
+  if (n == null) return true;
+  return bgPlayIdx(g, hole) <= bgPlayIdx(g, n);
+}
+// The participants of a per-hole game ON THIS HOLE. Same array back when nobody
+// has left, so every existing round is untouched.
+function bgHoleParts(g, parts, hole) {
+  try {
+    if (!Array.isArray(parts) || !bgHasLeavers(g)) return parts;
+    return parts.filter(p => p && bgActiveOnHole(g, p.id, hole));
+  } catch (e) { return parts; }
+}
+// The hole a player is leaving after, from the hole the scorer is on: this hole if
+// he has a score on it, else the previous hole in play order. 0 = he has not
+// played a hole yet (caller refuses — remove him from the round instead).
+function bgLeaveHoleFor(g, pid, curHole) {
+  try {
+    const rh = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+    const arr = (g.scores && g.scores[pid]) || [];
+    let h = Number(curHole) || 1;
+    for (let k = 0; k < rh; k++) {
+      if (arr[h - 1] != null) return h;
+      if (bgPlayIdx(g, h) === 0) return 0;
+      h = ((h - 2 + rh) % rh) + 1;
+    }
+    return 0;
+  } catch (e) { return 0; }
+}
+function bgLeaverLabel(g, p) {
+  const n = bgLeftAfter(g, p.id);
+  return n ? ('🚶 Left after hole ' + n) : '';
+}
+async function bgMarkPlayerLeft(pid) {
+  try {
+    const g = state.game;
+    if (!g || state.viewOnlyMode) return;
+    const p = (g.players || []).find(x => x && x.id === pid);
+    if (!p) return;
+    const rh = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+    const n = bgLeaveHoleFor(g, pid, state.currentHole);
+    if (!n) { showToast(displayFirst(p) + ' has no score yet — remove them from the round instead', 'warn'); return; }
+    if (bgPlayIdx(g, n) >= rh - 1) { showToast(displayFirst(p) + ' has finished the round', 'warn'); return; }
+    // scores sitting past N would settle money on holes he never played (the par trap)
+    let stray = 0;
+    try { for (let h = 1; h <= rh; h++) { if (bgPlayIdx(g, h) > bgPlayIdx(g, n) && g.scores[pid] && g.scores[pid][h - 1] != null) stray++; } } catch (e) {}
+    const nextH = ((n % rh) + 1);
+    const msg = displayFirst(p) + ' is leaving after hole ' + n + '.\n\nEvery game settles through hole ' + n + ' with ' + displayFirst(p) +
+      ' in it. From hole ' + nextH + ' on ' + displayFirst(p) + ' is out of every game — not charged, not paid — and the rest of you carry on as normal.' +
+      (stray ? ('\n\n' + stray + ' score' + (stray === 1 ? '' : 's') + ' already entered after hole ' + n + ' will be cleared.') : '') +
+      '\n\nTap "Bring back" on the score screen if this was a mistake.';
+    const ok = (typeof uiConfirm === 'function') ? await uiConfirm(msg, { title: displayFirst(p) + ' left the round?', okLabel: displayFirst(p) + ' is out', cancelLabel: 'Cancel', danger: false }) : window.confirm(msg);
+    if (!ok) return;
+    if (!g.leftRound || typeof g.leftRound !== 'object') g.leftRound = { byId: {} };
+    if (!g.leftRound.byId) g.leftRound.byId = {};
+    g.leftRound.byId[pid] = n;
+    g.leftRound.at = Date.now();
+    // clear anything past N — stamped, so a stale copy on another phone can't put it back
+    try {
+      for (let h = 1; h <= rh; h++) {
+        if (bgPlayIdx(g, h) <= bgPlayIdx(g, n)) continue;
+        ['scores', 'puttsData', 'fairwaysData', 'penaltiesData', 'sandData'].forEach(f => {
+          try { if (g[f] && g[f][pid] && g[f][pid][h - 1] != null) { g[f][pid][h - 1] = null; _markScoreTouched(f, pid, h - 1); } } catch (e) {}
+        });
+        try { if (g.girData && g.girData[pid] && g.girData[pid][h - 1] != null) { g.girData[pid][h - 1] = null; _markScoreTouched('girData', pid, h - 1); } } catch (e) {}
+        try {
+          const jd = g.junkData && g.junkData[h];
+          if (jd) Object.keys(jd).forEach(jt => { if (Array.isArray(jd[jt])) jd[jt] = jd[jt].filter(id => id !== pid); else if (jd[jt] === pid) delete jd[jt]; });
+        } catch (e) {}
+        try { const pd = g.p3greenieData && g.p3greenieData[h]; if (pd && Array.isArray(pd.winners)) pd.winners = pd.winners.filter(id => id !== pid); } catch (e) {}
+        try { const bh = g.bankerData && g.bankerData.holes && g.bankerData.holes[h]; if (bh && Array.isArray(bh.presses)) bh.presses = bh.presses.filter(x => x && x.playerId !== pid); } catch (e) {}
+        try { if (g.bankerData && g.bankerData.picks && g.bankerData.picks[h] === pid) { delete g.bankerData.picks[h]; if (typeof _bgStampBankerPick === 'function') _bgStampBankerPick(g, h, null); } } catch (e) {}
+      }
+    } catch (e) {}
+    try { state._configEditedAt = Date.now(); } catch (e) {}
+    await saveGame(g);
+    try { renderScoreEntry(); } catch (e) {}
+    showToast(displayFirst(p) + ' is out from hole ' + nextH + ' — games through ' + n + ' still count');
+  } catch (e) { console.warn('bgMarkPlayerLeft', e); }
+}
+async function bgBringPlayerBack(pid) {
+  try {
+    const g = state.game;
+    if (!g || state.viewOnlyMode) return;
+    const p = (g.players || []).find(x => x && x.id === pid);
+    if (!p || !bgLeftAfter(g, pid)) return;
+    const ok = (typeof uiConfirm === 'function') ? await uiConfirm(displayFirst(p) + ' is back in every game from hole ' + ((bgLeftAfter(g, pid) % ((typeof roundHoles === 'function') ? roundHoles(g) : 18)) + 1) + '. Any holes since will need their scores entered.', { title: 'Bring ' + displayFirst(p) + ' back?', okLabel: 'Bring back', cancelLabel: 'Cancel', danger: false }) : true;
+    if (!ok) return;
+    if (!g.leftRound) g.leftRound = { byId: {} };
+    if (!g.leftRound.byId) g.leftRound.byId = {};
+    delete g.leftRound.byId[pid];
+    g.leftRound.at = Date.now();
+    try { state._configEditedAt = Date.now(); } catch (e) {}
+    await saveGame(g);
+    try { renderScoreEntry(); } catch (e) {}
+    showToast(displayFirst(p) + ' is back in');
+  } catch (e) { console.warn('bgBringPlayerBack', e); }
 }
 function bgPurgePlayerFromRound(g, ids, names, opts) {
   try {
@@ -38071,7 +38209,8 @@ function isHoleComplete(g, h) {
     }
   }
   // Default: every player has an individual score
-  return g.players.every(p => g.scores[p.id] && g.scores[p.id][h - 1] != null);
+  // v1602: a player who left before this hole is not waited for
+  return g.players.every(p => !bgActiveOnHole(g, p.id, h) || (g.scores[p.id] && g.scores[p.id][h - 1] != null));
 }
 
 // v1185 (Tyler, 8/23): "When we are playing any type of game we need the
@@ -38841,20 +38980,27 @@ function renderScoreEntry() {
       // v625 CONSENT: show waiting/declined state and dim the stepper (writes
       // are hard-blocked in handleScoreChange either way).
       const _cs = consentBlockState(g, p.name);
+      // v1602: left the round — no stepper past his last hole, just the fact and an undo
+      const _leftN = bgLeftAfter(g, p.id);
+      const _outNow = _leftN != null && !bgActiveOnHole(g, p.id, h);
+      const _leaveLnk = (!_leftN && !state.viewOnlyMode && (g.players || []).length > 1)
+        ? ` · <span role="button" tabindex="0" class="bg-leave-lnk" data-leave="${p.id}">left the round?</span>`
+        : (_leftN ? ` · <span style="color:var(--danger-text);font-weight:700">🚶 left after hole ${_leftN}</span>` + (state.viewOnlyMode ? '' : ` · <span role="button" tabindex="0" class="bg-leave-lnk" data-return="${p.id}">bring back</span>`) : '');
       const _csBadge = _cs ? ` <span style="font-size:9.5px;font-weight:800;letter-spacing:.3px;color:#8a6d1a;background:rgba(212,175,55,.18);border-radius:999px;padding:2px 8px;vertical-align:2px">${_cs === 'declined' ? 'DECLINED' : '⏳ WAITING TO ACCEPT'}</span>` : '';
       row.innerHTML = `
         <div>
           <div class="name">${displayFirst(p)}${guestPillHtml(p.name, p)}${testPillHtml(p.name)}${_csBadge}</div>
-          <div class="meta">${p.playsGross ? 'Plays gross' : `HCP ${p.hcp}${strokes > 0 ? ` · gets ${strokes} stroke${strokes > 1 ? 's' : ''}` : ''}`}</div>
+          <div class="meta">${p.playsGross ? 'Plays gross' : `HCP ${p.hcp}${strokes > 0 ? ` · gets ${strokes} stroke${strokes > 1 ? 's' : ''}` : ''}`}${_leaveLnk}</div>
         </div>
-        <div class="score-stepper" style="position:relative${_cs ? ';opacity:.45' : ''}">
+        ${_outNow ? `<div class="score-stepper" style="position:relative;opacity:.55"><div class="val empty" id="val-${p.id}" title="Left after hole ${_leftN}">out</div></div>` : `<div class="score-stepper" style="position:relative${_cs ? ';opacity:.45' : ''}">
           ${strokes > 0 ? `<span class="pop-dot${strokes > 1 ? ' pop-multi' : ''}" title="${strokes} stroke${strokes > 1 ? 's' : ''} on this hole"></span>` : ''}
           <button class="bg-btn bg-btn--seg" data-action="dec" data-pid="${p.id}">−</button>
           <div class="val ${score === null ? 'empty' : ''}" id="val-${p.id}">${score === null ? '—' : score}</div>
           <button class="bg-btn bg-btn--seg" data-action="inc" data-pid="${p.id}">+</button>
-        </div>
+        </div>`}
       `;
       container.appendChild(row);
+      if (_outNow) return;   // v1602: no putts / GIR / fairway rows for a player who has left
 
       // Putts / GIR / Fairway rows — independent toggles
       if (g.trackPutts || g.trackGirs || g.trackFairways || g.trackSands) {
@@ -38923,6 +39069,9 @@ function renderScoreEntry() {
     container.querySelectorAll('button[data-putt]').forEach(btn => {
       btn.onclick = () => handlePuttChange(btn.dataset.pid, btn.dataset.putt);
     });
+    // v1602: mark a player as gone / bring him back
+    container.querySelectorAll('.bg-leave-lnk[data-leave]').forEach(el => { el.onclick = () => bgMarkPlayerLeft(el.dataset.leave); });
+    container.querySelectorAll('.bg-leave-lnk[data-return]').forEach(el => { el.onclick = () => bgBringPlayerBack(el.dataset.return); });
     container.querySelectorAll('button[data-gir-pid]').forEach(btn => {
       btn.onclick = () => handleGirToggle(btn.dataset.girPid);
     });
@@ -39542,7 +39691,7 @@ function renderGameBanners() {
     if (isLoserPickHole && !pickMade) {
       const pickList = $('banker-pick-list');
       const standings = bankerStandingsThrough(g, h - 1);
-      const ranked = [...g.players].sort((a, b) => (standings[a.id] || 0) - (standings[b.id] || 0));
+      const ranked = bgHoleParts(g, [...g.players], h).sort((a, b) => (standings[a.id] || 0) - (standings[b.id] || 0));   // v1602: a player who left can't take the bank
       ranked.forEach((p, idx) => {
         const standing = standings[p.id] || 0;
         const cls = standing < -0.005 ? 'neg' : (standing > 0.005 ? 'pos' : 'zero');
@@ -39586,7 +39735,7 @@ function renderGameBanners() {
         header.textContent = 'Each player picks their value. A player press doubles his own value. The banker gets ONE move per hole — press back (doubles every game) or the blind press (triples every game), not both.';
         playerBetsCtr.appendChild(header);
 
-        g.players.forEach(p => {
+        bgHoleParts(g, g.players, h).forEach(p => {   // v1602: no value row for a player who left
           if (banker && p.id === banker.id) return;
           // v1038: fall back to the round's configured default value so a 5 game arrives
           // pre-filled on every player on every hole instead of blank. Still editable per
@@ -41887,6 +42036,7 @@ async function handleScoreChange(pid, action) {
   // v625 CONSENT: nobody can enter scores for a player who hasn't accepted.
   if (consentBlockToast(g, pid)) return;
   { const _bg = bgBracketScoreGate(g, pid); if (_bg) { showToast(_bg, 'warn'); return; } }   // v1167
+  if (!bgActiveOnHole(g, pid, h)) { showToast('Left the round after hole ' + bgLeftAfter(g, pid) + ' — tap “bring back” to score them again', 'warn'); return; }   // v1602
   if (!g.scores[pid]) g.scores[pid] = new Array(18).fill(null);
   let cur = g.scores[pid][h - 1];
   const prev = cur; // value before this tap — used to fire the celebration only on an improvement
@@ -43989,7 +44139,9 @@ function calcSkins(g) {
   for (let h = 0; h < 18; h++) {
     const par = g.pars[h];
     const si = g.sis[h];
-    const scores = participants.map(p => {
+    const _hParts = bgHoleParts(g, participants, h + 1);   // v1602: a player who left is not in this hole's skin
+    if (_hParts.length < 2) continue;
+    const scores = _hParts.map(p => {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       const net = raw != null ? netHoleScore(raw, _skHcp(p), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : null;
       return { pid: p.id, name: p.name, score: raw, netScore: net, hcp: p.hcp };
@@ -44130,7 +44282,7 @@ function calcSkins(g) {
     const winnersThisHole = r.split
       ? results.filter(x => x.hole === r.hole && x.winnerId).length
       : 1;
-    const losers = participants.filter(p => {
+    const losers = bgHoleParts(g, participants, r.hole).filter(p => {   // v1602: nobody pays for a hole he had already left
       // A participant is a "loser" for this hole if they're not one of the
       // winning participants. Split rows have multiple winnerIds across rows.
       const winningIds = results
@@ -44316,11 +44468,19 @@ function groupStrokeStandings(g, playerIds, fromHole, toHole, useNet) {
   // and the breakdown cell rendered blank. Head-to-head Nassau already settled
   // this ("N up thru 5"); 3+ player (group) Nassau silently awarded 0.
   let winners = [];
-  if (standings.length > 0 && (allComplete || (g && g.finishedAt && minHolesPlayed > 0))) {
-    const lowest = standings[0].net;
-    winners = standings.filter(s => s.net === lowest).map(s => s.id);
+  /* v1602: a segment settled early is judged among the players who played ALL of
+     it as far as it went. A player who left mid-segment has a lower total simply
+     because he played fewer holes -- he used to WIN the back nine on 3 holes. He is
+     out of that segment: neither paid nor charged. Everyone equal = unchanged. */
+  const _played = standings.filter(s => s.holesPlayed > 0);
+  const _maxHP = _played.reduce((mx, s) => Math.max(mx, s.holesPlayed), 0);
+  const _scoped = !allComplete && bgHasLeavers(g);   // only a round with a marked leaver; everything else settles exactly as before
+  const _elig = _scoped ? _played.filter(s => s.holesPlayed === _maxHP) : standings;
+  if (_elig.length > 0 && (allComplete || (g && g.finishedAt && (_scoped ? (_maxHP > 0 && _elig.length >= 2) : minHolesPlayed > 0)))) {
+    const lowest = _elig[0].net;
+    winners = _elig.filter(s => s.net === lowest).map(s => s.id);
   }
-  return { players: standings, winners, holesPlayed: minHolesPlayed, allComplete };
+  return { players: _elig, winners, holesPlayed: _scoped ? (_elig.length >= 2 ? _maxHP : 0) : minHolesPlayed, allComplete };
 }
 
 // Nassau — supports MULTIPLE Nassau instances in a single round.
@@ -44332,7 +44492,8 @@ function groupStrokeStandings(g, playerIds, fromHole, toHole, useNet) {
 // front when only one nine was ever played — that would double-charge the
 // same 9 holes.
 function nassauHalvesPlayed(g, ids) {
-  const played = h => ids.every(id => g.scores[id] && g.scores[id][h] != null);
+  // v1602: a player who has left is not waited for, but a nine needs two players still in it
+  const played = h => ids.filter(id => bgActiveOnHole(g, id, h + 1)).length >= 2 && ids.every(id => !bgActiveOnHole(g, id, h + 1) || (g.scores[id] && g.scores[id][h] != null));
   let f = false, b = false;
   for (let h = 0; h < 9; h++) if (played(h)) { f = true; break; }
   for (let h = 9; h < 18; h++) if (played(h)) { b = true; break; }
@@ -44956,7 +45117,8 @@ function getBankerForHole(g, hole) {
   if (!g.bankerData) g.bankerData = { holes: {}, picks: {} };
 
   // Banker game's participants — only these can be banker / play in this game.
-  const participants = getParticipants(g, cfg);
+  // v1602: on a hole after a player left, he is not in the rotation and cannot be picked.
+  const participants = bgHoleParts(g, getParticipants(g, cfg), hole);
   if (participants.length === 0) return null;
 
   // If on or after loser-pick start AND someone has chosen, use that pick
@@ -45101,7 +45263,7 @@ function calcBanker(g) {
     const par = g.pars[h];
     const birdieMode = cfg.birdieDouble || 'anyone';
     // Only banker game's participants compete. Non-participants are skipped.
-    const participants = getParticipants(g, cfg);
+    const participants = bgHoleParts(g, getParticipants(g, cfg), h + 1);   // v1602: leavers out from the next hole
     const partIds = new Set(participants.map(p => p.id));
 
     const bankerScore = (g.scores[banker.id] && g.scores[banker.id][h] != null) ? g.scores[banker.id][h] : null;
@@ -45861,7 +46023,10 @@ function calcBBB(g) {
 
   const bbbData = g.bbbData || {};
 
+  const _bParts0 = participants;
   for (let h = 1; h <= 18; h++) {
+    const participants = bgHoleParts(g, _bParts0, h);   // v1602
+    const n = participants.length;
     const hd = bbbData[h] || {};
     const hResult = { hole: h, bingo: hd.bingo || null, bango: hd.bango || null, bongo: hd.bongo || null };
     holeResults.push(hResult);
@@ -46614,7 +46779,10 @@ function calcWolf(g) {
 
   if (!g.wolfData) g.wolfData = { holes: {} };
 
+  const _wParts0 = participants;
   for (let h = 0; h < 18; h++) {
+    const participants = bgHoleParts(g, _wParts0, h + 1);   // v1602: the wolf rotates among who is left
+    if (participants.length < 3) continue;
     const captainIdx = h % participants.length;
     const captain = participants[captainIdx];
     const hd = g.wolfData.holes[h + 1] || {};
@@ -47079,7 +47247,9 @@ function calcJunk(g) {
   g.players.forEach(p => money[p.id] = 0);
   const events = [];
   if (!g.junkData) g.junkData = {};
+  const _jParts0 = participants;
   for (let h = 1; h <= 18; h++) {
+    const participants = bgHoleParts(g, _jParts0, h);   // v1602: a player who left neither pays nor collects junk
     const hd = g.junkData[h] || {};
     Object.keys(hd).forEach(jt => {
       let earnerIds = hd[jt];
@@ -47261,9 +47431,11 @@ function calcBirdiePool(g) {
   // handicap-stroke birdie/eagle (so a net game's birdie pool gives on net). A
   // hole-in-one is always a natural 1. (Tyler, Jul 2026: net-or-gross per game.)
   const _useNetBP = (cfg.birdieBasis === 'net') && !!g.sis;
+  const _bpParts0 = participants;
   for (let h = 0; h < 18; h++) {
     const par = g.pars[h];
     if (par == null) continue;
+    const participants = bgHoleParts(g, _bpParts0, h + 1);   // v1602: birdies after he left cost him nothing
     participants.forEach(p => {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (raw == null) return;
@@ -47549,12 +47721,14 @@ function calcCtp(g) {
   g.players.forEach(p => money[p.id] = 0);
   const events = [];
   const data = g.ctpData || {};
+  const _cParts0 = participants;
   (cfg.holes || []).forEach(h => {
     const hd = data[h];
     if (!hd || !hd.pid) return;
     const w = g.players.find(p => p.id === hd.pid);
     if (!w || !partIds.has(w.id)) return;
     const per = cfg.value || 0;
+    const participants = bgHoleParts(g, _cParts0, Number(h));   // v1602
     participants.forEach(p => {
       if (p.id === w.id) return;
       money[p.id] -= per;
@@ -47581,8 +47755,10 @@ function calcP3Greenie(g) {
   const events = [];
   if (!g.p3greenieData) g.p3greenieData = {};
 
+  const _gParts0 = participants;
   for (let h = 1; h <= 18; h++) {
     if (g.pars[h - 1] !== 3) continue; // par 3s only
+    const participants = bgHoleParts(g, _gParts0, h);   // v1602
     const hd = g.p3greenieData[h] || {};
     // Only count winners who are actually participants in this game
     const winners = (Array.isArray(hd.winners) ? hd.winners : []).filter(id => partIds.has(id));
@@ -47958,11 +48134,12 @@ function calcPotOfGold(g) {
     const baseVal = (base != null ? base * weight : ((values[h] != null ? Number(values[h]) : 0) || 0));
     const incoming = carry;
     const holeVal = baseVal + incoming;
-    const scored = participants.map(p => {
+    const scored = bgHoleParts(g, participants, h + 1).map(p => {   // v1602
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       const net = raw != null ? (useNet ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : raw) : null;
       return { pid: p.id, name: p.name, raw, net };
     });
+    if (scored.length < 2) continue;
     const allScored = scored.every(s => s.raw !== null);
     if (!allScored) {
       // v968 (Tyler: "the payment amounts are not showing up until the round is
@@ -48400,7 +48577,7 @@ function calcHammer(g) {
     const hd = (g.hammerData && g.hammerData.holes && g.hammerData.holes[h]) || null;
     const stake = (hd && hd.stake) ? hd.stake : 1;
     const foldedIds = new Set((hd && Array.isArray(hd.folded)) ? hd.folded : []);
-    const active = players.filter(p => !foldedIds.has(p.id));
+    const active = bgHoleParts(g, players, h).filter(p => !foldedIds.has(p.id));   // v1602
     const amt = base * (stake + carry);
     if (foldedIds.size && active.length) {
       // Each folded player gives the current game value, split evenly among
@@ -50954,7 +51131,7 @@ function renderBoard() {
           const _nH = (g.holes === 9) ? 9 : 18;
           _roundOver = g.players.every(p => {
             const arr = (p && g.scores[p.id]) || [];
-            for (let i = 0; i < _nH; i++) { if (arr[i] == null) return false; }
+            for (let i = 0; i < _nH; i++) { if (arr[i] == null && bgActiveOnHole(g, p.id, i + 1)) return false; }   // v1602
             return true;
           });
         }
@@ -84308,7 +84485,7 @@ function allHolesScored(g) {
   if (!g || !Array.isArray(g.players) || !g.players.length) return false;
   const _rh = roundHoles(g);
   for (let h = 0; h < _rh; h++) {
-    if (g.players.some(p => !g.scores[p.id] || g.scores[p.id][h] == null)) return false;
+    if (g.players.some(p => bgActiveOnHole(g, p.id, h + 1) && (!g.scores[p.id] || g.scores[p.id][h] == null))) return false;   // v1602: leavers skipped
   }
   return true;
 }
@@ -84319,7 +84496,7 @@ function nextUnplayedAfter(g, current) {
   const _rh = roundHoles(g);
   for (let k = 1; k <= _rh; k++) {
     const h = ((current - 1 + k) % _rh) + 1, idx = h - 1;
-    if (g.players.some(p => !g.scores[p.id] || g.scores[p.id][idx] == null)) return h;
+    if (g.players.some(p => bgActiveOnHole(g, p.id, h) && (!g.scores[p.id] || g.scores[p.id][idx] == null))) return h;   // v1602
   }
   return null;
 }
