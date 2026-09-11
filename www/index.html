@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1677-->
+<!--BGVER=v2026.11.1678-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10662,7 +10662,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1677';
+const BG_BUILD = 'v2026.11.1678';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -66706,6 +66706,7 @@ async function t2Delete(id) {
         try { bgMarkEventGone(id); } catch (e) {}
         // mirror the server's work into THIS device's caches (the codes it purged)
         try { for (const c of _srvCodes) { try { tombstoneRound(c); } catch (e) {} try { localStorage.removeItem('game:' + c); } catch (e) {} try { await bgBadgesRevokeRound(c); } catch (e) {} } } catch (e) {}
+        try { setTimeout(() => { try { bgBadgesRecompute({ league: true }); } catch (e) {} }, 500); } catch (e) {}   // v1678: Commish comes off if that was the last event I ran
       } else if (_rpc && _rpc.error) console.warn('bg_t2_delete_everywhere', _rpc.error);
     }
   } catch (e) { console.warn('bg_t2_delete_everywhere', e); }
@@ -89160,6 +89161,11 @@ async function lgDelete(sid, opts) {
      Runs AFTER the RPC on purpose -- games has no FK to the season, so the stamp
      survives the delete and is still there to select on. */
   try { await lgVoidLaunchedRounds(sid); } catch (e) { console.warn('lgVoidLaunchedRounds', e); }
+  // v1678: the server-side purge (same one tournaments use since v1677) so rounds
+  // OTHER players own, and their recent lists / score history / stats / badges, go too.
+  try { const _rpc = await supa.rpc('bg_lg_purge_rounds', { sid: sid }); if (_rpc && _rpc.error) console.warn('bg_lg_purge_rounds', _rpc.error); } catch (e) {}
+  // ...and the league badges this season earned come off now, not on the next 6-hour pass.
+  try { bgBadgesRecompute({ league: true }); } catch (e) {}
   try { window._lgSeason = null; } catch (e) {}
   const d = (res && res.data) || {};
   try {
@@ -114305,15 +114311,19 @@ function bgBadgesFromGame(g, meNorm, live) {
 // ---------- evaluation: leagues + tournaments (signed in only; three small selects) ----------
 async function bgBadgesFromLeague() {
   const out = {};
+  // v1678: the result is now AUTHORITATIVE for the league/tournament badges (see the
+  // reconcile step in bgBadgesRecompute), so a read that failed must say so, or a bad
+  // connection would strip real badges. _partial is not a badge id; merge ignores it.
+  const _fail = (r) => { if (!r || r.error) out._partial = true; return r; };
   try {
-    if (!isSignedIn() || !supa) return out;
+    if (!isSignedIn() || !supa) { out._partial = true; return out; }
     const uid = _authUser.id;
     /* v1657: Podium — top three on a finished season (same rows Season Champ reads) */
     try {
-      const mr = await supa.from('league_members').select('id,season_id').eq('user_id', uid).limit(200);
+      const mr = _fail(await supa.from('league_members').select('id,season_id').eq('user_id', uid).limit(200));
       const mids = (mr && Array.isArray(mr.data)) ? mr.data.map(m => m.id) : [];
       if (mids.length) {
-        const sr = await supa.from('league_standings').select('season_id,entrant_id,rank,segment').in('entrant_id', mids).lte('rank', 3);
+        const sr = _fail(await supa.from('league_standings').select('season_id,entrant_id,rank,segment').in('entrant_id', mids).lte('rank', 3));
         const rows = (sr && Array.isArray(sr.data)) ? sr.data.filter(r => r && r.rank >= 1 && r.rank <= 3 && (!r.segment || r.segment === 'full' || r.segment === 'season')) : [];
         if (rows.length) {
           const ss = await supa.from('league_seasons').select('id,status').in('id', Array.from(new Set(rows.map(r => r.season_id))));
@@ -114329,20 +114339,21 @@ async function bgBadgesFromLeague() {
         supa.from('leagues').select('id,created_at').eq('commissioner_id', uid).limit(1),
         supa.from('tournaments').select('id,created_at').eq('commissioner_id', uid).limit(1)
       ]);
+      _fail(lg); _fail(tn);
       const row = (lg.data && lg.data[0]) || (tn.data && tn.data[0]);
       if (row) out.commish = { count: 1, level: 0, at: row.created_at ? Date.parse(row.created_at) : Date.now(), code: null };
     } catch (e) {}
     // My league seats → matchups I won + seasons I topped
-    const mem = await supa.from('league_members').select('id,season_id,team_id').eq('user_id', uid).limit(50);
+    const mem = _fail(await supa.from('league_members').select('id,season_id,team_id').eq('user_id', uid).limit(50));
     const seats = (mem && mem.data) || [];
     if (!seats.length) return out;
     const myEntrant = new Set(); seats.forEach(m => { myEntrant.add(m.id); if (m.team_id) myEntrant.add(m.team_id); });
     const sids = Array.from(new Set(seats.map(m => m.season_id)));
     try {
-      const wk = await supa.from('league_weeks').select('id,season_id,finalized_at').in('season_id', sids).not('finalized_at', 'is', null).limit(400);
+      const wk = _fail(await supa.from('league_weeks').select('id,season_id,finalized_at').in('season_id', sids).not('finalized_at', 'is', null).limit(400));
       const wids = ((wk && wk.data) || []).map(w => w.id);
       if (wids.length) {
-        const mu = await supa.from('league_matchups').select('week_id,a_entrant_id,b_entrant_id,a_points,b_points,status,finalized_at').in('week_id', wids).limit(2000);
+        const mu = _fail(await supa.from('league_matchups').select('week_id,a_entrant_id,b_entrant_id,a_points,b_points,status,finalized_at').in('week_id', wids).limit(2000));
         let wins = 0, firstAt = null;
         ((mu && mu.data) || []).forEach(m => {
           if (!m || m.a_points == null || m.b_points == null) return;
@@ -114353,7 +114364,7 @@ async function bgBadgesFromLeague() {
       }
     } catch (e) {}
     try {
-      const done = await supa.from('league_seasons').select('id,status,end_date,archived_at').in('id', sids).in('status', ['complete', 'completed', 'finished', 'archived', 'closed']).limit(50);
+      const done = _fail(await supa.from('league_seasons').select('id,status,end_date,archived_at').in('id', sids).in('status', ['complete', 'completed', 'finished', 'archived', 'closed']).limit(50));
       const doneIds = ((done && done.data) || []).map(s => s.id);
       if (doneIds.length) {
         const st = await supa.from('league_standings').select('season_id,entrant_id,rank,segment,computed_at').in('season_id', doneIds).eq('segment', 'full').eq('rank', 1).limit(200);
@@ -114465,6 +114476,22 @@ async function bgBadgesRecompute(opts) {
       if (isSignedIn() && (opts.league || !st.leagueAt || (Date.now() - st.leagueAt) > 6 * 3600 * 1000)) {
         const r = await bgBadgesFromLeague(); st.leagueAt = Date.now(); dirty = true;
         const ch = bgBadgesMerge(st, r); if (ch.length) changed.push.apply(changed, ch);
+        // v1678 (Tyler, 9/11): "I am still seeing badges I won for leagues when they have
+        // all been deleted ... make sure we remove the badge when we remove the game."
+        // Merge only ever RAISED these, so a Week Winner / Podium / Season Champ /
+        // Commish earned in a league or tournament that has since been deleted stayed
+        // forever. The league read is authoritative now: whatever it does not return
+        // is gone, and a count that came down comes down. Skipped when any read
+        // failed (_partial), so a bad signal can never strip a real badge.
+        if (!r._partial) {
+          ['weekwin', 'champ', 'podium', 'commish'].forEach(id => {
+            const cur = st.badges[id]; const now = r[id];
+            if (cur && !now) { delete st.badges[id]; dirty = true; }
+            else if (cur && now && (now.count || 0) < (cur.count || 0)) { cur.count = now.count; cur.last = now.at || cur.last; dirty = true; }
+          });
+          // the Commish hook flag would just put it straight back on the next pass
+          if (!r.commish && st.flags && st.flags.commish) { delete st.flags.commish; dirty = true; }
+        }
       }
     } catch (e) {}
     if (dirty) await bgBadgesSave(st);
@@ -114823,7 +114850,7 @@ async function renderBadgesTab() {
     // First open this session: sweep older rounds for game-based badges, then refresh leagues
     setTimeout(() => { try { bgBadgesBackfill(20); } catch (e) {} }, 300);
     // …and a fresh pass over history + leagues (throttled inside); repaint only if something moved
-    setTimeout(() => { try { bgBadgesRecompute({}).then(ch => { if (ch && ch.length) renderBadgesTab(); }); } catch (e) {} }, 600);
+    setTimeout(() => { try { const _n0 = earned.length; bgBadgesRecompute({ league: true }).then(async ch => { let _n1 = _n0; try { _n1 = bgBadgeEarnedList(await bgBadgesLoad()).length; } catch (e) {} if ((ch && ch.length) || _n1 !== _n0) renderBadgesTab(); }); } catch (e) {} }, 600);   /* v1678: league: true — a deleted league's badges must come off the moment the tab is looked at, not 6 h later; repaint when the count moved either way */
   } catch (e) { console.warn('badges tab', e); }
 }
 function bgBadgeDate(t) {
