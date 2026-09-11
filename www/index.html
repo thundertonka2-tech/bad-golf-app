@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1659-->
+<!--BGVER=v2026.11.1660-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -4691,6 +4691,8 @@
   .bdg-pop-kicker{ font-weight:800; font-size:13px; letter-spacing:.06em; text-transform:uppercase; color:var(--text-muted); }
   .bdg-pop{ text-align:center; }
   .bg-btn--seg.bg-btn--seg-danger{ color:var(--money-neg); }   /* v1659: the Delete seg on league/tourney cards */
+  .rounds-grp-title{ font-weight:700; font-size:14px; margin:14px 0 2px; padding-bottom:6px; border-bottom:2px solid var(--border); }   /* v1660: Rounds tab sections */
+  .rounds-grp:first-child .rounds-grp-title{ margin-top:2px; }
   .bdg-tap{ background:transparent; border:none; padding:2px; min-width:44px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; box-shadow:none; }
   .bdg-next{ display:flex; align-items:center; gap:8px; margin-top:12px; padding-top:12px; border-top:1px solid var(--border); }
   .bdg-next-body{ flex:1; min-width:0; display:flex; flex-direction:column; gap:5px; }
@@ -10421,7 +10423,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1659';
+const BG_BUILD = 'v2026.11.1660';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -18994,7 +18996,8 @@ async function addToRecent(game) {
     createdAt: game.createdAt || (prevEntry && (prevEntry.createdAt || prevEntry.updatedAt)) || game.updatedAt,
     updatedAt: game.updatedAt,
     finishedAt: game.finishedAt || null, // lets the Rounds tab show LIVE vs complete
-    t2: game.t2 || null                  // mark tournament rounds so they don't show under "Scheduled Rounds"
+    t2: game.t2 || null,                 // mark tournament rounds so they don't show under "Scheduled Rounds"
+    lg: (game.lg && game.lg.sid) ? { sid: game.lg.sid } : null   // v1660: league marker for the Rounds tab sections
   });
   recent = recent.slice(0, 50);
   await safeSet(KEY_RECENT, JSON.stringify(recent), true);
@@ -21861,7 +21864,8 @@ async function archiveScoresFromRound(g) {
       gameCode: g.code || null,
       // v902: stamp the tournament id so the trophy on Home / Saved rounds works
       // offline and keeps working after the tournament_groups rows are gone.
-      t2Id: (g.t2 && g.t2.tournamentId) || null
+      t2Id: (g.t2 && g.t2.tournamentId) || null,
+      lgSid: (g.lg && g.lg.sid) || null   // v1660: league round marker for the Rounds tab sections
     };
 
     if (existingIdx >= 0) {
@@ -54199,6 +54203,28 @@ let _tourneyCodesCache = null, _tourneyCodesAt = 0, _tourneyCodesKey = '';
 // deserve a trophy icon — and PostgREST's default cap silently truncated it, so
 // on a big database the trophy stopped appearing at all. Both callers know
 // exactly which codes they care about; ask for those.
+/* v1660: which of these game codes are LEAGUE rounds (data->lg->>sid set). Same shape and
+   cache idea as tourneyRoundCodes; older history/recent entries carry no lgSid, so the
+   Rounds tab asks once per paint (cached 5 min). */
+let _leagueCodesCache = null, _leagueCodesKey = '', _leagueCodesAt = 0;
+async function leagueRoundCodes(codes) {
+  const want = Array.isArray(codes) ? [...new Set(codes.filter(Boolean))] : [];
+  if (!want.length) return new Set();
+  const ck = want.slice().sort().join(',');
+  if (_leagueCodesCache && _leagueCodesKey === ck && (Date.now() - _leagueCodesAt) < 300000) return _leagueCodesCache;
+  const set = new Set();
+  try {
+    if (typeof supa !== 'undefined' && supa) {
+      for (let i = 0; i < want.length; i += 200) {
+        const { data, error } = await supa.from('games').select('code').in('code', want.slice(i, i + 200)).not('data->lg->>sid', 'is', null);
+        if (error) break;
+        (data || []).forEach(g => { if (g && g.code) set.add(g.code); });
+      }
+    }
+  } catch (e) {}
+  _leagueCodesCache = set; _leagueCodesKey = ck; _leagueCodesAt = Date.now();
+  return set;
+}
 async function tourneyRoundCodes(codes) {
   const want = Array.isArray(codes) ? [...new Set(codes.filter(Boolean))] : null;
   if (want && !want.length) return new Set();
@@ -60944,6 +60970,24 @@ async function loadRounds() {
   // the Stats tab both render THIS function, so one edit covers both).
   let _tcodes = new Set();
   try { _tcodes = await tourneyRoundCodes(recent.map(r => r && r.code).concat((pastRounds || []).map(s => s && s.gameCode)).filter(Boolean)); } catch (e) {}
+  /* v1660 (Tyler): "sort this in different sections ... Completed Rounds, Completed Tournament
+     Rounds, and then finally Completed League Rounds. Keep the same format just give each one a
+     title and their own area." Four titled groups inside the one list (live/unfinished rounds
+     keep the top, as before); a group with nothing in it draws no title. Rows are the same
+     rows -- only where they land changes. Search + Show all work across every group. */
+  let _lcodes = new Set();
+  try {
+    const _need = recent.filter(r => r && r.code && !(r.lg && r.lg.sid)).map(r => r.code)
+      .concat((pastRounds || []).filter(s => s && s.gameCode && !s.lgSid).map(s => s.gameCode));
+    _lcodes = await leagueRoundCodes(_need);
+  } catch (e) {}
+  const _grps = {};
+  [['live', 'Live & Unfinished'], ['done', 'Completed Rounds'], ['tourney', 'Completed Tournament Rounds'], ['league', 'Completed League Rounds']].forEach(([k, t]) => {
+    const _sec = document.createElement('div'); _sec.className = 'rounds-grp'; _sec.dataset.grp = k;
+    _sec.innerHTML = '<div class="rounds-grp-title">' + t + '</div>';
+    list.appendChild(_sec); _grps[k] = _sec;
+  });
+  const _place = (row, key) => { row.classList.add('rounds-row'); (_grps[key] || _grps.done).appendChild(row); };
   const recentSorted = recent.slice().sort((a, b) => {
     const aLive = !a.finishedAt && !isRoundStale(a), bLive = !b.finishedAt && !isRoundStale(b);
     if (aLive !== bLive) return aLive ? -1 : 1;
@@ -61040,7 +61084,7 @@ async function loadRounds() {
       showToast(hcpAffected ? 'Removed — your handicap has been recalculated' : 'Removed from your list');
       await loadRounds();
     }; }
-    list.appendChild(row);
+    _place(row, unfinished ? 'live' : (((r.t2 && r.t2.tournamentId) || _tcodes.has(r.code)) ? 'tourney' : (((r.lg && r.lg.sid) || _lcodes.has(r.code)) ? 'league' : 'done')));   /* v1660 */
   });
 
   // Manually-added past rounds — read-only entries (course · date · gross), tagged
@@ -61103,7 +61147,7 @@ async function loadRounds() {
       await loadRounds();
       try { renderStats(); } catch (e) {}
     }; }
-    list.appendChild(row);
+    _place(row, (s.t2Id || (s.gameCode && _tcodes.has(s.gameCode))) ? 'tourney' : ((s.lgSid || (s.gameCode && _lcodes.has(s.gameCode))) ? 'league' : 'done'));   /* v1660 */
   });
   // Wire search filter (preserves current query across reloads). The list shows
   // 5 rounds by default; "Show all" expands it. A search overrides the cap and
@@ -61113,13 +61157,18 @@ async function loadRounds() {
   const ROUNDS_PREVIEW = 5;
   function applyRoundsFilter() {
     const q = (searchInput.value || '').trim().toLowerCase();
-    const rows = Array.from(list.children);
+    const rows = Array.from(list.querySelectorAll('.rounds-row'));   /* v1660: rows live inside the section groups */
     const matched = rows.filter(r => q === '' || r.textContent.toLowerCase().includes(q));
     const collapsed = (q === '' && !state._roundsExpanded);
     const shown = collapsed ? matched.slice(0, ROUNDS_PREVIEW) : matched;
     const shownSet = new Set(shown);
     rows.forEach(r => { r.style.display = shownSet.has(r) ? '' : 'none'; r.style.borderBottom = '1px solid var(--border)'; });
-    if (shown.length) shown[shown.length - 1].style.borderBottom = 'none';
+    /* v1660: a section with nothing showing hides its title; the last shown row of each section loses its rule */
+    Array.from(list.querySelectorAll('.rounds-grp')).forEach(g => {
+      const vis = Array.from(g.querySelectorAll('.rounds-row')).filter(r => r.style.display !== 'none');
+      g.style.display = vis.length ? '' : 'none';
+      if (vis.length) vis[vis.length - 1].style.borderBottom = 'none';
+    });
     if (moreBtn) {
       if (q === '' && matched.length > ROUNDS_PREVIEW) {
         moreBtn.style.display = '';
