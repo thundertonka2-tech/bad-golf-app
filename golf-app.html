@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1653-->
+<!--BGVER=v2026.11.1656-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10414,7 +10414,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1653';
+const BG_BUILD = 'v2026.11.1656';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -60376,11 +60376,13 @@ async function removeRoundForMe(code) {
         entry.scoreHistory = entry.scoreHistory.filter(s => s.gameCode !== code);
         if (entry.scoreHistory.length !== before) {
           await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
+          try { await bgBadgesRevokeRound(code); } catch (e) {}   // v1654: badges the round earned go with it
           return true; // handicap affected
         }
       }
     }
   } catch (e) {}
+  try { await bgBadgesRevokeRound(code); } catch (e) {}   // v1654: game-based badges (no history entry needed)
   return false;
 }
 
@@ -61980,6 +61982,9 @@ async function deleteRecentGame(code) {
       if (touched) await safeSet(KEY_PLAYER_ROSTER, JSON.stringify(roster), false);
     }
   } catch (e) { console.warn('stats sync on round delete failed:', e); }
+  // v1654: and its badges. Mine now; every other player's on their next recompute,
+  // via the tombstone sweep (this row is per-user — we cannot write theirs).
+  try { await bgBadgesRevokeRound(code); } catch (e) {}
 
   // If we just deleted the "last opened" pointer, clear it
   const last = await safeGet(KEY_LAST, false);
@@ -85297,6 +85302,15 @@ function _lgHistBack(sid) {
     const prev = h[h.length - 1];
     if (!prev || prev.sid !== sid || typeof window[prev.fn] !== 'function') return false;
     h.pop();                                   /* the opener pushes it back on */
+    /* v1656 (Tyler): "I selected the players, then hit next then back. It should have
+       brought me back to the player selection screen I was on." The picker is a sheet
+       over the players step, so paint that step underneath and re-open the sheet. */
+    if (prev.fn === 'lgOpenAddPlayerPicker') {
+      Promise.resolve().then(function () { return window.lgOpenSettings(sid); })
+        .then(function () { return window.lgOpenAddPlayerPicker(sid); })   /* stack ends [settings, picker], as it did going forward */
+        .catch(function () {});
+      return true;
+    }
     window[prev.fn](sid);
     return true;
   } catch (e) { return false; }
@@ -85304,7 +85318,8 @@ function _lgHistBack(sid) {
 (function () {
   try {
     const names = ['lgOpenSeason', 'lgOpenSettings', 'lgOpenGame', 'lgOpenShape', 'lgOpenTeams', 'lgOpenCourse',
-                   'lgOpenSchedule', 'lgOpenHandicaps', 'lgOpenHcpRules', 'lgOpenSideGames', 'lgOpenMoneySetup'];
+                   'lgOpenSchedule', 'lgOpenHandicaps', 'lgOpenHcpRules', 'lgOpenSideGames', 'lgOpenMoneySetup',
+                   'lgOpenAddPlayerPicker'];   /* v1656: the picker is a screen you were on, so Back returns to it */
     const wire = function () {
       names.forEach(function (n) {
         try {
@@ -85811,9 +85826,21 @@ function lgOpenCreate() {
       '<br><span class="help-text" style="font-size:12px">On: you\'re in the schedule, standings and pot like everyone else. Off: you run the league without playing in it.</span></span></label>' +
     '<div id="lg-selfsched-wrap"' + (lgShapeKey() === 'field' ? '' : ' style="display:none"') + '>' +
       '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:2px 0 10px">' +
-      '<input type="checkbox" class="bg-sw" id="lg-selfsched-create">' +
+      '<input type="checkbox" class="bg-sw" id="lg-selfsched-create" onchange="try{document.getElementById(\'lg-anycourse-wrap\').style.display=this.checked?\'\':\'none\';if(!this.checked)document.getElementById(\'lg-anycourse-create\').checked=false;}catch(e){}">' +
       '<span style="flex:1;min-width:0"><strong style="font-size:13px">Let players post rounds they played on their own</strong>' +
       '<br><span class="help-text" style="font-size:12px">On the league’s course, within 6 days of the league day. Leave it off and the week is played together.</span></span></label>' +
+      /* v1656 (Tyler): "if I pick a mode where they can post from other courses, [the
+         course step] would not be needed so we can skip this step and the tees." Asked
+         here, at creation, so the wizard can leave the course step out from the start.
+         Only meaningful with self-submit on (the server refuses it otherwise), so it
+         sits under that switch and hides until it is ticked. Saved after create via
+         league_set_any_course — the same RPC the settings switch uses. */
+      '<div id="lg-anycourse-wrap" style="display:none;margin-left:22px">' +
+      '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:2px 0 10px">' +
+      '<input type="checkbox" class="bg-sw" id="lg-anycourse-create">' +
+      '<span style="flex:1;min-width:0"><strong style="font-size:13px">Accept rounds from any course</strong>' +
+      '<br><span class="help-text" style="font-size:12px">Players post from wherever they played. No league course or tees to set — each round scores against its own course.</span></span></label>' +
+      '</div>' +
     '</div>' +
     lgLbl('How many weeks: <span id="lg-weeks-val" style="color:var(--accent);font-weight:600">' + LG_WEEK_DEFAULT + ' weeks</span>') +
     '<input type="range" id="lg-weeks" min="' + LG_WEEK_MIN + '" max="' + LG_WEEK_MAX + '" step="1" value="' + LG_WEEK_DEFAULT + '" ' +
@@ -86192,6 +86219,16 @@ async function _lgSubmitCreateInner() {
        form stayed on screen under it (the recording) -- replace the form outright. */
     try { const _lb = document.getElementById('league-body'); if (_lb) _lb.innerHTML = lgCard('<p class="help-text" style="margin:0">League created \u2014 opening the setup\u2026</p>'); } catch (e) {}
     try { window._lgSeason = _sid; } catch (e) {}
+    /* v1656: the any-course answer from the create screen. Done before the wizard opens
+       so lgSetupState sees it and leaves the course step out. */
+    try {
+      const _ac = document.getElementById('lg-anycourse-create');
+      const _ss = document.getElementById('lg-selfsched-create');
+      if (_ac && _ac.checked && _ss && _ss.checked && lgShapeKey() === 'field') {
+        const _r = await supa.rpc('league_set_any_course', { p_season_id: _sid, p_on: true });
+        if (_r && _r.error) { try { console.warn('league_set_any_course at create failed:', _r.error); } catch (e) {} }
+      }
+    } catch (e) {}
     /* v1418 (Tyler, screen recording): create succeeded, the toast said so, and
        the CREATE FORM stayed on screen with his answers still in it — so the
        obvious next move was to press Next again and make a second league.
@@ -88472,11 +88509,12 @@ async function lgOpenGame(sid) {
   const _shapeObj = lgShape(_shape);
   const _games = lgGamesForShape(_shape, cur);
 
-  let h = lgWizHtml(sid, 'game') + lgCard('<h2 style="margin:0 0 4px">The game</h2>' +
-    '<p class="help-text" style="margin:0 0 10px">What this league plays every week. It decides how a week is scored and how the season is ranked.</p>' +
+  /* v1655 (Tyler): the "The game" heading + blurb are gone and the label under
+     it reads "This Week's Game" (was "This league is"). */
+  let h = lgWizHtml(sid, 'game') + lgCard(
     /* v1406: say what shape the league IS before offering its games, so the
        short list underneath is explained rather than mysterious. */
-    '<div class="bg-sec" style="margin-bottom:2px">This league is</div>' +
+    '<div class="bg-sec" style="margin-bottom:2px">This Week\u2019s Game</div>' +
     '<div style="font-weight:800;font-size:15px">' + lgEsc(_shapeObj.name) + '</div>' +
     '<p class="help-text" style="margin:4px 0 0;font-size:12px">' + lgEsc(_shapeObj.sub) + '</p>' +
     (amCommish && !done
@@ -89429,6 +89467,7 @@ async function lgOpenHandicaps(sid, weekNumber) {
   try {
     const _fr = await _bgRead(function () { return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle(); }, 'lgOpenHandicaps:season');
     window._lgHcpScramble = !!(_fr.ok && _fr.data && _fr.data.settings && _fr.data.settings.format === 'scramble');
+    window._lgHcpAnyCourse = !!(_fr.ok && _fr.data && _fr.data.settings && _fr.data.settings.play && _fr.data.settings.play.any_course);   /* v1656 */
   } catch (e) {}
 
   /* v1635 (Tyler, 9/10): "in a scramble in league this should be by team not by
@@ -89481,6 +89520,9 @@ async function lgOpenHandicaps(sid, weekNumber) {
       }
     }
   } catch (e) { lgTees = []; }
+  /* v1656 (Tyler): "in that format we also do not need to show tees, here either." A
+     round from any course plays whatever tee it was played from. */
+  if (window._lgHcpAnyCourse) lgTees = [];
   window._lgHcpTees = lgTees;
   window._lgHcpDefaultTee = (lgCur && lgCur.tee_id) || null;
   window._lgHcpHoles = lgHoles;
@@ -90487,6 +90529,22 @@ function lgHalfRating(v, holes) {
    Stroke indexes are RE-RANKED for a nine: a back nine's SIs are 10-18 on the
    full card, and left that way every stroke would be allocated to the wrong
    holes, because strokes are handed out by SI <= (handicap mod holes). */
+/* v1656: an any-course league has no course, and league_open_week still needs a card
+   (holes, pars, stroke index — §7.2). Every card posted to such a week is an "away"
+   card and scores against ITS OWN course's par and SI (v1653), so this placeholder is
+   never used for scoring — it only satisfies the open. Par 4s, SI in order, no rating. */
+function lgAnyCourseSnapshot(nine) {
+  const holes = (nine === 'front' || nine === 'back' || nine === 9 || nine === '9') ? 9 : 18;
+  const pars = []; const si = []; for (let i = 0; i < holes; i++) { pars.push(4); si.push(i + 1); }
+  return { holes: holes, pars: pars, si: si, par: holes * 4, rating: holes * 4, slope: 113, rating18: null, slope18: null, par18: 72,
+           course_id: null, tee: null, name: 'Any course', tees: [], any_course: true };
+}
+async function lgSeasonIsAnyCourse(sid) {
+  try {
+    const r = await _bgRead(function () { return supa.from('league_seasons').select('settings').eq('id', sid).maybeSingle(); }, 'lgSeasonIsAnyCourse');
+    return !!(r.ok && r.data && r.data.settings && r.data.settings.play && r.data.settings.play.any_course);
+  } catch (e) { return false; }
+}
 async function lgCourseSnapshot(courseId, nine, teeLabel) {
   let sc = null;
   try { sc = await getCourseScorecard(courseId); } catch (e) {}
@@ -90584,8 +90642,9 @@ async function lgAutoOpenAndSweep() {
     const due = await supa.rpc('league_weeks_due');
     if (due && !due.error && Array.isArray(due.data)) {
       for (const w of due.data) {
-        if (!w.course_id) continue;
-        const snap = await lgCourseSnapshot(w.course_id, w.nine, w.tee_id);
+        let snap = null;
+        if (!w.course_id) { if (w.any_course) snap = lgAnyCourseSnapshot(w.nine); else continue; }   /* v1656 */
+        else snap = await lgCourseSnapshot(w.course_id, w.nine, w.tee_id);
         if (!snap) continue;
         try { await supa.rpc('league_open_week', { p_week_id: w.week_id, p_course_snapshot: snap, p_opened_by_auto: true }); }
         catch (e) { try { console.warn('league_open_week failed:', e); } catch (e2) {} }
@@ -91621,8 +91680,10 @@ async function lgStartWeek(sid, weekId, opts) {
   const r = await _bgRead(function () {
     return supa.from('league_weeks').select('course_id,nine,tee_id').eq('id', weekId).maybeSingle();
   }, 'lgStartWeek:week');
-  if (!r.ok || !r.data || !r.data.course_id) { try { showToast('This week has no course set'); } catch (e) {} return; }
-  const snap = await lgCourseSnapshot(r.data.course_id, r.data.nine, r.data.tee_id);
+  if (!r.ok || !r.data) { try { showToast('This week has no course set'); } catch (e) {} return; }
+  const _anyC = !r.data.course_id && await lgSeasonIsAnyCourse(sid);   /* v1656 */
+  if (!r.data.course_id && !_anyC) { try { showToast('This week has no course set'); } catch (e) {} return; }
+  const snap = _anyC ? lgAnyCourseSnapshot(r.data.nine) : await lgCourseSnapshot(r.data.course_id, r.data.nine, r.data.tee_id);
   if (!snap) { try { showToast('Couldn’t read that course’s scorecard'); } catch (e) {} return; }
   let res = null;
   try { res = await supa.rpc('league_open_week', { p_week_id: weekId, p_course_snapshot: snap, p_opened_by_auto: false }); }
@@ -91708,8 +91769,10 @@ async function lgOpenWeekNow() {
   const r = await _bgRead(function () {
     return supa.from('league_weeks').select('course_id,nine,tee_id').eq('id', wid).maybeSingle();
   }, 'lgOpenWeekNow:week');
-  if (!r.ok || !r.data || !r.data.course_id) { try { showToast('This week has no course set'); } catch (e) {} return; }
-  const snap = await lgCourseSnapshot(r.data.course_id, r.data.nine, r.data.tee_id);
+  if (!r.ok || !r.data) { try { showToast('This week has no course set'); } catch (e) {} return; }
+  const _anyC = !r.data.course_id && await lgSeasonIsAnyCourse(window._lgSeason);   /* v1656 */
+  if (!r.data.course_id && !_anyC) { try { showToast('This week has no course set'); } catch (e) {} return; }
+  const snap = _anyC ? lgAnyCourseSnapshot(r.data.nine) : await lgCourseSnapshot(r.data.course_id, r.data.nine, r.data.tee_id);
   if (!snap) { try { showToast('Couldn’t read that course’s scorecard'); } catch (e) {} return; }
   let res = null;
   try { res = await supa.rpc('league_open_week', { p_week_id: wid, p_course_snapshot: snap, p_opened_by_auto: false }); }
@@ -94761,7 +94824,8 @@ function lgWizSteps(st) {
   const team = st && st.type && st.type !== 'individual';
   const _selfOn = !!(st && st.selfOn);   /* v1599 */
   const _field = !!(st && st.field);   /* v1653 */
-  return LG_WIZ.filter(function (s) { return (s.key !== 'teams' || team) && (s.key !== 'sidegames' || !_selfOn) && (s.key !== 'schedule' || !_field); }).map(function (s) {
+  const _any = !!(st && st.anyCourse);   /* v1656: rounds from anywhere → no course step */
+  return LG_WIZ.filter(function (s) { return (s.key !== 'teams' || team) && (s.key !== 'sidegames' || !_selfOn) && (s.key !== 'schedule' || !_field) && (s.key !== 'course' || !_any); }).map(function (s) {
     let done = false;
     try {
       done = (s.key === 'players')   ? (st.members >= 2)
@@ -94957,7 +95021,7 @@ async function _lgNextSetupStepInner(sid) {
   // schedule stamps weeks that a week can only open from once they have a
   // course, and Tyler hit exactly this order — "it want to build a schedule and
   // I haven't had a chance to pick the venue(s)".
-  if (st.course === null) {
+  if (st.course === null && !st.anyCourse) {   /* v1656: an any-course league has no course to pick */
     try { showToast('Players are in — now pick where you play'); } catch (e) {}
     try { lgOpenCourse(sid); } catch (e) { try { lgOpenSettings(sid); } catch (e2) {} }
     return;
@@ -95032,7 +95096,7 @@ function lgSetupChecklistHtml(sid, st) {
   if (!st || (st.ready && st.game && st.handicaps)) return '';
   const _next = (!st.game) ? 'Pick the game'   /* v1620: game first */
               : (st.members < 2) ? 'Add players'
-              : (st.course === null) ? 'Pick the course'
+              : (st.course === null && !st.anyCourse) ? 'Pick the course'   /* v1656 */
               : (!st.matchups) ? 'Build the schedule'
               : 'Check the handicaps';
   const row = function (done, label, hint) {
@@ -95045,8 +95109,8 @@ function lgSetupChecklistHtml(sid, st) {
   return lgCard('<div class="bg-sec" style="margin-bottom:2px">Getting set up</div>' +
     row(!!st.game, 'Pick the game', 'Stroke, match, stableford or scramble. Set it before the schedule.') +
     row(st.members >= 2, 'Add your players', 'You need at least two.') +
-    row(st.course !== null, 'Pick the course', 'A week can’t open until the league has somewhere to play.') +
-    row(st.matchups > 0, 'Build the schedule', 'Sets who plays who, week by week.') +
+    (st.anyCourse ? '' : row(st.course !== null, 'Pick the course', 'A week can’t open until the league has somewhere to play.')) +   /* v1656 */
+    (st.field ? '' : row(st.matchups > 0, 'Build the schedule', 'Sets who plays who, week by week.')) +
     row(st.handicaps > 0, 'Check the handicaps', 'They lock when a week opens.') +
     '<button class="bg-btn bg-btn--primary bg-btn--full primary full" style="margin-top:12px" onclick="lgNextSetupStep(\'' + lgJs(sid) + '\')">' +
     _next + '</button>');
@@ -97238,7 +97302,7 @@ function bnavOpenMore() {
   // v1488: the League tile's BETA pill is gone -- the feature is out of beta. Every tile
   // is now the same template with no per-tab special case. The .beta-pill CSS is kept
   // (see the note on it) for the next thing that ships behind a soft launch.
-  const _EMO = { badges: '\u{1F3C5}', bets: '\u{1F4A1}', league: '\u26F3', profile: '\u{1F464}', stats: '\u{1F4CA}', times: '\u{1F4C5}', tourneys: '\u{1F3C6}', admin: '\u{1F6E1}\uFE0F' };   /* v1629 */
+  const _EMO = { badges: '\u{1F3C5}', bets: '\u{1F4A1}', league: '\u26F3', profile: '\u{1F9D1}', stats: '\u{1F4CA}', times: '\u{1F4C5}', tourneys: '\u{1F3C6}', admin: '\u{1F6E1}\uFE0F' };   /* v1629 · v1654 (Tyler): Profile was 👤, a flat purple silhouette that "does not render well on dark mode" → 🧑, the full-colour person glyph */
   const cell = i => '<button type="button" class="bg-btn s-item s-item--' + i.tab + '" onclick="bnavSheetGo(\'' + i.tab + '\')"><span class="sic">' + (_EMO[i.tab] ? '<span class="sem" aria-hidden="true">' + _EMO[i.tab] + '</span>' : '<svg><use href="#bn-' + i.icon + '"/></svg>') +
     (i.tab === 'badges' ? '<span class="bdg-tile-count"></span>' : '') +   // v1611: unseen-badge count
     '</span>' + i.lbl + '</button>';
@@ -112996,8 +113060,13 @@ async function bgBadgesRecompute(opts) {
     const { me, hist, roster, mine } = await bgBadgesMyHistory();
     const meNorm = me ? normalizeNameSegment(me) : '';
     let dirty = false;
+    // 0. v1654: drop anything a deleted round earned (see bgBadgesRevokeRound).
+    let _swept = null;
+    try { _swept = await _bgBadgesSweepDeleted(st); if (_swept && _swept.dirty) dirty = true; } catch (e) {}
+    if (_swept && _swept.histHit) { BG_BADGE_HIST_IDS.forEach(id => { const o = st.badges[id]; if (o) { st.badges[id] = null; delete st.badges[id]; _swept.old = _swept.old || {}; _swept.old[id] = o; } }); dirty = true; }
     // 1. history-derived
     try { const r = bgBadgesFromHistory(hist); const rg = bgBadgesRegulars(mine, roster); const b = bgBadgeById('regulars'); const lvl = bgBadgeLevelFor(b, rg.n); r.regulars = { count: rg.n, n: rg.n, level: lvl, at: Date.now(), code: null }; const ch = bgBadgesMerge(st, r); if (ch.length) { changed.push.apply(changed, ch); dirty = true; } if (rg.name && st.badges.regulars && st.badges.regulars.who !== rg.name) { st.badges.regulars.who = rg.name; dirty = true; } } catch (e) {}
+    if (_swept && _swept.old) { try { Object.keys(_swept.old).forEach(id => { const o = _swept.old[id], n = st.badges[id]; if (n && o) { if (o.first) n.first = o.first; n.seen = (o.seen !== false); } }); changed.length = 0; } catch (e) {} }   /* v1654: a rebuild is not a new award */
     // 2. game-derived (this game)
     if (opts.game) {
       try { const r = bgBadgesFromGame(opts.game, meNorm); const ch = bgBadgesMerge(st, r); if (ch.length) { changed.push.apply(changed, ch); dirty = true; } if (opts.game.code && st.scanned.indexOf(opts.game.code) < 0) { st.scanned.push(opts.game.code); dirty = true; } } catch (e) {}
@@ -113065,6 +113134,94 @@ async function bgBadgesBackfill(max) {
     }
     if (dirty) { await bgBadgesSave(st); try { renderBadgesTab(); bgRenderBadgesCard('home'); bgRenderBadgesCard('stats'); } catch (e) {} }
   } catch (e) {}
+}
+// v1654 (Tyler): "when I delete a round it removes all state and removes any badges I may
+// have obtained because of that round." The merge above only ever RAISES a badge, and
+// neither delete path touched badges at all, so a deleted round kept every badge it earned.
+// This is the one revoke. Called from both delete paths AFTER the round's scoreHistory
+// entry is gone, and from the tombstone sweep in bgBadgesRecompute (so a round an admin
+// deletes for everyone drops off each OTHER player's badges on their own phone).
+//   · game-derived badges (board, foursome, sunrise, greenie, snake, hammer, wolf,
+//     comeback): the code comes out of `codes[]`; count follows; none left → badge gone.
+//   · history-derived badges (hole feats, Clean Card, Circle Squad, New Low, First Tee,
+//     mileage, Regulars): wiped and recomputed from what is LEFT of the history — these
+//     counts are absolute, so this is the only correct way down. `first` and `seen` are
+//     carried over for badges that survive, so nothing re-toasts or re-dots.
+//   · Couch Caddie, Commish, Week Winner, Season Champ are not round-earned: untouched.
+//   · the code leaves `scanned` so a re-created round with the same code is re-evaluated.
+const BG_BADGE_GAME_IDS = ['board', 'foursome', 'sunrise', 'greenie', 'snake', 'hammer', 'wolf', 'comeback'];
+const BG_BADGE_HIST_IDS = ['firsttee', 'snowman', 'fullsend', 'ace', 'bounce', 'bigbird', 'circles', 'cleancard', 'newlow', 'teetimes', 'courses', 'roadtrip', 'regulars'];
+function _bgBadgesRevokeCodes(st, codes) {
+  const gone = new Set((codes || []).filter(Boolean));
+  if (!gone.size) return false;
+  let dirty = false;
+  try { const n = st.scanned.length; st.scanned = st.scanned.filter(c => !gone.has(c)); if (st.scanned.length !== n) dirty = true; } catch (e) {}
+  BG_BADGE_GAME_IDS.forEach(id => {
+    const cur = st.badges[id]; if (!cur) return;
+    const had = Array.isArray(cur.codes) ? cur.codes.slice() : (cur.code ? [cur.code] : []);
+    const keep = had.filter(c => !gone.has(c));
+    if (keep.length === had.length) return;
+    dirty = true;
+    if (!keep.length) { delete st.badges[id]; return; }
+    cur.codes = keep; cur.count = keep.length; cur.code = keep[0];
+  });
+  const histHit = BG_BADGE_HIST_IDS.some(id => { const c = st.badges[id]; return c && (gone.has(c.code) || (Array.isArray(c.codes) && c.codes.some(x => gone.has(x)))); });
+  return { dirty, histHit };
+}
+async function bgBadgesRevokeRound(code, opts) {
+  opts = opts || {};
+  if (!code) return false;
+  if (_bgBadgeBusy) { try { await _bgBadgeBusy; } catch (e) {} }
+  let done; _bgBadgeBusy = new Promise(r => { done = r; });
+  try {
+    const st = await bgBadgesLoad();
+    const r = _bgBadgesRevokeCodes(st, [code]);
+    let dirty = !!(r && r.dirty);
+    // History badges: always rebuild on an explicit delete (the entry is already out of
+    // scoreHistory, and a history badge's stored `code` is only the FIRST round that
+    // earned it — a later round can be the one being deleted).
+    if (opts.history !== false) {
+      const old = {};
+      BG_BADGE_HIST_IDS.forEach(id => { if (st.badges[id]) { old[id] = st.badges[id]; delete st.badges[id]; } });
+      const { hist, roster, mine } = await bgBadgesMyHistory();
+      const res = bgBadgesFromHistory(hist);
+      const rg = bgBadgesRegulars(mine, roster); const rb = bgBadgeById('regulars');
+      res.regulars = { count: rg.n, n: rg.n, level: bgBadgeLevelFor(rb, rg.n), at: Date.now(), code: null };
+      bgBadgesMerge(st, res);
+      if (st.badges.regulars && rg.name) st.badges.regulars.who = rg.name;
+      BG_BADGE_HIST_IDS.forEach(id => {
+        const o = old[id], n = st.badges[id];
+        if (n && o) { if (o.first) n.first = o.first; n.seen = (o.seen !== false); if (n.count < (o.count || 0) || (n.level || 0) < (o.level || 0)) dirty = true; }
+        else if (n || o) dirty = true;
+        if (n && o && (n.count !== o.count || (n.level || 0) !== (o.level || 0))) dirty = true;
+      });
+    }
+    if (dirty) await bgBadgesSave(st);
+    return dirty;
+  } catch (e) { console.warn('badges revoke', e); return false; }
+  finally { done(); _bgBadgeBusy = null; try { bgRenderBadgesCard('home'); bgRenderBadgesCard('stats'); if (typeof renderBadgesTab === 'function' && document.getElementById('panel-badges') && document.getElementById('panel-badges').style.display !== 'none') renderBadgesTab(); } catch (e) {} try { bnavPaintBadgeCount(); } catch (e) {} }
+}
+// The sweep: any badge still crediting a round that is tombstoned (deleted by an admin
+// for everyone, or by me on another device) and no longer in my Rounds list loses it.
+// Runs at the top of every recompute; cheap (two cached sets + the recent list).
+async function _bgBadgesSweepDeleted(st) {
+  try {
+    const codes = new Set();
+    Object.keys(st.badges || {}).forEach(id => { const c = st.badges[id]; if (!c) return; if (c.code) codes.add(c.code); (Array.isArray(c.codes) ? c.codes : []).forEach(x => x && codes.add(x)); });
+    if (!codes.size) return false;
+    const local = getDeletedRoundKeys();
+    let shared = null; try { shared = await getSharedTombstones(); } catch (e) {}
+    let mine = null; try { mine = await getMyRoundTombstones(); } catch (e) {}
+    const dead = Array.from(codes).filter(c => local.has(c) || (shared && shared.rounds && shared.rounds.has(c)) || (mine && mine.has(c)));
+    if (!dead.length) return false;
+    // A recycled code that is live again in my list is a NEW round, not the deleted one.
+    let recent = []; try { recent = (await getRecent()) || []; } catch (e) {}
+    const live = new Set(recent.map(r => r && r.code).filter(Boolean));
+    const gone = dead.filter(c => !live.has(c));
+    if (!gone.length) return false;
+    const r = _bgBadgesRevokeCodes(st, gone);
+    return r ? { dirty: r.dirty, histHit: r.histHit, gone } : false;
+  } catch (e) { return false; }
 }
 
 // ---------- UI: the Badges card (Home + Stats) ----------
