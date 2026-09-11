@@ -193,8 +193,11 @@
      5. STATUS BAR + SPLASH + iOS BACK GESTURE
   ------------------------------------------------------------------ */
   (function chrome() {
-    var SB = P.StatusBar, Splash = P.SplashScreen, App = P.App;
-    if (SB) { try { SB.setStyle({ style: 'DARK' }); } catch (e) {} } // light text on dark green
+    var Splash = P.SplashScreen, App = P.App;
+    // v1666: @capacitor/status-bar REMOVED (its Window.setStatusBarColor calls were the
+    // only thing Play's "deprecated edge-to-edge APIs" scan flagged). Light status-bar
+    // text is now set natively: iOS via Info.plist UIStatusBarStyle, Android via the
+    // theme default (light icons on the navy header). Do not re-add the plugin.
     // Hide the native splash the moment the DOM is ready (the app's own loading
     // screen takes over) — autoHide is OFF, so we control timing for the fastest
     // perceived launch. A safety timeout guarantees it never sticks.
