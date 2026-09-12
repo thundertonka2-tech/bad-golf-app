@@ -1,30 +1,10 @@
 import { page, storeButtons, esc, appLd, orgLd, APPSTORE, PLAY, APP_URL, SITE, ctaBox, breadcrumbLd, crumbs } from './layout.mjs';
 
-const phoneGps = `
-<div class="phone" aria-hidden="true"><div class="screen">
-  <div class="gps">
-    <div class="yard"><div><small>FRONT</small><b>142</b></div><div><small>MIDDLE</small><b>156</b></div><div><small>BACK</small><b>171</b></div></div>
-    <div class="fairway"></div><div class="flag"></div><div class="line"></div><div class="ball"></div>
-    <div class="hole"><span>Hole 7 · Par 4</span><span>Blue · 388</span></div>
-  </div>
-  <div class="card-ui"><div class="hdr">Live scorecard</div>
-  <table><tr><th></th><th>5</th><th>6</th><th>7</th><th>Thru</th></tr>
-  <tr><td>Kevin</td><td>4</td><td><span class="birdie">3</span></td><td>–</td><td>+1</td></tr>
-  <tr><td>Tyler</td><td><span class="bogey">6</span></td><td>4</td><td>–</td><td>+4</td></tr>
-  <tr><td>Josh</td><td>5</td><td>4</td><td>–</td><td>+3</td></tr></table>
-  <div class="pill">Skins · carry ×2 <span>Kevin +3</span></div></div>
-</div></div>`;
-const phoneBoard = `
-<div class="phone tilt" aria-hidden="true"><div class="screen">
-  <div class="card-ui" style="padding-top:18px"><div class="hdr">Board · Nassau + Wolf</div>
-  <table><tr><th>Player</th><th>Front</th><th>Back</th><th>Wolf</th><th>Net</th></tr>
-  <tr><td>Kevin</td><td>+2</td><td>–</td><td>+4</td><td style="color:#177a31;font-weight:800">+6</td></tr>
-  <tr><td>Tyler</td><td>−2</td><td>–</td><td>−2</td><td style="color:#c0392b;font-weight:800">−4</td></tr>
-  <tr><td>Josh</td><td>0</td><td>–</td><td>−2</td><td style="color:#c0392b;font-weight:800">−2</td></tr></table>
-  <div class="pill">Handicap index <span style="color:#0c447c">12.4</span></div>
-  <div class="pill" style="background:#fdf3d5;color:#8a5710">🏅 Badge earned · Sandy Save</div>
-  <div class="pill">Next week · Thursday League <span style="color:#0c447c">Wk 6</span></div></div>
-</div></div>`;
+const shot = (name, alt, cls = '') => `
+<div class="phone ${cls}"><div class="screen"><picture><source srcset="/img/screens/${name}.webp" type="image/webp"><img src="/img/screens/${name}.jpg" alt="${alt}" width="520" height="1126" loading="${cls ? 'lazy' : 'eager'}"></picture></div></div>`;
+const phoneGps = shot('gps', 'Bad Golf GPS screen: front, middle and back yardages, plays-like distances with club suggestions, wind, and the live Nassau standing on hole 1');
+const phoneBoard = shot('home', 'Bad Golf home screen: handicap index 2.9 trending better, rounds, average score, best round, putts per round, GIR and fairway percentages', 'tilt');
+const phoneTourney = shot('tourney', 'Bad Golf tournament summary: skins, closest to the pin, low net, most greens in regulation and fewest putts prize pools with the winners of each');
 
 const FAQ = [
   ['Is Bad Golf free?', 'Yes. Bad Golf is free to download and free to play on iPhone, iPad and Android. Create rounds, invite your group, use GPS and run leagues and tournaments at no cost.'],
@@ -78,21 +58,19 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
 <section class="sec" id="leagues"><div class="wrap split">
   <div>
     <div class="eyebrow" style="color:var(--brand);font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;margin-bottom:8px">Leagues</div>
-    <h2>Run your league night in Bad Golf.</h2>
-    <p class="lede">Weekly leagues are where scorekeeping goes to die. Bad Golf takes the whole job: the schedule, the sub, the guy who missed week four, the playoff bracket.</p>
+    <h2>Run your league night, or the whole buddies trip.</h2>
+    <p class="lede">Weekly leagues and multi-day events are where scorekeeping goes to die. Bad Golf takes the whole job: the schedule, the sub, the guy who missed week four, the field-wide side games and one clean summary at the end.</p>
     <ul class="check">
       <li>Individual, team and scramble seasons with flights</li>
       <li>Automatic matchups, weekly cards and standings</li>
       <li>League handicaps that update every week</li>
       <li>Side games for the whole field, every week</li>
       <li>Playoffs, absences and subs handled</li>
+      <li>Tournaments with pairings, tee times and a live event leaderboard</li>
     </ul>
-    <a class="btn btn-primary" href="/leagues/">How leagues work</a>
+    <a class="btn btn-primary" href="/leagues/">How leagues work</a> &nbsp; <a class="btn btn-outline" href="/tournaments/">Tournaments</a>
   </div>
-  <div class="phone" aria-hidden="true" style="margin:0 auto"><div class="screen"><div class="card-ui" style="padding-top:18px"><div class="hdr">Thursday Night League · Standings</div>
-    <table><tr><th>Flight A</th><th>W</th><th>L</th><th>Pts</th></tr><tr><td>Sandbaggers</td><td>5</td><td>1</td><td>41.5</td></tr><tr><td>Mulligan Men</td><td>4</td><td>2</td><td>38</td></tr><tr><td>Fore Play</td><td>3</td><td>3</td><td>33</td></tr><tr><td>The Shanks</td><td>1</td><td>5</td><td>21.5</td></tr></table>
-    <div class="pill">Week 7 · Thursday 5:40 tee <span style="color:#0c447c">Matchups ›</span></div>
-    <div class="pill">Playoffs in 3 weeks <span style="color:#0c447c">Top 4 qualify</span></div></div></div></div>
+  <div style="margin:0 auto">${phoneTourney}</div>
 </div></section>
 
 <section class="sec alt" id="courses"><div class="wrap">
