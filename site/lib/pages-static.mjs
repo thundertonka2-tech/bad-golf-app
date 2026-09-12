@@ -81,7 +81,7 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
 </div></section>
 
 <section class="sec alt" id="tournaments"><div class="wrap split">
-  <div style="margin:0 auto;order:1">${phoneTourney}</div>
+  <div style="order:1;display:flex;justify-content:center">${phoneTourney}</div>
   <div style="order:2">
     <div class="eyebrow" style="color:var(--brand);font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;margin-bottom:8px">Tournaments &amp; events</div>
     <h2>The buddies trip, the member-guest, the charity scramble.</h2>
