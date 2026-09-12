@@ -26,7 +26,7 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
     <div class="actions">${storeButtons()}</div>
     <p class="fine">Bad Golf, Better Times. ${courseCount.toLocaleString()} U.S. courses mapped. No subscription.</p>
   </div>
-  <div class="hero-art"><div class="phones">${phoneGps}${phoneBoard}</div></div>
+  <div class="hero-art"><div class="phones">${phoneGps}${phoneBoard}${shot('tourney', 'Bad Golf App tournament summary: skins, closest to the pin, low net, most greens in regulation and fewest putts prize pools with the winners of each', 'mobile-only')}</div><p class="swipe-hint">Swipe to see more</p></div>
 </div></section>
 
 <div class="strip"><div class="wrap">
