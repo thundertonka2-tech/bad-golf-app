@@ -58,19 +58,43 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
 <section class="sec" id="leagues"><div class="wrap split">
   <div>
     <div class="eyebrow" style="color:var(--brand);font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;margin-bottom:8px">Leagues</div>
-    <h2>Run your league night, or the whole buddies trip.</h2>
-    <p class="lede">Weekly leagues and multi-day events are where scorekeeping goes to die. Bad Golf App takes the whole job: the schedule, the sub, the guy who missed week four, the field-wide side games and one clean summary at the end.</p>
+    <h2>Run your league night in Bad Golf App.</h2>
+    <p class="lede">Weekly leagues are where scorekeeping goes to die. Bad Golf App takes the whole job: the schedule, the sub, the guy who missed week four, the playoff bracket.</p>
     <ul class="check">
       <li>Individual, team and scramble seasons with flights</li>
       <li>Automatic matchups, weekly cards and standings</li>
       <li>League handicaps that update every week</li>
       <li>Side games for the whole field, every week</li>
       <li>Playoffs, absences and subs handled</li>
-      <li>Tournaments with pairings, tee times and a live event leaderboard</li>
     </ul>
-    <a class="btn btn-primary" href="/leagues/">How leagues work</a> &nbsp; <a class="btn btn-outline" href="/tournaments/">Tournaments</a>
+    <a class="btn btn-primary" href="/leagues/">How leagues work</a>
   </div>
-  <div style="margin:0 auto">${phoneTourney}</div>
+  <div class="phone" aria-hidden="true" style="margin:0 auto"><div class="screen"><div class="card-ui" style="padding-top:18px">
+    <div class="hdr">Thursday Night League · Week 7</div>
+    <table><tr><th>Flight A</th><th>W</th><th>L</th><th>Pts</th></tr><tr><td>Sandbaggers</td><td>5</td><td>1</td><td>41.5</td></tr><tr><td>Mulligan Men</td><td>4</td><td>2</td><td>38</td></tr><tr><td>Fore Play</td><td>3</td><td>3</td><td>33</td></tr><tr><td>The Shanks</td><td>1</td><td>5</td><td>21.5</td></tr></table>
+    <div class="hdr" style="margin-top:12px">This week's matchups</div>
+    <table><tr><th>Tee</th><th>Match</th><th>Status</th></tr><tr><td>5:40</td><td>Sandbaggers v Shanks</td><td style="color:#177a31">2 up · 14</td></tr><tr><td>5:48</td><td>Mulligan v Fore Play</td><td style="color:#0c447c">AS · 12</td></tr><tr><td>5:56</td><td>Hackers v Duffers</td><td style="color:#c0392b">1 dn · 11</td></tr><tr><td>6:04</td><td>Bogeymen v Yips</td><td>Not started</td></tr></table>
+    <div class="pill">Week 6 skins <span>Josh +3 units</span></div>
+    <div class="pill">League handicaps <span style="color:#0c447c">Updated Thu</span></div>
+    <div class="pill">Playoffs in 3 weeks <span style="color:#0c447c">Top 4 qualify</span></div>
+    <div class="pill" style="background:#fdf3d5;color:#8a5710">Sub needed · Week 8 <span>2 open</span></div></div></div></div>
+</div></section>
+
+<section class="sec alt" id="tournaments"><div class="wrap split">
+  <div style="margin:0 auto;order:1">${phoneTourney}</div>
+  <div style="order:2">
+    <div class="eyebrow" style="color:var(--brand);font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;margin-bottom:8px">Tournaments &amp; events</div>
+    <h2>The buddies trip, the member-guest, the charity scramble.</h2>
+    <p class="lede">Build a multi-day event in minutes and let the field score itself. Every cart group plays on its own live card while the event leaderboard and the field-wide side games update on everyone's phone.</p>
+    <ul class="check">
+      <li>Team cup or individual formats, one day or a whole weekend</li>
+      <li>Automatic groups, pairings, tee times and scorekeepers</li>
+      <li>Field-wide skins, closest to the pin, long drive, low net, most GIRs and fewest putts</li>
+      <li>A live event leaderboard the whole field can watch</li>
+      <li>One Tournament Summary at the end, with a tap to text the final standings</li>
+    </ul>
+    <a class="btn btn-primary" href="/tournaments/">How tournaments work</a>
+  </div>
 </div></section>
 
 <section class="sec alt" id="courses"><div class="wrap">

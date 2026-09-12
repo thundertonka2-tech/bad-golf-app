@@ -58,6 +58,7 @@ ${extraHead}
     <a href="/games/">Games</a>
     <a href="/courses/">Courses</a>
     <a href="/leagues/">Leagues</a>
+    <a href="/tournaments/">Tournaments</a>
     <a class="cta" href="/download/">Get the app</a>
   </nav>
 </div></header>
@@ -75,7 +76,7 @@ ${body}
     <div><h4>Courses</h4><a href="/courses/">Find a course</a><a href="/courses/tx/">Texas</a><a href="/courses/fl/">Florida</a><a href="/courses/ca/">California</a><a href="/courses/mi/">Michigan</a><a href="/courses/ny/">New York</a></div>
     <div><h4>Help</h4><a href="/support.html">Support</a><a href="mailto:${SUPPORT}">${SUPPORT}</a><a href="/Bad_Golf_Player_Guide.pdf">Player guide (PDF)</a><a href="/privacy.html">Privacy</a><a href="/terms.html">Terms</a><a href="/delete-account.html">Delete account</a></div>
   </div>
-  <div class="fine"><span>© ${new Date().getFullYear()} Bad Golf App. All rights reserved.</span><span>Already have the app? <a href="/app/" style="display:inline;padding:0">Open the web version</a></span></div>
+  <div class="fine"><span>© ${new Date().getFullYear()} KRWellsGolf, LLC. All rights reserved. Bad Golf App is a product of KRWellsGolf, LLC.</span><span>Already have the app? <a href="/app/" style="display:inline;padding:0">Open the web version</a></span></div>
 </div></footer>
 </body>
 </html>`;
