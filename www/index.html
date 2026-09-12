@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1681-->
+<!--BGVER=v2026.11.1685-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10662,7 +10662,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1681';
+const BG_BUILD = 'v2026.11.1685';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -35716,6 +35716,7 @@ async function renderRosterList() {
     const _pf = (p.firstName || (p.name || '').trim().split(/\s+/)[0] || '');
     const _pl = (p.lastName || (p.name || '').trim().split(/\s+/).slice(1).join(' ') || '');
     const key = (_pf + '|' + _pl).toLowerCase();
+    row.dataset.rosterKey = key;   /* v1685: so the Add-a-player form can find and tick the row it just saved */
     // v664: tournament mode — "already added" means on the EVENT, not the round setup
     const _t2key = _t2NameKey(combineName(_pf, _pl));   // v1009: was .trim().toLowerCase() — diverged from the row key
     // v1253: league mode ticks the rows already on the league roster.
@@ -100061,8 +100062,13 @@ async function init() {
   // ➕ Add a guest / non-user straight to Bad Golf Users (no round needed) — the
   // modern replacement for the old no-email test users. Stored in the shared
   // roster via upsertPlayerInRoster, so they're findable everywhere. (Tyler, June 2026.)
-  { const _ra = document.getElementById('roster-add-new'); if (_ra) _ra.onclick = () => { const f = document.getElementById('roster-add-form'); if (f) { f.style.display = (f.style.display === 'none' || !f.style.display) ? 'block' : 'none'; const fi = document.getElementById('roster-add-first'); if (fi && f.style.display === 'block') { try { fi.focus(); } catch (e) {} } } }; }
-  { const _rc = document.getElementById('roster-add-cancel'); if (_rc) _rc.onclick = () => { const f = document.getElementById('roster-add-form'); if (f) f.style.display = 'none'; }; }
+  /* v1684 (Tyler, 9/12): "when I add a new user it is keeping the text from the previous
+     user I added, this should be clear every time." The form only emptied itself after a
+     successful Save — Cancel, Done or a tap outside left the last name and handicap in
+     the boxes for the next open. Blank every field whenever the form opens or closes. */
+  const _bgRosterAddClear = () => { try { ['roster-add-first', 'roster-add-last', 'roster-add-hcp', 'roster-add-phone'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; }); } catch (e) {} };
+  { const _ra = document.getElementById('roster-add-new'); if (_ra) _ra.onclick = () => { const f = document.getElementById('roster-add-form'); if (f) { const _open = (f.style.display === 'none' || !f.style.display); _bgRosterAddClear(); f.style.display = _open ? 'block' : 'none'; const fi = document.getElementById('roster-add-first'); if (fi && f.style.display === 'block') { try { fi.focus(); } catch (e) {} } } }; }
+  { const _rc = document.getElementById('roster-add-cancel'); if (_rc) _rc.onclick = () => { const f = document.getElementById('roster-add-form'); if (f) f.style.display = 'none'; _bgRosterAddClear(); }; }
   // v1253 (Tyler: "the phone number, which needs to be formatted"): the same
   // live mask the profile phone field has used since v640's sibling. This form
   // has captured phones for a while and never formatted them, so numbers went
@@ -100105,6 +100111,17 @@ async function init() {
       const f = document.getElementById('roster-add-form'); if (f) f.style.display = 'none';
       const se = document.getElementById('roster-search'); if (se) se.value = '';
       try { await renderRosterList(); } catch (e) {}
+      /* v1685 (Tyler, 9/12): "When you add a new player then click save it adds them to the
+         player list but they aren't checked — they should be checked if I just added them."
+         Round setup only (tournament / league / sub modes add to the event above): tap the
+         freshly rendered row for this player, which is exactly addToSetup. */
+      try {
+        if (!_rosterT2Tid && !_rosterLgSid && !_rosterLgSubAbs) {
+          const _k = (first + '|' + last).toLowerCase();
+          const _row = Array.from(document.querySelectorAll('#roster-list [data-roster-key]')).find(r => r.dataset.rosterKey === _k);
+          if (_row && typeof _row.onclick === 'function') await _row.onclick({ target: _row, stopPropagation: function () {} });
+        }
+      } catch (e) {}
       try { showToast(combineName(first, last) + ' added to Bad Golf Users ✓' + (isSignedIn() ? '' : ' (sign in to sync to your other devices)')); } catch (e) {}
       if (_subDone) {   /* v1403 */
         const _ssid3 = _rosterLgSubSid;
@@ -108550,28 +108567,113 @@ function _bgInvitePromptedOnce(key) {
     l.push(key); localStorage.setItem(k, JSON.stringify(l.slice(-100))); return true;
   } catch (e) { return true; }
 }
+/* v1683 (Tyler, 9/12): "Once a round, league or tourney is set up and there is a new user
+   that has been added, prompt them after they start the round to send an invite to all
+   non-Bad Golf users. Make this a pop up, and if they click Send invite it opens up
+   messaging for them so they can send the link. Only do this on rounds where a new user
+   has been added."
+   So: the prompt fires ONLY when at least one player on the card is not a Bad Golf user
+   (no account id on the row / roster entry, not the host); it names them; Send invite
+   opens Messages (sms:) with the JOIN link in the body and any saved numbers filled in,
+   falling back to the share sheet / clipboard off a phone. Registered players still get
+   the in-app invite the round start already sends (v1638). */
+async function bgInviteGuestsFor(kind, id) {
+  const out = [];
+  const norm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
+  try {
+    if (kind === 'league') {
+      const rr = await supa.rpc('league_roster', { p_season_id: id });
+      ((rr && rr.data) || []).forEach(m => { if (m && !m.user_id && !m.claimed) { const n = m.display_name; if (n) out.push({ name: n, phone: m.invite_phone || '' }); } });
+      return out;
+    }
+    if (kind === 'tourney') {
+      const pl = await t2GetPlayers(id);
+      (pl || []).forEach(p => { if (p && !p.user_id && !p.claimed && p.display_name) out.push({ name: p.display_name, phone: '' }); });
+      return out;
+    }
+    let g = (state.game && state.game.code === id) ? state.game : null;
+    if (!g) { try { g = await loadGame(id); } catch (e) { g = null; } }
+    if (!g || !Array.isArray(g.players)) return out;
+    let me = ''; try { me = await getMeName(); } catch (e) {}
+    let roster = []; try { roster = await getPlayerRoster(); } catch (e) { roster = []; }
+    const meN = norm(me), hostN = norm(g.createdBy);
+    g.players.forEach(p => {
+      if (!p || !p.name) return;
+      const n = norm(p.name);
+      if (!n || n === meN || (hostN && n === hostN)) return;      // me / the host: has an account by definition
+      if (p.uid || p.tokUsedBy || p.email) return;                 // a registered player, or a claimed slot
+      let row = null;
+      try { row = (roster || []).find(x => x && norm(x.name) === n) || null; } catch (e) {}
+      if (row && (row.email || row._uid || row.claimedBy)) return;   // roster knows this is an account
+      out.push({ name: p.name, phone: String(p.phone || (row && row.phone) || '').trim() });
+    });
+  } catch (e) {}
+  return out;
+}
+async function bgInviteOpenMessages(text, guests) {
+  // Messages first on a phone (numbers pre-filled where we have them — the share sheet
+  // has no recipient API), the share sheet elsewhere, clipboard as the last resort.
+  const nums = (guests || []).map(g => String((g && g.phone) || '').replace(/[^\d+]/g, '')).filter(Boolean);
+  const _isPhone = /iP(hone|ad|od)|Android/i.test(navigator.userAgent || '');
+  if (_isPhone) {
+    try {
+      const sep = /iP(hone|ad|od)|Mac/i.test(navigator.userAgent || '') ? '&' : '?';
+      window.location.href = 'sms:' + nums.join(',') + sep + 'body=' + encodeURIComponent(text);
+      try { showToast(nums.length ? ('Added ' + nums.length + ' saved number' + (nums.length === 1 ? '' : 's') + ' \u2014 add anyone else in Messages') : 'Pick your recipients in Messages', 4000); } catch (e) {}
+      return true;
+    } catch (e) {}
+  }
+  try { if (navigator.share) { await navigator.share({ text: text }); return true; } }
+  catch (e) { if (e && e.name === 'AbortError') return true; }
+  try { await navigator.clipboard.writeText(text); showToast('Invite copied \u2014 paste it into a text \ud83d\udccb'); return true; }
+  catch (e) { try { showToast(text, 6000); } catch (e2) {} return false; }
+}
 async function bgInvitePrompt(kind, id) {
   try {
-    if (!id || !_bgInvitePromptedOnce(kind + ':' + id)) return;
+    if (!id) return;
     const what = kind === 'league' ? 'league' : (kind === 'tourney' ? 'event' : 'round');
-    let ok = false;
-    try {
-      ok = await uiConfirm('Your ' + what + ' is set. Send the invites now? Players with the app get a notification; everyone else gets the link by text.',
-        { title: 'Invite your players', okLabel: '\ud83d\udce8 Send invites', cancelLabel: 'Later' });
-    } catch (e) { ok = false; }
-    if (!ok) return;
+    let me = null; try { me = await getMeName(); } catch (e) {}
+    const who = me ? me.split(/\s+/)[0] : 'Your buddy';
+    // League: the registered members get their push whether or not there are guests.
+    let s = null;
     if (kind === 'league') {
-      let s = null, uids = [];
+      let uids = [];
       try { const r = await supa.from('league_seasons').select('name,join_code,leagues(name)').eq('id', id).maybeSingle(); s = r && r.data; } catch (e) {}
       try { const rr = await supa.rpc('league_roster', { p_season_id: id }); (rr && rr.data || []).forEach(function (m) { if (m && m.user_id && m.user_id !== _authUser.id && uids.indexOf(m.user_id) < 0) uids.push(m.user_id); }); } catch (e) {}
       const nm = (s && ((s.leagues && s.leagues.name) || s.name)) || 'the league';
       try { if (uids.length) sendPush(uids, 'You\u2019re in ' + nm, 'Open Bad Golf \u2192 League and tap your name to pick up your spot.', { league: id }, 'lg-invite-' + id); } catch (e) {}
-      try { if (s && s.join_code) await lgShareJoinLink(s.join_code, nm); } catch (e) {}
-    } else if (kind === 'tourney') {
-      try { await shareTourneyInvite(id); } catch (e) {}
-    } else {
-      try { await shareGameInvite(); } catch (e) {}
     }
+    // v1683: only when somebody on the card is not on Bad Golf yet.
+    let guests = []; try { guests = await bgInviteGuestsFor(kind, id); } catch (e) { guests = []; }
+    if (!guests.length) return;
+    if (!_bgInvitePromptedOnce(kind + ':' + id)) return;
+    const names = guests.map(g => g.name).filter(Boolean);
+    const list = (typeof bgJoinAnd === 'function') ? bgJoinAnd(names) : names.join(', ');
+    let ok = false;
+    try {
+      ok = await uiConfirm(list + (names.length === 1 ? ' isn\u2019t' : ' aren\u2019t') + ' on Bad Golf yet. Send ' + (names.length === 1 ? 'them' : 'them all') + ' the link by text? They tap it, sign in, and pick their name \u2014 handicap and games are already set.',
+        { title: 'Invite ' + (names.length === 1 ? names[0] : names.length + ' new players'), okLabel: '\ud83d\udce8 Send invite', cancelLabel: 'Later' });
+    } catch (e) { ok = false; }
+    if (!ok) return;
+    let text = '';
+    if (kind === 'league') {
+      const nm = (s && ((s.leagues && s.leagues.name) || s.name)) || 'the league';
+      const link = (s && s.join_code && typeof lgJoinLink === 'function') ? lgJoinLink(s.join_code) : BG_PUBLIC_URL;
+      text = who + ' added you to ' + nm + ' on Bad Golf!\n\n' + link + '\n\nOpen it, sign in, and tap your own name to pick up your spot.';
+    } else if (kind === 'tourney') {
+      let t = null; try { if (typeof t2Get === 'function') t = await t2Get(id); } catch (e) {}
+      const nm = (t && t.name) || 'our Bad Golf event';
+      text = who + ' added you to "' + nm + '" on Bad Golf!\n\n' + BG_PUBLIC_URL + '?tclaim=' + encodeURIComponent(id) + '\n\nOpen it, sign in, and tap your name to take your spot.';
+    } else {
+      const g = (state.game && state.game.code === id) ? state.game : null;
+      const course = (g && g.course) || '';
+      text = who + ' added you to a golf round' + (course ? ' at ' + course : '') + ' on Bad Golf!\n\n' + buildJoinLink(id) + '\n\nOpen it, sign in, and tap your name \u2014 your handicap and games are already set up.';
+      try {
+        if (supa && _authUser) await supa.from('outbound_invites').insert({ from_user: _authUser.id, from_name: me, to_name: names.join(', '), game_code: id, course: course || null, join_link: buildJoinLink(id), channel: 'sms', status: 'logged' });
+      } catch (e) {}
+    }
+    text += '\n\nGet the app \u2014 iPhone: ' + BG_APPSTORE_URL + '\nAndroid: ' + BG_PLAYSTORE_URL;
+    await bgInviteOpenMessages(text, guests);
   } catch (e) {}
 }
 window.bgInvitePrompt = bgInvitePrompt;
@@ -108948,6 +109050,7 @@ async function maybeClaimBoundSlot() {
     // Token already burned by somebody else -> fall through to the picker rather
     // than silently handing this account another person's slot.
     if (p && p.tokUsedBy && String(p.tokUsedBy).toLowerCase() !== myEmail) p = null;
+    if (p && !bgSlotIsOpen(g, p, myEmail)) p = null;   // v1682: a registered player's (or the host's) slot is never offered
     if (p) {
       const hcpTxt = (typeof fmtHcp === 'function') ? fmtHcp(p.hcp || 0) : String(p.hcp || 0);
       const ok = await uiConfirm(
@@ -108966,30 +109069,50 @@ async function maybeClaimBoundSlot() {
     return await bindAccountToSlot(g, p);
   } catch (e) { console.warn('maybeClaimBoundSlot failed', e); return false; }
 }
-// The "I'm someone else" / no-token path. Slots already tied to a DIFFERENT account
-// are shown greyed and unpickable, so this can never be used to take over a
-// registered player's scorecard. Self-contained DOM (same pattern as uiPrompt).
+/* v1682 (Tyler, 9/12, the Deez Nuts test): "iDrive is already tied to an account so it
+   should not have even been an option. The only option a new user should see is the guest
+   players that have not been assigned to an email yet."
+   A slot is OPEN for a new account only when nobody owns it: no account id stamped on the
+   row (v1467 stamps `uid` for every registered player at round start), no invite token
+   burned by someone else, and not the host's own row (createdBy). */
+function bgSlotIsOpen(g, p, myEmail) {
+  try {
+    if (!p || !p.name) return false;
+    const mine = String(myEmail || '').toLowerCase();
+    const myUid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) ? String(_authUser.id) : '';
+    if (p.uid && String(p.uid) !== myUid) return false;
+    if (p.tokUsedBy && String(p.tokUsedBy).toLowerCase() !== mine) return false;
+    if (p.email && String(p.email).toLowerCase() !== mine) return false;
+    const norm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
+    if (g && g.createdBy && norm(g.createdBy) === norm(p.name)) return false;
+    return true;
+  } catch (e) { return false; }
+}
+// The "I'm someone else" / no-token path. v1682: only OPEN guest slots are listed (see
+// bgSlotIsOpen) — a registered player's or the host's scorecard can never be taken over,
+// and it is not even shown. With nothing open there is no picker at all: the normal
+// signup runs, exactly as if "None of these" had been tapped.
+// Self-contained DOM (same pattern as uiPrompt).
 function pickSlotFromRound(g, headline) {
   return new Promise(resolve => {
     try {
       const mine = String((typeof currentUserEmail === 'function' && currentUserEmail()) || '').toLowerCase();
-      const players = (g && Array.isArray(g.players)) ? g.players : [];
+      const all = (g && Array.isArray(g.players)) ? g.players : [];
+      const players = all.filter(p => bgSlotIsOpen(g, p, mine));   /* v1682 */
       if (!players.length) { resolve(null); return; }
       const ov = document.createElement('div');
       ov.className = 'modal-overlay show';
       ov.style.zIndex = '10050';
       const rows = players.map((p, i) => {
-        const taken = !!(p && p.tokUsedBy && String(p.tokUsedBy).toLowerCase() !== mine);
         const hcp = (typeof fmtHcp === 'function') ? fmtHcp((p && p.hcp) || 0) : String((p && p.hcp) || 0);
-        return '<button type="button" class="bg-btn bg-btn--full full bg-slot-pick" data-i="' + i + '"' + (taken ? ' disabled' : '') +
-          ' style="text-align:left;margin-bottom:6px;' + (taken ? 'opacity:0.45;' : '') + '">' +
+        return '<button type="button" class="bg-btn bg-btn--full full bg-slot-pick" data-i="' + i + '"' +
+          ' style="text-align:left;margin-bottom:6px">' +
           '<strong>' + escapeHtml((p && p.name) || ('Player ' + (i + 1))) + '</strong>' +
-          ' <span class="small-text" style="color:var(--text-muted)">HCP ' + escapeHtml(hcp) +
-          (taken ? ' \u00b7 already claimed' : '') + '</span></button>';
+          ' <span class="small-text" style="color:var(--text-muted)">HCP ' + escapeHtml(hcp) + '</span></button>';
       }).join('');
       ov.innerHTML = '<div class="modal" style="max-width:420px">' +
         '<h2 style="margin-top:0">' + escapeHtml(headline || 'Which player are you?') + '</h2>' +
-        '<p class="help-text" style="margin-bottom:12px">Tap your name \u2014 your handicap, tee and games are already set up.</p>' +
+        '<p class="help-text" style="margin-bottom:12px">Tap your name and you\u2019re in \u2014 your handicap, tee and games are already set up.</p>' +
         rows +
         '<button type="button" class="bg-btn bg-btn--full full" id="bg-slot-none" style="margin-top:10px">None of these \u2014 I am new</button>' +
         '</div>';
@@ -109035,6 +109158,10 @@ async function bindAccountToSlot(g, p) {
     try {
       p.tokUsedBy = email || 'claimed';
       p.tokUsedAt = Date.now();
+      /* v1682: the account id goes on the row as well — that is what joinRoundByCode's
+         gate and bgDiscoverMyLiveRounds key on, so the new player is recognised by
+         account from here on instead of by a name string. */
+      try { if (typeof _authUser !== 'undefined' && _authUser && _authUser.id && !p.uid) p.uid = String(_authUser.id); } catch (e) {}
       await saveGame(g);
     } catch (e) {}
     try { renderAccountUI(); } catch (e) {}
