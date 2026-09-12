@@ -10,11 +10,13 @@ export const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;'
 export const attr = esc;
 export const slugify = s => String(s).toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
-const dlIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>`;
+// Official store badges: Apple's "Download on the App Store" SVG (Apple marketing tools) and
+// Google's "Get it on Google Play" PNG (play.google.com/intl/en_us/badges), used per each
+// store's badge guidelines (unaltered artwork, black versions, equal height).
 export const storeButtons = (cls = '') => `
 <div class="stores ${cls}">
-  <a class="store" href="${APPSTORE}" rel="noopener" target="_blank">${dlIcon}<span><small>Download on the</small><b>App Store</b></span></a>
-  <a class="store" href="${PLAY}" rel="noopener" target="_blank">${dlIcon}<span><small>Get it on</small><b>Google Play</b></span></a>
+  <a class="store-badge" href="${APPSTORE}" rel="noopener" target="_blank" aria-label="Download on the App Store"><img src="/img/badge-appstore.svg" alt="Download on the App Store" width="134" height="45"></a>
+  <a class="store-badge" href="${PLAY}" rel="noopener" target="_blank" aria-label="Get it on Google Play"><img src="/img/badge-googleplay.png" alt="Get it on Google Play" width="152" height="45"></a>
 </div>`;
 
 export function page({ path, title, description, h1, body, ogImage, jsonld = [], noindex = false, extraHead = '', headFirst = '', bodyClass = '' }) {
@@ -52,7 +54,7 @@ ${extraHead}
 </head>
 <body class="${bodyClass}">
 <header class="top"><div class="wrap">
-  <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="Bad Golf App logo" width="40" height="40">Bad Golf App</a>
+  <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="Bad Golf App logo" width="40" height="40"><span>Bad Golf App</span></a>
   <nav class="main" aria-label="Main">
     <a href="/features/">Features</a>
     <a href="/games/">Games</a>
@@ -68,7 +70,7 @@ ${body}
 <footer><div class="wrap">
   <div class="cols">
     <div>
-      <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="" width="40" height="40">Bad Golf App</a>
+      <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="" width="40" height="40"><span>Bad Golf App</span></a>
       <p style="margin-top:12px;max-width:26rem">The golf app for your regular group: one shared live scorecard, GPS yardages, real handicaps and every side game you already play, scored automatically. ${esc(TAGLINE)}.</p>
       ${storeButtons()}
     </div>
