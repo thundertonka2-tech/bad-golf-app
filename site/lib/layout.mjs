@@ -31,7 +31,7 @@ ${headFirst}<meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="canonical" href="${url}">
 ${noindex ? '<meta name="robots" content="noindex,follow">' : ''}
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Bad Golf">
+<meta property="og:site_name" content="Bad Golf App">
 <meta property="og:title" content="${attr(title)}">
 <meta property="og:description" content="${attr(description)}">
 <meta property="og:url" content="${url}">
@@ -52,7 +52,7 @@ ${extraHead}
 </head>
 <body class="${bodyClass}">
 <header class="top"><div class="wrap">
-  <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="Bad Golf logo" width="40" height="40">Bad Golf</a>
+  <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="Bad Golf App logo" width="40" height="40">Bad Golf App</a>
   <nav class="main" aria-label="Main">
     <a href="/features/">Features</a>
     <a href="/games/">Games</a>
@@ -67,7 +67,7 @@ ${body}
 <footer><div class="wrap">
   <div class="cols">
     <div>
-      <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="" width="40" height="40">Bad Golf</a>
+      <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="" width="40" height="40">Bad Golf App</a>
       <p style="margin-top:12px;max-width:26rem">The golf app for your regular group: one shared live scorecard, GPS yardages, real handicaps and every side game you already play, scored automatically. ${esc(TAGLINE)}.</p>
       ${storeButtons()}
     </div>
@@ -75,7 +75,7 @@ ${body}
     <div><h4>Courses</h4><a href="/courses/">Find a course</a><a href="/courses/tx/">Texas</a><a href="/courses/fl/">Florida</a><a href="/courses/ca/">California</a><a href="/courses/mi/">Michigan</a><a href="/courses/ny/">New York</a></div>
     <div><h4>Help</h4><a href="/support.html">Support</a><a href="mailto:${SUPPORT}">${SUPPORT}</a><a href="/Bad_Golf_Player_Guide.pdf">Player guide (PDF)</a><a href="/privacy.html">Privacy</a><a href="/terms.html">Terms</a><a href="/delete-account.html">Delete account</a></div>
   </div>
-  <div class="fine"><span>© ${new Date().getFullYear()} Bad Golf. All rights reserved.</span><span>Already have the app? <a href="/app/" style="display:inline;padding:0">Open the web version</a></span></div>
+  <div class="fine"><span>© ${new Date().getFullYear()} Bad Golf App. All rights reserved.</span><span>Already have the app? <a href="/app/" style="display:inline;padding:0">Open the web version</a></span></div>
 </div></footer>
 </body>
 </html>`;
@@ -88,14 +88,14 @@ export const breadcrumbLd = items => ({
 export const crumbs = items => `<div class="crumbs">${items.map((it, i) => i < items.length - 1 ? `<a href="${it.path}">${esc(it.name)}</a><span>›</span>` : `<strong>${esc(it.name)}</strong>`).join('')}</div>`;
 
 export const appLd = {
-  '@context': 'https://schema.org', '@type': 'MobileApplication', name: 'Bad Golf',
+  '@context': 'https://schema.org', '@type': 'MobileApplication', name: 'Bad Golf App',
   operatingSystem: 'iOS, Android', applicationCategory: 'SportsApplication',
   offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
   description: 'Golf scorecard, GPS rangefinder, handicap tracker and side-game scorer for your regular golf group. Leagues, tournaments and thousands of U.S. courses.',
   url: SITE, image: SITE + '/img/icon-512.jpg', installUrl: [APPSTORE, PLAY],
-  author: { '@type': 'Organization', name: 'Bad Golf', url: SITE }
+  author: { '@type': 'Organization', name: 'Bad Golf App', url: SITE }
 };
-export const orgLd = { '@context': 'https://schema.org', '@type': 'Organization', name: 'Bad Golf', url: SITE, logo: SITE + '/img/icon-512.jpg', email: SUPPORT, slogan: TAGLINE };
+export const orgLd = { '@context': 'https://schema.org', '@type': 'Organization', name: 'Bad Golf App', url: SITE, logo: SITE + '/img/icon-512.jpg', email: SUPPORT, slogan: TAGLINE };
 
-export const ctaBox = (h, p, href = '/download/', label = 'Get Bad Golf free') => `
+export const ctaBox = (h, p, href = '/download/', label = 'Get Bad Golf App free') => `
 <div class="cta-box"><div><h3>${esc(h)}</h3><p>${esc(p)}</p></div><a class="btn btn-gold" href="${href}">${esc(label)}</a></div>`;

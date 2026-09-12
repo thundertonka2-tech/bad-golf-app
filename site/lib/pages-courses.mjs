@@ -44,7 +44,7 @@ export function coursePage(c, nearby) {
   if (par) bits.push(`par ${par}`); bits.push(`${holes} holes`);
   if (tees.length) bits.push(`${tees.length} tee${tees.length > 1 ? 's' : ''}`);
   if (top && top.rating) bits.push(`rating ${top.rating} / slope ${top.slope}${top.yards ? ' from ' + top.yards.toLocaleString() + ' yards' : ''}`);
-  const description = `${c.name}${loc ? ' in ' + loc.replace(/, ([A-Z]{2})$/, (m, s) => ', ' + STATES[s]) : ''}: ${bits.join(', ')}. Full scorecard, tee ratings and ${full ? 'GPS yardages to every green' : 'GPS'} in the free Bad Golf app.`;
+  const description = `${c.name}${loc ? ' in ' + loc.replace(/, ([A-Z]{2})$/, (m, s) => ', ' + STATES[s]) : ''}: ${bits.join(', ')}. Full scorecard, tee ratings and ${full ? 'GPS yardages to every green' : 'GPS'} in the free Bad Golf App.`;
   const maps = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(c.name + (loc ? ', ' + loc : ''))}`;
   const ld = { '@context': 'https://schema.org', '@type': 'GolfCourse', name: c.name, url: SITE + path,
     address: { '@type': 'PostalAddress', ...(c.address ? { streetAddress: c.address } : {}), addressLocality: c.city || undefined, addressRegion: STATES[c.st] ? c.st : undefined, addressCountry: STATES[c.st] ? 'US' : undefined },
@@ -63,8 +63,8 @@ export function coursePage(c, nearby) {
   <div class="prose">
     ${tees.length ? `<h2>Tees, course rating &amp; slope</h2>${teesTable(tees)}` : ''}
     ${c.pars && c.pars.length ? `<h2 style="margin-top:1.4em">Scorecard</h2>${scorecard(c)}` : ''}
-    <h2>Play ${esc(c.name)} with Bad Golf</h2>
-    <p>Open the free Bad Golf app, pick ${esc(c.name)} and your tees, and the scorecard above is ready to go: ${full ? `GPS yardages to the front, middle and back of every green, ` : ''}handicap strokes applied by hole, a live card shared with your group and all your side games scored in units.</p>
+    <h2>Play ${esc(c.name)} with Bad Golf App</h2>
+    <p>Open the free Bad Golf App, pick ${esc(c.name)} and your tees, and the scorecard above is ready to go: ${full ? `GPS yardages to the front, middle and back of every green, ` : ''}handicap strokes applied by hole, a live card shared with your group and all your side games scored in units.</p>
     <ul>
       <li>${full ? `All ${holes} greens GPS-mapped` : c.greens ? `${c.greens} of ${holes} greens GPS-mapped (map the rest in the app)` : 'Map the greens yourself in the app in a few minutes'}</li>
       ${top && top.rating ? `<li>Course handicap calculated from the ${esc(top.label || '')} tees (${top.rating}/${top.slope}) or any other tee set above</li>` : ''}
@@ -72,7 +72,7 @@ export function coursePage(c, nearby) {
     </ul>
     <div style="margin:18px 0 6px">${storeButtons()}</div>
     ${(c.address || c.phone || c.website) ? `<h2>Contact</h2><p>${c.address ? esc(c.address) + (c.city ? ', ' + esc(c.city) : '') + (STATES[c.st] ? ' ' + c.st : '') + '<br>' : ''}${c.phone ? `<a href="tel:${attr(c.phone.replace(/[^+\d]/g, ''))}">${esc(c.phone)}</a><br>` : ''}${c.website ? `<a href="${attr(c.website)}" rel="nofollow noopener" target="_blank">Course website</a><br>` : ''}<a href="${maps}" rel="nofollow noopener" target="_blank">Directions</a></p>` : `<p><a href="${maps}" rel="nofollow noopener" target="_blank">Directions to ${esc(c.name)}</a></p>`}
-    <p style="font-size:.9rem;color:var(--ink-subtle)">Scorecard, ratings and GPS data are maintained by the Bad Golf community and may differ from the printed card. Spot an error? <a href="mailto:support@officialbadgolf.com?subject=${encodeURIComponent('Course fix: ' + c.name)}">Tell us</a>.</p>
+    <p style="font-size:.9rem;color:var(--ink-subtle)">Scorecard, ratings and GPS data are maintained by the Bad Golf App community and may differ from the printed card. Spot an error? <a href="mailto:support@officialbadgolf.com?subject=${encodeURIComponent('Course fix: ' + c.name)}">Tell us</a>.</p>
   </div>
   ${nearby.length ? `<div class="related"><h2>Nearby courses${STATES[c.st] ? ' in ' + esc(st) : ''}</h2><ul class="list">${nearby.map(n => `<li><a href="${coursePath(n)}">${esc(n.name)}</a> <small>${esc(n.city || '')}${n.km != null ? ' · ' + Math.round(n.km * 0.621) + ' mi' : ''}</small></li>`).join('')}</ul></div>` : ''}
   ${ctaBox(`Score your round at ${c.name}`, 'Free on iPhone and Android. Live scorecard, GPS, handicaps and every side game your group plays.')}
@@ -89,12 +89,12 @@ export function statePage(st, courses) {
   const body = `<section class="page wide"><div class="wrap">
   ${crumbs([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: name, path }])}
   <h1>Golf courses in ${esc(name)}</h1>
-  <p class="lede" style="max-width:46rem">${courses.length.toLocaleString()} ${esc(name)} golf courses in the Bad Golf app, ${mapped.toLocaleString()} with GPS-mapped greens. Every course has its scorecard, tee ratings and slope, and a live shared scorecard for your group.</p>
+  <p class="lede" style="max-width:46rem">${courses.length.toLocaleString()} ${esc(name)} golf courses in the Bad Golf App, ${mapped.toLocaleString()} with GPS-mapped greens. Every course has its scorecard, tee ratings and slope, and a live shared scorecard for your group.</p>
   <div class="stats" style="max-width:520px"><div class="stat"><b>${courses.length.toLocaleString()}</b><small>Courses</small></div><div class="stat"><b>${mapped.toLocaleString()}</b><small>GPS mapped</small></div><div class="stat"><b>${cities.length.toLocaleString()}</b><small>Cities</small></div></div>
   ${cities.map(city => `<h2 id="${attr(city.toLowerCase().replace(/[^a-z0-9]+/g, '-'))}" style="font-size:1.2rem;margin-top:28px">${esc(city)}</h2><ul class="list">${byCity[city].sort((a, b) => a.name.localeCompare(b.name)).map(c => { const f = courseFacts(c); return `<li><a href="${coursePath(c)}">${esc(c.name)}</a> <small>${f.holes} holes${f.par ? ' · par ' + f.par : ''}${f.top && f.top.slope ? ' · slope ' + f.top.slope : ''}</small></li>`; }).join('')}</ul>`).join('')}
-  ${ctaBox(`Play ${name} golf with Bad Golf`, 'Free on iPhone and Android. GPS yardages, live scorecard, handicaps and side games on every course above.')}
+  ${ctaBox(`Play ${name} golf with Bad Golf App`, 'Free on iPhone and Android. GPS yardages, live scorecard, handicaps and side games on every course above.')}
 </div></section>`;
-  return page({ path, title: `${name} Golf Courses — Scorecards, Slope, Rating & GPS | Bad Golf`, description: `${courses.length.toLocaleString()} golf courses in ${name} with scorecards, course rating and slope by tee, and GPS-mapped greens in the free Bad Golf app. Browse by city.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: name, path }])] });
+  return page({ path, title: `${name} Golf Courses — Scorecards, Slope, Rating & GPS | Bad Golf App`, description: `${courses.length.toLocaleString()} golf courses in ${name} with scorecards, course rating and slope by tee, and GPS-mapped greens in the free Bad Golf App. Browse by city.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: name, path }])] });
 }
 
 export function coursesIndex(byState, total) {
@@ -102,12 +102,12 @@ export function coursesIndex(byState, total) {
   const body = `<section class="page wide"><div class="wrap">
   ${crumbs([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }])}
   <h1>Golf course scorecards, slope &amp; GPS</h1>
-  <p class="lede" style="max-width:46rem">${total.toLocaleString()} courses in the Bad Golf library, each with its scorecard, tee ratings and slope, and GPS-mapped greens for the app. Search your course or browse by state.</p>
+  <p class="lede" style="max-width:46rem">${total.toLocaleString()} courses in the Bad Golf App library, each with its scorecard, tee ratings and slope, and GPS-mapped greens for the app. Search your course or browse by state.</p>
   <div class="search" id="course-search" style="margin:20px 0 32px"><label class="sr" for="cs">Search courses</label><input id="cs" type="search" placeholder="Search a course or city…" autocomplete="off"><div class="results"></div></div>
   <div class="states">${sts.map(st => `<a href="/courses/${stateSlug(st)}/">${esc(stateName(st))}<small>${byState[st].length.toLocaleString()}</small></a>`).join('')}</div>
   ${ctaBox('Your course, your group, one scorecard', 'Free on iPhone and Android. If your course is missing, add it in the app in a couple of minutes.')}
 </div></section>`;
-  return page({ path: '/courses/', title: `Golf Course Scorecards, Slope & GPS — ${total.toLocaleString()} U.S. Courses | Bad Golf`, description: `Scorecards, course rating and slope by tee, and GPS-mapped greens for ${total.toLocaleString()} U.S. golf courses. Find your course, then score your round in the free Bad Golf app.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }])], extraHead: `<script defer src="/course-search.js"></script>` });
+  return page({ path: '/courses/', title: `Golf Course Scorecards, Slope & GPS — ${total.toLocaleString()} U.S. Courses | Bad Golf App`, description: `Scorecards, course rating and slope by tee, and GPS-mapped greens for ${total.toLocaleString()} U.S. golf courses. Find your course, then score your round in the free Bad Golf App.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }])], extraHead: `<script defer src="/course-search.js"></script>` });
 }
 
 // Tiny client-side search over /courses/index.txt (one course per line: st|id|name|city).
