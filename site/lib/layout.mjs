@@ -55,12 +55,14 @@ ${extraHead}
 <body class="${bodyClass}">
 <header class="top"><div class="wrap">
   <a class="brand" href="/"><img src="/img/bg-logo-96.png" alt="Bad Golf App logo" width="40" height="40"><span>Bad Golf App</span></a>
-  <nav class="main" aria-label="Main">
+  <button class="menu-btn" type="button" aria-label="Menu" aria-expanded="false" aria-controls="mainnav"><span></span><span></span><span></span></button>
+  <nav class="main" id="mainnav" aria-label="Main">
     <a href="/features/">Features</a>
     <a href="/games/">Games</a>
     <a href="/courses/">Courses</a>
     <a href="/leagues/">Leagues</a>
     <a href="/tournaments/">Tournaments</a>
+    <a href="/handicaps/">Handicaps</a>
     <a class="cta" href="/download/">Get the app</a>
   </nav>
 </div></header>
@@ -80,6 +82,7 @@ ${body}
   </div>
   <div class="fine"><span>© ${new Date().getFullYear()} KRWellsGolf, LLC. All rights reserved. Bad Golf App is a product of KRWellsGolf, LLC.</span><span>Already have the app? <a href="/app/" style="display:inline;padding:0">Open the web version</a></span></div>
 </div></footer>
+<script>(function(){var b=document.querySelector('.menu-btn'),n=document.getElementById('mainnav');if(!b||!n)return;b.addEventListener('click',function(){var o=n.classList.toggle('open');b.setAttribute('aria-expanded',o?'true':'false');});document.addEventListener('click',function(e){if(n.classList.contains('open')&&!n.contains(e.target)&&!b.contains(e.target)){n.classList.remove('open');b.setAttribute('aria-expanded','false');}});})();</script>
 </body>
 </html>`;
 }
