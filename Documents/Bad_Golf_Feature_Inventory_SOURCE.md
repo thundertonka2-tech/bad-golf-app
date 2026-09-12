@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1677
+**Build Version:** v2026.11.1687
 **Documentation Date:** September 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -78,7 +78,7 @@ If your buddies added you as a guest before you signed up, the app offers to han
 
 If someone added you at the first tee and sent you the link, signing in gives you **one confirmation** — e.g. *"You are set up as Brian Myers, handicap 12"* — and you're in, using the name and handicap the host entered. No name prompt, no handicap prompt, no phone prompt.
 
-If the link isn't tied to a specific person, you get a **"Which player are you?"** picker listing the round's players. Slots already linked to another account are greyed out and can't be picked. There's also **"I'm someone else"** and **"None of these — I'm new"** (which runs normal signup). An account that already has a linked player is never renamed by a link.
+If the link isn't tied to a specific person, you get a **"Which player are you?"** picker — and it lists **only the open guest spots**: players the host added by name who don't have an account attached yet. The host's own row, anyone who signed in with an account, and any spot already claimed through a link never appear, so there's nothing to pick by mistake. Tap your name and you're in — name and handicap come from the spot, no prompts. There's also **"I'm someone else"** and **"None of these — I'm new"** (which runs normal signup); if the round has no open spot at all, the picker is skipped and normal signup runs. An account that already has a linked player is never renamed by a link.
 
 If a claim fails, the app now says why — whether the slot is already tied to one of *your* other logins (naming the email you're signed in as) or to somebody else's — and opens the event anyway. *This is the classic "the invite just dumps me on the home screen" complaint, and the usual cause is a duplicate account.*
 
@@ -210,6 +210,10 @@ A pass across the whole app put every button on one system. You won't find a new
 **Update available banner.** When a newer build is out, a banner appears above the bottom nav reading **"Update available — you're on ‹your build› — ‹new build› is out"** with an **Update** button (App Store on iPhone, Google Play on Android, page reload on web) and a **✕** that snoozes that one version. The app asks the App Store what version is actually live, so it can't tell you to update to a build the store doesn't have yet.
 
 **The app got materially faster to open.** The web app had been downloading its whole 5 MB bundle **twice** on every launch, because the version check read the wrong slice of the file and fell through to a full uncached re-fetch. Launch traffic dropped by about **half**. Opening the course picker and typing in it are noticeably quicker too.
+
+### Where the App Lives on the Web — officialbadgolf.com/app
+
+**officialbadgolf.com** is now the Bad Golf App home page — what the app does, every game explained, a page for every course in the library, and the download buttons with one **QR code** that sends an iPhone to the App Store and an Android phone to Google Play. **The web app itself lives at `officialbadgolf.com/app/`.** Every invite and share link the app sends out (round, league, tournament, tee time, calendar) now points there, and an older link that still lands on the home page is forwarded to the app automatically with nothing lost — texts already sitting in someone's Messages keep working. On a phone with the app installed, tapping any officialbadgolf.com link opens the app.
 
 ---
 
@@ -379,7 +383,7 @@ One list for everything you're in — live invites, scheduled rounds, open round
 - **"View" on a completed round opens the 💵 Games sheet directly.** The separate 💵 icon button that used to sit beside View is gone from Home, Rounds and Crew — one button does the job. *(A manually logged round has no game record, so View on those still opens Stats.)*
 - **home / away** marker before the course name
 - **🏆 trophy** next to the course name if the round was part of a **tournament**
-- **👥 partner scores** on completed rounds — a second line reading e.g. `👥 Mike 79 · Kevin 82 · Paul 88`, best score first, capped at 5 names with **"+N more"**
+- **🏌️ partner scores** on completed rounds — a second line reading e.g. `🏌️ Mike 79 · Kevin 82 · Paul 88`, best score first, capped at 5 names with **"+N more"**
 - Extra actions sit in a compact wrapped row underneath: **"Edit details"** / **"Edit settings"** on scheduled rounds, and **"Leave round"** on a round you didn't create
 
 > **The "🗂 Scorecard" and "📍 GPS preview" shortcuts were removed from these Home rows** — from scheduled rows and live tournament rows alike. A scheduled row now carries only Edit/View details, Edit/View settings and Leave round; a live tournament row carries only its primary action and Leave round. **Both features still exist** — the scorecard preview and the GPS course preview are still reachable from the **Rounds tab**, from the **course detail** screen, and from inside a live round. Only the Home shortcuts went away.
@@ -574,9 +578,11 @@ Every group starts collapsed; a group opens itself only if something in it is al
 
 **Units steppers.** Every units box is a big **− value +** stepper that moves by one whole unit; on an empty box "+" starts from the placeholder.
 
-**Adding people.** The player picker shows profile photos (and in a two-team event a team ring); tapping the search box with the phone keyboard up scrolls the list so about four results stay visible. **"Add a player (guest)"** asks for First name, Last name and HCP — nothing else. Removing a player who already has scores warns you first: *"X already has N holes scored in the live round — removing them deletes those scores and re-settles every game without them."*
+**Adding people.** The player picker shows profile photos (and in a two-team event a team ring); tapping the search box with the phone keyboard up scrolls the list so about four results stay visible. **"➕ Add a player"** (a guest who isn't on the app yet) asks for First name, Last name and HCP — nothing else. The form opens **blank every time** — Cancel, Done or tapping away never leaves the last person's name in the boxes — and the moment you tap **Save** the new player is **ticked into the round** with their handicap, exactly as if you'd tapped their row. Removing a player who already has scores warns you first: *"X already has N holes scored in the live round — removing them deletes those scores and re-settles every game without them."*
 
 **Send the invites?** The moment a round, tournament or league is created, the app asks once: *"Your round is set. Send the invites now? Players with the app get a notification; everyone else gets the link by text."* → **📨 Send invites** / Later. Each person gets one in-app invite per round — **"✓ Invited — tap to resend"** forces another. The text invite says what you're playing: *"Today we're playing Birdie Bump and Low Net Pool."*
+
+**Somebody on the card isn't on Bad Golf yet?** When you start a round (or a league or tournament) with a guest you added by name, the app asks once more — only for those people, and only once per round: *"Deez Nuts isn't on Bad Golf yet. Send them the link by text? They tap it, sign in, and pick their name — handicap and games are already set."* → **📨 Send invite** / Later. Send invite opens your own Messages app with any saved numbers filled in and the text ready: *"Tyler added you to a golf round at Buffalo Creek on Bad Golf!"*, the join link, *"Open it, sign in, and tap your name — your handicap and games are already set up,"* and the App Store / Google Play links. If everyone on the card already has an account, this prompt never appears — the normal in-app invites cover them.
 
 ### Your Setup Is Saved While You Poke Around
 
@@ -634,7 +640,7 @@ The Score tab is live during a round — enter scores hole-by-hole and track sid
 
 ### Editing a Score Without Leaving the Card
 
-**Tap any score on the scorecard** and a small **+ / −** editor opens for that player and hole, with a **"Go to hole N"** shortcut beside it. Read-only surfaces — the recap, the final-standings scorecard — are unaffected; tapping there still does nothing.
+**Tap any score on the scorecard** and a small **+ / −** editor opens for that player and hole, with a **"Go to hole N"** shortcut beside it. The big number moves the instant you tap **+** or **−** — the cloud save happens behind it, so on weak course signal you'll never see the popup sit on 4 while your taps quietly count to 7. Read-only surfaces — the recap, the final-standings scorecard — are unaffected; tapping there still does nothing.
 
 ### The Last-Hole Recap Covers Every Game
 
@@ -1492,35 +1498,49 @@ Games and side games carry the gold **PRO** pill here too. The handicap, tournam
 
 ## Bad Golf Badges
 
-**More → 🏅 BG Badges.** Fifty achievements, earned automatically from the rounds you post — a mix of bad golf and good play, in six categories: **Bad Golf · The Card · Games & Units · Crew · League & Tourney · Tee Times**. Most are one-and-done; a few have **levels**.
+**More → 🏅 BG Badges.** **Seventy-five** achievements, earned automatically from the rounds you post — a mix of bad golf and good play, in six categories: **Bad Golf (19) · The Card (24) · Games & Units (13) · Crew (8) · League & Tourney (7) · Tee Times (4)**. Most are one-and-done; a few have **levels**, and a couple repeat every time you beat yourself. Badges that depend on a tracked stat (putts, GIRs, fairways, bunkers, penalties) stay silent unless that stat was switched on for the round — nobody gets *Forty Putts* from a round that never counted putts.
 
 ### Where They Show
 
-- **Home** and **Stats** each carry a **Bad Golf Badges** card under the handicap card — your earned coins, up to **15 plus a "+N" coin** that opens the Badges tab.
+- **Home** and **Stats** each carry a **Bad Golf Badges** card under the handicap card (the header reads e.g. **"29 of 75"**) — your earned coins, up to **15 plus a "+N" coin** that opens the Badges tab.
 - **The Badges tab** lists every badge with its icon and **how to earn it**; locked ones are greyed. Tap any badge for a sheet with the coin, category, how it's earned, the date and **the round it came from** (course · date). New badges carry a red dot and a **NEW** pill until you've looked.
 - **Friends** — pick a player under Player stats and their badges row appears; tap one for "‹name›'s badge". Someone with no account yet reads "hasn't signed up yet".
-- **A badge earned more than once** shows a small **×N** bubble on its coin. Levelled badges show roman numerals instead.
+- **A badge earned more than once** shows a bold **×N** pip tucked into the bottom corner of its coin, readable in light mode and dark. Levelled badges show roman numerals in the same spot.
 
 ### The Levelled Badges
 
 | Badge | Levels |
 |-------|--------|
 | **Regulars** | I / II / III — 10 / 25 / 50 rounds with one friend |
-| **Tee Times** | I–IV — 5 / 25 / 75 / 200 tee times |
-| **Course Collector** | I–IV — 3 / 10 / 25 / 50 courses |
+| **Home Game** | I / II / III — 10 / 25 / 50 rounds posted at your home course |
+| **Weekend Warrior** | I / II / III — 10 / 25 / 50 rounds posted on a Saturday or Sunday |
+| **Tee Times** | I–IV — 5 / 25 / 75 / 200 rounds posted |
+| **Course Collector** | I–IV — 3 / 10 / 25 / 50 different courses |
 | **Road Trip** | I / II — 3 / 6 states |
 
-### A Sample of the Fifty
+**New Low** and **Career Nine** repeat: every time you beat your own best 18 (or best nine) the ×N ticks up.
 
-Double Par · Back-Nine Collapse · Century Club (an 18-hole gross of 100 or more) · Par-Free Round · Beach Day (4+ sand holes) · Forty Putts · Hero Tax · Wooden Spoon · Rolo · Par Train (5 straight pars or better) · Two Birds · Breaking 90 · Breaking 80 · Sandy · Chip-In · Greenie Bandit · Dart Board (10+ GIRs) · Fairway Finder (10+ fairways) · Payday (+10 units) · Arnie · Night Owl (finished at 8 pm or later) · Six Pack (6+ players) · Podium (top 3 in a completed league) · **Bomb Squad** (win the Long Putt on a round) · **Double Header** (two real 18-hole rounds scored on one calendar day — imports, manual rounds and nines don't count).
+### All Seventy-Five
+
+**Bad Golf (19)** — Snowman Season (an 8 on one hole) · Full Send (double digits on one hole) · Bounce Back (birdie right after a double or worse) · The Comeback (down 5+ units at the turn, finish positive) · Sunrise Service (tee off before 7 am) · Double Par · Back-Nine Collapse (back nine six shots worse than the front) · Century Club (100 or more for 18) · Par-Free Round · Beach Day (in the sand on four holes, bunkers tracked) · Forty Putts (putts tracked) · Hero Tax (win the Par-3 Greenie, then three-putt it) · Wooden Spoon (last in units with three or more on the card) · **Triple Threat** (three triples or worse in one round) · **Water Hazard** (three or more penalty strokes, penalties tracked) · **Front-Nine Faceplant** (front nine six shots worse than the back) · **The Slide** (bogey or worse on each of the last three holes) · **Four-Jack** (four putts on one hole, putts tracked) · **Nobody's Home** (zero GIRs for 18, GIRs tracked).
+
+**The Card (24)** — First Tee (post your first round) · Clean Card (18 holes with no double or worse) · Circle Squad (three birdies in a round) · Big Bird (an eagle) · One and Done (a hole in one) · New Low (beat your best 18, repeats) · Rolo (take a penalty and still make par or better) · Par Train (five pars or better in a row) · Two Birds (back-to-back birdies) · Breaking 90 · Breaking 80 · Sandy (up and down from a bunker for par) · Chip-In · Greenie Bandit (steal the Par-3 Greenie with a birdie) · Dart Board (10+ GIRs, tracked) · Fairway Finder (10+ fairways, tracked) · **Level Par** (even par or better on a nine) · **Clean Nine** (par or better on every hole of a nine) · **The Turnaround** (over par at the turn, back nine at par or better) · **Steady Eddie** (every hole within one of par for 18) · **Career Nine** (a new personal-best nine, repeats) · **Streak Bird** (birdies on three holes in a row) · **Twenty-Something** (29 or fewer putts, tracked) · **Breaking 100** (an 18-hole round in the 90s or better).
+
+**Games & Units (13)** — On the Board (first round finished with a game running) · Snake Charmer (18 with the Snake running and never three-putt) · Greenie Machine (three greenies in a round) · Hammer Time (accept a hammer and win the hole) · Lone Wolf (go lone wolf and win the hole) · Payday (finish up 10 units or more) · Bomb Squad (win the Long Putt on a round) · Arnie (par without ever touching the fairway) · **Skins Bandit** (three or more skins in a round) · **Rob the Bank** (as the banker, beat every player in the group on one hole) · **Nassau Sweep** (front, back and overall in one Nassau) · **Hot Streak** (finish up in units five rounds in a row) · **Grinder** (win a skin with a bogey).
+
+**Crew (8)** — Foursome (three others on the card) · Regulars (levelled) · Couch Caddie (spectate a friend's live round) · Night Owl (finish after 8 pm) · Six Pack (six or more players on one card) · **Home Game** (levelled) · **Full Cart** (eight players on one card) · **Weekend Warrior** (levelled).
+
+**League & Tourney (7)** — Week Winner (win a league week) · Season Champ (win the league) · Commish (run a league or tournament as commissioner) · Podium (top three in a finished league) · **Field Day** (play your first tournament round) · **Money List** (finish a tournament round up in units) · **Iron Man** (play every week of a league season without missing one).
+
+**Tee Times (4)** — Tee Times (levelled) · Course Collector (levelled) · Road Trip (levelled) · Double Header (two real 18-hole rounds scored on one calendar day — imports, manual rounds and nines don't count).
 
 ### Mid-Round Pop-Ups
 
 A badge earned during a round pops a sheet — coin, name, ×N, how — with **See badges / Nice!** and a light vibration. **One notification per hole:** if the hole already fired a birdie or snowman celebration, the badge is awarded silently (red dot + NEW pill instead). Switch the pop-ups off under **Profile ▸ Push notifications ▸ "🏅 I earn a badge"**.
 
-### Deleted Rounds Take Their Badges With Them
+### Deleted Rounds and Events Take Their Badges With Them
 
-Delete a round and any badge it earned goes too — per-round badges drop, an ×N falls by one, and history badges recompute — on every player's phone, not just yours. League-earned badges (Week Winner, Season Champ) are untouched.
+Delete a round and any badge it earned goes too — per-round badges drop, an ×N falls by one, and history badges recompute — on every player's phone, not just yours. **League and tournament badges follow the event the same way:** delete a league or tournament and Week Winner, Season Champ, Podium and Iron Man from it come off, and Commish comes off if that was the last event you ran. Opening the Badges tab re-checks your league and tournament badges against what still exists every time, so a badge from a test league you deleted can't linger. A weak connection never strips a real badge — the re-check only removes something when it got a complete answer from the server.
 
 ---
 
