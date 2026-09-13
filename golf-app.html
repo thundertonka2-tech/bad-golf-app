@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1687-->
+<!--BGVER=v2026.11.1688-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10669,7 +10669,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1687';
+const BG_BUILD = 'v2026.11.1688';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -39030,7 +39030,13 @@ function isHoleComplete(g, h) {
   // Scramble: both team scores must be entered
   if (g.games && g.games.scramble) {
     const hd = g.scrambleData && g.scrambleData[h];
-    return !!(hd && hd.teamA !== null && hd.teamB !== null);
+    // v1688: a 4-MAN scramble is ONE team. renderScrambleEntry draws a single
+    // stepper (teamA) for it and teamB is never entered, so demanding teamB left
+    // every hole of a 4-man scramble permanently "incomplete" -- no auto-advance
+    // row, no Finish round button, and every all-holes-in gate stuck open forever.
+    // Same is4man test the entry screen uses, so the two can't disagree.
+    if (g.games.scramble.teamMode === '4man') return !!(hd && hd.teamA != null);
+    return !!(hd && hd.teamA != null && hd.teamB != null);
   }
   // Ryder Cup: team-score holes need ryderCupData; bestball holes need individual scores
   if (g.games && g.games.ryderCup) {
@@ -50101,15 +50107,52 @@ function gpsMyStatuses(g, res, myId) {
   } catch (e) {}
   return out;
 }
+/* v1688: MY score on a hole where the team plays one ball, or undefined when the
+   hole is played on individual cards. Scramble is one ball for the whole round;
+   Ryder Cup mixes best-ball holes (individual cards) with scramble / alt-shot
+   holes (one team score), so it has to be asked hole by hole. */
+function bgTeamBallScore(g, myId, hole) {
+  try {
+    const _mine = (ids) => Array.isArray(ids) && ids.indexOf(myId) >= 0;
+    const sc = g.games && g.games.scramble;
+    if (sc) {
+      const hd = (g.scrambleData && g.scrambleData[hole]) || {};
+      if (sc.teamMode === '4man') return hd.teamA;          // one team, one score
+      return _mine(sc.teamB) ? hd.teamB : hd.teamA;         // teamA is the default side
+    }
+    const rc = g.games && g.games.ryderCup;
+    if (rc && typeof getHoleFormat === 'function') {
+      const fmt = getHoleFormat(rc, hole, (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18);
+      if (fmt === 'scramble' || fmt === 'altshot') {
+        const hd = (g.ryderCupData && g.ryderCupData[hole]) || {};
+        return _mine(rc.teamB) ? hd.teamB : hd.teamA;
+      }
+    }
+  } catch (e) {}
+  return undefined;                                          // individual card hole
+}
 // My current gross-to-par across the holes I've scored (null if none scored).
+/* v1688 (Tyler, 9/13): "during the match the GPS screen kept saying I was even the
+   whole time even though Charlie and I were under par." The pill read g.scores
+   only. A scramble never writes g.scores -- the team's 4 goes into
+   g.scrambleData[h].teamA -- so this walked 18 nulls, counted 0 holes, returned
+   null, and the button renders null as a flat grey E. Tyler's team was 66 on a
+   par 71: it should have read -5 and climbed all round. Now a team-ball hole
+   contributes the TEAM's score (mine is whichever side I'm on), an individual
+   hole still contributes my own, and a Ryder Cup card that mixes both adds up
+   correctly hole by hole. Also stops hardcoding 18 so a nine reads right. */
 function gpsMyToPar(g, myId) {
   try {
-    if (!g || !g.scores || !g.pars || !myId) return null;
-    const arr = g.scores[myId] || [];
+    if (!g || !g.pars || !myId) return null;
+    const arr = (g.scores && g.scores[myId]) || [];
+    const _rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
     let diff = 0, n = 0;
-    for (let i = 0; i < 18; i++) {
-      const s = arr[i], par = g.pars[i];
-      if (s != null && par != null) { diff += (s - par); n++; }
+    for (let i = 0; i < _rh; i++) {
+      const par = g.pars[i];
+      if (par == null) continue;
+      let s = bgTeamBallScore(g, myId, i + 1);
+      if (s === undefined) s = arr[i];
+      if (s != null) { diff += (s - par); n++; }
     }
     return n ? diff : null;
   } catch (e) { return null; }
@@ -51763,15 +51806,27 @@ async function bgFinishRoundFlow() {
         // to hunt for the missing scores, found nothing, and tried again. Say who, and
         // how many, and call out the ones who never posted a score at all.
         const _rhB = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+        // v1688 (Tyler, 9/13): on a SCRAMBLE there is no individual card to have gaps
+        // in, so naming players printed "no scores at all (never played?)" next to all
+        // four of them on a card that was completely filled in. Name the HOLES that are
+        // actually short instead -- that is the thing the scorer can go and fix.
+        let _lines;
+        const _teamBall = !!(g.games && (g.games.scramble || g.games.ryderCup));
+        if (_teamBall && typeof isHoleComplete === 'function') {
+          const _hs = [];
+          for (let h = 1; h <= _rhB; h++) { if (!isHoleComplete(g, h)) _hs.push(h); }
+          _lines = '\u2022 No score yet on hole' + (_hs.length === 1 ? ' ' : 's ') + _hs.join(', ');
+        } else {
         const _gaps = (g.players || []).map(function (p) {
           const sc = (g.scores && g.scores[p.id]) || [];
           let n = 0;
           for (let h = 0; h < _rhB; h++) { if (sc[h] == null) n++; }
           return { name: p.name || 'A player', blanks: n, none: n >= _rhB };
         }).filter(function (x) { return x.blanks > 0; });
-        const _lines = _gaps.map(function (x) {
+        _lines = _gaps.map(function (x) {
           return '\u2022 ' + x.name + ' \u2014 ' + (x.none ? 'no scores at all (never played?)' : (x.blanks + ' blank hole' + (x.blanks === 1 ? '' : 's')));
         }).join('\n');
+        }
         if (!(await uiConfirm(_lines + '\n\nFinish the round with the scores entered so far? Blank holes won\u2019t count.', { title: 'Blank holes', okLabel: 'Finish', cancelLabel: 'Go back', danger: false }))) return;
       }
     } catch (e) {}
@@ -85914,7 +85969,12 @@ function findNextUnscoredHole(g) {
   const n = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
   for (let k = 0; k < n; k++) {
     const h = ((first - 1 + k) % n);
-    const anyMissing = g.players.some(p => !g.scores[p.id] || g.scores[p.id][h] == null);
+    // v1688: was individual-card only, so a scramble (whose scores live in
+    // g.scrambleData) always reported hole 1 as unscored -- reopening the Score
+    // tab mid-round dumped you back on the first hole every time.
+    const anyMissing = (typeof isHoleComplete === 'function')
+      ? !isHoleComplete(g, h + 1)
+      : g.players.some(p => !g.scores[p.id] || g.scores[p.id][h] == null);
     if (anyMissing) return h + 1;
   }
   return n; // every hole scored — land on the last one
@@ -85927,11 +85987,29 @@ function lastHoleOfRound(g) {
   const _rh = roundHoles(g);
   return ((start + _rh - 2) % _rh) + 1;
 }
-// True once every player has a score on all 18 holes.
+// True once every hole of the round has the score its FORMAT needs.
+/* v1688 (Tyler, 9/13 -- the "Sundy Hundy" scramble): this walked g.scores and
+   nothing else. A scramble is one ball and ONE TEAM SCORE per hole: it writes
+   g.scrambleData and never touches g.scores, so on a fully played scramble every
+   hole read blank and this returned false all round. Consequences, all reported
+   or latent:
+     * Finish round raised the "Blank holes" dialog naming all four players with
+       "no scores at all (never played?)" on a card with 18 team scores in it;
+     * every pool that settles on "all holes are in" (skins, stableford, quota,
+       team quota, long putt) waited for a card that is never written;
+     * the advance row and the Finish button never flipped state on their own.
+   Ryder Cup had the same hole in it for its scramble / alt-shot holes.
+   isHoleComplete ALREADY knows where each format keeps its scores -- scramble in
+   scrambleData, Ryder Cup team holes in ryderCupData, everything else on the
+   individual card with leavers skipped -- so this asks it rather than keeping a
+   second, format-blind copy of the rule. The old walk stays as a fallback so a
+   load order that somehow lacks isHoleComplete can't break the round. */
 function allHolesScored(g) {
   if (!g || !Array.isArray(g.players) || !g.players.length) return false;
   const _rh = roundHoles(g);
+  const _hc = (typeof isHoleComplete === 'function') ? isHoleComplete : null;
   for (let h = 0; h < _rh; h++) {
+    if (_hc) { if (!_hc(g, h + 1)) return false; continue; }
     if (g.players.some(p => bgActiveOnHole(g, p.id, h + 1) && (!g.scores[p.id] || g.scores[p.id][h] == null))) return false;   // v1602: leavers skipped
   }
   return true;
@@ -85943,7 +86021,12 @@ function nextUnplayedAfter(g, current) {
   const _rh = roundHoles(g);
   for (let k = 1; k <= _rh; k++) {
     const h = ((current - 1 + k) % _rh) + 1, idx = h - 1;
-    if (g.players.some(p => bgActiveOnHole(g, p.id, h) && (!g.scores[p.id] || g.scores[p.id][idx] == null))) return h;   // v1602
+    // v1688: same fix as findNextUnscoredHole -- on a scramble this never ran out
+    // of "unplayed" holes, so Next hole wrapped 18 -> 1 instead of stopping.
+    const _miss = (typeof isHoleComplete === 'function')
+      ? !isHoleComplete(g, h)
+      : g.players.some(p => bgActiveOnHole(g, p.id, h) && (!g.scores[p.id] || g.scores[p.id][idx] == null));   // v1602
+    if (_miss) return h;
   }
   return null;
 }
