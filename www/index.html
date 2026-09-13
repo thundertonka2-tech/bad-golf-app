@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1691-->
+<!--BGVER=v2026.11.1695-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -3623,6 +3623,23 @@
      not miss. .sc-nm takes the ellipsis so the NUMBER survives, never the reverse. */
   .mini-sc td.pn, .mini-sc th.pn { text-align: left; width: 66px; font-weight: 600; padding-left: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mini-sc td.pn .sc-nm { display: inline-block; max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+  /* v1692 (Tyler, 9/13): "when you click the group 1 tab it's messed up again."
+     The scores were right -- they were the TEAM's -- but each row was labelled with
+     a two-person name ("Tyler & Tar") inside a name column capped at 96px (v988's
+     fix for a long name eating a 375px phone) / 66px on the mini card, with
+     text-overflow: ellipsis. Both teams therefore rendered as "Tyler ..." and
+     "Steve ...", which reads as two individual players with impossible scores.
+     A team card has TWO rows where a player card has four to eight, so it can
+     afford the second line: let the name WRAP. The column keeps its width, so
+     v988's phone fix and the sticky-column layout are untouched. Higher
+     specificity than the base rules, so source order does not matter. */
+  table.scorecard.sc-teamcard td.player-name,
+  table.scorecard.sc-teamcard td.player-name .sc-nm,
+  .mini-sc.sc-teamcard td.pn,
+  .mini-sc.sc-teamcard td.pn .sc-nm {
+    white-space: normal; overflow: visible; text-overflow: clip;
+    max-width: none; line-height: 1.2;
+  }
   .mini-sc td.tot, .mini-sc th.tot { width: 28px; background: var(--surface-3); font-weight: 700; }
   .mini-sc tr.par td { background: var(--bg-brand-tint); color: var(--bg-brand); font-weight: 600; }
   .mini-sc .sc-mark { width: 17px; height: 17px; font-size: 11px; }
@@ -10667,7 +10684,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1691';
+const BG_BUILD = 'v2026.11.1695';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17652,6 +17669,51 @@ function subscribeToGame(code) {
   // all phones converge without having to navigate away and back.
   try { clearInterval(_gamePollTimer); } catch (e) {}
   _gamePollTimer = setInterval(() => { pollGameOnce(code); }, 12000);
+  /* v1693 (Tyler, 9/13): "I finished that scramble round on the web. However, when I
+     opened my phone, the round was still open and I had to close out the app
+     completely or finish the round again. Make sure once the round is finished it
+     closes the round on all devices and shows them the summary screen."
+
+     Everything needed to close the round on another device already existed --
+     maybeAutoCloseFinishedRound flips it read-only, ends the Live Activity and opens
+     the award summary, and BOTH the realtime handler and this backstop poll call it.
+     The hole was that neither of them ever RAN on a phone that had been asleep:
+
+       * a backgrounded WKWebView / tab has its realtime socket torn down, so the
+         finish event was delivered to nobody;
+       * its timers are suspended, so the 12s backstop did not tick either;
+       * and on resume the socket reconnects and reports state 'joined', which made
+         pollGameOnce believe realtime had it covered and fall back to its slow
+         every-4th-tick path (~48s) -- for an event that had already been missed.
+
+     So the round sat open until the app was killed and relaunched, which is exactly
+     what Tyler had to do. One forced read on wake closes that window: it applies the
+     finish (or any other change) through the same path the poll already uses, so the
+     read-only flip, the toast, the Live Activity end and the summary all follow
+     unchanged. Wired once, not per subscription, and it no-ops when there is no live
+     round or the round is already finished locally. */
+  if (!window._bgWakePollWired) {
+    window._bgWakePollWired = true;
+    const _wake = function () {
+      try {
+        const c = state.game && state.game.code;
+        if (!c || state.game.finishedAt) return;      // nothing live to catch up on
+        setTimeout(function () {
+          try {
+            const c2 = state.game && state.game.code;
+            if (c2 && !state.game.finishedAt) pollGameOnce(c2, true);
+          } catch (e) {}
+        }, 250);                                      // let the socket settle first
+      } catch (e) {}
+    };
+    try {
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') _wake();
+      });
+      window.addEventListener('focus', _wake);
+      window.addEventListener('pageshow', _wake);     // iOS bfcache restore
+    } catch (e) {}
+  }
 }
 // One backstop pull of the live game; applies + re-renders only if a strictly
 // newer version exists and the user isn't mid-typing (so it never clobbers input).
@@ -17659,12 +17721,18 @@ function subscribeToGame(code) {
 // actually fetches on every 4th tick (~48s) — realtime already pushes changes
 // instantly. When realtime is down it fetches every tick, exactly as before.
 let _bgGamePollTick = 0;
-async function pollGameOnce(code) {
+async function pollGameOnce(code, force) {
   try {
     try {
       _bgGamePollTick++;
       const _rtUp = !!(typeof activeRealtimeSub !== 'undefined' && activeRealtimeSub && activeRealtimeSub.state === 'joined'); // v935: truthiness isn't health — a dead socket must not slow the backstop
-      if (_rtUp && (_bgGamePollTick % 4 !== 0)) return; // realtime covers it; slow backstop only
+      /* v1693: `force` skips the throttle. A socket that RECONNECTED after the phone
+         was asleep reports state 'joined' and looks perfectly healthy -- but it was
+         not listening while the round was finished on another device, so the event it
+         would have carried is simply gone. On that one path "realtime covers it" is
+         exactly wrong, and waiting 4 ticks (~48s) for the slow backstop is what left
+         a finished round open on a phone that had just been unlocked. */
+      if (!force && _rtUp && (_bgGamePollTick % 4 !== 0)) return; // realtime covers it; slow backstop only
     } catch (e) { /* any doubt about realtime health → fetch as before */ }
     if (!state.game || state.game.code !== code || state.game.finishedAt) return;
     const f = document.activeElement;
@@ -53622,7 +53690,7 @@ function buildStackedScorecardHtml(g, fieldSkinMap) {
   const fSkinMap = fieldSkinMap || {};
   const seg = (from, to, label) => {
     const cols = []; for (let i = from; i < to; i++) cols.push(i);
-    let h = '<table class="mini-sc"><thead><tr><th class="pn">Hole</th>';
+    let h = '<table class="mini-sc' + ((g && g._bgTeamCard) ? ' sc-teamcard' : '') + '"><thead><tr><th class="pn">Hole</th>';
     cols.forEach(i => h += '<th>' + (i + 1) + '</th>');
     h += '<th class="tot">' + label + '</th></tr></thead><tbody>';
     const parSum = cols.reduce((a, i) => a + (g.pars[i] || 0), 0);
@@ -53834,7 +53902,12 @@ function buildRoundScorecardHtml(g, fieldSkinMap) {
       ? skinMark(s, par, won, wonF)
       : ((typeof scoreMark === 'function') ? scoreMark(s, par) : (s == null ? '—' : String(s)));
     const _anyNet = bgAnyNetOnCard(g);   // v1122
-    let html = '<table class="scorecard"><thead><tr><th>Player</th>';
+    /* v1692: a team card's rows are TEAMS. The Board card has always headed that
+       column "Team" (renderScorecard); this builder still said "Player" over two
+       rows of paired names. sc-teamcard also lets the name wrap instead of being
+       ellipsised to one first name -- see the CSS note on .sc-teamcard. */
+    const _tcCls = (g && g._bgTeamCard) ? ' sc-teamcard' : '';
+    let html = '<table class="scorecard' + _tcCls + '"><thead><tr><th>' + (_tcCls ? 'Team' : 'Player') + '</th>';
     for (let i = 1; i <= 9; i++) html += '<th>' + i + '</th>';
     html += '<th>' + bgTotHeader('Out', _anyNet) + '</th>';
     for (let i = 10; i <= 18; i++) html += '<th>' + i + '</th>';
@@ -55358,6 +55431,22 @@ async function _renderHomeInvitesNow() {
         let _sharedTomb6 = new Set();
         try { const _st6 = await getSharedTombstones(); if (_st6 && _st6.rounds) _sharedTomb6 = _st6.rounds; } catch (e) {}
         const _delKeys6 = (typeof getDeletedRoundKeys === 'function') ? getDeletedRoundKeys() : new Set();
+        /* v1692 (Tyler, 9/13): "still doesn't show my teams scramble score here."
+           These rows are built ENTIRELY from scoreHistory, and a scramble records no
+           individual gross for anybody -- so `s.gross` was null, the row read
+           "Sep 13, 2026 · Gross —", and the partners line underneath was empty too
+           (it is built from the other players' scoreHistory, which is equally blank).
+           The round's own team line already exists on its recent entry, written by
+           grossScoreLineFor: "2 Man Scramble · Tyler & Tar 66 · Steve & Gregory 64".
+           The Events and Stats round lists have always preferred that line over the
+           bare gross (see _recByCode / recByCode in loadRounds and the Stats list);
+           this card was the one that never looked it up. Same read, one call. */
+        const _recLine6 = {};
+        try {
+          ((await getRecent()) || []).forEach(r => {
+            if (r && r.code && r.scoreLine && String(r.scoreLine).trim()) _recLine6[r.code] = String(r.scoreLine);
+          });
+        } catch (e) {}
         /* v886 (Tyler): "show me other players scores I played with as well."
            Every player in the crew roster keeps their own scoreHistory, and the
            entries for the same round share a gameCode — so the partners for a round
@@ -55417,7 +55506,13 @@ async function _renderHomeInvitesNow() {
               date: s.date || null, gross: (s.gross != null ? s.gross : null),   // v1395: so a manual/imported round can be identified for removal
               courseId: s.courseId || '',                 // v1066: exact 🏠/✈️ match, not just by name
               t2Id: s.t2Id || null,                      // v902: stamped at archive time (new rounds)
-              sub: (dt6 ? dt6 + ' · ' : '') + 'Gross ' + (s.gross != null ? s.gross : '—'),
+              /* v1692: fall back to the round's own score line ONLY when there is no
+                 individual gross to show -- a team-ball round. Every ordinary round
+                 still reads "Gross 74" exactly as before. */
+              sub: (dt6 ? dt6 + ' · ' : '')
+                + ((s.gross == null && s.gameCode && _recLine6[s.gameCode])
+                    ? _recLine6[s.gameCode]
+                    : ('Gross ' + (s.gross != null ? s.gross : '—'))),
               others: (_partners.get(_pKey(s)) || []),   // v886: who else played, and what they shot
               action: 'View'
             });
@@ -62542,6 +62637,25 @@ async function openRoundBetsSheet(code, courseName, opts) {
       const _scEl = body.querySelector('#rb-scorecard');
       const _scHd = body.querySelector('#rb-sc-head');
       const _stEl = body.querySelector('#rb-stats');
+      /* v1692 (Tyler, 9/13): "the tournament tab is correct, although it shows you
+         bad data first then updates -- don't show anything if you can show good
+         data." The scorecard and the stats table sit OUTSIDE both scopes (see
+         v1337), and this painter fell back to _grpScHtml whenever the field card
+         was not built yet. So tapping Tournament flashed THIS GROUP'S four players
+         under a "Scorecard" heading that did not say which scope it was, and then
+         silently swapped to the whole field a second later -- long enough to read,
+         and wrong. #rb-scope-event above it has had a proper spinner since v1366;
+         this is the one block that did not.
+         While the event scope is still loading, say so and show nothing else. It
+         is NOT applied when the fetch has finished and simply produced no field
+         card (_rbEventState 'ready'/'empty' with no _fieldScHtml) -- there the
+         group card IS the best answer available, which is v1337's rule. */
+      if ((scope === 'event') && !_fieldScHtml && _rbEventState === 'loading') {
+        if (_scHd) _scHd.textContent = 'Scorecard \u2014 whole field';
+        if (_scEl) _scEl.innerHTML = '<div class="bg-inline-load" style="padding:18px 4px"><span class="sp"></span>Pulling the whole field\u2019s scorecard\u2026</div>';
+        if (_stEl) _stEl.innerHTML = '';
+        return;
+      }
       if (_scEl) _scEl.innerHTML = _ev ? _fieldScHtml : _grpScHtml;
       if (_scHd) _scHd.textContent = _ev ? 'Scorecard — whole field' : 'Scorecard';
       /* v1305's rule, kept: the totals follow the scorecard's scope. A field
@@ -98669,7 +98783,13 @@ function bnavOpenMore() {
   // v1488: this is now the DEFAULT view, not the tester view — every signed-in user
   // sees six tiles in the 3-up grid. Signed-out users still see five on one row.
   const items = [
-    { tab: 'badges', icon: 'badges', lbl: 'BG Badges' },   // v1611: alphabetical → first · v1626 (Tyler): "BG Badges — too wordy for this tile"
+    /* v1695 (Tyler, 9/13): "Here BG Badges should just be Badges so it fits the mobile
+       screen better." v1626 recorded the same complaint -- "BG Badges — too wordy for
+       this tile" -- and never actually shortened it, so the label kept overflowing its
+       box on a phone. "Badges" still sorts first alphabetically, so the tile order is
+       unchanged. The tab's own heading and the badge name everywhere else stay "Bad
+       Golf Badges"; this is the tile only. */
+    { tab: 'badges', icon: 'badges', lbl: 'Badges' },   // v1611: alphabetical → first
     { tab: 'courses', icon: 'cal', lbl: 'Courses' },   // v1667 (Tyler): Find a Course + Live Holes. Eight tiles → two clean rows of four
     { tab: 'bets', icon: 'info', lbl: 'Info' },
     { tab: 'league', icon: 'league', lbl: 'League' },
@@ -115303,6 +115423,16 @@ function bgBadgeNextUp(st) {
 }
 async function bgRenderBadgesCard(where) {
   const el = document.getElementById(where === 'stats' ? 'stats-badges-card' : 'home-badges-card'); if (!el) return;
+  /* v1694 (Tyler, 9/13): "Take the Bad Golf Badges off the home page, it takes up way
+     too much space on the mobile screen." Retired at the RENDERER rather than by
+     deleting the six call sites: every caller (renderHome, the award sweep, the
+     mid-round pop-up, the seen-sweep) keeps calling this exactly as before and simply
+     gets a hidden card back, so no call site can be missed and nothing throws.
+     Everything else about badges is untouched -- the Stats card, the Badges tab in the
+     More sheet, the mid-round pop-ups and the bottom-nav count all still work, and
+     #home-badges-card stays in the markup (already display:none by default) so this is
+     one line to undo if he wants it back. */
+  if (where !== 'stats') { try { el.style.display = 'none'; el.innerHTML = ''; } catch (e) {} return; }
   try {
     if (where === 'stats' && window._bgStatsIsMe === false) { el.style.display = 'none'; return; }
     const st = await bgBadgesLoad();
