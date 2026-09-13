@@ -1,9 +1,21 @@
 import { page, storeButtons, esc, appLd, orgLd, APPSTORE, PLAY, APP_URL, SITE, ctaBox, breadcrumbLd, crumbs } from './layout.mjs';
 
-const shot = (name, alt, cls = '') => `
-<div class="phone ${cls}"><div class="screen"><picture><source srcset="/img/screens/${name}.webp" type="image/webp"><img src="/img/screens/${name}.jpg" alt="${alt}" width="520" height="1126" loading="${cls ? 'lazy' : 'eager'}"></picture></div></div>`;
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const SCREENS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'static', 'img', 'screens');
+// A real iPhone screenshot inside the CSS iPhone frame (see site.css "phone mockups").
+// Drop `<name>.jpg` (and optionally `<name>.webp`) into site/static/img/screens/ — the
+// build only renders a phone whose screenshot file exists, so a missing shot never 404s.
+const shot = (name, alt, cls = '') => {
+  if (!fs.existsSync(path.join(SCREENS, `${name}.jpg`))) return '';
+  const webp = fs.existsSync(path.join(SCREENS, `${name}.webp`)) ? `<source srcset="/img/screens/${name}.webp" type="image/webp">` : '';
+  return `
+<div class="phone ${cls}"><span class="btns" aria-hidden="true"><i class="a"></i><i class="vu"></i><i class="vd"></i><i class="p"></i></span><div class="screen"><picture>${webp}<img src="/img/screens/${name}.jpg" alt="${alt}" width="520" height="1126" loading="${cls ? 'lazy' : 'eager'}"></picture></div></div>`;
+};
 const phoneGps = shot('gps', 'Bad Golf App GPS screen: front, middle and back yardages, plays-like distances with club suggestions, wind, and the live Nassau standing on hole 1');
 const phoneBoard = shot('home', 'Bad Golf App home screen: handicap index 2.9 trending better, rounds, average score, best round, putts per round, GIR and fairway percentages', 'tilt');
+const phoneLeague = shot('league', 'Bad Golf App league screen: the season standings and this week\'s matchups', 'lazy');
 const phoneTourney = shot('tourney', 'Bad Golf App tournament summary: skins, closest to the pin, low net, most greens in regulation and fewest putts prize pools with the winners of each');
 
 const FAQ = [
@@ -55,7 +67,7 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
   <div class="chips">${topGames.map(g => `<a class="chip" href="/games/${g.slug}/">${g.emoji ? g.emoji + ' ' : ''}${esc(g.name)}</a>`).join('')}<a class="chip more" href="/games/">All ${gameCount} games →</a></div>
 </div></section>
 
-<section class="sec" id="leagues"><div class="wrap split">
+<section class="sec" id="leagues"><div class="wrap${phoneLeague ? ' split' : ''}">
   <div>
     <div class="eyebrow" style="color:var(--brand);font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;margin-bottom:8px">Leagues</div>
     <h2>Run your league night in Bad Golf App.</h2>
@@ -69,15 +81,7 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
     </ul>
     <a class="btn btn-primary" href="/leagues/">How leagues work</a>
   </div>
-  <div class="phone" aria-hidden="true" style="margin:0 auto"><div class="screen"><div class="card-ui" style="padding-top:18px">
-    <div class="hdr">Thursday Night League · Week 7</div>
-    <table><tr><th>Flight A</th><th>W</th><th>L</th><th>Pts</th></tr><tr><td>Sandbaggers</td><td>5</td><td>1</td><td>41.5</td></tr><tr><td>Mulligan Men</td><td>4</td><td>2</td><td>38</td></tr><tr><td>Fore Play</td><td>3</td><td>3</td><td>33</td></tr><tr><td>The Shanks</td><td>1</td><td>5</td><td>21.5</td></tr></table>
-    <div class="hdr" style="margin-top:12px">This week's matchups</div>
-    <table><tr><th>Tee</th><th>Match</th><th>Status</th></tr><tr><td>5:40</td><td>Sandbaggers v Shanks</td><td style="color:#177a31">2 up · 14</td></tr><tr><td>5:48</td><td>Mulligan v Fore Play</td><td style="color:#0c447c">AS · 12</td></tr><tr><td>5:56</td><td>Hackers v Duffers</td><td style="color:#c0392b">1 dn · 11</td></tr><tr><td>6:04</td><td>Bogeymen v Yips</td><td>Not started</td></tr></table>
-    <div class="pill">Week 6 skins <span>Josh +3 units</span></div>
-    <div class="pill">League handicaps <span style="color:#0c447c">Updated Thu</span></div>
-    <div class="pill">Playoffs in 3 weeks <span style="color:#0c447c">Top 4 qualify</span></div>
-    <div class="pill" style="background:#fdf3d5;color:#8a5710">Sub needed · Week 8 <span>2 open</span></div></div></div></div>
+  ${phoneLeague ? `<div style="display:flex;justify-content:center">${phoneLeague}</div>` : ''}
 </div></section>
 
 <section class="sec alt" id="tournaments"><div class="wrap split">
