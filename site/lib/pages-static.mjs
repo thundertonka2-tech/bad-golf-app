@@ -129,7 +129,20 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
   // the app's query keys (or a maintenance key in the hash) is sent straight to
   // /app/ with the query intact, before the marketing page paints. Plain visits
   // (and utm-tagged ones) stay here.
-  const forwarder = `<script>(function(){try{var q=location.search||'',h=location.hash||'';var re=/[?&#](join|lg|lgs|tclaim|tjoin|claim|tt|cal|p|courseimport|courseoverride|courseremove|stateimport|osmimport|sweepimport|gpsimport|nextstate|coursecheck|coursegaps|courselist|contactimport|coursecleanup|multinine|dupcleanup|mergeplayer|cleanup|statsreset|statecheck|statefill)=/;if(re.test(q)||re.test(h)){location.replace('/app/'+q+h);}}catch(e){}})();</script>\n`;
+  //
+  // 2026-09-13 — the auth keys were added for the same reason, one move later.
+  // Signing in at /app/ sends Supabase redirectTo=https://officialbadgolf.com/app/
+  // (location.origin + location.pathname). Supabase only honours a redirect_to
+  // that matches its Redirect URLs allow-list; anything else is silently swapped
+  // for the project's Site URL -- which is still the bare origin, i.e. THIS page.
+  // So the callback landed on the marketing home with #access_token=... in the
+  // hash, nothing here reads it, and the sign-in looked like it bounced the user
+  // back to the home page. The real fix is the allow-list (add
+  // https://officialbadgolf.com/app/** in Authentication -> URL Configuration);
+  // this is the safety net, so a token that lands here is carried into the app
+  // rather than dropped, and a future move can't silently break sign-in again.
+  // location.replace leaves no history entry, so Back still works normally.
+  const forwarder = `<script>(function(){try{var q=location.search||'',h=location.hash||'';var re=/[?&#](join|lg|lgs|tclaim|tjoin|claim|tt|cal|p|courseimport|courseoverride|courseremove|stateimport|osmimport|sweepimport|gpsimport|nextstate|coursecheck|coursegaps|courselist|contactimport|coursecleanup|multinine|dupcleanup|mergeplayer|cleanup|statsreset|statecheck|statefill|access_token|refresh_token|provider_token|error_code|error_description)=/;if(re.test(q)||re.test(h)){location.replace('/app/'+q+h);}}catch(e){}})();</script>\n`;
   return page({
     headFirst: forwarder,
     path: '/', title: 'Bad Golf App — Golf Scorecard, GPS & Side Games for Your Group', h1: '',
