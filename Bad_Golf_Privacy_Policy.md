@@ -1,8 +1,8 @@
 # Bad Golf — Privacy Policy
 
-**Effective date:** September 3, 2026  **Last updated:** September 3, 2026
+**Effective date:** September 3, 2026  **Last updated:** September 13, 2026
 
-**Kevin Wells, an individual doing business as Bad Golf** ("Bad Golf," "we," "us," or "our") operates the Bad Golf mobile application and web app (the "Service"). This Privacy Policy explains what information we collect, how we use it, and the choices you have. We've tried to write it in plain English. If anything is unclear, contact us at support@officialbadgolf.com.
+**KRWellsGolf LLC, doing business as Bad Golf** ("Bad Golf," "we," "us," or "our") operates the Bad Golf mobile application and web app (the "Service"). This Privacy Policy explains what information we collect, how we use it, and the choices you have. We've tried to write it in plain English. If anything is unclear, contact us at support@officialbadgolf.com.
 
 ## Summary (the short version)
 
