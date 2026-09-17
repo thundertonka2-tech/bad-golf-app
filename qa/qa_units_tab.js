@@ -108,7 +108,10 @@ doc.body.innerHTML = tableHtml('t');
 const t = doc.getElementById('t');
 ok('decorator ran', w.bgMatchViewDecorate(t, g) === true);
 const chips = [...t.querySelectorAll('caption.sc-tabs .sc-tab')].map(b => b.dataset.mode);
-ok('three chips: match | strokes | units', JSON.stringify(chips) === JSON.stringify(['match','strokes','units']), chips.join('|'));
+// v1711: the leading chip is decided by bgScLeadMode. This round's match covers 2 of
+// its 4 players, so the match is a side bet and Strokes leads. Units is always last.
+// (qa/qa_scorecard_tab_order.js covers the ordering rule itself, both ways round.)
+ok('three chips, side-bet match: strokes | match | units', JSON.stringify(chips) === JSON.stringify(['strokes','match','units']), chips.join('|'));
 const row = () => [...t.querySelectorAll('tbody tr[data-pid="p0"] td')].map(td => td.textContent.trim());
 w.bgScApplyMode(t, 'strokes');
 ok('Strokes restores the real scores', row()[1] === '4' && row()[3] === '2');
