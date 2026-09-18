@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1717-->
+<!--BGVER=v2026.11.1718-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10859,7 +10859,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1717';
+const BG_BUILD = 'v2026.11.1718';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -56186,6 +56186,7 @@ async function _renderHomeInvitesNow() {
       if (r.kind === 'invite') return bgStatusChip(r.live ? 'live' : 'scheduled');   // v903
       if (r.kind === 't2round') return bgStatusChip('live');
       if (r.kind === 'myLive') return bgStatusChip('live');   // v910
+      if (r.kind === 'lgRound') return bgStatusChip('live');   // v1718
       return bgStatusChip('scheduled');   // scheduled, openRound, openGroup
     };
     list.innerHTML = rows.map((r, i) => {
@@ -56242,6 +56243,11 @@ async function _renderHomeInvitesNow() {
       else if (r.kind === 'openRound') { try { openManageOpenRound(r.tourney.id); } catch (e) {} }
       else if (r.kind === 'openGroup') { try { openManageTeeGroup(r.groupId); } catch (e) {} }
       else if (r.kind === 't2round') { try { openT2Round(r.code); } catch (e) {} }
+      else if (r.kind === 'lgRound') { try { lgOpenLaunchedRound(r.code); } catch (e) {} }   // v1718
+      else if (r.kind === 'evSched') {   // v1718: scheduled tournament day / league week -> the event itself
+        if (r.evKind === 't2') { try { openT2Home(r.tid); } catch (e) {} }
+        else { try { lgOpenWeek(r.sid, r.wid); } catch (e) {} }
+      }
       else if (r.kind === 'completed') {
         // v1125: a completed round opens the Games sheet rather than the read-only
         // round view. The sheet now carries Reopen, which was the only thing
@@ -56854,6 +56860,136 @@ async function _renderHomeInvitesNow() {
     if (_myLiveRows.length) rows.unshift.apply(rows, _myLiveRows);
   } catch (e) { console.warn('home my live rounds', e); }
 
+  // 5c) v1718 (Tyler, 9/18): "add scheduled rounds, tournaments, and leagues to the home
+  //     page under saved rounds but show them as scheduled until it starts and we can
+  //     offer a join now button. Only show that player's group."
+  //     His answers: the next 7 days; before the start a row is a SCHEDULED chip + date +
+  //     tee time + MY group, and tapping it opens the event (no button); with no carts
+  //     built yet, one row for the day/week saying groups aren't set; live first, then
+  //     upcoming by date, then completed (the sort sits just before the paint below).
+  //     Casual scheduled rounds were already here (section 2), and a tournament group
+  //     already becomes a live t2round row with its button the moment it has a round
+  //     (section 5). This adds what was missing: a tournament DAY before its group
+  //     launches, and league WEEKS (scheduled, and live with Join now).
+  try {
+    if (supa && _authUser) {
+      const _seen5c = new Set(); rows.forEach(r => { if (r && r.code) _seen5c.add(r.code); if (r && r.gameCode) _seen5c.add(r.gameCode); });
+      const _ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const _today = new Date(); const _todayS = _ymd(_today);
+      const _endS = _ymd(new Date(_today.getFullYear(), _today.getMonth(), _today.getDate() + 7));
+      const _inWin = (ds) => !!ds && String(ds).slice(0, 10) >= _todayS && String(ds).slice(0, 10) <= _endS;
+      const _dLbl = (ds) => { try { return new Date(String(ds).slice(0, 10) + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); } catch (e) { return String(ds || ''); } };
+      const _at = (ds, tt) => { try { let m = Date.parse(String(ds).slice(0, 10) + 'T12:00:00'); if (tt && typeof _lgTeeMins === 'function') { const v = _lgTeeMins(tt); if (v < 1e9) m = Date.parse(String(ds).slice(0, 10) + 'T00:00:00') + v * 60000; } return m; } catch (e) { return Infinity; } };
+      const _n5 = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
+      const _me5 = _n5(meName || '');
+      // ── Tournaments: a day in the window whose group has NOT launched yet ──
+      try {
+        const _evs = ((_pfT2Mine || await t2ListMine()) || [])
+          .filter(ev => ev && ev.status !== 'complete' && !(ev.settings && ev.settings.bracketChampion) && !(typeof bgIsDeadEvent === 'function' && bgIsDeadEvent(ev.id)))
+          .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''))).slice(0, 8);
+        const _per = await Promise.all(_evs.map(async ev => {
+          try {
+            const _pd = await Promise.all([Promise.resolve(t2GetPlayers(ev.id)).catch(() => []), Promise.resolve(t2GetDays(ev.id)).catch(() => [])]);
+            let _wd = new Set(); try { _wd = t2WithdrawnSet(ev); } catch (e) {}
+            const _meIds = new Set((_pd[0] || []).filter(p => p && !_wd.has(p.id) && ((p.user_id && p.user_id === _authUser.id) || (_me5 && _n5(p.display_name) === _me5))).map(p => p.id));
+            if (!_meIds.size) return [];   // I'm not playing in it
+            // the NEXT day in the window only -- one row per event
+            const _day = (_pd[1] || []).filter(d => d && d.status !== 'complete' && _inWin(d.play_date))
+              .sort((a, b) => String(a.play_date).localeCompare(String(b.play_date)) || (a.day_number - b.day_number))[0];
+            if (!_day) return [];
+            const _gs = (await Promise.resolve(t2GetGroups(_day.id)).catch(() => [])) || [];
+            const _mems = await Promise.all(_gs.map(g2 => Promise.resolve(t2GetGroupMembers(g2.id)).catch(() => [])));
+            let _myG = null;
+            _gs.forEach((g2, i) => { if (!_myG && (_mems[i] || []).some(m => m && _meIds.has(m.tournament_player_id))) _myG = g2; });
+            if (_myG && _myG.game_code) return [];   // launched: section 5 owns it (live row / Join)
+            const _dc = (ev.settings && ev.settings.dayCourses && ev.settings.dayCourses[_day.day_number]) || null;
+            const _multi = (_pd[1] || []).length > 1;
+            const _tee = _myG && _myG.tee_time ? _myG.tee_time : '';
+            return [{
+              kind: 'evSched', evKind: 't2', tid: ev.id, t2Id: ev.id, courseId: (_dc && _dc.id) || '',
+              course: (_dc && _dc.name) || ev.name || 'Tournament',
+              sub: '📅 ' + _dLbl(_day.play_date) + (_tee ? ' · ' + _tee : '') + ' · ' + (ev.name || 'Tournament')
+                + (_multi ? ' · Day ' + _day.day_number : '')
+                + (_myG ? ' · Group ' + _myG.group_number : ' · groups not set yet'),
+              sortAt: _at(_day.play_date, _tee), action: 'View'
+            }];
+          } catch (e) { return []; }
+        }));
+        _per.forEach(a => (a || []).forEach(r => rows.push(r)));
+      } catch (e) { console.warn('home t2 scheduled days', e); }
+      // ── Leagues: the live week, or the next week in the window ──
+      try {
+        const _sr = await supa.from('league_seasons').select('id,name,status,settings,leagues(name)').order('created_at', { ascending: false }).limit(12);
+        const _seasons = ((_sr && !_sr.error && _sr.data) || []).filter(s => s && !/complete|final|archiv|done|ended/i.test(String(s.status || '')));
+        if (_seasons.length) {
+          const _wr = await supa.from('league_weeks').select('id,season_id,week_number,status,date,tee_time,course_id,format_config')
+            .in('season_id', _seasons.map(s => s.id)).order('week_number', { ascending: true });
+          const _weeks = (_wr && !_wr.error && _wr.data) || [];
+          const _lgRows = await Promise.all(_seasons.map(async s => {
+            try {
+              if ((((s.settings || {}).play) || {}).self_scheduled) return [];   // post-when-you-play: no league night to show
+              const _mine = _weeks.filter(w => w.season_id === s.id);
+              const _liveW = _mine.filter(w => ['open', 'in_play', 'awaiting_cards'].indexOf(w.status) >= 0)[0];
+              const _nextW = _mine.filter(w => w.status === 'scheduled' && _inWin(w.date))[0];
+              const w = _liveW || _nextW; if (!w) return [];
+              const _rr = await supa.rpc('league_roster', { p_season_id: s.id });
+              const _ros = (_rr && !_rr.error && Array.isArray(_rr.data)) ? _rr.data : [];
+              const me = _ros.filter(m => m && m.user_id === _authUser.id)[0];
+              if (!me || me.status === 'organizer' || me.is_sub_pool) return [];   // not in the field
+              const _lgName = (s.leagues && s.leagues.name) || s.name || 'League';
+              const _crs = (w.course_id && typeof lgCourseName === 'function') ? (lgCourseName(w.course_id) || '') : '';
+              // MY group: a field week's foursome, or my fixture on a team / head-to-head week
+              let _code = '', _tee = '', _grpTxt = '';
+              const _gc = (typeof _lgGroups === 'function') ? _lgGroups(w) : null;
+              if (_gc && _gc.length) {
+                const g = _gc.filter(x => Array.isArray(x.mids) && x.mids.map(String).indexOf(String(me.id)) >= 0)[0];
+                if (g) { _code = g.code || ''; _tee = g.tee || ''; _grpTxt = 'Group ' + (g.g || '?'); }
+              }
+              if (!_grpTxt) {
+                const _ent = me.team_id || me.id;
+                const _mr = await supa.from('league_matchups').select('id,a_entrant_id,b_entrant_id,kind,game_code').eq('week_id', w.id);
+                const mu = ((_mr && !_mr.error && _mr.data) || []).filter(m => m && m.kind !== 'bye' && m.kind !== 'vs_field' && (m.a_entrant_id === _ent || m.b_entrant_id === _ent))[0];
+                if (mu) {
+                  _code = mu.game_code || (((w.format_config || {}).launched_code) || '');
+                  const _fm = (typeof _lgFixtureMeta === 'function') ? (_lgFixtureMeta(w, mu.id) || {}) : {};
+                  _tee = _fm.tee || '';
+                  let _opp = '';
+                  try {
+                    const _oid = (mu.a_entrant_id === _ent) ? mu.b_entrant_id : mu.a_entrant_id;
+                    const _om = _ros.filter(m => m && m.id === _oid)[0];
+                    if (_om) _opp = _om.display_name || '';
+                    else if (me.team_id) { const _tr = await supa.rpc('league_teams_get', { p_season_id: s.id }); const _t = ((_tr && !_tr.error && _tr.data) || []).filter(t => t && t.team_id === _oid)[0]; if (_t) _opp = _t.name || ''; }
+                  } catch (e) {}
+                  _grpTxt = _opp ? ('vs ' + _opp) : 'Your match';
+                }
+              }
+              if (!_tee && w.tee_time) _tee = w.tee_time;
+              if (_code) {
+                if (_seen5c.has(_code)) return [];
+                let _g = null; try { _g = await loadGame(_code); } catch (e) {}
+                if (_g && _g.finishedAt) return [];   // finished: it arrives as a completed round
+                return [{
+                  kind: 'lgRound', code: _code, sid: s.id, wid: w.id, courseId: w.course_id || '',
+                  course: _crs || _lgName,
+                  sub: _lgName + ' · Week ' + w.week_number + (_grpTxt ? ' · ' + _grpTxt : ''),
+                  action: 'Join now'
+                }];
+              }
+              return [{
+                kind: 'evSched', evKind: 'lg', sid: s.id, wid: w.id, courseId: w.course_id || '',
+                course: _crs || _lgName,
+                sub: '📅 ' + (w.date ? _dLbl(w.date) : 'Week ' + w.week_number) + (_tee ? ' · ' + _tee : '') + ' · ' + _lgName + ' · Week ' + w.week_number
+                  + ' · ' + (_grpTxt || 'groups not set yet'),
+                sortAt: w.date ? _at(w.date, _tee) : Infinity, action: 'View'
+              }];
+            } catch (e) { return []; }
+          }));
+          _lgRows.forEach(a => (a || []).forEach(r => rows.push(r)));
+        }
+      } catch (e) { console.warn('home league weeks', e); }
+    }
+  } catch (e) { console.warn('home scheduled events', e); }
+
   // 6) Completed round history (all-time, newest first) — the SAME canonical
   //    source as the Rounds tab's pastRounds (mineP.scoreHistory, the "single
   //    source of truth" per loadRounds), so Home "Your rounds" and the Rounds
@@ -56895,6 +57031,27 @@ async function _renderHomeInvitesNow() {
     rows.forEach(r => {
       r.isTourney = (r.kind === 't2round') || !!r.t2Id
         || !!(r.gameCode && _tc.has(r.gameCode)) || !!(r.code && _tc.has(r.code));
+    });
+  } catch (e) {}
+  // v1718 (Tyler): live rounds first, then everything upcoming by date (soonest
+  // first), then the completed rounds in the order they were built. Stable, so rows
+  // with no date keep the order they were collected in.
+  try {
+    const _bucket = r => (_bgRowIsLive(r) ? 0 : ((r && r.kind === 'completed') ? 2 : 1));
+    const _when = r => {
+      try {
+        if (r && typeof r.sortAt === 'number' && isFinite(r.sortAt)) return r.sortAt;
+        const t = r && r.tourney;
+        if (t && t.date) { let m = Date.parse(t.date + 'T12:00:00'); if (t.time && typeof _lgTeeMins === 'function') { const v = _lgTeeMins(t.time); if (v < 1e9) m = Date.parse(t.date + 'T00:00:00') + v * 60000; } if (isFinite(m)) return m; }
+      } catch (e) {}
+      return Infinity;
+    };
+    const _idx = new Map(); rows.forEach((r, i) => _idx.set(r, i));
+    rows.sort((a, b) => {
+      const ba = _bucket(a), bb = _bucket(b);
+      if (ba !== bb) return ba - bb;
+      if (ba === 1) { const wa = _when(a), wb = _when(b); if (wa !== wb) return (wa === Infinity) ? 1 : ((wb === Infinity) ? -1 : wa - wb); }
+      return _idx.get(a) - _idx.get(b);
     });
   } catch (e) {}
   _bgPaintHomeRows(rows);
@@ -62540,6 +62697,7 @@ function _bgRowIsLive(r) {
     if (!r) return false;
     if (r.kind === 't2round') return true;
     if (r.kind === 'myLive') return true;   // v910: my own in-progress round
+    if (r.kind === 'lgRound') return true;  // v1718: my league group's round, under way
     if (r.kind === 'invite') return !!r.live;
     return false;
   } catch (e) { return false; }
