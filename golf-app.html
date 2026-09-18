@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1716-->
+<!--BGVER=v2026.11.1717-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10859,7 +10859,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1716';
+const BG_BUILD = 'v2026.11.1717';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -20547,7 +20547,7 @@ function mergeRosters(base, incoming, removals) {
       if (!s) return;
       const rk = rosterRoundKey(s);
       if (!have.has(rk)) { hist.push(s); have.add(rk); _rrIdx.set(rk, hist.length - 1); }
-      else { const i = _rrIdx.get(rk); if (i != null && _rrRank(s) > _rrRank(hist[i])) hist[i] = s; }
+      else { const i = _rrIdx.get(rk); if (i != null) { const _was = hist[i]; if (_rrRank(s) > _rrRank(_was)) hist[i] = s; try { if (typeof bgHcpReconcile === 'function') hist[i] = bgHcpReconcile(hist[i], _was, s); } catch (e) {} } }   // v1717: newest handicap on/off choice wins
     });
     ex.scoreHistory = hist;
     // Profile fields: the active edit (incoming) wins when it has a real value.
@@ -22518,6 +22518,12 @@ async function archiveScoresFromRound(g) {
       t2Id: (g.t2 && g.t2.tournamentId) || null,
       lgSid: (g.lg && g.lg.sid) || null   // v1660: league round marker for the Rounds tab sections
     };
+    // v1717: carry MY "don't count toward my handicap" choice through a re-archive.
+    // Casual rounds only -- a tournament / league round always counts.
+    try {
+      const _hOld = (existingIdx >= 0) ? entry.scoreHistory[existingIdx] : null;
+      if (_hOld && _hOld.hcpSetAt && !record.t2Id && !record.lgSid && typeof bgApplyHcpOff === 'function') Object.assign(record, bgApplyHcpOff(record, !!_hOld.hcpOff, _hOld.hcpSetAt));
+    } catch (e) {}
 
     if (existingIdx >= 0) {
       // Update in place — preserves the array's position but refreshes values
@@ -32173,7 +32179,7 @@ function calcHandicapIndex(scoreHistory) {
   // GHIN has no weather PCC, so weather-adjusted values drifted from GHIN.
   // The 🌦️ adjustment still displays on each round; rounds saved before
   // differentialRaw existed fall back to `differential` (identical for them).
-  const _dOf = s => (s && s.differentialRaw != null) ? s.differentialRaw : (s ? s.differential : null);
+  const _dOf = s => (!s || s.hcpOff) ? null : ((s.differentialRaw != null) ? s.differentialRaw : s.differential);   // v1717: a round switched off never counts
   // Use most recent 20 rounds (sorted by date desc) that carry a differential.
   const recent = [..._list]
     .filter(s => _dOf(s) != null)
@@ -56421,7 +56427,8 @@ async function _renderHomeInvitesNow() {
               sub: (dt6 ? dt6 + ' · ' : '')
                 + ((s.gross == null && s.gameCode && _recLine6[s.gameCode])
                     ? _recLine6[s.gameCode]
-                    : ('Gross ' + (s.gross != null ? s.gross : '—'))),
+                    : ('Gross ' + (s.gross != null ? s.gross : '—')))
+                + (s.hcpOff ? ' · Not in HCP' : ''),   // v1717
               others: (_partners.get(_pKey(s)) || []),   // v886: who else played, and what they shot
               action: 'View'
             });
@@ -61801,7 +61808,7 @@ async function renderFriendStatsRounds(player, history) {
     const date = s.date ? new Date(s.date).toLocaleDateString() : '';
     const grossStr = (s.gross != null ? s.gross : '—');
     const rec = (s.gameCode && recByCode[s.gameCode]) ? recByCode[s.gameCode] : null;
-    const descLine = (rec && rec.scoreLine) ? rec.scoreLine : ('Gross ' + grossStr);
+    const descLine = ((rec && rec.scoreLine) ? rec.scoreLine : ('Gross ' + grossStr)) + (s.hcpOff ? ' · Not in HCP' : '');   // v1717
     row.innerHTML =
       '<div style="flex:1;min-width:0">' +
         '<div style="font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(s.course || 'Round') + '</div>' +
@@ -63147,6 +63154,108 @@ const _bgFinishedRoundCache = (function () {
   };
 })();
 
+/* ═══ v1717 (Tyler, 9/18): "a simple button to say don't count this round toward my
+   handicap ... always on by default, unless it is a scramble or other game where a HCP
+   could not be tracked."  Decisions he made: PER PLAYER (only my own index), on a SAVED
+   round, CASUAL rounds only (tournament + league rounds always count), and the round
+   stays in history tagged "Not in HCP" with its score, stats and units untouched.
+
+   Storage: a flag on MY scoreHistory record for that round, not on the shared game --
+   it is my handicap, and my index is published from my own roster (bgPublishMyHcp),
+   which is what every other login reads (bgHcpFor -> bgSharedHcp).
+     hcpOff       true while switched off
+     hcpSetAt     ms of the last flip, so a merge takes the NEWEST choice (both ways)
+     hcpOffDiff / hcpOffDiffRaw   the differentials, parked while off
+   While off, differential / differentialRaw are NULL on the record itself, so every
+   screen that reads them (index, Handicap Rounds card, trend, 9-hole expected-SD)
+   leaves the round out with no change of its own. Turning it back on restores them.
+   The archive (archiveScoresFromRound) and the roster merge (mergeRosters) both carry
+   the choice forward, so a re-archive or another device's copy cannot undo it. ═══ */
+function bgApplyHcpOff(s, off, at) {
+  const r = Object.assign({}, s || {});
+  try {
+    if (off) {
+      if (!r.hcpOff) { r.hcpOffDiff = (r.differential != null) ? r.differential : null; r.hcpOffDiffRaw = (r.differentialRaw != null) ? r.differentialRaw : null; }
+      else {
+        // already off: a freshly computed differential (re-archive) replaces the parked one
+        if (r.differential != null) r.hcpOffDiff = r.differential;
+        if (r.differentialRaw != null) r.hcpOffDiffRaw = r.differentialRaw;
+      }
+      r.differential = null; r.differentialRaw = null; r.hcpOff = true;
+    } else {
+      if (r.hcpOff) {
+        if (r.differential == null && r.hcpOffDiff != null) r.differential = r.hcpOffDiff;
+        if (r.differentialRaw == null && r.hcpOffDiffRaw != null) r.differentialRaw = r.hcpOffDiffRaw;
+      }
+      delete r.hcpOff; delete r.hcpOffDiff; delete r.hcpOffDiffRaw;
+    }
+    if (at) r.hcpSetAt = at;
+  } catch (e) {}
+  return r;
+}
+// Same round in two copies: keep the winner the merge picked, but apply whichever
+// copy holds the NEWER switch choice.
+function bgHcpReconcile(winner, a, b) {
+  try {
+    const ta = (a && a.hcpSetAt) || 0, tb = (b && b.hcpSetAt) || 0;
+    if (!ta && !tb) return winner;
+    const latest = (tb > ta) ? b : a;
+    if ((winner.hcpSetAt || 0) === (latest.hcpSetAt || 0) && !!winner.hcpOff === !!latest.hcpOff) return winner;
+    return bgApplyHcpOff(winner, !!latest.hcpOff, latest.hcpSetAt);
+  } catch (e) { return winner; }
+}
+function bgHcpSwitchable(s) { return !!(s && !s.t2Id && !s.lgSid && (s.hcpOff || s.differential != null)); }
+async function bgMyRoundRecord(code) {
+  const me = await getMeName(); if (!me || !code) return null;
+  const roster = await getPlayerRoster();
+  const mine = findMyRosterPlayer(roster, me);
+  if (!mine || !Array.isArray(mine.scoreHistory)) return null;
+  const i = mine.scoreHistory.findIndex(s => s && s.gameCode === code);
+  return (i < 0) ? null : { roster: roster, mine: mine, i: i, rec: mine.scoreHistory[i] };
+}
+async function bgSetRoundHcpOff(code, off) {
+  try {
+    const hit = await bgMyRoundRecord(code);
+    if (!hit || !bgHcpSwitchable(hit.rec)) return false;
+    hit.mine.scoreHistory[hit.i] = bgApplyHcpOff(hit.rec, !!off, Date.now());
+    await savePlayerRoster(hit.roster);
+    try { _bgHcpPublished = ''; await bgPublishMyHcp(); } catch (e) {}
+    return true;
+  } catch (e) { return false; }
+}
+// Paints the switch into the Games sheet of a finished round (openRoundBetsSheet).
+async function bgPaintRoundHcpSwitch(el, g) {
+  if (!el || !g || !g.code) return;
+  let hit = null; try { hit = await bgMyRoundRecord(g.code); } catch (e) {}
+  if (!el.isConnected) return;
+  if (!hit || !hit.rec) { el.innerHTML = ''; return; }   // not my round
+  const s = hit.rec;
+  const note = (t) => '<div class="small-text" style="color:var(--text-muted);margin-top:10px;padding:9px 11px;background:var(--surface-2);border-radius:8px;line-height:1.45">' + t + '</div>';
+  if (s.t2Id || s.lgSid) { el.innerHTML = ''; return; }   // event rounds always count -- nothing to switch
+  if (!bgHcpSwitchable(s)) {
+    let why = '';
+    try { const _tb = (typeof bgTeamBallLabel === 'function') ? bgTeamBallLabel(g) : ''; if (_tb) why = _tb + ' is a team format, so there is no individual score to post.'; } catch (e) {}
+    if (!why) why = s.complete ? 'It has no course rating / slope to post against.' : 'It is not a full ' + ((typeof roundHoles === 'function' ? roundHoles(g) : 18) || 18) + '-hole card.';
+    el.innerHTML = note('\u{1F3AF} This round doesn’t count toward your handicap. ' + escapeHtml(why));
+    return;
+  }
+  const on = !s.hcpOff;
+  el.innerHTML = '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px">'
+    + '<input type="checkbox" class="bg-sw" id="rb-hcp-sw"' + (on ? ' checked' : '') + '>'
+    + '<span style="flex:1;min-width:0"><strong style="font-size:13px">Count toward my handicap</strong>'
+    + '<br><span class="small-text" style="color:var(--text-muted)"><span class="bg-sw-on">On: this round is used for your index.</span><span class="bg-sw-off">Off: kept in your history, but not used for your index.</span></span></span>'
+    + '</label>';
+  const sw = el.querySelector('#rb-hcp-sw');
+  if (sw) sw.onchange = async () => {
+    const want = !!sw.checked;
+    sw.disabled = true;
+    const ok = await bgSetRoundHcpOff(g.code, !want);
+    sw.disabled = false;
+    if (!ok) { sw.checked = !want; try { showToast("Couldn’t change that — try again"); } catch (e) {} return; }
+    try { showToast(want ? 'Counting toward your handicap again ✓' : 'Not counting toward your handicap ✓'); } catch (e) {}
+  };
+}
+
 async function openRoundBetsSheet(code, courseName, opts) {
   if (!code) { try { showToast('No games recorded for this round'); } catch (e) {} return; }
   const ov = document.createElement('div');
@@ -63528,6 +63637,7 @@ async function openRoundBetsSheet(code, courseName, opts) {
   // thing this sheet was missing is the way back into an editable round.
   // Finished rounds only — a live round is already editable from the Score tab.
   if (g && g.finishedAt) {
+    html += '<div id="rb-hcpsw"></div>';   // v1717: "Count toward my handicap" switch (casual rounds)
     html += '<button id="rb-reopen" class="bg-btn bg-btn--full full" style="width:100%;margin-top:8px">\u{1F513} Reopen round</button>';
   }
   // v1143 (Tyler, 8/20): "once they do click on this screen, they need the option
@@ -63642,6 +63752,7 @@ async function openRoundBetsSheet(code, courseName, opts) {
   // re-archives the units and sets viewOnlyMode — then run the SAME reopen flow
   // the Games screen's own button uses. One implementation, and the sheet can
   // never reopen a round the app has not actually loaded into state.game.
+  try { const _hs = body.querySelector('#rb-hcpsw'); if (_hs && g && !_isT2Round && !(g.lg && g.lg.sid)) bgPaintRoundHcpSwitch(_hs, g); } catch (e) {}   // v1717
   { const rb = body.querySelector('#rb-reopen'); if (rb) rb.onclick = async () => {
       rb.disabled = true;
       try {
