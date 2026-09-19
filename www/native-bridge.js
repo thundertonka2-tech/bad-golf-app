@@ -152,6 +152,37 @@
       if (CRITICAL.indexOf(k) !== -1) { try { Prefs.set({ key: k, value: String(v) }); } catch (e) {} }
     };
     console.log('[native-bridge] Durable storage mirroring active.');
+
+    /* v1721 (Chris Curry, Kerbo 9/19): signed in 12 times in 13 minutes from the iOS
+       app -- every login was accepted by the server and every one was gone by the next
+       launch, so the email/password gate came straight back. The note at the top of
+       this block is the reason: the Supabase session lives in WKWebView localStorage,
+       which iOS evicts under storage pressure, and it was never one of the mirrored
+       keys. This adapter is handed to supabase-js as its `auth.storage`: reads come
+       from localStorage first and fall back to native Preferences, writes go to both.
+       supabase-js awaits getItem, so the restore is ordered, never a race. */
+    var AUTH_NS = 'bgauth:';
+    window.NativeAuthStorage = {
+      getItem: function (k) {
+        var v = null;
+        try { v = localStorage.getItem(k); } catch (e) {}
+        if (v != null) return Promise.resolve(v);
+        return Prefs.get({ key: AUTH_NS + k }).then(function (r) {
+          var pv = (r && r.value != null) ? r.value : null;
+          if (pv != null) { try { origSet(k, pv); } catch (e) {} console.log('[native-bridge] auth session restored from native storage'); }
+          return pv;
+        }).catch(function () { return null; });
+      },
+      setItem: function (k, v) {
+        try { origSet(k, v); } catch (e) {}
+        return Prefs.set({ key: AUTH_NS + k, value: String(v) }).catch(function () {});
+      },
+      removeItem: function (k) {
+        try { localStorage.removeItem(k); } catch (e) {}
+        return Prefs.remove({ key: AUTH_NS + k }).catch(function () {});
+      }
+    };
+    console.log('[native-bridge] Durable auth storage adapter ready.');
   })();
 
   /* ------------------------------------------------------------------
