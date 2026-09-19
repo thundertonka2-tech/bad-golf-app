@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1725-->
+<!--BGVER=v2026.11.1726-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10876,7 +10876,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1725';
+const BG_BUILD = 'v2026.11.1726';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -52940,7 +52940,12 @@ function renderBoard() {
   const hammer = results.hammer;
   const matchPlay = results.matchPlay;
   const teamMatch = results.teamMatch;
-  const teamLowball = results.teamLowball;
+  // v1726: a tournament's 4-man best ball is event-owned, so computeAllGameMoney leaves it
+  // out of `results` (no units inside the cart) -- which is why this card said "No games
+  // configured". The card is about the SCORE, so build it straight from the round.
+  const teamLowball = results.teamLowball || (function () {
+    try { const c = g.games && g.games.teamLowball; return (c && c.teamMode === '4man' && typeof calcTeamLowball4man === 'function') ? calcTeamLowball4man(g, c) : null; } catch (e) { return null; }
+  })();
   const comboScore = results.comboScore;
   const quota = results.quota;
   const teamQuota = results.teamQuota;
@@ -53688,7 +53693,13 @@ function renderBoard() {
     div.innerHTML = `<div class="head"><span class="lbl">🎯 Best Ball (4-man)</span><span class="val">thru ${r.played}</span></div>`;
     div.innerHTML += `<div class="sub">${escapeHtml(r.teamName)}</div>`;
     div.innerHTML += `<div class="sub" style="color:var(--accent)">Team total: ${r.played ? r.teamTotal : '—'}${relTxt}</div>`;
-    div.innerHTML += `<div class="sub">Settles vs the field in a tournament</div>`;
+    if (g.t2 && g.t2.tournamentId) {
+      // v1726: the other team(s) -- one live line per cart, filled in once the field loads.
+      div.innerHTML += `<div class="sub bb4-field" style="margin-top:4px">Loading the other team…</div>`;
+      try { bgFillBestBallField(g, div.querySelector('.bb4-field')); } catch (e) {}
+    } else {
+      div.innerHTML += `<div class="sub">Settles vs the field in a tournament</div>`;
+    }
     gr.appendChild(div);
   } else if (teamLowball && teamLowball.result) {
     const r = teamLowball.result;
@@ -54039,6 +54050,50 @@ function renderBoard() {
 // Returns the inner HTML for a scorecard score: the number wrapped in the
 // standard golf notation badge (circle = birdie, double circle = eagle+,
 // square = bogey, double square = double+; par = plain black number).
+/* v1726 (Tyler, 9/19 -- Test 4 V 4 Team Low Ball): "When we do Team low ball we should
+   see everyone's scorecard as well as the team's score ... it should be one score for the
+   team." Each cart playing a 4-man best ball gets one TEAM row under the players: the
+   score that counts on each hole (lowest ball, net when the game is net) and the team's
+   out / in / total. Used by the group card and the whole-field card. */
+function bgBestBallTeamRows(rounds, fieldPlayers, n18) {
+  let html = '';
+  try {
+    const _t = (typeof _t2Current !== 'undefined') ? _t2Current : null;
+    const byPid = {}; (fieldPlayers || []).forEach(p => { if (p && p.id) byPid[p.id] = p; });
+    (rounds || []).forEach(g => {
+      const cfg = g && g.games && g.games.teamLowball;
+      if (!cfg || cfg.teamMode !== '4man' || !Array.isArray(g.players)) return;
+      const team = (cfg.teamA || []).map(id => g.players.find(p => p.id === id)).filter(Boolean);
+      if (!team.length) return;
+      const val = (h) => {
+        const v = team.map(p => {
+          const s = (g.scores && g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
+          if (s === null) return null;
+          return (cfg.net && g.sis) ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
+        }).filter(x => x !== null);
+        return v.length ? Math.min.apply(null, v) : null;
+      };
+      // Name: the event team when the whole cart is one team, else the group number.
+      let name = '';
+      try {
+        const ks = [...new Set(team.map(p => (p.t2pid && byPid[p.t2pid]) ? byPid[p.t2pid].team : null))];
+        if (ks.length === 1 && ks[0] && _t && typeof t2TeamName === 'function') name = t2TeamName(_t, ks[0]);
+      } catch (e) {}
+      if (!name) name = (g.t2 && g.t2.group) ? ('Group ' + g.t2.group) : 'Team';
+      let row = '<tr class="sc-team-row" style="background:var(--surface-2)"><td class="player-name" style="font-weight:800;color:var(--accent)">🏌️ ' + escapeHtml(name) + '<div style="font-size:10px;font-weight:600;color:var(--text-muted)">best ball' + (cfg.net ? ' · net' : '') + '</div></td>';
+      let out = 0, inT = 0, anyO = false, anyI = false;
+      for (let h = 0; h < 9; h++) { const s = val(h); if (s != null) { out += s; anyO = true; row += '<td style="font-weight:700">' + scoreMark(s, g.pars[h]) + '</td>'; } else row += '<td>—</td>'; }
+      row += '<td class="total">' + (anyO ? out : '—') + '</td>';
+      if (n18 !== false) {
+        for (let h = 9; h < 18; h++) { const s = val(h); if (s != null) { inT += s; anyI = true; row += '<td style="font-weight:700">' + scoreMark(s, g.pars[h]) + '</td>'; } else row += '<td>—</td>'; }
+        row += '<td class="total">' + (anyI ? inT : '—') + '</td>';
+      }
+      row += '<td class="total" style="color:var(--accent)">' + ((anyO || anyI) ? (out + inT) : '—') + '</td></tr>';
+      html += row;
+    });
+  } catch (e) { console.warn('best ball team rows', e); }
+  return html;
+}
 function scoreMark(s, par) {
   if (s == null) return '—';
   if (par == null) return String(s);
@@ -55499,9 +55554,38 @@ function renderScorecard(g, totals, fieldSkinMap) {
     });
   }
 
+  // v1726: the cart's team best-ball row under its players.
+  try { if (!scrambleActive && !ryderCupActive) html += bgBestBallTeamRows([g], (window._bgT2PlayersCache && g.t2 && window._bgT2PlayersCache[g.t2.tournamentId]) || [], _n18); } catch (e) {}
   html += '</tbody>';
   t.innerHTML = html;
   try { bgMatchViewDecorate(t, g); } catch (e) {}   // v1566: Match / Strokes tabs
+}
+
+// v1726: the Best Ball card's head-to-head line -- every cart's team total, low first.
+async function bgFillBestBallField(g, el) {
+  try {
+    if (!el || !g || !g.t2 || !g.t2.tournamentId) return;
+    const t = await t2Get(g.t2.tournamentId); if (!t) { el.textContent = ''; return; }
+    const [raw, evp] = await Promise.all([loadTourneyRawRounds(t).catch(() => []), t2GetPlayers(t.id).catch(() => [])]);
+    try { window._bgT2PlayersCache = window._bgT2PlayersCache || {}; window._bgT2PlayersCache[t.id] = evp; } catch (e) {}
+    const byPid = {}; (evp || []).forEach(p => { if (p && p.id) byPid[p.id] = p; });
+    const rows = [];
+    (raw || []).forEach(row => {
+      const rg = row && row.data ? row.data : row;
+      const c = rg && rg.games && rg.games.teamLowball;
+      if (!c || c.teamMode !== '4man' || Number((rg.t2 && rg.t2.day) || 1) !== Number((g.t2 && g.t2.day) || 1)) return;
+      const r = calcTeamLowball4man(rg, c); if (!r || !r.result) return;
+      let name = '';
+      try { const ks = [...new Set((rg.players || []).map(p => (p.t2pid && byPid[p.t2pid]) ? byPid[p.t2pid].team : null))]; if (ks.length === 1 && ks[0]) name = t2TeamName(t, ks[0]); } catch (e) {}
+      if (!name) name = 'Group ' + ((rg.t2 && rg.t2.group) || '?');
+      rows.push({ name: name, total: r.result.teamTotal, par: r.result.parTotal, thru: r.result.played, mine: rg.code === g.code, done: !!rg.finishedAt });
+    });
+    if (rows.length < 2) { el.textContent = 'Settles against the other team once their group starts.'; return; }
+    rows.sort((a, b) => (a.thru && b.thru ? (a.total - a.par) - (b.total - b.par) : b.thru - a.thru));
+    const rel = r => { const d = r.total - r.par; return r.thru ? (d === 0 ? 'E' : (d > 0 ? '+' + d : String(d))) : '—'; };
+    el.innerHTML = rows.map(r => '<div style="display:flex;gap:8px;' + (r.mine ? 'font-weight:700;' : '') + '"><span style="flex:1;min-width:0">' + escapeHtml(r.name) + '</span><span>' + (r.thru ? r.total + ' (' + rel(r) + ')' : '—') + '</span><span style="color:var(--text-muted);min-width:52px;text-align:right">' + (r.done ? 'final' : 'thru ' + r.thru) + '</span></div>').join('')
+      + '<div class="small-text" style="color:var(--text-muted);margin-top:3px">Lowest team total wins — settles on Tournament Results once every group is in.</div>';
+  } catch (e) { try { el.textContent = ''; } catch (e2) {} }
 }
 
 // ============================================================
@@ -86580,6 +86664,11 @@ function _t2BuildFieldScorecardHtml(rawRounds, headerG, fieldSkinMap, fieldPlaye
     }
   } catch (e) {}
 
+  // v1726: every cart's team best-ball row under the whole field.
+  try {
+    try { if (headerG && headerG.t2 && headerG.t2.tournamentId && fieldPlayers && fieldPlayers.length) { window._bgT2PlayersCache = window._bgT2PlayersCache || {}; window._bgT2PlayersCache[headerG.t2.tournamentId] = fieldPlayers; } } catch (e) {}
+    html += bgBestBallTeamRows(rounds, fieldPlayers, true);
+  } catch (e) {}
   html += '</tbody>';
   return html;
 }
