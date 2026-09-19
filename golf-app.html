@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1719-->
+<!--BGVER=v2026.11.1720-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10859,7 +10859,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1719';
+const BG_BUILD = 'v2026.11.1720';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -31627,6 +31627,26 @@ async function ensureUniqueGameCode(code) {
 // console-only, so debugging keeps the trail and players stop seeing plumbing.
 // User-action feedback toasts ("Saved ✓", "Round started", errors) are untouched.
 function bgQuietNote(msg) { try { console.log('[bad-golf] ' + msg); } catch (e) {} }
+/* v1720 (Tyler, 9/19): "it takes a really long time and almost feels like things are hung
+   up. Can you at least show a progress bubble?" One floating pill with the app's spinner,
+   for the long awaits that used to run behind a disabled button with nothing on screen.
+   bgBusyPill('Saving your round…') -> { set(msg), done() }. Always call done() in a finally. */
+function bgBusyPill(msg) {
+  let el = null;
+  try {
+    el = document.createElement('div');
+    el.className = 'bg-inline-load bg-busy-pill';
+    el.setAttribute('role', 'status');
+    el.style.cssText = 'position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:100090;padding:10px 16px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:999px;box-shadow:0 6px 24px rgba(0,0,0,.28);max-width:88vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none';
+    el.innerHTML = '<span class="sp"></span><span class="bg-busy-txt"></span>';
+    el.querySelector('.bg-busy-txt').textContent = msg || 'Working\u2026';
+    document.body.appendChild(el);
+  } catch (e) { el = null; }
+  return {
+    set: (m) => { try { const t = el && el.querySelector('.bg-busy-txt'); if (t) t.textContent = m; } catch (e) {} },
+    done: () => { try { if (el) el.remove(); } catch (e) {} el = null; }
+  };
+}
 function showToast(msg) {
   if (window._suppressToasts) return;   // silent mode (used by live-edit auto-save's dry-run gatherSetup)
   const t = $('toast');
@@ -68385,6 +68405,14 @@ async function t2RemoveDay(dayNumber) {
 let _t2LastDeleteScope = 'everyone';
 async function t2Delete(id) {
   if (!id) return false;
+  // v1720 (Tyler, 9/19): "if I am setting up a tournament and hit delete, it takes a really
+  // long time." A pill for the wait, and (in _t2DeleteInner) no more client-side
+  // tear-down after the server has already done the whole thing.
+  const _pill = bgBusyPill('Deleting tournament\u2026');
+  try { return await _t2DeleteInner(id); }
+  finally { try { _pill.done(); } catch (e) {} }
+}
+async function _t2DeleteInner(id) {
   _t2LastDeleteScope = 'everyone';
   // v1677 (Tyler, 9/11): "make sure when I delete a tourney or a round it truly deletes
   // everything, all stats, badges, and money." The client path below is a dozen
@@ -68404,11 +68432,17 @@ async function t2Delete(id) {
         _srvCodes = Array.isArray(_rpc.data.rounds) ? _rpc.data.rounds : [];
         try { bgMarkEventGone(id); } catch (e) {}
         // mirror the server's work into THIS device's caches (the codes it purged)
-        try { for (const c of _srvCodes) { try { tombstoneRound(c); } catch (e) {} try { localStorage.removeItem('game:' + c); } catch (e) {} try { await bgBadgesRevokeRound(c); } catch (e) {} } } catch (e) {}
+        try { _srvCodes.forEach(c => { try { tombstoneRound(c); } catch (e) {} try { localStorage.removeItem('game:' + c); } catch (e) {} }); } catch (e) {}
+        try { await Promise.all(_srvCodes.map(c => Promise.resolve(bgBadgesRevokeRound(c)).catch(() => {}))); } catch (e) {}   // v1720: together, not one after another
         try { setTimeout(() => { try { bgBadgesRecompute({ league: true }); } catch (e) {} }, 500); } catch (e) {}   // v1678: Commish comes off if that was the last event I ran
       } else if (_rpc && _rpc.error) console.warn('bg_t2_delete_everywhere', _rpc.error);
     }
   } catch (e) { console.warn('bg_t2_delete_everywhere', e); }
+  // v1720: the server transaction succeeded -- the tournament tree, its rounds, invites,
+  // tombstones and dead-events marker are all gone. Everything below is the pre-v1677
+  // client path: a dozen sequential round trips that delete rows which no longer exist
+  // and then read the row back to confirm. That was most of the wait. Done here.
+  if (_srvCodes !== null) { _t2LastDeleteScope = 'everyone'; return true; }
   try {
     // Delete child rows FIRST so a foreign-key constraint can never silently block the
     // tournament delete. The old one-line delete failed whenever children lingered,
@@ -103608,14 +103642,17 @@ async function init() {
   // and it had no double-tap guard, behind a 6s awaited save. Cleared in a
   // finally so no early return can strand it.
   let _bgFinishingRound = false;
+  let _bgFinishPill = null;   // v1720
   $('summary-confirm').onclick = async () => {
     if (_bgFinishingRound) return;
     try { bgNoteSummaryDismissed(); } catch (e) {}   // v1485: Save & return home is a dismissal too
     _bgFinishingRound = true;
     try { const _fb = $('summary-confirm'); if (_fb) _fb.disabled = true; } catch (e) {}
+    try { _bgFinishPill = bgBusyPill('Saving your round\u2026'); } catch (e) { _bgFinishPill = null; }   // v1720
     try { await _bgSummaryConfirmInner(); }
     finally {
       _bgFinishingRound = false;
+      try { if (_bgFinishPill) { _bgFinishPill.done(); _bgFinishPill = null; } } catch (e) {}   // v1720: backstop
       try { const _fb = $('summary-confirm'); if (_fb) _fb.disabled = false; } catch (e) {}
     }
   };
@@ -103630,7 +103667,11 @@ async function init() {
       // v1357: last chance to stamp account ids while this device still has write
       // permission on the round. Awaited here (unlike the Finish tap) because this
       // path already awaits the archive, and after this the round is closed.
-      try { await bgStampRoundUids(g); } catch (e) {}
+      // v1720: bounded -- this is one lookup PER player without an account id, in series,
+      // and it ran with no time limit before anything else on the close. A guest-heavy
+      // card on course wifi is exactly where "hit close and it hangs" came from.
+      try { const _su = bgStampRoundUids(g); if (typeof _promiseTimeout === 'function') await _promiseTimeout(_su, 2500, 'stampUids-finish'); else await _su; } catch (e) {}
+      try { if (_bgFinishPill) _bgFinishPill.set(g.reopenedAt ? 'Updating your rounds\u2026' : 'Saving your round\u2026'); } catch (e) {}
       // v1044 (Tyler, 8/16): Gregory's Senior Sunday card archived as a 79 while his
       // scorecard read 77 -- holes 11 and 14 were corrected during a REOPEN, the round
       // was finished a second time, and the archive kept the pre-edit scores. He then
@@ -103686,6 +103727,7 @@ async function init() {
         if (typeof _promiseTimeout === 'function') await _promiseTimeout(_ar, 3000, 'addToRecent-finish');
         else await _ar;
       } catch (e) { console.warn('addToRecent (pre-release) failed/slow:', e); }
+      try { if (_bgFinishPill) { _bgFinishPill.done(); _bgFinishPill = null; } } catch (e) {}   // v1720: the user is free from here; the rest is background bookkeeping
       try { _bgReleaseSummaryUI(g); } catch (e) { console.warn('summary release failed:', e); }
       try { bgPostFinishGrowth(g); } catch (e) {}   // v1243: rating ask / invite nudge, one max, delayed
       // v1253 (Tyler): "could we add something to the end of the rounds... when an
