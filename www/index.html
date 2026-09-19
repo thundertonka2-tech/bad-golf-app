@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1718-->
+<!--BGVER=v2026.11.1719-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10857,7 +10857,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1718';
+const BG_BUILD = 'v2026.11.1719';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -16151,7 +16151,11 @@ function wireAuthUI() {
     const em = (document.getElementById('auth-email').value || '').trim();
     const pw = document.getElementById('auth-password').value || '';
     if (!em || !pw) { showErr('Enter your email and password.'); return; }
-    const err = await signInWithEmail(em, pw);
+    if (window._bgSignInBusy) return;   // v1719: one sign-in at a time (Chris Curry's sessions landed in pairs a second apart)
+    window._bgSignInBusy = true; try { if (si) { si.disabled = true; si.textContent = 'Signing in\u2026'; } } catch (e) {}
+    let err = null;
+    try { err = await signInWithEmail(em, pw); }
+    finally { window._bgSignInBusy = false; try { if (si) { si.disabled = false; si.textContent = 'Sign in'; } } catch (e) {} }
     if (err) { showErr(err); return; }
     // v974: remember the address so the box is pre-filled next time even if iOS
     // declines to save the password. signOutUser() deliberately does NOT clear
@@ -33271,6 +33275,8 @@ function restoreSetupDraft(d) {
 
 async function setupNewGameForm(prefill) {
   try { state._schedStartPids = null; } catch (e) {}   // cleared each form build; set by scheduled-start flows
+  // v1719: the pickers must not treat rows arriving during this build as newcomers (see renderParticipantPickers).
+  try { state._bgFormBuilding = true; clearTimeout(window._bgFormBuildT); window._bgFormBuildT = setTimeout(() => { state._bgFormBuilding = false; }, 20000); } catch (e) {}
   // Safety: a normal (non-tournament) setup must never inherit the locked-group
   // hide styles from a prior group/day config. (Tyler, June 2026.)
   /* v1492 (Tyler): the league's Side games screen adds these three classes and
@@ -33587,6 +33593,7 @@ async function setupNewGameForm(prefill) {
     }
   } catch (e) {}
   try { refreshParHoleChips(); } catch (e) {}   // v1526: CTP = par 3s only, Long Drive = par 5s only
+  try { state._bgFormBuilding = false; clearTimeout(window._bgFormBuildT); state._bgPoolKnown = null; } catch (e) {}   // v1719: form settled; pickers learn the roster afresh
 }
 
 // Add a player row to the setup form. Supports both legacy single-name calls
@@ -37855,7 +37862,15 @@ function renderParticipantPickers() {
           // render of a form (a saved/edited round) just learns who is there, so a
           // saved "Kevin is out" stays out.
           const _known = state._bgPoolKnown && state._bgPoolKnown[spec.key];
-          if (_known) players.forEach(p => { if (!_known.has(p.name) && (!_dropped || !_dropped.has(p.name))) partSet.add(p.name); });
+          /* v1719 (Tyler, Kerbo 9/19): "this change turned on the birdie bump for Kevin even
+             though I never selected him." This newcomer rule fired while the group-games form
+             was being BUILT (rows arrive one at a time, then the saved games are re-applied), so
+             a player who was in the group all along counted as "added after the pool went on"
+             and got seated. It is for a player added to a round the user already has on
+             screen; the saved config is the truth while a form is loading, and a tournament
+             group's picks are exactly what the scorekeeper saved. */
+          const _settled = !state._bgFormBuilding && !state._bgCfgRestoring && !state._t2GroupGamesConfig && !state._liveEditBuilding;
+          if (_known && _settled) players.forEach(p => { if (!_known.has(p.name) && (!_dropped || !_dropped.has(p.name))) partSet.add(p.name); });
           state._bgPoolKnown[spec.key] = new Set(players.map(p => p.name));
         } catch (e) {}
         state._bgPoolSeeded.add(spec.key);
@@ -37980,6 +37995,7 @@ function restoreTeamPickerFromSaved(gameKey, cfg, config) {
 // pre-populated, but the user can still edit anything before tapping Start.
 function applySavedConfig(config) {
   if (!config) return;
+  try { state._bgCfgRestoring = true; } catch (e) {}   // v1719
   try { if (typeof rebuildParSiGrids === 'function' && Array.isArray(config.pars)) rebuildParSiGrids(config.pars.filter(function(p){return p!=null;}).length === 9 ? 9 : 18); } catch (e) {}
 
   // Pars and stroke indexes
@@ -38584,6 +38600,9 @@ function applySavedConfig(config) {
       });
     }
   });
+  // v1719: the saved lists above are the truth -- forget what the pickers thought the
+  // roster was, so the next render cannot read anyone as a newcomer to auto-seat.
+  try { state._bgPoolKnown = null; state._bgPoolDropped = null; state._bgCfgRestoring = false; } catch (e) {}
   // Snake — its own participant list (games.junk.snakeParticipants/Names), handled
   // here because the generic loop above skips it (no cfgKey). Prefer names (stable).
   try {
@@ -38706,7 +38725,17 @@ function gatherSetup() {
         const _tp = teeObj && Array.isArray(teeObj.pars) ? teeObj.pars : null;
         if (_tp && _tp.length === pars.length) _parTotalP = _tp.reduce((a, b) => a + (b || 0), 0);
       } catch (e) {}
-      const courseHcp = computeCourseHcp(hcpIndex, teeObj, _parTotalP);
+      /* v1719 (Tyler, Kerbo 9/19): "if I manually override or enter in the HCPs they need to
+         stay there and not be adjusted to the tee." A tournament or league round is launched
+         on the handicap the commissioner keyed in (t2LaunchDayRounds: hcp = rawHcp = the
+         event handicap, no conversion). But any Edit-settings save came back through THIS
+         form, which reads the box as a handicap INDEX and converts it to a course handicap
+         off the tee -- Tyler's 5/8/15 became 7/10/18 the moment he fixed a side game. On an
+         event round the number in the box IS the playing handicap. Casual rounds keep the
+         index -> course handicap conversion. */
+      const _fixedHcp = !!(typeof state !== 'undefined' && state && (state._t2DayConfig || state._t2GroupGamesConfig || state._t2GroupConfig || state._lgSideGamesCfg
+        || (state.editingLiveRound && state.game && ((state.game.t2 && state.game.t2.tournamentId) || (state.game.lg && state.game.lg.sid)))));
+      const courseHcp = _fixedHcp ? Math.round(hcpIndex) : computeCourseHcp(hcpIndex, teeObj, _parTotalP);
       players.push({
         id: playerId,
         puid: row.dataset.puid, // stable row id — keys team assignments (name-edit safe)
@@ -38728,7 +38757,7 @@ function gatherSetup() {
         lastName,
         name, // legacy combined-name field — kept for backwards compat with internal lookups
         hcp: courseHcp,
-        index: hcpIndex, // the handicap index typed/shown in the box (plus = negative)
+        index: _fixedHcp ? null : hcpIndex, // the handicap index typed/shown in the box (plus = negative); v1719: an event round carries none
         playsGross,
         teeLabel: teeLabel || null
       });
@@ -100466,6 +100495,7 @@ async function enterEditLiveRoundMode() {
   // could persist a half-built form (e.g. tees/handicaps not yet restored) and
   // clobber the running round. Cleared at the end of this function. (June 2026)
   state._liveEditBuilding = true;
+  let _leFormP = null, _leFormDone = false;   // v1719
 
   // Hide the no-game pickers, show the with-game form
   $('setup-no-game').style.display = 'none';
@@ -100507,8 +100537,7 @@ async function enterEditLiveRoundMode() {
     // setupNewGameForm awaits network (course scorecard load). Cap it at 8s
     // so a slow/flaky connection can't strand the form half-built —
     // applySavedConfig below refills every field directly either way.
-    await Promise.race([
-      setupNewGameForm({
+    _leFormP = setupNewGameForm({
         course: g.course,
         pars: g.pars,
         sis: g.sis,
@@ -100523,11 +100552,11 @@ async function enterEditLiveRoundMode() {
         trackSands: !!g.trackSands,
         naturalBoost: !!g.naturalBoost,
         hydration: g.hydration || null
-      }),
-      new Promise(res => setTimeout(res, 8000))
-    ]);
+      });
+    try { _leFormP.then(() => { _leFormDone = true; }).catch(() => { _leFormDone = true; }); } catch (e) { _leFormDone = true; }
+    await Promise.race([_leFormP, new Promise(res => setTimeout(res, 8000))]);
   } catch (e) { console.error('edit-live-round: form build failed:', e); }
-  try {
+  const _leApplyCfg = () => { try {
     applySavedConfig({
       course: g.course,
       pars: g.pars,
@@ -100547,7 +100576,8 @@ async function enterEditLiveRoundMode() {
   } catch (e) {
     console.error('edit-live-round: prefill failed:', e);
     showToast("Couldn't load every round setting — tap Setup again to retry");
-  }
+  } };
+  _leApplyCfg();
   setTimeout(updateSetupGates, 0);
   // Apply (or clear) the group-only game restriction. Restores ALL games for a
   // normal live edit, hides the group-disallowed set only during group config.
@@ -100573,7 +100603,20 @@ async function enterEditLiveRoundMode() {
     };
   } catch (e) {}
   // Form is fully restored — allow auto-save again.
-  state._liveEditBuilding = false;
+  /* v1719 (Kevin: "when he goes back in to change a setting, the junk bets are removed").
+     On a slow connection the form build outlasts the 8 s race above. Its tail then lands
+     AFTER the prefill: the junk grid is rebuilt (GIR only), every game box is reset and the
+     participants wiped -- and the next tap auto-saved that half-built form over the round.
+     The group-games screen has had this re-apply since v517; the live edit never did. Hold
+     the auto-saver until the build really finishes, then put the round's settings back. */
+  if (_leFormDone) state._liveEditBuilding = false;
+  else {
+    state._liveEditBuilding = true;
+    const _leG = g;
+    const _leSettle = () => { try { if (state.editingLiveRound && state.game === _leG) { _leApplyCfg(); try { t2FilterGroupConfigGames(!!(state._t2GroupConfig || (_leG.t2 && _leG.t2.tournamentId))); } catch (e) {} setTimeout(updateSetupGates, 0); } } catch (e) {} state._liveEditBuilding = false; };
+    try { _leFormP.then(_leSettle).catch(_leSettle); } catch (e) { _leSettle(); }
+    setTimeout(() => { if (state._liveEditBuilding && !_leFormDone) { _leFormDone = true; _leSettle(); } }, 25000);   // never hold the auto-saver forever
+  }
 }
 
 // Exit edit-live-round mode without saving
@@ -100720,7 +100763,10 @@ function applyLiveEditMerge(g, setup) {
       if (!Object.keys(g.groupGames).length) g.groupGames = undefined;
     }
   } catch (e) {}
-  g.hcpRules = setup.hcpRules;
+  { const _oldR = g.hcpRules || {}; g.hcpRules = setup.hcpRules;
+    // v1719: the launch stamps (hcp18 / holes / set) are not on the form; a live edit of an
+    // event round used to drop them, which is how PITCH84 lost hcp18. Carry them over.
+    try { if ((g.t2 && g.t2.tournamentId) || (g.lg && g.lg.sid)) ['hcp18', 'holes', 'set'].forEach(k => { if (_oldR[k] !== undefined && g.hcpRules[k] === undefined) g.hcpRules[k] = _oldR[k]; }); } catch (e) {} }
   g.unranked = setup.unranked || false;
   g.trackPutts = setup.trackPutts || false;
   g.trackGirs = setup.trackGirs || false;
