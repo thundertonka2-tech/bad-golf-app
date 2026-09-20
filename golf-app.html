@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1733-->
+<!--BGVER=v2026.11.1734-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10890,7 +10890,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1733';
+const BG_BUILD = 'v2026.11.1734';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -20062,7 +20062,21 @@ async function _bgOverlayCourseShards(base) {
   meta.forEach(function (m) { var d = m && cache.rows[m.code]; if (d) { for (var k in d) base[k] = d[k]; } });
   return base;
 }
+/* v1734 (measured on Tyler's phone, 9/20 15:58:45): a course list asked for the library index
+   and the scorecard-image map ~25 times EACH inside five seconds - every row called these and
+   the 20 s cache is only filled when the first call FINISHES, so 25 callers that start together
+   all miss it. Callers that arrive while a load is running now wait for that one load. */
+let _courseSavesP = null;
 async function getCourseSaves() {
+  if (_courseSavesCache != null && (Date.now() - _courseSavesAt < 20000)) {
+    try { return JSON.parse(_courseSavesCache); } catch (e) { _courseSavesCache = null; }
+  }
+  if (!_courseSavesP) { _courseSavesP = _bgGetCourseSavesRaw(); _courseSavesP.then(() => { _courseSavesP = null; }, () => { _courseSavesP = null; }); return await _courseSavesP; }
+  const _b = await _courseSavesP;
+  try { if (_courseSavesCache != null) return JSON.parse(_courseSavesCache); } catch (e) {}
+  return _b;
+}
+async function _bgGetCourseSavesRaw() {
   if (_courseSavesCache != null && (Date.now() - _courseSavesAt < 20000)) {
     try { return JSON.parse(_courseSavesCache); } catch (e) { _courseSavesCache = null; }
   }
@@ -23358,9 +23372,17 @@ function openDuplicateCompare(id) {
 // ---- Scorecard image links (shared) — admins paste a URL to a photo/scan of the
 // real scorecard so anyone verifying can see the actual pars/ratings to key in. ----
 const KEY_SCORECARD_IMGS = 'golf:course-scorecard-imgs';
-async function getScorecardImgs() { try { const v = await safeGet(KEY_SCORECARD_IMGS, true); return v ? (JSON.parse(v) || {}) : {}; } catch (e) { return {}; } }
+let _scImgsP = null, _scImgsV = null, _scImgsAt = 0;   // v1734: one shared read (60 s), not one per course row
+async function getScorecardImgs() {
+  try { if (_scImgsV && (Date.now() - _scImgsAt) < 60000) return Object.assign({}, _scImgsV); } catch (e) {}
+  if (!_scImgsP) {
+    _scImgsP = (async () => { try { const v = await safeGet(KEY_SCORECARD_IMGS, true); const m = v ? (JSON.parse(v) || {}) : {}; _scImgsV = m; _scImgsAt = Date.now(); return m; } catch (e) { return {}; } })();
+    _scImgsP.then(() => { _scImgsP = null; }, () => { _scImgsP = null; });
+  }
+  const m = await _scImgsP; return Object.assign({}, m || {});
+}
 async function getScorecardImg(courseId) { try { const m = await getScorecardImgs(); return (m && m[courseId]) || ''; } catch (e) { return ''; } }
-async function setScorecardImg(courseId, url) { try { const m = await getScorecardImgs(); if (url) m[courseId] = url; else delete m[courseId]; return await safeSet(KEY_SCORECARD_IMGS, JSON.stringify(m), true); } catch (e) { return false; } }
+async function setScorecardImg(courseId, url) { try { const m = await getScorecardImgs(); if (url) m[courseId] = url; else delete m[courseId]; _scImgsV = null; _scImgsAt = 0; return await safeSet(KEY_SCORECARD_IMGS, JSON.stringify(m), true); } catch (e) { return false; } }
 
 // Custom EVENT images (scheduled rounds + tournaments). Kept in their own shared
 // singleton keyed by event id — NOT in the tourneys blob — so big data-URLs never
@@ -32458,7 +32480,7 @@ async function resyncMyStats() {
         if (hadBefore.has(c)) refreshed++; else added++;
       } catch (e) {}
     }
-    try { window._bgMissingTried = {}; } catch (e) {}
+    try { window._bgMissingTried = {}; localStorage.removeItem('golf:heal-tried'); } catch (e) {}   // v1734: the manual Resync really does retry everything
     try { if (typeof renderHome === 'function') await renderHome(); } catch (e) {}
     try { if (typeof renderStats === 'function') await renderStats(); } catch (e) {}
     try { if (typeof loadRounds === 'function') await loadRounds(); } catch (e) {}
@@ -56727,6 +56749,7 @@ let _homeInvP = null, _homeInvAgain = false;
    Home now remembers what it last showed (per account, on this phone) and paints that
    FIRST, before any network; the normal load then replaces it in place. Same rows, same
    buttons - the saved rows are plain data and go through the very same painter. */
+function _bgHomeLiveSig(rows) { try { return (rows || []).filter(r => r && r.kind !== 'completed').map(r => (r.kind + ':' + (r.code || r.gameCode || (r.tourney && r.tourney.id) || r.groupId || ''))).join(','); } catch (e) { return ''; } }
 function _bgHomeSnapKey(kind) { try { return 'golf:home-snap:' + kind + ':' + ((_authUser && _authUser.id) || 'anon'); } catch (e) { return 'golf:home-snap:' + kind + ':anon'; } }
 function _bgHomeSnapLoad(kind, maxAgeMs) {
   try {
@@ -56799,7 +56822,7 @@ async function _renderHomeInvitesNow() {
       if (r.kind === 'lgRound') return bgStatusChip('live');   // v1718
       return bgStatusChip('scheduled');   // scheduled, openRound, openGroup
     };
-    list.innerHTML = rows.map((r, i) => {
+    const _rowsHtml = rows.map((r, i) => {
       const extras =
         (r.kind === 'scheduled' ? '<button class="bg-btn bg-btn--sm small home-edit-details-btn" data-i="' + i + '" style="flex:1 1 auto;min-width:88px">' + (r.isCreator ? 'Edit details' : 'View details') + '</button>' : '') +
         (r.kind === 'scheduled' ? '<button class="bg-btn bg-btn--sm small home-edit-settings-btn" data-i="' + i + '" style="flex:1 1 auto;min-width:88px">' + (r.isCreator ? 'Edit settings' : 'View settings') + '</button>' : '') +
@@ -56845,6 +56868,14 @@ async function _renderHomeInvitesNow() {
         (extras ? '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">' + extras + '</div>' : '') +
       '</div>';
     }).join('');
+    /* v1734 (Tyler): "the tournament icons keep flashing as it's updating." Every Home refresh
+       rebuilt this whole list - first a quick version without trophies / live rows, then the
+       full one - so the rows blinked even when nothing had changed. If the rows about to be
+       painted are exactly what is on screen, leave the screen alone. */
+    try { const _mb0 = document.getElementById('home-rounds-showmore'); if (list._bgRowsHtml === _rowsHtml && list.children.length && !(_mb0 && /Loading/.test(_mb0.textContent || ''))) { try { state._homeLiveSig = _bgHomeLiveSig(rows); } catch (e) {} return; } } catch (e) {}
+    list._bgRowsHtml = _rowsHtml;
+    list.innerHTML = _rowsHtml;
+    try { state._homeLiveSig = _bgHomeLiveSig(rows); } catch (e) {}
     const go = (i) => {
       const r = rows[i]; if (!r) return;
       if (r.kind === 'invite') { try { window.joinRoundByCode(r.code); } catch (e) {} }
@@ -57114,7 +57145,17 @@ async function _renderHomeInvitesNow() {
       }
     } catch (e) {}
     await _bgBuildCompletedRows(_fast);
-    if (_fast.length && !_snapPainted) _bgPaintHomeRows(_fast);   // v1733: the snapshot is already the fuller picture
+    /* v1734: once the card has rows, the quick pass only paints if it carries a live round the
+       screen does not show yet (the v1205 case: you just started one). Otherwise it was a
+       downgrade - fuller rows replaced by fewer, then put back a second later. */
+    let _fastAdds = true;
+    try {
+      if (list.children.length) {
+        const _shown = String(state._homeLiveSig || '');
+        _fastAdds = _fast.some(r => r && r.kind === 'myLive' && _shown.indexOf(':' + r.code) < 0);
+      }
+    } catch (e) { _fastAdds = true; }
+    if (_fast.length && !_snapPainted && _fastAdds) _bgPaintHomeRows(_fast);
   } catch (e) {}
 
 
@@ -57687,7 +57728,7 @@ async function _renderHomeInvitesNow() {
   // whole card, which is the "then it went away completely" half of the report.
   if (!rows.length) {
     try {
-      if (list && list.children && list.children.length) return;   // keep what the fast pass painted
+      if (list && list.children && list.children.length) { try { if (_snapPainted) localStorage.removeItem(_bgHomeSnapKey('rows')); } catch (e2) {} return; }   // keep what the fast pass painted (v1734: but never re-serve a snapshot the fresh load could not confirm)
     } catch (e) {}
     card.style.display = 'none'; list.innerHTML = ''; return;
   }
@@ -59845,6 +59886,16 @@ async function syncMyStatsToCloud(roster, visOverride){
     const _deleted = getDeletedRoundKeys();
     try { const _st = await getSharedTombstones(); if (_st && _st.rounds) _st.rounds.forEach(k => _deleted.add(k)); } catch (e) {}
     let stats = (me && Array.isArray(me.scoreHistory)) ? me.scoreHistory.slice() : [];
+    /* v1734: launch called this three times in five seconds (roster heal, restore, the once-per-
+       session sync), each one a cloud read + a full upload of the same history. Identical
+       history already uploaded in the last 10 minutes -> nothing to do. */
+    let _statsSig = null;
+    try {
+      _statsSig = _authUser.id + '|' + JSON.stringify(stats) + '|' + (meNm || '');
+      if (!visOverride && window._bgStatsSyncSig === _statsSig && (Date.now() - (window._bgStatsSyncAt || 0)) < 600000) return;
+      if (!visOverride && window._bgStatsSyncBusySig === _statsSig) return;   // the same upload is already in flight
+      window._bgStatsSyncBusySig = _statsSig;
+    } catch (e) { _statsSig = null; }
     stats = stats.filter(s => !_deleted.has(statsRoundKey(s)));   // never re-upload a deleted (tombstoned) round
     // Never SHRINK the per-user backup: union in any rounds the cloud copy already
     // has that our local roster is missing. This stops a shared-blob overwrite (or
@@ -59906,8 +59957,9 @@ async function syncMyStatsToCloud(roster, visOverride){
     if (_statsRow.player_name == null) delete _statsRow.player_name;
     const _up = await supa.from('player_stats').upsert(_statsRow, { onConflict: 'user_id' });
     if (_up && _up.error) console.warn('syncMyStatsToCloud: upsert failed', _up.error);
-    else { try { _bgStatsCacheBust(); } catch (e) {} }   // v963: my backup changed — drop the 30s memo so the next board read sees it
+    else { try { _bgStatsCacheBust(); } catch (e) {} try { if (_statsSig) { window._bgStatsSyncSig = _statsSig; window._bgStatsSyncAt = Date.now(); } } catch (e) {} }   // v963: my backup changed — drop the 30s memo so the next board read sees it
   } catch (e) { console.warn('syncMyStatsToCloud failed', e); }
+  finally { try { window._bgStatsSyncBusySig = null; } catch (e) {} }
 }
 
 // v963 PERF: the whole player_stats backup table was being downloaded THREE separate
@@ -63132,6 +63184,8 @@ async function reconcileMyScoreHistory() {
   if (!r) _reconcileAt = Date.now();
   return r;
 }
+function _bgHealTriedGet() { try { return JSON.parse(localStorage.getItem('golf:heal-tried') || '{}') || {}; } catch (e) { return {}; } }
+function _bgHealTriedAdd(code) { try { const m = _bgHealTriedGet(); m[code] = Date.now(); const ks = Object.keys(m); if (ks.length > 200) ks.sort((a, b) => m[a] - m[b]).slice(0, ks.length - 200).forEach(k => { delete m[k]; }); localStorage.setItem('golf:heal-tried', JSON.stringify(m)); } catch (e) {} }
 async function _reconcileMyScoreHistoryNow() {
   try {
     const me = await getMeName(); if (!me) return;
@@ -63168,6 +63222,10 @@ async function _reconcileMyScoreHistoryNow() {
           if (!r || !r.code || !r.finishedAt) return false;      // finished rounds only
           if (_have.has(r.code)) return false;                   // already in my stats
           if (window._bgMissingTried[r.code]) return false;      // tried once already
+          /* v1734: a hand-entered round has no cloud round to load, so this asked for ten of them
+             on EVERY launch and got nothing back. And 'tried' only lived until the app closed. */
+          if (/^manual-/.test(String(r.code))) return false;
+          try { if (_bgHealTriedGet()[r.code]) return false; } catch (e) {}
           if (_hidden.indexOf(r.code) >= 0) return false;        // I removed this round
           try { if (_delKeys && _delKeys.has(statsRoundKey({ gameCode: r.code }))) return false; } catch (e) {}
           return true;
@@ -63176,6 +63234,7 @@ async function _reconcileMyScoreHistoryNow() {
           const _meKey = (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(me || '')) : String(me || '').trim().toLowerCase();
           const _loadedM = await Promise.all(_missing.map(async r => {
             window._bgMissingTried[r.code] = 1;
+            try { _bgHealTriedAdd(r.code); } catch (e) {}
             try { return await loadGame(r.code); } catch (e) { return null; }
           }));
           let _added = 0;
