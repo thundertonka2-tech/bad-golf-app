@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1735-->
+<!--BGVER=v2026.11.1736-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10888,7 +10888,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1735';
+const BG_BUILD = 'v2026.11.1736';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -17488,11 +17488,17 @@ async function safeGet(key, shared) {
     try {
       if (!supaReady) await initSupabase();
       if (supa && supaOnline) {
-        const { data, error } = await supa
+        let data = null, error = null;
+        const _fg = _bgFeedGame(code);   // v1736: Home's feed already carries this round (<= 8 s old)
+        if (_fg !== undefined) { data = _fg ? { data: _fg } : null; }
+        else {
+          const _r = await supa
           .from('games')
           .select('data')
           .eq('code', code)
           .maybeSingle();
+          data = _r.data; error = _r.error;
+        }
         if (!error && data && data.data) {
           // v863 (Tyler): "clicked Save and return home... did not finish my round.
           // Had to go back in and click Finish again." Root cause: this cloud read
@@ -56614,7 +56620,12 @@ async function tourneyRoundCodes(codes) {
   let ok = false;
   try {
     if (typeof supa !== 'undefined' && supa) {
-      if (want) {
+      const _ftg = want ? _bgFeedTable('tournament_groups') : null;   // v1736
+      if (want && _ftg) {
+        ok = true;
+        const _ws = new Set(want);
+        _ftg.forEach(g => { if (g && g.game_code && _ws.has(g.game_code)) set.add(g.game_code); });
+      } else if (want) {
         ok = true;
         for (let i = 0; i < want.length; i += 200) {
           const { data, error } = await supa.from('tournament_groups').select('game_code').in('game_code', want.slice(i, i + 200));
@@ -56786,7 +56797,7 @@ function renderHomeInvites() {
   if (_homeInvP) { _homeInvAgain = true; return _homeInvP; }
   _homeInvP = (async () => {
     try { await _renderHomeInvitesNow(); }
-    finally { _homeInvP = null; if (_homeInvAgain) { _homeInvAgain = false; try { renderHomeInvites(); } catch (e) {} } }
+    finally { try { _bgHomeFeedDrop(); } catch (e) {} _homeInvP = null; if (_homeInvAgain) { _homeInvAgain = false; try { renderHomeInvites(); } catch (e) {} } }
   })();
   return _homeInvP;
 }
@@ -57184,11 +57195,14 @@ async function _renderHomeInvitesNow() {
      out of the batch and is otherwise untouched. Every one falls back to its old
      behaviour if the batch entry is missing, so a single failed read still only costs
      its own section. */
+  try { await _bgHomeFeedLoad(); } catch (e) {}   // v1736: one call; everything below reads from it and falls back per read
   let _pfInvites = null, _pfTourneys = null, _pfT2Mine = null, _pfRecent = null, _pfActiveCode;
   let _pfActiveSet = false;
   try {
     const _pf = await Promise.all([
-      (isSignedIn() && supa && _authUser)
+      (isSignedIn() && supa && _authUser && _bgFeedTable('invites'))
+        ? Promise.resolve({ data: _bgFeedWhere('invites', r => r.status === 'pending' || r.status === 'seen').slice(0, 20), error: null })   // v1736 (already newest-first)
+        : (isSignedIn() && supa && _authUser)
         ? Promise.resolve(supa.from('game_invites').select('*').eq('to_user', _authUser.id)
             .in('status', ['pending', 'seen']).order('created_at', { ascending: false }).limit(20)).catch(() => null)
         : Promise.resolve(null),
@@ -57594,8 +57608,8 @@ async function _renderHomeInvitesNow() {
         let _pl5 = [], _dy5 = [], _gs5 = [], _mm5 = [];
         if (_ids5.length) {
           const _pr = await Promise.all([
-            _bgRead(() => supa.from('tournament_players').select('*').in('tournament_id', _ids5), 'home5c:players'),
-            _bgRead(() => supa.from('tournament_days').select('*').in('tournament_id', _ids5).order('day_number'), 'home5c:days')
+            _bgRead(() => supa.from('tournament_players').select('*').in('tournament_id', _ids5), 'home5c:players', () => { const _s = new Set(_ids5); return _bgFeedWhere('tournament_players', r => _s.has(r.tournament_id)); }),
+            _bgRead(() => supa.from('tournament_days').select('*').in('tournament_id', _ids5).order('day_number'), 'home5c:days', () => { const _s = new Set(_ids5); return _bgFeedWhere('tournament_days', r => _s.has(r.tournament_id), 'day_number'); })
           ]);
           _pl5 = _pr[0].data || []; _dy5 = _pr[1].data || [];
         }
@@ -57613,9 +57627,9 @@ async function _renderHomeInvitesNow() {
         });
         const _dayIds5 = Object.values(_pick5).map(x => x.day.id);
         if (_dayIds5.length) {
-          const _gr = await _bgRead(() => supa.from('tournament_groups').select('*').in('day_id', _dayIds5).order('group_number'), 'home5c:groups');
+          const _gr = await _bgRead(() => supa.from('tournament_groups').select('*').in('day_id', _dayIds5).order('group_number'), 'home5c:groups', () => { const _s = new Set(_dayIds5); return _bgFeedWhere('tournament_groups', r => _s.has(r.day_id), 'group_number'); });
           _gs5 = _gr.data || [];
-          if (_gs5.length) { const _mr = await _bgRead(() => supa.from('tournament_group_members').select('*').in('group_id', _gs5.map(g2 => g2.id)), 'home5c:members'); _mm5 = _mr.data || []; }
+          if (_gs5.length) { const _mr = await _bgRead(() => supa.from('tournament_group_members').select('*').in('group_id', _gs5.map(g2 => g2.id)), 'home5c:members', () => { const _s = new Set(_gs5.map(g2 => g2.id)); return _bgFeedWhere('tournament_group_members', r => _s.has(r.group_id)); }); _mm5 = _mr.data || []; }
         }
         const _per = await Promise.all(_evs.map(async ev => {
           try {
@@ -68707,12 +68721,12 @@ async function t2ListMine() {
       (async () => {
         try {
           if (typeof isAdmin !== 'function' || !isAdmin()) return;
-          const { data } = await _bgRead(() => supa.from('tournaments').select('*'), 't2ListMine:adminAll');
+          const { data } = await _bgRead(() => supa.from('tournaments').select('*'), 't2ListMine:adminAll', () => _bgFeedWhere('tournaments', r => true));
           (data || []).forEach(t => { if (t && t.id && !byId[t.id]) byId[t.id] = t; });
         } catch (e) {}
       })(),
-      (async () => { try { const { data } = await _bgRead(() => supa.from('tournaments').select('*').eq('commissioner_id', uid), 't2ListMine:commissioner'); (data || []).forEach(t => { byId[t.id] = t; linked.add(t.id); }); } catch (e) {} })(),
-      (async () => { try { const { data } = await _bgRead(() => supa.from('tournament_players').select('tournament_id').eq('user_id', uid), 't2ListMine:myPlayerRows'); (data || []).forEach(r => { if (r.tournament_id) { need.push(r.tournament_id); linked.add(r.tournament_id); } }); } catch (e) {} })(),
+      (async () => { try { const { data } = await _bgRead(() => supa.from('tournaments').select('*').eq('commissioner_id', uid), 't2ListMine:commissioner', () => _bgFeedWhere('tournaments', r => r.commissioner_id === uid)); (data || []).forEach(t => { byId[t.id] = t; linked.add(t.id); }); } catch (e) {} })(),
+      (async () => { try { const { data } = await _bgRead(() => supa.from('tournament_players').select('tournament_id').eq('user_id', uid), 't2ListMine:myPlayerRows', () => _bgFeedWhere('tournament_players', r => r.user_id === uid)); (data || []).forEach(r => { if (r.tournament_id) { need.push(r.tournament_id); linked.add(r.tournament_id); } }); } catch (e) {} })(),
       // (2b) Events where a roster slot matches MY NAME but was never linked to my
       // login (the commissioner added me by name). Without this, a name-only player
       // whose group is scored by someone else never sees the event in their list —
@@ -68734,7 +68748,7 @@ async function t2ListMine() {
             if (_me) {
               // v1027: invite_token comes along so a visible, genuinely
               // unclaimed slot can go through claim_tournament_slot below.
-              const { data } = await _bgRead(() => supa.from('tournament_players').select('id, tournament_id, user_id, display_name, invite_token').ilike('display_name', _pat), 't2ListMine:nameMatch');
+              const { data } = await _bgRead(() => supa.from('tournament_players').select('id, tournament_id, user_id, display_name, invite_token').ilike('display_name', _pat), 't2ListMine:nameMatch', () => { const _ln = String(myNm).toLowerCase(); return _bgFeedWhere('tournament_players', r => String(r.display_name == null ? '' : r.display_name).toLowerCase() === _ln); });
               for (const r of (data || [])) {
                 if (!r.tournament_id) continue;
                 if (_norm(r.display_name) !== _me) continue;      // not actually my name
@@ -68756,10 +68770,10 @@ async function t2ListMine() {
           // relationship (tournament_groups.day_id -> tournament_days.id ->
           // tournaments.id). Two round trips, but ones that actually return rows.
           if (codes.length) {
-            const { data: _grp } = await _bgRead(() => supa.from('tournament_groups').select('day_id, game_code').in('game_code', codes), 't2ListMine:groupsByCode');
+            const { data: _grp } = await _bgRead(() => supa.from('tournament_groups').select('day_id, game_code').in('game_code', codes), 't2ListMine:groupsByCode', () => { const _cs = new Set(codes); return _bgFeedWhere('tournament_groups', r => !!r.game_code && _cs.has(r.game_code)); });
             const _dayIds = [...new Set((_grp || []).map(x => x && x.day_id).filter(Boolean))];
             if (_dayIds.length) {
-              const { data: _days } = await _bgRead(() => supa.from('tournament_days').select('id, tournament_id').in('id', _dayIds), 't2ListMine:daysByGroup');
+              const { data: _days } = await _bgRead(() => supa.from('tournament_days').select('id, tournament_id').in('id', _dayIds), 't2ListMine:daysByGroup', () => { const _ds = new Set(_dayIds); return _bgFeedWhere('tournament_days', r => _ds.has(r.id)); });
               (_days || []).forEach(d => { if (d && d.tournament_id) { need.push(d.tournament_id); linked.add(d.tournament_id); } });
             }
           }
@@ -68770,7 +68784,7 @@ async function t2ListMine() {
       // authorisation to adopt my unclaimed slot.
       (async () => {
         try {
-          const { data } = await _bgRead(() => supa.from('game_invites').select('game_code').eq('to_user', uid).like('game_code', 'T2:%'), 't2ListMine:invites');
+          const { data } = await _bgRead(() => supa.from('game_invites').select('game_code').eq('to_user', uid).like('game_code', 'T2:%'), 't2ListMine:invites', () => _bgFeedWhere('invites', r => String(r.game_code || '').indexOf('T2:') === 0));
           (data || []).forEach(r => { const c = String((r && r.game_code) || ''); if (c.indexOf('T2:') === 0) linked.add(c.slice(3)); });
         } catch (e) {}
       })()
@@ -68843,7 +68857,7 @@ async function t2ListMine() {
     // the four-route redundancy buys nothing — so of the seven it is the one most
     // worth being able to see fail. NOTE the limit, spelled out below: an RLS refusal
     // is NOT a failure as far as this reports. It comes back ok with zero rows.
-    if (fetchIds.length) { try { const { data } = await _bgRead(() => supa.from('tournaments').select('*').in('id', fetchIds), 't2ListMine:hydrate'); (data || []).forEach(t => { byId[t.id] = t; }); } catch (e) {} }
+    if (fetchIds.length) { try { const { data } = await _bgRead(() => supa.from('tournaments').select('*').in('id', fetchIds), 't2ListMine:hydrate', () => { const _fs = new Set(fetchIds); const _r = _bgFeedWhere('tournaments', r => _fs.has(r.id)); return (_r && _r.length === _fs.size) ? _r : null; }); (data || []).forEach(t => { byId[t.id] = t; }); } catch (e) {} }
     // v1127 NOTE (Tyler, 8/19): "the round says it was a tourney but it does not
     // show up under tourneys for IDrive." THIS LINE is where that happens, and it
     // happens silently. The trophy on a round card is drawn from data the round
@@ -69036,7 +69050,83 @@ function _bgWrote(res) {
 // defeat the whole point. The thunk is invoked inside the try.
 //
 // ok:false means "we could not ask", which is NOT "there is nothing there".
-async function _bgRead(mk, label) {
+/* v1736 (Tyler: "we may need to do what you suggested earlier to get premium speed").
+   HOME IN ONE CALL. Measured on his phone 9/20: one Home load was ~45 separate reads -
+   invites, six "which tournaments am I in" lookups, then players / days / groups / members
+   per event, then each group's round one at a time, then a 14-day scan for live rounds.
+   Each answers in ~80 ms; together, on a phone, they are the seconds he waits.
+   The database function bg_home_feed(p_codes, p_name) returns all of it at once. It is
+   SECURITY INVOKER - every table is read under the caller's own row-level security - so it
+   holds exactly the rows those separate reads would have returned. The feed lives only
+   while Home is rendering (dropped in the finally), is never used for a { strict } read,
+   and saves never read it (_mergeGameForWrite queries the cloud directly). Any failure -
+   function missing, offline, a table over the server cap - leaves that table null and the
+   read site falls straight through to the query it always ran.
+   Kill switch: localStorage 'golf:no-home-feed' = '1'. */
+let _bgHomeFeed = null, _bgHomeFeedP = null;
+function _bgFeed() {
+  try {
+    const f = _bgHomeFeed;
+    if (!f || !f.ok || (Date.now() - f.at) > 25000) return null;
+    if (typeof _authUser === 'undefined' || !_authUser || f.uid !== _authUser.id) return null;
+    return f;
+  } catch (e) { return null; }
+}
+function _bgFeedTable(name) { const f = _bgFeed(); return (f && Array.isArray(f[name])) ? f[name] : null; }
+function _bgFeedWhere(name, pred, sortKey) {
+  const t = _bgFeedTable(name); if (!t) return null;
+  try {
+    const out = t.filter(pred).map(r => Object.assign({}, r));
+    if (sortKey) out.sort((a, b) => (a[sortKey] < b[sortKey] ? -1 : (a[sortKey] > b[sortKey] ? 1 : 0)));
+    return out;
+  } catch (e) { return null; }
+}
+/* undefined = the feed has nothing to say about this code (ask the cloud);
+   null = the feed asked for it and there is no such round; object = the round. */
+function _bgFeedGame(code) {
+  try {
+    const f = _bgFeed(); if (!f || !f.games || !Array.isArray(f.games_asked)) return undefined;
+    if ((Date.now() - f.at) > 8000) return undefined;            // round blobs go stale fastest
+    if (f.games_asked.indexOf(code) < 0) return undefined;
+    const g = f.games[code];
+    return g ? JSON.parse(JSON.stringify(g)) : null;
+  } catch (e) { return undefined; }
+}
+function _bgHomeFeedDrop() { _bgHomeFeed = null; }
+async function _bgHomeFeedLoad() {
+  try {
+    try { if (localStorage.getItem('golf:no-home-feed') === '1') return null; } catch (e) {}
+    if (!(typeof isSignedIn === 'function' && isSignedIn() && supa && typeof _authUser !== 'undefined' && _authUser)) return null;
+    if (typeof supaOnline !== 'undefined' && !supaOnline) return null;
+    if (_bgHomeFeedP) return await _bgHomeFeedP;
+    _bgHomeFeedP = (async () => {
+      const t0 = Date.now();
+      // codes worth shipping with the feed: my unfinished recent rounds + the active one (local copies - hints only)
+      let codes = [];
+      try {
+        const raw = localStorage.getItem(KEY_RECENT); const arr = raw ? JSON.parse(raw) : [];
+        (Array.isArray(arr) ? arr : []).forEach(r => { if (r && r.code && !r.finishedAt && !/^manual-/.test(String(r.code))) codes.push(String(r.code)); });
+      } catch (e) {}
+      try { const lc = localStorage.getItem(KEY_LAST); if (lc) codes.push(String(lc)); } catch (e) {}
+      codes = Array.from(new Set(codes)).filter(c => c.indexOf(':') < 0).slice(0, 20);
+      let nm = null; try { nm = localStorage.getItem(KEY_ME) || null; } catch (e) {}
+      const res = await Promise.race([
+        supa.rpc('bg_home_feed', { p_codes: codes, p_name: nm }),
+        new Promise(r => setTimeout(() => r({ error: 'timeout' }), 6000))
+      ]);
+      if (!res || res.error || !res.data || !res.data.ok) { try { console.warn('[BG v1736] home feed unavailable:', res && res.error); } catch (e) {} return null; }
+      const f = res.data; f.at = Date.now();
+      _bgHomeFeed = f;
+      try { console.log('[BG v1736] home feed in ' + (Date.now() - t0) + ' ms'); } catch (e) {}
+      return f;
+    })();
+    try { return await _bgHomeFeedP; } finally { _bgHomeFeedP = null; }
+  } catch (e) { _bgHomeFeedP = null; return null; }
+}
+async function _bgRead(mk, label, feedFn) {
+  if (typeof feedFn === 'function') {
+    try { const rows = feedFn(); if (Array.isArray(rows)) return { ok: true, data: rows, error: null }; } catch (e) {}
+  }
   let res = null;
   try { res = await (typeof mk === 'function' ? mk() : mk); }
   catch (e) { res = { data: null, error: e }; }
@@ -69532,6 +69622,7 @@ async function t2GetPlayers(tid, opts) {
   // v1133: was the only reader with this contract hand-rolled. Same behaviour,
   // now expressed once — fail-soft [] by default, throws for { strict: true }.
   if (!tid || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(tid))) { if (opts && opts.strict) throw new Error('t2GetPlayers: not a tournament id'); return []; }   // v1176/v1177: legacy "tt-…" ids were 400s
+  if (!(opts && opts.strict)) { const _f = _bgFeedWhere('tournament_players', r => r.tournament_id === tid, 'created_at'); if (_f) return _f; }   // v1736
   return await _bgReadList(() => supa.from('tournament_players').select('*').eq('tournament_id', tid).order('created_at'), 't2GetPlayers', opts);
 }
 async function t2SetPlayerTeam(playerId, team) {
@@ -69843,6 +69934,7 @@ async function t2SetDays(tid, days) {
 }
 async function t2GetDays(tid, opts) {
   if (!tid) { if (opts && opts.strict) throw new Error('t2GetDays: no tournament id'); return []; }   // v1176
+  if (!(opts && opts.strict)) { const _f = _bgFeedWhere('tournament_days', r => r.tournament_id === tid, 'day_number'); if (_f) return _f; }   // v1736
   return await _bgReadList(() => supa.from('tournament_days').select('*').eq('tournament_id', tid).order('day_number'), 't2GetDays', opts);
 }
 
@@ -69858,6 +69950,7 @@ async function t2CreateGroup(dayId, g) {
 }
 async function t2GetGroups(dayId, opts) {
   if (!dayId) { if (opts && opts.strict) throw new Error('t2GetGroups: no day id'); return []; }   // v1176
+  if (!(opts && opts.strict)) { const _f = _bgFeedWhere('tournament_groups', r => r.day_id === dayId, 'group_number'); if (_f) return _f; }   // v1736
   return await _bgReadList(() => supa.from('tournament_groups').select('*').eq('day_id', dayId).order('group_number'), 't2GetGroups', opts);
 }
 async function t2AddGroupMember(groupId, tournamentPlayerId, team, slot) {
@@ -69869,6 +69962,7 @@ async function t2AddGroupMember(groupId, tournamentPlayerId, team, slot) {
   } catch (e) { return false; }
 }
 async function t2GetGroupMembers(groupId, opts) {
+  if (!(opts && opts.strict)) { const _f = _bgFeedWhere('tournament_group_members', r => r.group_id === groupId); if (_f) return _f; }   // v1736
   return await _bgReadList(() => supa.from('tournament_group_members').select('*').eq('group_id', groupId), 't2GetGroupMembers', opts);
 }
 // v1134: settings.groupGames is keyed by GROUP id and lives inside the tournaments
@@ -73848,7 +73942,8 @@ async function bgDiscoverMyLiveRounds() {
     if (now - _bgDiscoverAt < 60000) return 0;
     _bgDiscoverAt = now;
     const since = new Date(now - 14 * 86400000).toISOString();
-    const res = await supa.from('games')
+    const _fdisc = _bgFeedTable('discover');   // v1736: same query, already answered by the feed
+    const res = _fdisc ? { data: _fdisc.map(r => Object.assign({}, r)), error: null } : await supa.from('games')
       .select('code,data,updated_at')
       .eq('type', 'game')
       .gt('updated_at', since)
