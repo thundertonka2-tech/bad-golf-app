@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1738-->
+<!--BGVER=v2026.11.1739-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10888,7 +10888,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1738';
+const BG_BUILD = 'v2026.11.1739';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -11106,7 +11106,45 @@ async function initSupabase() {
         document.head.appendChild(script);
       });
     }
+    /* v1739 SPEED - identical reads share one request.
+       Measured 9/20 (edge logs, 24 h, grouped by phone + exact URL + 2-second window):
+       a THIRD to a HALF of the app's reads are exact duplicates fired at the same moment -
+       my_player 54%, tournament_players 56%, tournaments?id 32%, a live round's blob 33-37%,
+       recent:<uid> 46%, tombstones 44%. One screen paint asks the same question from five
+       places and every one of them was its own round trip.
+       This wraps the Supabase client's fetch: while a GET to /rest/v1/ is IN FLIGHT, another
+       GET with the same URL and the same headers waits for that answer instead of sending its
+       own (each caller gets its own clone of the response). Nothing is kept once the answer
+       lands - no time-based cache - so a read that STARTS after a write always goes to the
+       network; and any write (POST/PATCH/PUT/DELETE, RPCs included) also empties the table, so
+       a read can never join a request that began before the write. Auth, storage, functions
+       and realtime are not touched. Kill switch: localStorage 'golf:no-dedupe' = '1'. */
+    const _bgInflightGets = new Map();
+    const bgDedupeFetch = function (input, init) {
+      try {
+        const _off = (function () { try { return localStorage.getItem('golf:no-dedupe') === '1'; } catch (e) { return false; } })();
+        const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+        const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+        if (_off || url.indexOf('/rest/v1/') < 0) return fetch(input, init);
+        if (method !== 'GET') { _bgInflightGets.clear(); return fetch(input, init); }
+        if (init && init.signal) return fetch(input, init);          // an abortable read stays its own request
+        let hk = '';
+        try {
+          const h = new Headers((init && init.headers) || (input && input.headers) || {});
+          const parts = []; h.forEach(function (v, k) { if (k !== 'x-client-info') parts.push(k + ':' + v); }); parts.sort(); hk = parts.join('|');
+        } catch (e) { return fetch(input, init); }
+        const key = url + '\n' + hk;
+        const hit = _bgInflightGets.get(key);
+        if (hit) { try { window._bgDedupeHits = (window._bgDedupeHits || 0) + 1; } catch (e) {} return hit.then(function (res) { return res.clone(); }); }
+        const p = fetch(input, init);
+        _bgInflightGets.set(key, p);
+        const done = function () { try { if (_bgInflightGets.get(key) === p) _bgInflightGets.delete(key); } catch (e) {} };
+        p.then(done, done);
+        return p.then(function (res) { return res.clone(); });   // the original is never consumed, so later joiners can still clone it
+      } catch (e) { return fetch(input, init); }
+    };
     supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { fetch: bgDedupeFetch },
       realtime: { params: { eventsPerSecond: 5 } },
       // v1721: on the native app the session is kept in native storage too (see
       // native-bridge.js NativeAuthStorage) -- iOS can evict WKWebView localStorage, which
@@ -17887,6 +17925,7 @@ function subscribeToGame(code) {
   // all phones converge without having to navigate away and back.
   try { clearInterval(_gamePollTimer); } catch (e) {}
   _gamePollTimer = setInterval(() => { pollGameOnce(code); }, 12000);
+  try { window._bgGamePollCode = code; } catch (e) {}   // v1739: lets the older 15 s poller stand down for this round
   /* v1693 (Tyler, 9/13): "I finished that scramble round on the web. However, when I
      opened my phone, the round was still open and I had to close out the app
      completely or finish the round again. Make sure once the round is finished it
@@ -105470,6 +105509,8 @@ async function init() {
     const ap = document.querySelector('.panel.active');
     const activePanel = ap && ap.id;
     if (activePanel !== 'panel-score' && activePanel !== 'panel-board') return;
+    /* v1739: pollGameOnce (12 s, subscribeToGame) already backstops THIS round; two pollers on the same round was double the reads for nothing. This one only runs when that one is not watching the round on screen. */
+    try { if (typeof _gamePollTimer !== 'undefined' && _gamePollTimer && window._bgGamePollCode === state.game.code && !state.game.finishedAt) return; } catch (e) {}
     _pollTick++;
     const realtimeUp = !!activeRealtimeSub;
     if (realtimeUp && (_pollTick % 4 !== 0)) return; // realtime covers it; slow backstop only
