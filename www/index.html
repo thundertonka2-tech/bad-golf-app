@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1745-->
+<!--BGVER=v2026.11.1746-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10888,7 +10888,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1745';
+const BG_BUILD = 'v2026.11.1746';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -89023,7 +89023,137 @@ function _bgTeeGamesLine(t) {
     return names.length ? names.join(' \u00B7 ') : '';
   } catch (e) { return ''; }
 }
+/* v1746 (Tyler, 9/21): "If I set up a tee time and end up with more than five people, how will
+   we prompt the users to move it to a tournament? Once it does move ... keep those users and
+   the course in place so they don't have to re-key anything."
+   His calls: 6+ SEATED players (not empty spots), organizer only; an OFFER with the reason, not a
+   wall (a plain round still holds 8); one tap builds the event -- Individual one-day, Day 1 = the
+   tee time's date + course, every player seated with handicap / tee / account, carts of up to 4
+   with tee times 10 minutes apart from the tee time's own time; the tee time is cancelled and the
+   answers carry over (accepted = seated and not re-invited, pending = seated + tournament invite,
+   declined = left out). Saying "Keep as tee time" is remembered at that head-count and only asked
+   again if the group grows. */
+const BG_TEE_T2_MIN = 6;
+function bgTeeSeated(t) {
+  try { return _timesPlayers(t).filter(function (p) { return p && p.status !== 'declined' && p.status !== 'removed'; }); } catch (e) { return []; }
+}
+let _bgTeeOfferBusy = false;
+async function bgTeeOfferTournament(id) {
+  if (_bgTeeOfferBusy || !id) return false;
+  _bgTeeOfferBusy = true;
+  try {
+    const list = await getTourneys();
+    const t = (list || []).find(function (x) { return x && String(x.id) === String(id); });
+    if (!t || t.type !== 'teetime' || (t.status || 'scheduled') !== 'scheduled' || t._ttDeleted || t.activeCode) return false;
+    if (typeof _bgSchedTeeRole === 'function' && _bgSchedTeeRole(t, null) !== 'org') return false;
+    if (!(typeof isSignedIn === 'function' ? isSignedIn() : true) || typeof supa === 'undefined' || !supa) return false;
+    const n = bgTeeSeated(t).length;
+    if (n < BG_TEE_T2_MIN) return false;
+    if ((Number(t.t2OfferAt) || 0) >= n) return false;            // already said "keep it" at this size
+    let yes = false;
+    try {
+      yes = await uiConfirm(n + ' players is more than one group. Move this to a tournament?\n\nYou get a tee time and a cart for each group, and one leaderboard for everyone. Your players, the date and the course all come with it — nothing to re-enter.',
+        { title: 'Move to a tournament?', okLabel: 'Move to tournament', cancelLabel: 'Keep as tee time', danger: false });
+    } catch (e) { yes = false; }
+    if (!yes) {
+      try { const l2 = await getTourneys(); const r2 = (l2 || []).find(function (x) { return x && String(x.id) === String(id); }); if (r2) { r2.t2OfferAt = n; await saveTourneys(l2); } } catch (e) {}
+      return false;
+    }
+    return await bgTeeMoveToTournament(id);
+  } catch (e) { return false; }
+  finally { _bgTeeOfferBusy = false; }
+}
+async function bgTeeMoveToTournament(id) {
+  const pill = (typeof bgBusyPill === 'function') ? bgBusyPill('Creating the tournament…') : { set: function () {}, done: function () {} };
+  try {
+    const list = await getTourneys();
+    const t = (list || []).find(function (x) { return x && String(x.id) === String(id); });
+    if (!t) { showToast('Tee time not found'); return false; }
+    const seated = bgTeeSeated(t);
+    const course = String(t.course || '').trim();
+    const cid = t.courseId || (t.savedConfig && t.savedConfig.courseId) || (typeof _timesCourseId === 'function' ? _timesCourseId(course) : '') || '';
+    let dl = ''; try { if (t.date) dl = new Date(t.date + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); } catch (e) {}
+    const name = ((course || 'Tee time') + (dl ? ' · ' + dl : '')).slice(0, 80);
+    try { if (typeof wireT2 === 'function') wireT2(); } catch (e) {}
+    const ev = await t2Create({ name: name, numDays: 1, teamAName: 'Players', teamBName: '' });
+    if (!ev || !ev.id) { showToast('Could not create the tournament — your tee time is unchanged'); return false; }
+    const sc = t.savedConfig || null;
+    const okSet = await t2MergeSettings(ev.id, function (s) {
+      s.type = 'oneday'; s.public = false; s.location = s.location || ''; s.numPlayers = seated.length;
+      if (t.date) s.startDate = t.date;
+      if (course) { s.dayCourses = s.dayCourses || {}; s.dayCourses[1] = { id: cid || '', name: course }; }
+      if (sc && sc.hcpRules) { s.dayHcpRules = s.dayHcpRules || {}; s.dayHcpRules[1] = sc.hcpRules; }
+      if (sc) { s.dayTracking = s.dayTracking || {}; s.dayTracking[1] = { putts: !!sc.trackPutts, girs: !!sc.trackGirs, fairways: !!sc.trackFairways }; }
+      s.fromTeeTime = String(t.id);
+    });
+    const dayErr = await t2SetDays(ev.id, [{ dayNumber: 1, format: 'stroke', playDate: t.date || null }]);
+    pill.set('Seating ' + seated.length + ' players…');
+    let roster = null; try { roster = await getPlayerRoster(); } catch (e) { roster = null; }
+    const rows = []; let failed = 0;
+    for (const p of seated) {
+      let hcp = null;
+      try { const re = (roster && typeof _timesRosterEntry === 'function') ? _timesRosterEntry(roster, p.first || '', p.last || '') : null; if (re && typeof t2RosterHcp === 'function') hcp = t2RosterHcp(re); } catch (e) {}
+      if (hcp == null) { const h = parseFloat(p.hcp); if (isFinite(h)) hcp = Math.round(h); }
+      let row = null;
+      try { row = await t2AddPlayer(ev.id, { displayName: p.name, userId: p.uid || null, team: null, handicap: hcp, force: true }); } catch (e) { row = null; }
+      if (row && row.id) rows.push({ p: p, row: row }); else failed++;
+    }
+    // tees, keyed the way the event's Player tees step stores them
+    try {
+      const tmap = {}; rows.forEach(function (x) { if (x.p.tee) tmap[x.row.id] = x.p.tee; });
+      if (cid && Object.keys(tmap).length) await t2MergeSettings(ev.id, function (s) { s.playerTees = s.playerTees || {}; s.playerTees[cid] = Object.assign({}, s.playerTees[cid] || {}, tmap); });
+    } catch (e) {}
+    // carts: as even as they go, never more than 4
+    let cartsOk = false;
+    try {
+      pill.set('Building the carts…');
+      const days = await t2GetDays(ev.id, { strict: true }).catch(function () { return []; });
+      const d1 = (days || []).find(function (d) { return d && d.day_number === 1; });
+      if (d1 && rows.length) {
+        const nG = Math.ceil(rows.length / 4), baseSz = Math.floor(rows.length / nG), extra = rows.length % nG;
+        const specs = []; for (let i = 0; i < nG; i++) specs.push({ groupNumber: i + 1, size: baseSz + (i < extra ? 1 : 0) });
+        const made = await t2CreateGroupsBulk(d1.id, specs);
+        if (made && made.length === nG) {
+          const mem = []; let k = 0;
+          made.forEach(function (g, gi) { for (let s2 = 0; s2 < specs[gi].size; s2++) { const x = rows[k++]; if (x) mem.push({ group_id: g.id, tournament_player_id: x.row.id, team: null, slot: s2 + 1 }); } });
+          cartsOk = await t2AddGroupMembersBulk(mem);
+          const m0 = (typeof t2ParseClock === 'function') ? t2ParseClock(t.time || '') : null;
+          if (m0 != null && typeof t2FmtClock === 'function') { for (let i = 0; i < made.length; i++) { try { await t2SetGroupTeeTime(made[i].id, t2FmtClock(m0 + i * 10)); } catch (e) {} } }
+        }
+      }
+    } catch (e) { cartsOk = false; }
+    if (failed || !rows.length) {
+      // Do NOT cancel the tee time on a half-built event: the organizer still has everything.
+      showToast('The tournament was created but ' + (failed || 'some') + ' player(s) did not carry over — your tee time was kept. Check the event’s Players step.', 6000);
+    } else {
+      // carry the answers: accepted players are in and are never re-invited; pending ones get the invite now
+      try {
+        const myUid = (_authUser && _authUser.id) || null; let meNm = ''; try { meNm = (await getMeName()) || ''; } catch (e) {}
+        for (const x of rows) {
+          const u = x.p.uid; if (!u || String(u) === String(myUid)) continue;
+          if (x.p.status === 'pending') { try { await sendTournamentInvite(u, { id: ev.id, name: name }); } catch (e) {} }
+          else {
+            try { await supa.from('game_invites').delete().eq('to_user', u).eq('game_code', 'T2:' + ev.id); } catch (e) {}
+            try { await supa.from('game_invites').insert({ from_user: myUid, to_user: u, game_code: 'T2:' + ev.id, course: name, status: 'accepted' }); } catch (e) {}
+            try { sendPush(u, 'Bad Golf', (meNm ? _timesFirst(meNm) : 'The organizer') + ' moved your tee time' + (course ? ' at ' + course : '') + ' into a tournament — you’re in.', { type: 'tourney_added', tourney_id: ev.id }, 't2:' + ev.id); } catch (e) {}
+          }
+        }
+      } catch (e) {}
+      try { const l3 = await getTourneys(); const r3 = (l3 || []).find(function (x) { return x && String(x.id) === String(id); }); if (r3) { r3.status = 'cancelled'; r3._ttDeleted = true; r3.movedToT2 = ev.id; r3.updatedAt = Date.now(); r3.rev = (r3.rev || 0) + 1; await saveTourneys(l3); } } catch (e) {}
+      showToast(cartsOk ? 'Moved — ' + rows.length + ' players seated' + (okSet && !dayErr ? '' : ' (check the date and course)') : 'Moved — players seated; build the carts on the next screen', 4500);
+    }
+    try { timesCloseSheet(); } catch (e) {}
+    try { window._timesEvCache = null; } catch (e) {}
+    try { renderTimes(); } catch (e) {}
+    try { switchTab('tourneys'); } catch (e) {}
+    try { await openT2Home(ev.id); } catch (e) {}
+    setTimeout(function () { try { renderT2List(); } catch (e) {} try { renderHome(); } catch (e2) {} try { renderTourneyList(); } catch (e3) {} }, 2500);
+    return true;
+  } catch (e) { try { console.warn('bgTeeMoveToTournament', e); } catch (e2) {} showToast('Could not move it — your tee time is unchanged'); return false; }
+  finally { try { pill.done(); } catch (e) {} }
+}
 async function timesOpenSetup(id) {
+  try { if (await bgTeeOfferTournament(id)) return; } catch (e) {}
   try {
     var list = await getTourneys(); var t = (list || []).find(function (x) { return x && String(x.id) === String(id); });
     if (!t) { try { showToast('Tee time not found'); } catch (e) {} return; }
@@ -89041,7 +89171,8 @@ async function timesStartRound(id) {
     var list = await getTourneys(); var idx = (list || []).findIndex(function (x) { return x && String(x.id) === String(id); });
     if (idx < 0) return;
     var t = list[idx];
-    if (!t.savedConfig) { return timesOpenSetup(id); }   // nothing set up yet: the setup screen has Start round now at the bottom
+    if (!t.savedConfig) { return timesOpenSetup(id); }
+    try { if (await bgTeeOfferTournament(id)) return; } catch (e0) {}   // v1746   // nothing set up yet: the setup screen has Start round now at the bottom
     _bgTeeReconcileConfig(t);
     try { await saveTourneys(list); } catch (e) {}
     try { timesCloseSheet(); } catch (e) {}
@@ -111140,6 +111271,8 @@ async function timesOpenDetail(id){
   try{ var _cs={}; (items||[]).forEach(function(x){ [x.code,x.activeCode,x.plannedCode].forEach(function(c){ if(c) _cs[String(c)]=1; }); }); var _pr=await _timesRecentRounds(_cs); if(_pr&&_pr.length) items=items.concat(_pr); }catch(e){}
   var t=(items||[]).find(function(x){return String(x.id)===String(id);});
   if(!t){ try{ showToast('Tee time not found'); }catch(e){} return; }
+  // v1746: the 6th player can arrive by joining or by an add on this card -- ask when the organizer next looks.
+  try{ if(t.type==='teetime') setTimeout(function(){ try{ bgTeeOfferTournament(id); }catch(e1){} }, 500); }catch(e){}
   // v1676: a tournament day opens the tournament; a league week opens that week.
   if(t._ev){ timesCloseSheet(); return _timesOpenEvent(t); }
   // A finished/played round → open the read-only round view, exactly like the Rounds list does.
@@ -111763,7 +111896,8 @@ function _timesPushChanged(t, skipUids){
 }
 async function timesSaveThenSetup(editId){
   try{ window._timesLastSavedId=null; }catch(e){}
-  await timesSave(editId);
+  try{ window._bgTeeOfferHold=true; }catch(e){}   // v1746: timesOpenSetup asks, so timesSave must not ask first
+  try{ await timesSave(editId); } finally { try{ window._bgTeeOfferHold=false; }catch(e){} }
   var id=null; try{ id=window._timesLastSavedId; }catch(e){}
   if(id) timesOpenSetup(id);
 }
@@ -111816,7 +111950,9 @@ async function _timesSaveInner(editId){
     try{ window._timesLastSavedId=t.id; }catch(e){}
     try{ showToast(savedE?'Saved ✓':'Saved — syncing…'); }catch(e){}
     try{ if(date) window._timesCurD=new Date(date+'T00:00:00'); }catch(e){}   // jump the calendar to the saved date
-    timesCloseSheet(); renderTimes(); return;
+    timesCloseSheet(); renderTimes();
+    try{ if(!window._bgTeeOfferHold) bgTeeOfferTournament(t.id); }catch(e){}   // v1746
+    return;
   }
 
   // CREATE: ONE tee time (course + day + time + players) — like any other round.
@@ -111843,6 +111979,7 @@ async function _timesSaveInner(editId){
   try{ showToast(saved?'Saved ✓':'Saved — syncing…'); }catch(e){}
   try{ if(date) window._timesCurD=new Date(date+'T00:00:00'); }catch(e){}   // jump the calendar to the new tee time's date so it's always visible
   timesCloseSheet(); renderTimes();
+  try{ if(!window._bgTeeOfferHold) bgTeeOfferTournament(rec.id); }catch(e){}   // v1746
 }
 
 /* ---- ?cal= share-link landing ---- */
