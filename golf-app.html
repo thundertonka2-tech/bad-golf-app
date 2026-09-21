@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1750-->
+<!--BGVER=v2026.11.1751-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10890,7 +10890,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1750';
+const BG_BUILD = 'v2026.11.1751';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -70631,6 +70631,7 @@ async function t2PersistStandings(t, players, standings) {
 // ============================================================
 let _t2Wired = false;
 let _t2Current = null;
+let _t2InvStatus = {};            // v1751: user_id -> status of their T2 invite (pending|seen|accepted|declined|expired), for the Review "Invites" card
 let _t2DeclinedIds = new Set();  // v690: user_ids who DECLINED their invite to _t2Current (director-visible "✕ Declined" tag)
 let _pendingTjoin = null;
 function t2esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -79079,11 +79080,12 @@ async function renderT2Home() {
   // they need the day ids. Each carries its own catch so an early rejection can never
   // surface as an unhandled one while the others are still in flight.
   const _pDecl = (amCommish && supa)
-    ? supa.from('game_invites').select('to_user').eq('game_code', 'T2:' + t.id).eq('status', 'declined').then(r => r, () => ({}))
+    ? supa.from('game_invites').select('to_user,status').eq('game_code', 'T2:' + t.id).then(r => r, () => ({}))   /* v1751: every status, one read (was declined only) */
     : Promise.resolve({});
   const _pMatches = Promise.resolve().then(() => t2GetMatches(t.id)).then(r => r, () => []);
   const [players, days, _dclRes] = await Promise.all([t2GetPlayers(t.id), t2GetDays(t.id), _pDecl]);
-  try { ((_dclRes && _dclRes.data) || []).forEach(r => { if (r && r.to_user) _t2DeclinedIds.add(r.to_user); }); } catch (e) {}
+  _t2InvStatus = {};
+  try { ((_dclRes && _dclRes.data) || []).forEach(r => { if (!r || !r.to_user) return; _t2InvStatus[r.to_user] = String(r.status || ''); if (r.status === 'declined') _t2DeclinedIds.add(r.to_user); }); } catch (e) {}
   // v1520 (Tyler): the start date typed on the New tournament screen fills Day 1.
   // submitT2Create writes it there directly; this is the belt to that braces -- if
   // Day 1 has no date but the event carries the one the director typed, put it back.
@@ -79707,12 +79709,33 @@ async function renderT2Home() {
          set up." The per-guest personal links (the ?tjoin= slot invites) now live HERE,
          on Review & start, instead of beside every row on the Players step. */
       try {
-        const _gl = (players || []).filter(p => p && !p.user_id && !p.claimed);
+        /* v1751 (Tyler): "why don't I see personal invites for everyone?" The card only ever listed
+           guests, so a field of linked users looked like nobody had been invited. It is now ONE
+           list of the whole field: a linked player shows where their in-app invite stands, a
+           guest keeps the personal join-link button. Statuses come from the invite rows this
+           screen already reads (the sender can read their own), so it costs no extra request. */
+        const _wdI = (typeof t2WithdrawnSet === 'function') ? t2WithdrawnSet(t) : new Set();
+        const _gl = (players || []).filter(p => p && !_wdI.has(p.id));
+        const _myU = (_authUser && _authUser.id) || null;
+        const _chipI = (txt, col) => '<span class="small-text" style="flex:0 0 auto;font-weight:700;color:' + col + '">' + txt + '</span>';
+        const _statI = (p) => {
+          if (_myU && String(p.user_id) === String(_myU)) return _chipI('You', 'var(--text-muted)');
+          const s = _t2InvStatus[p.user_id] || '';
+          if (s === 'accepted') return _chipI('\u2713 Accepted', 'var(--money-pos)');
+          if (s === 'declined') return _chipI('\u2715 Declined', 'var(--money-neg)');
+          if (s === 'pending' || s === 'seen') return _chipI('Sent \u00B7 waiting', 'var(--accent)');
+          if (s === 'expired') return _chipI('Expired \u00B7 send again', 'var(--text-muted)');
+          return _chipI('Not sent yet', 'var(--text-muted)');
+        };
         if (_gl.length) {
-          sb += '<div class="card" style="padding:10px 12px;margin-bottom:8px"><div style="font-weight:700;margin-bottom:4px">📨 Personal invites</div>' +
-            '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">Each guest gets their own join link — send it and they land in their slot.</div>' +
-            _gl.map(p => '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid var(--border)">' +
-              '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600">' + t2esc(p.display_name || 'Player') + '</span>' +
+          const _nG = _gl.filter(p => !p.user_id && !p.claimed).length;
+          sb += '<div class="card" style="padding:10px 12px;margin-bottom:8px"><div style="font-weight:700;margin-bottom:4px">📨 Invites \u00B7 ' + _gl.length + ' player' + (_gl.length === 1 ? '' : 's') + '</div>' +
+            '<div class="small-text" style="color:var(--text-muted);margin-bottom:4px">Bad Golf users are invited in the app \u2014 tap Invite players above.' + (_nG ? ' A guest gets their own join link to text.' : '') + '</div>' +
+            _gl.map(p => (p.user_id || p.claimed)
+              ? ('<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid var(--border)">' +
+                 '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600">' + t2esc(p.display_name || 'Player') + '</span>' + _statI(p) + '</div>')
+              : '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid var(--border)">' +
+              '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600">' + t2esc(p.display_name || 'Player') + ' <span class="small-text" style="color:var(--text-muted);font-weight:500">\u00B7 guest</span></span>' +
               '<button class="bg-btn bg-btn--sm small t2-invite-btn" data-pid="' + p.id + '" data-token="' + t2esc(p.invite_token || '') + '" data-name="' + t2esc(p.display_name || '') + '" title="Text ' + t2esc(p.display_name || 'this player') + ' a personal join link" style="flex:0 0 auto">📨 Invite</button></div>').join('') + '</div>';
         }
       } catch (e) {}
