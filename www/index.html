@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1753-->
+<!--BGVER=v2026.11.1754-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10888,7 +10888,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1753';
+const BG_BUILD = 'v2026.11.1754';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -81392,16 +81392,32 @@ function renderTourneyCard(t, compact) {
   return card;
 }
 
+/* v1754 (Tyler): "It's taking several seconds for the scheduled rounds to show up once I click
+   the rounds tab." Three separate waits, none of them needed before the first paint:
+   1. the tab ran this AFTER `await loadRounds()` -- the whole Saved rounds list -- although this
+      card sits ABOVE it;
+   2. inside, five reads ran one after another before anything was drawn: the rounds, who I am,
+      EVERY tournament group's code in the database (whole-table read, just to hide a tournament
+      round from a list that is usually empty), my recent rounds, and the event pictures;
+   3. the pictures were awaited last, with the cards already built.
+   Now: the two reads the cards actually need go out together and the cards paint. The "rounds I
+   was invited to" extras and the pictures are worked out afterwards and repaint only if they add
+   or change something; the group-code lookup asks about the few candidate codes only, and not at
+   all when there are none. A token stops an older pass painting over a newer one. */
+let _bgTLTok = 0;
 async function renderTourneyList() {
   const list = $('tourney-list');
+  const _tok = ++_bgTLTok;
+  let _meT = '';
+  const _pMeT = (async () => { try { return (await getMeName()) || ''; } catch (e) { return ''; } })();
   const _allT = await getTourneys();
   // Personalize + prune (QA): the tourneys blob is SHARED across all users, so
   // without filtering everyone saw everyone else's scheduled rounds — and stale
   // completed/expired ones lingered. A user should only see (a) scheduled rounds
   // they're in (creator or a listed player) that are still 'scheduled' and not
   // past their time, and (b) reusable templates they created.
-  let _meT = '';
-  try { _meT = (await getMeName()) || ''; } catch (e) {}
+  _meT = await _pMeT;
+  if (_tok !== _bgTLTok) return;
   const _normT = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
   const _meKeyT = _normT(_meT);
   const tourneys = (_allT || []).filter(t => {
@@ -81440,55 +81456,64 @@ async function renderTourneyList() {
   // only on the Rounds tab. Deduped against any live tourney card (by activeCode).
   // Tournament group rounds belong under "Tournaments", not "Scheduled Rounds" — build
   // the set of their game codes so we exclude them from the scheduled list below.
-  let _t2RoundCodes = new Set();
-  try { if (typeof supa !== 'undefined' && supa) { const { data: _tg } = await _bgRead(() => supa.from('tournament_groups').select('game_code'), 'renderTourneyList:codes'); (_tg || []).forEach(g => { if (g.game_code) _t2RoundCodes.add(g.game_code); }); } } catch (e) {}
+  tourneys.sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'));
+  const _paint = (schedGames) => {
+    if (_tok !== _bgTLTok) return;
+    // v899 (Tyler): NO big "No rounds yet" empty state here -- the card already carries the
+    // explainer and the "+ Schedule a round" button above this list.
+    if (tourneys.length === 0 && schedGames.length === 0) { list.innerHTML = ''; return; }
+    list.innerHTML = '';
+    // v1743/v1745 (Tyler): soonest three show; the rest sit behind ONE Show more / Show less.
+    const _cards = tourneys.map(t => renderTourneyCard(t)).concat(schedGames.map(r => renderScheduledGameCard(r)));
+    const _open = !!window._bgSchedShowAll;
+    const _SCHED_SHOW = 3;
+    _cards.forEach((c, i) => { if (i >= _SCHED_SHOW && !_open) c.style.display = 'none'; list.appendChild(c); });
+    if (_cards.length > _SCHED_SHOW) {
+      const _tg = document.createElement('button');
+      _tg.type = 'button'; _tg.id = 'sched-toggle-cap'; _tg.className = 'bg-btn bg-btn--full bg-btn--sm small';
+      _tg.textContent = _open ? '\u25B4 Show less' : ('\u25BE Show more (' + (_cards.length - _SCHED_SHOW) + ')');
+      _tg.onclick = () => { window._bgSchedShowAll = !_open; renderTourneyList(); };
+      list.appendChild(_tg);
+    }
+  };
+  window._eventImgs = window._eventImgs || {};
+  const _imgSig0 = JSON.stringify(window._eventImgs);
+  if (tourneys.length) _paint([]);          // FIRST PAINT: the rounds themselves, with whatever pictures we already hold
+
+  // ---- afterwards: rounds I was invited to that live only in my recent list, and the pictures ----
+  const _pImgs = (async () => { try { return await getEventImgs(); } catch (e) { return null; } })();
   let schedGames = [];
   try {
     const rec = await getRecent();
     const hidden = (typeof getHiddenRounds === 'function') ? getHiddenRounds() : [];
     const tourneyCodes = new Set(tourneys.map(t => t.activeCode).filter(Boolean));
-    // Open rounds (status 'open') are filtered out of `tourneys` above, so their
-    // pre-allocated game code can leak in here and show the SAME round a 2nd time
-    // as a "Scheduled" card next to its Open Rounds card. Exclude any code that
-    // belongs to an open-round tourney (planned OR active code).
+    // An open round's pre-allocated code must not show a second time as a "Scheduled" card.
     const openRoundCodes = new Set();
     (_allT || []).forEach(t => { if (t && (t.status === 'open' || t.openRound)) { if (t.plannedCode) openRoundCodes.add(t.plannedCode); if (t.activeCode) openRoundCodes.add(t.activeCode); } });
-    schedGames = (rec || []).filter(r => {
+    let cand = (rec || []).filter(r => {
       if (!r || !r.code || r.finishedAt) return false;
       if (hidden.includes(r.code)) return false;
-      if (r.scoreLine && String(r.scoreLine).trim()) return false;   // started → not a scheduled round
+      if (r.scoreLine && String(r.scoreLine).trim()) return false;   // started -> not a scheduled round
       if (tourneyCodes.has(r.code)) return false;                    // already shown as a tourney card
-      if (openRoundCodes.has(r.code)) return false;                  // belongs to an Open Round — shown there
-      if ((r.t2 && r.t2.tournamentId) || _t2RoundCodes.has(r.code)) return false;  // tournament round → under Tournaments, not here
+      if (openRoundCodes.has(r.code)) return false;                  // belongs to an Open Round -- shown there
+      if (r.t2 && r.t2.tournamentId) return false;                   // tournament round -> under Tournaments
       return recentRowHasName(r, _meT);                              // I'm in it
-    }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  } catch (e) {}
-
-  // v899 (Tyler): NO big "No rounds yet" empty state on Events. The Scheduled
-  // Rounds card already carries the explainer paragraph AND the "+ Schedule a
-  // round" button directly above this list, so the cart illustration + a second
-  // "+ Create Round" button were saying the same thing twice and eating half a
-  // screen. Nothing scheduled -> render an empty list; the button above the list
-  // is the only call to action. (#btn-new-tourney is never hidden, so there is
-  // always a way to create a round.)
-  if (tourneys.length === 0 && schedGames.length === 0) { list.innerHTML = ''; return; }
-  tourneys.sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'));
-  try { window._eventImgs = await getEventImgs(); } catch (e) { window._eventImgs = window._eventImgs || {}; }
-  list.innerHTML = '';
-  // v1743 (Tyler): "keep this collapsed and only show the next upcoming one." Soonest card
-  // shows; the rest sit behind ONE Show more / Show less (the v1730 pattern). Undated rounds
-  // sort last, so they are behind the fold whenever a dated one exists.
-  const _cards = tourneys.map(t => renderTourneyCard(t)).concat(schedGames.map(r => renderScheduledGameCard(r)));
-  const _open = !!window._bgSchedShowAll;
-  const _SCHED_SHOW = 3;   // v1745 (Tyler): "let's show the next three upcoming rounds."
-  _cards.forEach((c, i) => { if (i >= _SCHED_SHOW && !_open) c.style.display = 'none'; list.appendChild(c); });
-  if (_cards.length > _SCHED_SHOW) {
-    const _tg = document.createElement('button');
-    _tg.type = 'button'; _tg.id = 'sched-toggle-cap'; _tg.className = 'bg-btn bg-btn--full bg-btn--sm small';
-    _tg.textContent = _open ? '\u25B4 Show less' : ('\u25BE Show more (' + (_cards.length - _SCHED_SHOW) + ')');
-    _tg.onclick = () => { window._bgSchedShowAll = !_open; renderTourneyList(); };
-    list.appendChild(_tg);
-  }
+    });
+    // Tournament group rounds whose recent row lost its t2 stamp: ask about THESE codes only.
+    if (cand.length && typeof supa !== 'undefined' && supa) {
+      try {
+        const _codes = cand.map(r => r.code);
+        const { data: _tg } = await _bgRead(() => supa.from('tournament_groups').select('game_code').in('game_code', _codes), 'renderTourneyList:codes');
+        const _t2c = new Set((_tg || []).map(g => g && g.game_code).filter(Boolean));
+        cand = cand.filter(r => !_t2c.has(r.code));
+      } catch (e) {}
+    }
+    schedGames = cand.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  } catch (e) { schedGames = []; }
+  let _imgsChanged = false;
+  try { const _im = await _pImgs; if (_im) { _imgsChanged = JSON.stringify(_im) !== _imgSig0; window._eventImgs = _im; } } catch (e) {}
+  if (_tok !== _bgTLTok) return;
+  if (schedGames.length || _imgsChanged || !tourneys.length) _paint(schedGames);
 }
 
 // A simple Events-tab card for a scheduled (not-yet-started) round that lives in
@@ -102183,9 +102208,13 @@ window.switchTab = function(name, opts) {
       // local work and returns immediately when signed out, so it goes first now.
       try { renderRoundTemplates(); } catch (e) {}
       await _yield();
+      /* v1754: Scheduled Rounds sits at the TOP of this tab but used to wait for the whole Saved
+         rounds list below it. Start it first and don't hold the rest up for it. */
+      const _pTL = (async () => { try { await renderTourneyList(); } catch (e) {} })();
+      await _yield();
       try { await loadRounds(); } catch (e) {}
       await _yield();
-      try { await renderTourneyList(); } catch (e) {}
+      try { await _pTL; } catch (e) {}
       await _yield();
       try { await renderOpenRounds(); } catch (e) {}
     })(); });
