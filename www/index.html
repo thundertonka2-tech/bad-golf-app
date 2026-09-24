@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1774-->
+<!--BGVER=v2026.11.1775-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -10962,7 +10962,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1774';
+const BG_BUILD = 'v2026.11.1775';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -12111,11 +12111,45 @@ async function crCreate(type, payload) {
     const row = Object.assign({ type: type, status: 'open', requester_id: (_authUser && _authUser.id) || null, requester_name: me || null }, payload || {});
     const { data, error } = await supa.from('course_requests').insert(row).select().maybeSingle();
     if (error) { console.warn('crCreate', error); try { showToast(error.message || 'Could not send request — is the table set up?'); } catch (e) {} return null; }
-    if (type === 'remap' && data && data.id) { // #6 ping admins about a re-map request
+    // v1775 (Tyler): ping the right admins for BOTH kinds -- re-map -> Kevin, new course ->
+    // Tyler + Kevin. The routing lives server-side in notify-admins-remap.
+    if (data && data.id) {
       try { if (supa.functions && supa.functions.invoke) supa.functions.invoke('notify-admins-remap', { body: { request_id: data.id } }).catch(function () {}); } catch (e) {}
     }
     return data;
   } catch (e) { console.warn('crCreate', e); try { showToast('Could not send request'); } catch (e2) {} return null; }
+}
+// v1775 (Tyler, 9/24): who hears about each kind of course request, in the ✉️ inbox and by
+// push. Re-map -> Kevin; new course -> Tyler + Kevin. Mirrors ROUTE in notify-admins-remap.
+const BG_CR_ROUTE = {
+  remap: ['577b3347-c4ca-4a07-bba1-ff5a7174c3e4'],
+  new:   ['96c81a63-a969-483f-acd4-887758ee1053', '577b3347-c4ca-4a07-bba1-ff5a7174c3e4']
+};
+function bgCrRouteFor(uid) {
+  const out = [];
+  try { Object.keys(BG_CR_ROUTE).forEach(k => { if (uid && BG_CR_ROUTE[k].indexOf(uid) >= 0) out.push(k); }); } catch (e) {}
+  return out;
+}
+// v1775: send a message to the person who filed the request -- stored on the row
+// (course_requests.replies, which they can read) and pushed to their phone.
+async function crSendReply(row, text, status) {
+  try {
+    const msg = String(text || '').trim();
+    if (!supa || !row || !row.id || !msg) return false;
+    if (typeof t2EnsureFreshSession === 'function') { try { await t2EnsureFreshSession(); } catch (e) {} }
+    let me = ''; try { me = (await getMeName()) || ''; } catch (e) {}
+    let cur = [];
+    try { const r = await supa.from('course_requests').select('replies').eq('id', row.id).maybeSingle(); if (r && r.data && Array.isArray(r.data.replies)) cur = r.data.replies; } catch (e) {}
+    const entry = { at: Date.now(), by: (_authUser && _authUser.id) || null, by_name: me || 'Bad Golf', text: msg.slice(0, 1000), status: status || (row.status || 'open') };
+    const { error } = await supa.from('course_requests').update({ replies: cur.concat([entry]) }).eq('id', row.id);
+    if (error) { try { showToast(error.message || 'Could not save the reply'); } catch (e) {} return false; }
+    if (row.requester_id) {
+      const nm = row.course_name || 'your course';
+      const title = status === 'resolved' ? (row.type === 'remap' ? 'Course re-mapped ✅' : 'Your course is ready ⛳') : (status === 'rejected' ? 'About your course request' : 'Bad Golf team replied');
+      try { sendPush(row.requester_id, title, nm + ': ' + msg, { type: 'course_request_reply', request_id: row.id }, 'creqr:' + row.id); } catch (e) {}
+    }
+    return true;
+  } catch (e) { console.warn('crSendReply', e); return false; }
 }
 async function crFetchAll() {
   if (!supa) return [];
@@ -12192,16 +12226,30 @@ async function openCourseRequestQueue() {
           + (x.requester_name ? ' · by ' + esc(x.requester_name) : '') + '</div>'
         + (x.note ? '<div class="small-text" style="margin-top:6px;background:var(--surface-2);border-radius:8px;padding:8px 10px;line-height:1.5">' + esc(x.note) + '</div>' : '')
         + (x.resolution_note ? '<div class="small-text" style="margin-top:6px;color:var(--text-muted)">Note: ' + esc(x.resolution_note) + '</div>' : '')
+        + ((Array.isArray(x.replies) && x.replies.length) ? '<div class="small-text" style="margin-top:6px;line-height:1.45">' + x.replies.map(r => '\u{1F4AC} <strong>' + esc(r.by_name || 'Bad Golf') + '</strong>: ' + esc(r.text || '')).join('<br>') + '</div>' : '')
         + '<div style="display:flex;gap:8px;margin-top:10px">'
         + (showOpen
             ? '<button class="bg-btn bg-btn--primary bg-btn--sm small primary cr-q-resolve" data-id="' + esc(x.id) + '" style="flex:1">✓ Resolve</button>'
+              + '<button class="bg-btn bg-btn--sm small cr-q-reply" data-id="' + esc(x.id) + '" style="flex:1">\u{1F4AC} Reply</button>'
               + '<button class="bg-btn bg-btn--danger bg-btn--sm small cr-q-reject" data-id="' + esc(x.id) + '" style="flex:1">✕ Reject</button>'
             : '<button class="bg-btn bg-btn--sm small cr-q-reopen" data-id="' + esc(x.id) + '" style="flex:1">↺ Reopen</button>')
         + '</div></div>';
     }).join('');
     const act = async (id, status) => {
       let note = null;
-      if (status !== 'open') { try { note = await uiPrompt('Add a note? (optional)', { title: status === 'resolved' ? 'Resolve request' : 'Reject request', okLabel: 'Save' }); } catch (e) { note = null; } }
+      // v1775 (Tyler): closing a request messages the requester (push + their ✉️ inbox).
+      // The box is prefilled; clear it to close without messaging, Cancel to back out.
+      const row = (all || []).find(r => String(r.id) === String(id)) || null;
+      const who = (row && row.requester_name) ? row.requester_name : 'the requester';
+      if (status === 'resolved' || status === 'rejected') {
+        const nm = (row && row.course_name) || 'This course';
+        const def = status === 'resolved'
+          ? ((row && row.type === 'remap') ? (nm + ' has been re-mapped \u2014 reopen your round to load the new GPS. Thanks for the heads up!') : (nm + ' is in Bad Golf now \u2014 tap Play and search for it. Thanks for the request!'))
+          : '';
+        try { note = await uiPrompt('Message to ' + who + ' (sent as a notification). Clear it to close without messaging.', { title: status === 'resolved' ? 'Resolve request' : 'Reject request', okLabel: status === 'resolved' ? 'Resolve & send' : 'Reject & send', value: def, placeholder: status === 'rejected' ? 'Why we could not add it' : '' }); } catch (e) { note = null; }
+        if (note === null) return;
+        if (String(note).trim() && row) { if (!(await crSendReply(row, note, status))) return; }
+      }
       if (await crResolveRequest(id, status, note)) {
         try { showToast(status === 'open' ? 'Reopened' : (status === 'resolved' ? 'Resolved' : 'Rejected')); } catch (e) {}
         _dashCache = null;                       // dashboard counts are now stale
@@ -12211,6 +12259,12 @@ async function openCourseRequestQueue() {
     };
     list.querySelectorAll('.cr-q-resolve').forEach(b => b.onclick = () => act(b.dataset.id, 'resolved'));
     list.querySelectorAll('.cr-q-reject').forEach(b => b.onclick = () => act(b.dataset.id, 'rejected'));
+    list.querySelectorAll('.cr-q-reply').forEach(b => b.onclick = async () => {   // v1775: message without closing
+      const row = (all || []).find(r => String(r.id) === String(b.dataset.id)); if (!row) return;
+      let t = null; try { t = await uiPrompt('Message to ' + (row.requester_name || 'the requester') + ' (sent as a notification). The request stays open.', { title: 'Reply', okLabel: 'Send', placeholder: 'e.g. Which city is that in?' }); } catch (e) { t = null; }
+      if (t == null || !String(t).trim()) return;
+      if (await crSendReply(row, t, 'open')) { try { showToast('Reply sent'); } catch (e) {} await draw(); }
+    });
     list.querySelectorAll('.cr-q-reopen').forEach(b => b.onclick = () => act(b.dataset.id, 'open'));
   };
   const tabOpen = ov.querySelector('#cr-q-open'), tabDone = ov.querySelector('#cr-q-done');
@@ -58933,6 +58987,43 @@ async function bgCollectInbox() {
     }
   } catch (e) {}
 
+  // 5b) v1775 (Tyler, 9/24): COURSE REQUESTS. Re-map requests go to Kevin; new-course
+  //     requests go to Tyler + Kevin. Outstanding like friend requests: a row stays on
+  //     the badge until the request is resolved/rejected in the queue (tap = the queue).
+  try {
+    const _myKinds = bgCrRouteFor(meId);
+    if (_myKinds.length) {
+      const r = await supa.from('course_requests').select('id,type,course_name,location,requester_name,created_at,status')
+        .eq('status', 'open').in('type', _myKinds).order('created_at', { ascending: false }).limit(25);
+      ((r && r.data) || []).forEach(q => {
+        if (!q) return;
+        const isRemap = q.type === 'remap';
+        out.push({ kind: 'creq-admin', unread: true, at: Date.parse(q.created_at) || 0,
+                   icon: isRemap ? '\u{1F6E0}\uFE0F' : '\u{1F4E9}',
+                   title: (isRemap ? 'Re-map requested: ' : 'New course requested: ') + (q.course_name || '(no name)') + (q.location ? ' \u00b7 ' + q.location : ''),
+                   sub: 'from ' + (q.requester_name || 'a user') + ' \u2014 tap to open the request queue', act: 'crqueue' });
+      });
+    }
+  } catch (e) {}
+  // 5c) v1775: replies from the Bad Golf team to course requests I filed (last 60 days).
+  try {
+    const r = await supa.from('course_requests').select('id,type,course_name,status,replies,created_at')
+      .eq('requester_id', meId).order('created_at', { ascending: false }).limit(20);
+    const _cut = Date.now() - 60 * 86400000;
+    ((r && r.data) || []).forEach(q => {
+      const reps = (q && Array.isArray(q.replies)) ? q.replies : [];
+      if (!reps.length) return;
+      const last = reps[reps.length - 1];
+      const at = Number(last && last.at) || 0;
+      if (at < _cut) return;
+      const ready = q.status === 'resolved';
+      out.push({ kind: 'creq-reply', unread: at > seenAt, at: at,
+                 icon: ready ? '\u26f3' : '\u{1F4EC}',
+                 title: (ready ? (q.type === 'remap' ? 'Re-mapped: ' : 'Ready to play: ') : 'About your request: ') + (q.course_name || 'your course'),
+                 sub: String((last && last.text) || ''), act: (ready && q.type !== 'remap') ? 'play' : null });
+    });
+  } catch (e) {}
+
   // 3) Fist bumps + comments on MY highlights. _myHlKeys is populated by renderHomeLive
   //    and covers the last 24h — Home is the landing panel, so it is filled within a
   //    second of opening the app. Empty set simply contributes nothing.
@@ -59034,6 +59125,8 @@ function _bgInboxPaintList(ov, close) {
         try { close(); } catch (e) {}
         try { if (it && it.tab && typeof switchTab === 'function') switchTab(it.tab); } catch (e) {}
         try { if (it && it.ttId && typeof timesOpenDetail === 'function') setTimeout(function () { try { timesOpenDetail(it.ttId); } catch (e2) {} }, 250); } catch (e) {}   // v1770: straight to the tee time card
+        try { if (it && it.act === 'crqueue' && typeof openCourseRequestQueue === 'function') setTimeout(function () { try { openCourseRequestQueue(); } catch (e2) {} }, 150); } catch (e) {}   // v1775
+        try { if (it && it.act === 'play' && typeof bnavCenter === 'function') setTimeout(function () { try { bnavCenter(); } catch (e2) {} }, 150); } catch (e) {}   // v1775
       };
     });
   } catch (e) {}
@@ -59063,7 +59156,7 @@ async function bgOpenInbox() {
     // friend requests and invites deliberately do not — they are outstanding until
     // answered, which is what Tyler asked the badge to mean.
     _inboxMarkSeen(Date.now());
-    (_bgInboxItems || []).forEach(x => { if (x && x.kind !== 'friend' && x.kind !== 'invite') x.unread = false; });
+    (_bgInboxItems || []).forEach(x => { if (x && x.kind !== 'friend' && x.kind !== 'invite' && x.kind !== 'creq-admin') x.unread = false; });   // v1775: open course requests stay on the badge until closed
     bgPaintInboxBadge();
   } catch (e) {}
 }
