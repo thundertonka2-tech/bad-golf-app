@@ -36,6 +36,7 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
     <h1>The golf app for your regular group.</h1>
     <p class="lead">One shared live scorecard, GPS yardages on every hole, real handicaps and all ${gameCount}+ side games you already play, scored automatically. No napkin math at the 19th hole.</p>
     <div class="actions">${storeButtons()}</div>
+    <p class="try-demo"><a href="/app/?demo=1">Try a demo round in your browser &rarr;</a> <span>No sign-up. Nothing is saved.</span></p>
     <p class="fine">Bad Golf, Better Times. ${courseCount.toLocaleString()} U.S. courses mapped. No subscription.</p>
   </div>
   <div class="hero-art"><div class="phones">${phoneGps}${phoneBoard}</div></div>
