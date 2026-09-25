@@ -26,10 +26,13 @@ for (let i = 0; i < 64; i += 16) {
   rows.forEach(d => { if (d) for (const k in d) cards[k] = d[k]; });
 }
 const gps = {};
-for (let off = 0; ; off += 1000) {
-  const rows = await get(`/course_gps?select=course_id,holes&limit=1000&offset=${off}`);
+// 2026-09-25 health check: 1,000 rows of full hole JSON per page was hitting the database's
+// statement timeout (31 x 500 in a day), so each deploy leaned on retries. 250 per page, ordered
+// so paging is stable.
+for (let off = 0; ; off += 250) {
+  const rows = await get(`/course_gps?select=course_id,holes&order=course_id&limit=250&offset=${off}`);
   rows.forEach(r => { let n = 0; for (const k in (r.holes || {})) if (r.holes[k] && r.holes[k].mid) n++; if (n) gps[r.course_id] = n; });
-  if (rows.length < 1000) break;
+  if (rows.length < 250) break;
 }
 const contact = {};
 for (let off = 0; ; off += 1000) {

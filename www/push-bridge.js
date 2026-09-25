@@ -110,9 +110,28 @@
           if (typeof window.switchTab === 'function') return window.switchTab('home');
         } catch (e) {}
       });
-      Push.requestPermissions().then(function (res) {
-        if (res && res.receive === 'granted') Push.register();
-      });
+      // v1792 (Tyler): no more Apple/Android Allow popup the instant the app opens -- before
+      // sign-in, with no reason given, and a "Don't Allow" there can never be asked again. The
+      // app script (bgPushNudge) asks after sign-in with its own explanation first. Here we only
+      // re-register people who already said yes, and expose the state + the ask.
+      window.bgPushState = function () {
+        return Push.checkPermissions().then(function (r) { return (r && r.receive) || 'prompt'; }).catch(function () { return 'prompt'; });
+      };
+      window.bgPushAsk = function () {
+        return Push.requestPermissions().then(function (res) {
+          var st = (res && res.receive) || 'denied';
+          if (st === 'granted') { try { Push.register(); } catch (e) {} }
+          return st;
+        }).catch(function () { return 'denied'; });
+      };
+      window.bgPushState().then(function (st) { if (st === 'granted') { try { Push.register(); } catch (e) {} } });
+      // Turned them on in Settings and came back? Register right away.
+      try {
+        var AppP = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+        if (AppP && AppP.addListener) AppP.addListener('appStateChange', function (s) {
+          if (s && s.isActive) window.bgPushState().then(function (st) { if (st === 'granted') { try { Push.register(); } catch (e) {} } });
+        });
+      } catch (e) {}
     } catch (e) { console.warn('push-bridge init', e); }
   });
 })();
