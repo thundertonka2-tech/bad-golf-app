@@ -37,7 +37,7 @@ const urls = [];
 const add = (loc, priority = 0.5, changefreq = 'monthly') => urls.push({ loc, priority, changefreq });
 
 // ---- static pages
-const topSlugs = ['skins', 'nassau', 'wolf-captain', 'vegas', 'banker', 'stableford', 'quota', 'match-play', 'scramble', 'hammer', 'bingo-bango-bongo', 'ryder-cup', 'par-3-greenie', 'snake', 'closest-to-the-pin', 'umbrella'];
+const topSlugs = ['skins', 'nassau', 'wolf-captain', 'vegas', 'banker', 'stableford', 'quota', 'match-play', 'scramble', 'shamble', 'hammer', 'bingo-bango-bongo', 'ryder-cup', 'par-3-greenie', 'snake', 'closest-to-the-pin', 'umbrella'];
 const topGames = topSlugs.map(s => games.find(g => g.slug === s)).filter(Boolean);
 write('index.html', home({ courseCount: courses.length, gameCount: games.length, topGames, stateCount })); add('/', 1.0, 'weekly');
 write('features/index.html', features({ courseCount: courses.length, gameCount: games.length })); add('/features/', 0.8);
