@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1787-->
+<!--BGVER=v2026.11.1788-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11341,7 +11341,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1787';
+const BG_BUILD = 'v2026.11.1788';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -12566,92 +12566,247 @@ async function crResolveRequest(id, status, note) {
 }
 
 // Admin queue for course requests — the missing other half of crCreate.
-// Opened by tapping either request tile on the dashboard.
-async function openCourseRequestQueue() {
+// v1788 (Tyler, 9/25): the request workflow now has three steps, and the queue is built
+// around them so Kevin can finish a request and email the golfer in two taps.
+//   1) NEW       status 'open'     -- Tyler maps the course, then taps "Mapped -> Kevin".
+//   2) REVIEW    status 'mapped'   -- Kevin checks it, taps Approve (the golfer gets the
+//                                     in-app push + inbox notice), or Send back to Tyler.
+//   3) DONE      status 'resolved' -- "Email <name>" opens Kevin's own mail app with the
+//                                     To, subject and a thank-you already written. Tapping
+//                                     it stamps emailed_at so the card shows it was sent.
+// Each card shows the requester's name AND sign-in email (admin-only RPC
+// bg_course_request_emails, because auth.users is not readable from the app) with a Copy
+// button. Apple "Hide My Email" addresses (@privaterelay.appleid.com) only accept mail
+// from a domain registered with Apple, so for those the Email button is replaced with a
+// note: they got the in-app notice, a personal email won't reach them.
+const BG_CR_REVIEWER = '577b3347-c4ca-4a07-bba1-ff5a7174c3e4';   // Kevin: step 2 + the email
+const BG_CR_MAPPER   = '96c81a63-a969-483f-acd4-887758ee1053';   // Tyler: step 1 (maps it)
+function bgCrIsRelay(email) { return /@privaterelay\.appleid\.com$/i.test(String(email || '')); }
+async function crFetchEmails() {
+  const out = {};
+  try {
+    if (!supa) return out;
+    const { data, error } = await supa.rpc('bg_course_request_emails');
+    if (error) { console.warn('crFetchEmails', error); return out; }
+    (data || []).forEach(r => { if (r && r.id) out[String(r.id)] = r.email || ''; });
+  } catch (e) { console.warn('crFetchEmails', e); }
+  return out;
+}
+async function crPatch(id, patch) {
+  if (!supa || !id) return false;
+  try {
+    if (typeof t2EnsureFreshSession === 'function') { try { await t2EnsureFreshSession(); } catch (e) {} }
+    const { error } = await supa.from('course_requests').update(patch).eq('id', id);
+    if (error) { console.warn('crPatch', error); try { showToast(error.message || 'Could not update that request'); } catch (e) {} return false; }
+    return true;
+  } catch (e) { console.warn('crPatch', e); return false; }
+}
+function bgCrFirst(name) { const f = String(name || '').trim().split(/\s+/)[0] || ''; return f || 'there'; }
+function bgCrEmailParts(row) {
+  const course = row.course_name || 'your course';
+  const city = row.location ? ' (' + row.location + ')' : '';
+  if (row.type === 'remap') {
+    return {
+      subject: course + ' has been fixed in Bad Golf ⛳',
+      body: 'Hi ' + bgCrFirst(row.requester_name) + ',\n\n'
+        + 'Thanks for using Bad Golf and for letting us know about ' + course + city + '. We have re-mapped it, so the GPS and hole layout should be spot on now. '
+        + 'If you have a round there in progress, close it and reopen it to load the new map.\n\n'
+        + 'If anything still looks off, just reply to this email and we will take care of it.\n\n'
+        + 'Thanks for playing,\nKevin\nBad Golf'
+    };
+  }
+  return {
+    subject: course + ' is ready in Bad Golf ⛳',
+    body: 'Hi ' + bgCrFirst(row.requester_name) + ',\n\n'
+      + 'Thanks for using Bad Golf and for requesting ' + course + city + '. It is now in the app with the full scorecard, tees and GPS for every hole. '
+      + 'Tap Play and search for "' + course + '" to start a round.\n\n'
+      + 'If anything on the course looks off, just reply to this email and we will fix it.\n\n'
+      + 'Thanks for playing,\nKevin\nBad Golf'
+  };
+}
+function bgCrCopy(text) {
+  const done = () => { try { showToast('Copied'); } catch (e) {} };
+  try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done, () => fallback()); return; } } catch (e) {}
+  fallback();
+  function fallback() {
+    try { const t = document.createElement('textarea'); t.value = text; t.setAttribute('readonly', ''); t.style.cssText = 'position:fixed;left:-9999px;top:0'; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); done(); } catch (e) { try { showToast('Could not copy'); } catch (e2) {} }
+  }
+}
+async function crEmailRequester(row, email) {
+  if (!row || !email || bgCrIsRelay(email)) return;
+  const p = bgCrEmailParts(row);
+  const url = 'mailto:' + encodeURIComponent(email) + '?subject=' + encodeURIComponent(p.subject) + '&body=' + encodeURIComponent(p.body);
+  try { window.location.href = url; } catch (e) {}
+  if (!row.emailed_at) {
+    await crPatch(row.id, { emailed_at: new Date().toISOString(), emailed_by: (_authUser && _authUser.id) || null });
+    row.emailed_at = new Date().toISOString();
+  }
+}
+async function openCourseRequestQueue(startTab) {
   if (document.getElementById('cr-queue-ov')) return;
   const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => x);
   const ov = document.createElement('div');
   ov.id = 'cr-queue-ov';
   // v977: with viewport-fit=cover + a black-translucent status bar, an inset:0
   // overlay starts UNDER the notch — the title row and its ✕ Close were clipped.
-  // Every other surface in the app pads for the safe area; these four did not.
   ov.style.cssText = 'position:fixed;inset:0;z-index:100010;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch';
   ov.innerHTML = '<div style="padding:calc(14px + env(safe-area-inset-top,0px)) 14px 40px;max-width:720px;margin:0 auto">'
     + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'
     +   '<h2 style="margin:0;flex:1">📩 Course requests</h2>'
     +   '<button id="cr-q-close" class="bg-btn bg-btn--ghost bg-btn--sm small">✕ Close</button>'
     + '</div>'
-    + '<div style="display:flex;gap:8px;margin-bottom:10px">'
-    +   '<button id="cr-q-open" class="bg-btn bg-btn--primary bg-btn--sm small primary" style="flex:1">Open</button>'
-    +   '<button id="cr-q-done" class="bg-btn bg-btn--sm small" style="flex:1">Resolved</button>'
+    + '<div style="display:flex;gap:6px;margin-bottom:10px">'
+    +   '<button id="cr-q-t-open" class="bg-btn bg-btn--sm small cr-q-tab" data-tab="open" style="flex:1">1 · New</button>'
+    +   '<button id="cr-q-t-mapped" class="bg-btn bg-btn--sm small cr-q-tab" data-tab="mapped" style="flex:1">2 · Review</button>'
+    +   '<button id="cr-q-t-done" class="bg-btn bg-btn--sm small cr-q-tab" data-tab="done" style="flex:1">3 · Done</button>'
     + '</div>'
     + '<div id="cr-q-list"></div></div>';
   document.body.appendChild(ov);
-  let showOpen = true;
+  const meId = (_authUser && _authUser.id) || '';
+  let tab = startTab || (meId === BG_CR_REVIEWER ? 'mapped' : 'open');
   const close = () => { try { ov.remove(); } catch (e) {} };
   ov.querySelector('#cr-q-close').onclick = close;
-  const draw = async () => {
+  let all = [], emails = {};
+  const inTab = (x, t) => {
+    const st = x.status || 'open';
+    if (t === 'open') return st === 'open';
+    if (t === 'mapped') return st === 'mapped';
+    return st === 'resolved' || st === 'rejected';
+  };
+  const paintTabs = () => {
+    ov.querySelectorAll('.cr-q-tab').forEach(b => {
+      const t = b.dataset.tab;
+      const n = (all || []).filter(x => inTab(x, t)).length;
+      const lbl = { open: '1 · New', mapped: '2 · Review', done: '3 · Done' }[t];
+      b.textContent = lbl + (t !== 'done' && n ? ' (' + n + ')' : '');
+      b.classList.toggle('bg-btn--primary', t === tab); b.classList.toggle('primary', t === tab);
+    });
+  };
+  const draw = async (refetch) => {
     const list = ov.querySelector('#cr-q-list');
-    list.innerHTML = '<div class="help-text" style="padding:20px 0;text-align:center">Loading…</div>';
-    let all = [];
-    try { all = await crFetchAll(); } catch (e) {}
-    const rows = (all || []).filter(x => showOpen ? ((x.status || 'open') === 'open') : ((x.status || 'open') !== 'open'));
-    if (!rows.length) { list.innerHTML = '<div class="help-text" style="padding:20px 0;text-align:center">Nothing here.</div>'; return; }
-    list.innerHTML = rows.map(x => {
+    if (refetch !== false) {
+      list.innerHTML = '<div class="help-text" style="padding:20px 0;text-align:center">Loading…</div>';
+      try { const r = await Promise.all([crFetchAll(), crFetchEmails()]); all = r[0] || []; emails = r[1] || {}; } catch (e) {}
+    }
+    paintTabs();
+    const help = {
+      open: 'New requests. Map the course, then tap <strong>Mapped → Kevin</strong> to hand it over for review.',
+      mapped: 'Mapped and waiting on Kevin. Check it in the app, then <strong>Approve</strong> (the golfer gets a notification) and email them.',
+      done: 'Finished requests. Email anyone who hasn’t been thanked yet.'
+    }[tab];
+    const rows = (all || []).filter(x => inTab(x, tab));
+    if (!rows.length) { list.innerHTML = '<div class="help-text" style="margin-bottom:10px">' + help + '</div><div class="help-text" style="padding:20px 0;text-align:center">Nothing here.</div>'; return; }
+    list.innerHTML = '<div class="help-text" style="margin-bottom:10px">' + help + '</div>' + rows.map(x => {
       const when = x.created_at ? new Date(x.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
       const kind = x.type === 'remap' ? '🛠 Re-map' : '📩 New course';
+      const st = x.status || 'open';
+      const email = emails[String(x.id)] || '';
+      const relay = bgCrIsRelay(email);
+      const step = st === 'open' ? '1 · New' : st === 'mapped' ? '2 · Waiting on Kevin' : st === 'rejected' ? 'Rejected' : (x.emailed_at ? '3 · Approved · emailed' : '3 · Approved');
+      const id = esc(x.id);
+      // contact block: name, email, copy
+      const contact = '<div style="margin-top:8px;padding:8px 10px;border-radius:10px;background:var(--surface-2);font-size:13px;line-height:1.5">'
+        + '<div><strong>' + esc(x.requester_name || 'Unknown') + '</strong></div>'
+        + '<div style="word-break:break-all">' + (email ? esc(email) : '<span style="color:var(--text-muted)">no email on file</span>') + '</div>'
+        + (relay ? '<div class="small-text" style="color:var(--text-muted);margin-top:2px">\u{1F34E} Apple “Hide My Email” — a personal email won’t reach them. They get the in-app notice when you approve.</div>' : '')
+        + '<button class="bg-btn bg-btn--ghost bg-btn--sm small cr-q-copy" data-id="' + id + '" style="margin-top:6px">\u{1F4CB} Copy name, email &amp; course</button>'
+        + '</div>';
+      let btns = '';
+      if (st === 'open' && x.type !== 'remap') {
+        btns = '<button class="bg-btn bg-btn--primary bg-btn--sm small primary cr-q-mapped" data-id="' + id + '" style="flex:1">✓ Mapped → Kevin</button>'
+          + '<button class="bg-btn bg-btn--sm small cr-q-reply" data-id="' + id + '" style="flex:1">\u{1F4AC} Reply</button>'
+          + '<button class="bg-btn bg-btn--danger bg-btn--sm small cr-q-reject" data-id="' + id + '" style="flex:1">✕ Reject</button>';
+      } else if (st === 'open') {   // re-map: Kevin fixes it himself, so it goes straight to Approve
+        btns = '<button class="bg-btn bg-btn--primary bg-btn--sm small primary cr-q-approve" data-id="' + id + '" style="flex:1">✓ Fixed · Approve</button>'
+          + '<button class="bg-btn bg-btn--sm small cr-q-reply" data-id="' + id + '" style="flex:1">\u{1F4AC} Reply</button>'
+          + '<button class="bg-btn bg-btn--danger bg-btn--sm small cr-q-reject" data-id="' + id + '" style="flex:1">✕ Reject</button>';
+      } else if (st === 'mapped') {
+        btns = '<button class="bg-btn bg-btn--primary bg-btn--sm small primary cr-q-approve" data-id="' + id + '" style="flex:1">✓ Approve</button>'
+          + '<button class="bg-btn bg-btn--sm small cr-q-sendback" data-id="' + id + '" style="flex:1">↩ Send back</button>'
+          + '<button class="bg-btn bg-btn--danger bg-btn--sm small cr-q-reject" data-id="' + id + '" style="flex:1">✕ Reject</button>';
+      } else {
+        btns = ((st === 'resolved' && email && !relay)
+            ? '<button class="bg-btn bg-btn--primary bg-btn--sm small primary cr-q-email" data-id="' + id + '" style="flex:2">✉️ ' + (x.emailed_at ? 'Email again' : 'Email ' + esc(bgCrFirst(x.requester_name))) + '</button>' : '')
+          + '<button class="bg-btn bg-btn--sm small cr-q-reopen" data-id="' + id + '" style="flex:1">↺ Reopen</button>';
+      }
       return '<div class="card" style="margin-bottom:8px">'
-        + '<div style="font-weight:700">' + esc(x.course_name || '(no name given)') + '</div>'
+        + '<div style="display:flex;gap:8px;align-items:flex-start"><div style="font-weight:700;flex:1">' + esc(x.course_name || '(no name given)') + '</div>'
+        + '<span class="small-text" style="flex:0 0 auto;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--surface-2)">' + esc(step) + '</span></div>'
         + '<div class="small-text" style="color:var(--text-muted);margin-top:2px">' + kind
           + (x.location ? ' · ' + esc(x.location) : '')
-          + (when ? ' · ' + esc(when) : '')
-          + (x.requester_name ? ' · by ' + esc(x.requester_name) : '') + '</div>'
+          + (when ? ' · ' + esc(when) : '') + '</div>'
         + (x.note ? '<div class="small-text" style="margin-top:6px;background:var(--surface-2);border-radius:8px;padding:8px 10px;line-height:1.5">' + esc(x.note) + '</div>' : '')
+        + contact
         + (x.resolution_note ? '<div class="small-text" style="margin-top:6px;color:var(--text-muted)">Note: ' + esc(x.resolution_note) + '</div>' : '')
         + ((Array.isArray(x.replies) && x.replies.length) ? '<div class="small-text" style="margin-top:6px;line-height:1.45">' + x.replies.map(r => '\u{1F4AC} <strong>' + esc(r.by_name || 'Bad Golf') + '</strong>: ' + esc(r.text || '')).join('<br>') + '</div>' : '')
-        + '<div style="display:flex;gap:8px;margin-top:10px">'
-        + (showOpen
-            ? '<button class="bg-btn bg-btn--primary bg-btn--sm small primary cr-q-resolve" data-id="' + esc(x.id) + '" style="flex:1">✓ Resolve</button>'
-              + '<button class="bg-btn bg-btn--sm small cr-q-reply" data-id="' + esc(x.id) + '" style="flex:1">\u{1F4AC} Reply</button>'
-              + '<button class="bg-btn bg-btn--danger bg-btn--sm small cr-q-reject" data-id="' + esc(x.id) + '" style="flex:1">✕ Reject</button>'
-            : '<button class="bg-btn bg-btn--sm small cr-q-reopen" data-id="' + esc(x.id) + '" style="flex:1">↺ Reopen</button>')
-        + '</div></div>';
+        + (x.emailed_at ? '<div class="small-text" style="margin-top:6px;color:var(--money-pos);font-weight:600">✉️ Emailed ' + esc(new Date(x.emailed_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })) + '</div>' : '')
+        + '<div style="display:flex;gap:8px;margin-top:10px">' + btns + '</div></div>';
     }).join('');
-    const act = async (id, status) => {
+    const rowOf = id => (all || []).find(r => String(r.id) === String(id)) || null;
+    const after = async (msg) => { try { if (msg) showToast(msg); } catch (e) {} _dashCache = null; await draw(); try { if (document.getElementById('dash-body')) renderDashboard(); } catch (e) {} };
+    // Step 1 -> 2
+    list.querySelectorAll('.cr-q-mapped').forEach(b => b.onclick = async () => {
+      const row = rowOf(b.dataset.id); if (!row) return;
+      if (!(await crPatch(row.id, { status: 'mapped', mapped_at: new Date().toISOString(), mapped_by: meId || null }))) return;
+      try { sendPush([BG_CR_REVIEWER], 'Course ready for review', (row.course_name || 'A course') + (row.location ? ' · ' + row.location : '') + ' is mapped — check it and approve', { type: 'course_request_review', request_id: row.id }, 'creqv:' + row.id); } catch (e) {}
+      await after('Sent to Kevin for review');
+    });
+    // Step 2 -> 1 (with a note to Tyler)
+    list.querySelectorAll('.cr-q-sendback').forEach(b => b.onclick = async () => {
+      const row = rowOf(b.dataset.id); if (!row) return;
+      let t = null; try { t = await uiPrompt('What still needs fixing? (goes back to step 1 with this note)', { title: 'Send back', okLabel: 'Send back', placeholder: 'e.g. hole 7 green is in the wrong spot' }); } catch (e) { t = null; }
+      if (t == null) return;
+      const note = String(t).trim();
+      if (!(await crPatch(row.id, { status: 'open', mapped_at: null, mapped_by: null, resolution_note: note ? ('Sent back: ' + note) : (row.resolution_note || null) }))) return;
+      try { sendPush([BG_CR_MAPPER], 'Course sent back', (row.course_name || 'A course') + ': ' + (note || 'needs another look'), { type: 'course_request_review', request_id: row.id }, 'creqv:' + row.id); } catch (e) {}
+      await after('Sent back');
+    });
+    // Step 2 -> 3: approve (in-app notice), then offer the email right away
+    list.querySelectorAll('.cr-q-approve').forEach(b => b.onclick = async () => {
+      const row = rowOf(b.dataset.id); if (!row) return;
+      const nm = row.course_name || 'This course';
+      const def = row.type === 'remap' ? (nm + ' has been re-mapped — reopen your round to load the new GPS. Thanks for the heads up!') : (nm + ' is in Bad Golf now — tap Play and search for it. Thanks for the request!');
       let note = null;
-      // v1775 (Tyler): closing a request messages the requester (push + their ✉️ inbox).
-      // The box is prefilled; clear it to close without messaging, Cancel to back out.
-      const row = (all || []).find(r => String(r.id) === String(id)) || null;
-      const who = (row && row.requester_name) ? row.requester_name : 'the requester';
-      if (status === 'resolved' || status === 'rejected') {
-        const nm = (row && row.course_name) || 'This course';
-        const def = status === 'resolved'
-          ? ((row && row.type === 'remap') ? (nm + ' has been re-mapped \u2014 reopen your round to load the new GPS. Thanks for the heads up!') : (nm + ' is in Bad Golf now \u2014 tap Play and search for it. Thanks for the request!'))
-          : '';
-        try { note = await uiPrompt('Message to ' + who + ' (sent as a notification). Clear it to close without messaging.', { title: status === 'resolved' ? 'Resolve request' : 'Reject request', okLabel: status === 'resolved' ? 'Resolve & send' : 'Reject & send', value: def, placeholder: status === 'rejected' ? 'Why we could not add it' : '' }); } catch (e) { note = null; }
-        if (note === null) return;
-        if (String(note).trim() && row) { if (!(await crSendReply(row, note, status))) return; }
+      try { note = await uiPrompt('In-app message to ' + (row.requester_name || 'the requester') + ' (push + their inbox). Clear it to approve without the notice.', { title: 'Approve', okLabel: 'Approve & notify', value: def }); } catch (e) { note = null; }
+      if (note === null) return;
+      if (String(note).trim()) { if (!(await crSendReply(row, note, 'resolved'))) return; }
+      if (!(await crResolveRequest(row.id, 'resolved', String(note).trim() || null))) return;
+      const email = emails[String(row.id)] || '';
+      await after('Approved');
+      if (email && !bgCrIsRelay(email)) {
+        let go = false; try { go = await uiConfirm('Email ' + bgCrFirst(row.requester_name) + ' now? Your mail app opens with the thank-you already written.', { title: 'Send the email', okLabel: '✉️ Open email' }); } catch (e) {}
+        if (go) { row.status = 'resolved'; await crEmailRequester(row, email); await draw(false); }
       }
-      if (await crResolveRequest(id, status, note)) {
-        try { showToast(status === 'open' ? 'Reopened' : (status === 'resolved' ? 'Resolved' : 'Rejected')); } catch (e) {}
-        _dashCache = null;                       // dashboard counts are now stale
-        await draw();
-        try { if (document.getElementById('dash-body')) renderDashboard(); } catch (e) {}
-      }
-    };
-    list.querySelectorAll('.cr-q-resolve').forEach(b => b.onclick = () => act(b.dataset.id, 'resolved'));
-    list.querySelectorAll('.cr-q-reject').forEach(b => b.onclick = () => act(b.dataset.id, 'rejected'));
+    });
+    list.querySelectorAll('.cr-q-email').forEach(b => b.onclick = async () => {
+      const row = rowOf(b.dataset.id); if (!row) return;
+      await crEmailRequester(row, emails[String(row.id)] || '');
+      await draw(false);
+    });
+    list.querySelectorAll('.cr-q-copy').forEach(b => b.onclick = () => {
+      const row = rowOf(b.dataset.id); if (!row) return;
+      bgCrCopy([row.requester_name || '', emails[String(row.id)] || '', (row.course_name || '') + (row.location ? ' (' + row.location + ')' : '')].filter(Boolean).join('\n'));
+    });
+    list.querySelectorAll('.cr-q-reject').forEach(b => b.onclick = async () => {
+      const row = rowOf(b.dataset.id); if (!row) return;
+      let note = null;
+      try { note = await uiPrompt('Message to ' + (row.requester_name || 'the requester') + ' (sent as a notification). Clear it to close without messaging.', { title: 'Reject request', okLabel: 'Reject & send', value: '', placeholder: 'Why we could not add it' }); } catch (e) { note = null; }
+      if (note === null) return;
+      if (String(note).trim()) { if (!(await crSendReply(row, note, 'rejected'))) return; }
+      if (await crResolveRequest(row.id, 'rejected', note)) await after('Rejected');
+    });
     list.querySelectorAll('.cr-q-reply').forEach(b => b.onclick = async () => {   // v1775: message without closing
-      const row = (all || []).find(r => String(r.id) === String(b.dataset.id)); if (!row) return;
+      const row = rowOf(b.dataset.id); if (!row) return;
       let t = null; try { t = await uiPrompt('Message to ' + (row.requester_name || 'the requester') + ' (sent as a notification). The request stays open.', { title: 'Reply', okLabel: 'Send', placeholder: 'e.g. Which city is that in?' }); } catch (e) { t = null; }
       if (t == null || !String(t).trim()) return;
-      if (await crSendReply(row, t, 'open')) { try { showToast('Reply sent'); } catch (e) {} await draw(); }
+      if (await crSendReply(row, t, row.status || 'open')) await after('Reply sent');
     });
-    list.querySelectorAll('.cr-q-reopen').forEach(b => b.onclick = () => act(b.dataset.id, 'open'));
+    list.querySelectorAll('.cr-q-reopen').forEach(b => b.onclick = async () => {
+      const row = rowOf(b.dataset.id); if (!row) return;
+      if (await crResolveRequest(row.id, 'open', null)) await after('Reopened');
+    });
   };
-  const tabOpen = ov.querySelector('#cr-q-open'), tabDone = ov.querySelector('#cr-q-done');
-  tabOpen.onclick = () => { showOpen = true; tabOpen.classList.add('primary'); tabDone.classList.remove('primary'); draw(); };
-  tabDone.onclick = () => { showOpen = false; tabDone.classList.add('primary'); tabOpen.classList.remove('primary'); draw(); };
+  ov.querySelectorAll('.cr-q-tab').forEach(b => b.onclick = () => { tab = b.dataset.tab; draw(false); });
   draw();
 }
 function openCourseRequestModal(type, prefillName) {
@@ -13038,7 +13193,7 @@ async function renderDashboard() {
   // 42P17 (infinite recursion) to every ordinary user.
   // --- requests ---
   const reqs = d.requests || [];
-  const openReqs = reqs.filter(x => (x.status || 'open') === 'open');
+  const openReqs = reqs.filter(x => (x.status || 'open') === 'open' || x.status === 'mapped');   // v1788: 'mapped' = waiting on Kevin's review, still awaiting action
   const reqNew = openReqs.filter(x => x.type === 'new').length;
   const reqRemap = openReqs.filter(x => x.type === 'remap').length;
   // --- courses (snapshot) ---
@@ -59458,19 +59613,37 @@ async function bgCollectInbox() {
   // 5b) v1775 (Tyler, 9/24): COURSE REQUESTS. Re-map requests go to Kevin; new-course
   //     requests go to Tyler + Kevin. Outstanding like friend requests: a row stays on
   //     the badge until the request is resolved/rejected in the queue (tap = the queue).
+  //     v1788 (Tyler): routed by STEP now. Step 1 (new, open) -> Tyler, who maps it.
+  //     Step 2 (mapped) -> Kevin, to review + approve. Re-maps (open) -> Kevin as before.
+  //     Approved but not emailed yet (last 21 days, real email) -> Kevin, until he emails.
   try {
-    const _myKinds = bgCrRouteFor(meId);
-    if (_myKinds.length) {
-      const r = await supa.from('course_requests').select('id,type,course_name,location,requester_name,created_at,status')
-        .eq('status', 'open').in('type', _myKinds).order('created_at', { ascending: false }).limit(25);
-      ((r && r.data) || []).forEach(q => {
-        if (!q) return;
+    const _isMapper = meId === BG_CR_MAPPER, _isReviewer = meId === BG_CR_REVIEWER;
+    if (_isMapper || _isReviewer) {
+      const r = await supa.from('course_requests').select('id,type,course_name,location,requester_name,created_at,status,mapped_at,resolved_at,emailed_at')
+        .in('status', ['open', 'mapped', 'resolved']).order('created_at', { ascending: false }).limit(60);
+      const rows = (r && r.data) || [];
+      let _em = null;
+      const _cut = Date.now() - 21 * 86400000;
+      for (const q of rows) {
+        if (!q) continue;
         const isRemap = q.type === 'remap';
-        out.push({ kind: 'creq-admin', unread: true, at: Date.parse(q.created_at) || 0,
-                   icon: isRemap ? '\u{1F6E0}\uFE0F' : '\u{1F4E9}',
-                   title: (isRemap ? 'Re-map requested: ' : 'New course requested: ') + (q.course_name || '(no name)') + (q.location ? ' \u00b7 ' + q.location : ''),
-                   sub: 'from ' + (q.requester_name || 'a user') + ' \u2014 tap to open the request queue', act: 'crqueue' });
-      });
+        let item = null;
+        if (q.status === 'open' && !isRemap && _isMapper) {
+          item = { icon: '\u{1F4E9}', title: 'New course requested: ', sub: 'from ' + (q.requester_name || 'a user') + ' \u2014 map it, then tap Mapped \u2192 Kevin', tab: 'open', at: q.created_at };
+        } else if (q.status === 'open' && isRemap && _isReviewer) {
+          item = { icon: '\u{1F6E0}\uFE0F', title: 'Re-map requested: ', sub: 'from ' + (q.requester_name || 'a user') + ' \u2014 tap to open the request queue', tab: 'open', at: q.created_at };
+        } else if (q.status === 'mapped' && _isReviewer) {
+          item = { icon: '\u2705', title: 'Ready for your review: ', sub: 'mapped \u2014 check it, approve, then email ' + (q.requester_name || 'them'), tab: 'mapped', at: q.mapped_at || q.created_at };
+        } else if (q.status === 'resolved' && _isReviewer && !q.emailed_at && Date.parse(q.resolved_at || 0) > _cut) {
+          if (_em === null) { try { _em = await crFetchEmails(); } catch (e) { _em = {}; } }
+          const em = _em[String(q.id)] || '';
+          if (em && !bgCrIsRelay(em)) item = { icon: '\u2709\uFE0F', title: 'Email a thank-you: ', sub: (q.requester_name || 'The requester') + ' \u2014 approved, not emailed yet', tab: 'done', at: q.resolved_at };
+        }
+        if (!item) continue;
+        out.push({ kind: 'creq-admin', unread: true, at: Date.parse(item.at) || 0, icon: item.icon,
+                   title: item.title + (q.course_name || '(no name)') + (q.location ? ' \u00b7 ' + q.location : ''),
+                   sub: item.sub, act: 'crqueue', crTab: item.tab });
+      }
     }
   } catch (e) {}
   // 5c) v1775: replies from the Bad Golf team to course requests I filed (last 60 days).
@@ -59593,7 +59766,7 @@ function _bgInboxPaintList(ov, close) {
         try { close(); } catch (e) {}
         try { if (it && it.tab && typeof switchTab === 'function') switchTab(it.tab); } catch (e) {}
         try { if (it && it.ttId && typeof timesOpenDetail === 'function') setTimeout(function () { try { timesOpenDetail(it.ttId); } catch (e2) {} }, 250); } catch (e) {}   // v1770: straight to the tee time card
-        try { if (it && it.act === 'crqueue' && typeof openCourseRequestQueue === 'function') setTimeout(function () { try { openCourseRequestQueue(); } catch (e2) {} }, 150); } catch (e) {}   // v1775
+        try { if (it && it.act === 'crqueue' && typeof openCourseRequestQueue === 'function') setTimeout(function () { try { openCourseRequestQueue(it.crTab || undefined); } catch (e2) {} }, 150); } catch (e) {}   // v1775; v1788 opens on the item's step
         try { if (it && it.act === 'play' && typeof bnavCenter === 'function') setTimeout(function () { try { bnavCenter(); } catch (e2) {} }, 150); } catch (e) {}   // v1775
       };
     });
