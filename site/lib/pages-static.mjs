@@ -102,6 +102,36 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
   </div>
 </div></section>
 
+<section class="sec" id="friends-foes"><div class="wrap split">
+  <div>
+    <div class="eyebrow" style="color:var(--brand);font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;margin-bottom:8px">Friends &amp; Foes</div>
+    <h2>Find out who really owns you.</h2>
+    <p class="lede">Every game you play with your group adds up. Bad Golf App works out who gives you the most units and who takes them, round after round, and lets you put your stats next to any friend's.</p>
+    <ul class="check">
+      <li>Your top three friends and your top three foes, from every game you've played together</li>
+      <li>Head-to-head compare: handicap, scoring average and best round, gross and net</li>
+      <li>A friends leaderboard you can sort by units, scoring average, rounds or handicap</li>
+      <li>Every player's profile with putts, greens, fairways and badges</li>
+    </ul>
+    <a class="btn btn-primary" href="/app/?demo=1">See it in the demo</a>
+  </div>
+  <div class="ff-mock" aria-label="Example Friends and Foes card from the Bad Golf App">
+    <div class="ff-card">
+      <div class="ff-h">😇 Friends &amp; 😈 Foes</div>
+      <div class="ff-sub">Who gives you units and who takes them</div>
+      <div class="ff-seg fr"><div class="ff-t">😇 Friends</div><div class="ff-s">They give you the most</div><div class="ff-row"><span class="ff-av" style="background:#16806f">J</span><div class="ff-main"><div class="ff-top"><span>Jake</span><b>51</b></div><div class="ff-bar"><i class="g" style="width:100%"></i></div></div></div><div class="ff-row"><span class="ff-av" style="background:#7a4fc0">D</span><div class="ff-main"><div class="ff-top"><span>Dave</span><b>37</b></div><div class="ff-bar"><i class="g" style="width:73%"></i></div></div></div><div class="ff-row"><span class="ff-av" style="background:#1f4f8a">R</span><div class="ff-main"><div class="ff-top"><span>Ray</span><b>36</b></div><div class="ff-bar"><i class="g" style="width:71%"></i></div></div></div></div>
+      <div class="ff-seg fo"><div class="ff-t">😈 Foes</div><div class="ff-s">You give them the most</div><div class="ff-row"><span class="ff-av" style="background:#1f4f8a">M</span><div class="ff-main"><div class="ff-top"><span>Mike</span><b>48</b></div><div class="ff-bar"><i class="r" style="width:100%"></i></div></div></div><div class="ff-row"><span class="ff-av" style="background:#1f4f8a">R</span><div class="ff-main"><div class="ff-top"><span>Ray</span><b>10</b></div><div class="ff-bar"><i class="r" style="width:21%"></i></div></div></div><div class="ff-row"><span class="ff-av" style="background:#4b5bc4">L</span><div class="ff-main"><div class="ff-top"><span>Luis</span><b>5</b></div><div class="ff-bar"><i class="r" style="width:10%"></i></div></div></div></div>
+    </div>
+    <div class="ff-card">
+      <div class="ff-h" style="font-size:.8rem;letter-spacing:.06em;text-transform:uppercase">⚖️ Compare to a friend</div>
+      <div class="ff-cmp ff-cmp-h"><b class="you">You</b><span></span><b class="them">Mike</b></div>
+      <div class="ff-cmp"><b class="you">10.3</b><span>Handicap</span><b class="them">2.7</b></div>
+      <div class="ff-cmp"><b class="you">85 <small>(net 75)</small></b><span>Avg score</span><b class="them">78 <small>(net 76)</small></b></div>
+      <div class="ff-cmp"><b class="you">80 <small>(net 70)</small></b><span>Best</span><b class="them">72 <small>(net 70)</small></b></div>
+    </div>
+  </div>
+</div></section>
+
 <section class="sec alt" id="courses"><div class="wrap">
   <div class="sec-head"><div class="eyebrow">Courses</div><h2>${courseCount.toLocaleString()} courses, scorecards included.</h2><p>Every course in Bad Golf App comes with its scorecard, tee ratings and slope, and GPS-mapped greens. Look up your home course before you download.</p></div>
   <div class="search" id="course-search"><label class="sr" for="cs">Search courses</label><input id="cs" type="search" placeholder="Search a course or city…" autocomplete="off"><div class="results"></div></div>
@@ -164,7 +194,8 @@ export function features({ courseCount, gameCount }) {
     ['📊', 'Stats and trends', 'Scoring average, best round, greens, fairways, putts per round, scoring mix and a trend line, all from the rounds you actually play.'],
     ['🎖️', '75 badges', 'Earned for the great stuff and the bad stuff: first birdie, sandy save, hero tax, double par, snowman. A badge pops up mid-round when you earn it, if you want it to.'],
     ['⌚', 'Apple Watch', 'Yardages and score entry on your wrist.'],
-    ['👥', 'Friends and crew', 'Keep your regular group in one place, see who is playing today, and compare stats head to head.'],
+    ['😈', 'Friends & Foes', 'See who gives you the most units and who takes them, worked out from every game you have played together, then compare your stats head to head with any friend.'],
+    ['👥', 'Friends and crew', 'Keep your regular group in one place, see who is playing today, and rank your friends by units, scoring average, rounds or handicap.'],
     ['🗺️', 'Course library', `${courseCount.toLocaleString()} U.S. courses with scorecards, tee ratings and slope. Missing one? Add it in the app and map the greens yourself in a few minutes.`],
   ];
   const body = `<section class="page wide"><div class="wrap">

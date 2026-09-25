@@ -104,7 +104,7 @@ export function coursesIndex(byState, total) {
   <h1>Golf course scorecards, slope &amp; GPS</h1>
   <p class="lede" style="max-width:46rem">${total.toLocaleString()} courses in the Bad Golf App library, each with its scorecard, tee ratings and slope, and GPS-mapped greens for the app. Search your course or browse by state.</p>
   <div class="search" id="course-search" style="margin:20px 0 32px"><label class="sr" for="cs">Search courses</label><input id="cs" type="search" placeholder="Search a course or city…" autocomplete="off"><div class="results"></div></div>
-  <div class="states">${sts.map(st => `<a href="/courses/${stateSlug(st)}/">${esc(stateName(st))}<small>${byState[st].length.toLocaleString()}</small></a>`).join('')}</div>
+  <div class="states">${sts.map(st => `<a href="/courses/${stateSlug(st)}/" title="${esc(stateName(st))}"><span>${esc(stateName(st))}</span><small>${byState[st].length.toLocaleString()} courses</small></a>`).join('')}</div>
   ${ctaBox('Your course, your group, one scorecard', 'Free on iPhone and Android. If your course is missing, add it in the app in a couple of minutes.')}
 </div></section>`;
   return page({ path: '/courses/', title: `Golf Course Scorecards, Slope & GPS — ${total.toLocaleString()} U.S. Courses | Bad Golf App`, description: `Scorecards, course rating and slope by tee, and GPS-mapped greens for ${total.toLocaleString()} U.S. golf courses. Find your course, then score your round in the free Bad Golf App.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }])], extraHead: `<script defer src="/course-search.js"></script>` });
