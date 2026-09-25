@@ -510,6 +510,7 @@ _See [Games](#games-35) for complete rules and options._
 - **⚖️ High & Low (2v2)** — a point for the better low ball, a point for the better high ball
 - **👥 Team match play** — any even teams, best-ball per hole
 - **🎯 Team low ball** — even teams, sum of best-ball over 18
+- **🏁 Shamble** — everyone drives, the team picks the best drive, then each player plays their own ball in; best **1 or 2** net scores per team per hole, lowest 18-hole total wins
 - **➕ Combo Score** — 2-man or 4-man aggregate: **both partners' net scores are added together every hole**, and nothing is dropped. Unlike best ball, a partner's bad hole counts. Requires exactly 4 players.
 - **🎯 Quota (Points)** — Albatross 8/Eagle 6/Birdie 4/Par 2/Bogey 1 vs. your quota
 - **🎯 Team Quota** — even teams, sum of (points − quota); entry prize pool
@@ -570,11 +571,11 @@ Every place you pick games — a normal round, a tournament's Configure games, a
 | Group | Games |
 |-------|-------|
 | **Single games** | Banker, Match play, Nassau, Pot of Gold, Quota, Skins, Stableford, Stroke play |
-| **Team games** | Sixes, Split Sixes, Combo Score, Hammer, High & Low, Ryder Cup, Scramble, Team low ball, Team match play, Team Quota, Umbrella, Vegas, Wolf |
+| **Team games** | Sixes, Split Sixes, Combo Score, Hammer, High & Low, Ryder Cup, Scramble, Shamble, Team low ball, Team match play, Team Quota, Umbrella, Vegas, Wolf |
 | **Junk** | Animals, Birdie Bump, Hot Potato, Junk, Marks, Par 3 Greenie, Snake |
 | **Extras** | Bingo Bango Bongo, CTP, Fewest Putts Pool, GIR Pool, Long Drive, Long Putt, Low Net Pool, Niners |
 
-Every group starts collapsed; a group opens itself only if something in it is already ticked. **In a normal round you can stack formats** — Skins, Match play and Stroke play can all be on together. **Inside a tournament it's one format at a time** (Stroke / Match / Stableford / Quota / Team Match / Team Quota / Team low ball / Combo Score / High & Low): ticking one greys the others with *"Already playing ‹X› — one format at a time."*
+Every group starts collapsed; a group opens itself only if something in it is already ticked. **In a normal round you can stack formats** — Skins, Match play and Stroke play can all be on together. **Inside a tournament it's one format at a time** (Stroke / Match / Stableford / Quota / Team Match / Team Quota / Team low ball / Shamble / Combo Score / High & Low): ticking one greys the others with *"Already playing ‹X› — one format at a time."*
 
 **Units steppers.** Every units box is a big **− value +** stepper that moves by one whole unit; on an empty box "+" starts from the placeholder.
 
@@ -1282,6 +1283,21 @@ Any even-sized teams. Each hole the **better ball** on each team competes; the m
 #### **🎯 Team Low Ball**
 Same teams, but **sum each team's best ball over all 18 holes**; lowest total wins. *Same per-cart rule as Team Match in a 3+ team event.*
 
+#### **🏁 Shamble**
+A scramble off the tee, then real golf. **Everyone on the team tees off, the team picks the best drive, and every player plays their own ball from that spot into the hole.** Two even teams, **4+ players**.
+
+- **Scoring:** on each hole a team counts its **best 1 or 2 net scores** (you choose at setup) and adds them together. The **lowest 18-hole team total wins** the Units per player; a tie is a push.
+- **Shamble handicap allowance:** because everyone plays from the best drive, handicaps are cut — **50% by default** (50% is common for pairs, 30–35% for foursomes). It **replaces** the round's handicap percentage for this game only, and still respects no-strokes-on-par-3s and gross players.
+- **Tracking drives:** the Score screen shows a **Shamble** row with a chip for each player on each team. Tap whose drive the team used on the hole (tap again to clear). The scorecard keeps a running count per player and shows **n/min** on anyone short of the **Minimum drives per player** (3 by default; **0** turns the check off). The Game results card lists **🚗 Drives used** with a ⚠️ next to anyone under the minimum. **Drives never move any units.**
+- **Walked-in partner:** a team with fewer scores than the balls it counts on a hole uses the scores it has.
+- **Ending early:** settles on the holes played.
+
+> **Example:** 5 units per player, best 1 net ball, 50% allowance. Team A's best net balls add up to **71**, Team B's to **74**. Team A wins by 3 — **each Team A player +5, each Team B player −5.**
+
+**In a tournament:** on **Configure games**, Shamble plays as **each cart is a team** against the whole field. The A/B team picker is hidden and a note explains the rules: every player puts in the amount set, the **winning cart splits it**, and a tie for first is a push. Carts are ranked on the **Event Leaderboard**, and the payout waits until every cart is in. Each cart taps its own drives on its score screen.
+
+**Setup options:** Units per player · Balls that count per hole (1 or 2) · Net or gross · Shamble handicap allowance (%) · Minimum drives per player · team picker.
+
 #### **🎯 Quota (Points)**
 - Each hole earns **Albatross 8, Eagle 6, Birdie 4, Par 2, Bogey 1, Double or worse 0.** Quota target: **Auto = 36 − handicap**, or Manual. Your result = points earned − quota; furthest **over** wins.
 - **On a nine, both halves scale** — it used to use the 18-hole target of 36 while still subtracting your full 18-hole handicap.
@@ -1920,7 +1936,7 @@ Setup runs one step at a time and **saves as it goes** — a green *"✓ Everyth
 
 Two clearly separate ideas:
 
-- **Tournament games** are set by the commissioner on **Configure games** and settle across the **whole field**. The main format — **Stroke play, Stableford, Quota, Match play, Team match play (2v2), Team Quota, Team low ball, Scramble** or **Ryder Cup** — is **one at a time**: ticking one greys the others with *"Already playing ‹X› — one format at a time."* Team formats offer **2-man teams (2 v 2 in each cart)** or **4-man teams (each cart is a team)**. Individual and Bracket events hide the team formats.
+- **Tournament games** are set by the commissioner on **Configure games** and settle across the **whole field**. The main format — **Stroke play, Stableford, Quota, Match play, Team match play (2v2), Team Quota, Team low ball, Shamble, Scramble** or **Ryder Cup** — is **one at a time**: ticking one greys the others with *"Already playing ‹X› — one format at a time."* Team formats offer **2-man teams (2 v 2 in each cart)** or **4-man teams (each cart is a team)**. Individual and Bracket events hide the team formats.
 - **The field prize pools** — **Tournament Skins, Low Net, Most GIRs, Fewest Putts, Long Putt, Closest to the Pin, Long Drive** — sit under **Extras**. With Ryder Cup or Scramble on, the individual pools grey out: *"Ryder Cup plays a shared ball — no individual scores or stats to pay this on."* Stroke play and the Low Net pool grey each other out — *"Stroke play already runs the Low Net prize pool."*
 - **Main formats carry no units of their own** — they're paid from the tournament fee; the pools and extras keep units.
 - **Group games** are each cart's own action — Nassau, Banker, Wolf, junk and the rest — set on the cart's round exactly like an ordinary round and settled inside that cart. A pool switched on for the whole event is what pays; the same game inside a cart is suppressed so nothing settles twice. A cart's group games never pre-tick Long Putt when the event runs the Long Putt pool.
@@ -2926,6 +2942,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 | **Running totals — not final** | The stamp on final standings while a round is unfinished; the numbers can still move |
 | **Best Ball** | Team format; each player plays their own ball, the team takes the lower score per hole |
 | **Scramble** | Team format; everyone hits, the team picks the best, repeat (one team score per hole). Scored against the **card** par |
+| **Shamble** | Team format; everyone drives, the team picks the best drive, then each player plays their own ball in. The team counts its best 1 or 2 net scores per hole, with a reduced **Shamble allowance** on handicaps |
 | **Scramble Prize Pool** | The field-wide scramble prize pool, set under Event Prize pools — every player pays the entry and cart groups are the teams |
 | **Nassau** | Three separate games (front, back, overall). **Ties carry** to the next segment |
 | **Huckle** | The Nassau press — available when you're down 2+ in a segment, in stroke play or match play |
