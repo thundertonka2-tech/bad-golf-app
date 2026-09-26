@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1801-->
+<!--BGVER=v2026.11.1802-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11414,11 +11414,20 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 
 // Build version — bump the last number on every push so any phone can be
 // checked against the deployed version at a glance (shows in the footer).
-const BG_BUILD = 'v2026.11.1801';
+// v1802 (audit, 9/26): full-app QA pass — results board crash on Stableford/Splix pool
+// (undefined `entry`), 9-hole Nassau paid nothing when finished, Day-2 commissioner lockout
+// (`_dc`), Start-event pre-writing status=live, delete-before-authorized tombstone, tee-time
+// join race, dirty-queue overwrite by realtime/poll, group-size/format validation at launch
+// (cap 5), unchecked pairing writes, uid-first identity matching, phone removal, sign-out
+// cache wipe, game:* pruning, stranded skins carry, shamble blank partner, plus speed:
+// player boot no longer downloads the whole course DB, saveGame debounce, memoized GPS
+// bubbles, once-guards. Full list: project doc AUDIT_v1801_FullApp_QA_2026-09-26.md.
+const BG_BUILD = 'v2026.11.1802';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
-const T2_MAX_GROUP_SIZE = 8;
+// v1802 (H6): 5 — a cart holds five, and every per-cart game rule tops out there.
+const T2_MAX_GROUP_SIZE = 5;
 // v1035 (Tyler, 8/15): ONE source of truth for how many players a normal round's
 // scorecard holds. Was a bare literal 5 in the row cap, the Nassau caps, the
 // live-edit prune guard and ~8 toasts — they drifted, and the drift is what let the
@@ -11743,13 +11752,26 @@ function isAdmin() {
 function currentUserEmail() { return (_authUser && _authUser.email) ? _authUser.email : null; }
 
 // Look up the signed-in user's role from the profiles table.
+// v1802 PERF: initAuth fires this twice at boot (once off getSession, once from the
+// INITIAL_SESSION handler) and again on every TOKEN_REFRESHED. Share one in-flight read per
+// account and reuse a result for 30 s; a different account, a sign-out ('guest') or an older
+// result reads again, so the admin tools' re-checks still see a promotion.
+let _bgRoleP = null, _bgRoleUid = null, _bgRoleAt = 0;
 async function fetchMyRole() {
-  if (!_authUser || !supa) { _authRole = 'guest'; return; }
-  try {
-    const { data, error } = await supa.from('profiles')
-      .select('role').eq('id', _authUser.id).maybeSingle();
-    _authRole = (!error && data && data.role) ? data.role : 'user';
-  } catch (e) { _authRole = 'user'; }
+  if (!_authUser || !supa) { _authRole = 'guest'; _bgRoleUid = null; _bgRoleAt = 0; return; }
+  const uid = _authUser.id;
+  if (_bgRoleUid === uid && _authRole !== 'guest' && (Date.now() - _bgRoleAt) < 30000) return;
+  if (_bgRoleP && _bgRoleUid === uid) return _bgRoleP;
+  _bgRoleUid = uid;
+  _bgRoleP = (async () => {
+    try {
+      const { data, error } = await supa.from('profiles')
+        .select('role').eq('id', uid).maybeSingle();
+      _authRole = (!error && data && data.role) ? data.role : 'user';
+    } catch (e) { _authRole = 'user'; }
+    _bgRoleAt = Date.now();
+  })();
+  try { await _bgRoleP; } finally { _bgRoleP = null; }
 }
 
 // Initialize auth: read any existing session, then listen for changes.
@@ -12053,6 +12075,12 @@ function resetSessionIdentity() {
     try { if (typeof _singletonDirty !== 'undefined') _singletonDirty[k] = false; } catch (e) {}
   });
   try { Object.keys(localStorage).forEach(function (k) { if (/^golf:(draft:|score-touch:|scview:|evscview:|push-nudge-at:|gps-ask:)/.test(k)) localStorage.removeItem(k); }); } catch (e) {}
+  // v1802 (M14): the previous account's queued round writes and every cached round blob
+  // go too -- left behind, flushDirtyGames would push account A's rounds from account
+  // B's session, and A's game:* caches were readable by B. signOutUser flushes A's
+  // queue BEFORE calling this, so nothing of A's is lost.
+  try { localStorage.removeItem('golf:dirty-games'); localStorage.removeItem('golf:dirty-since'); } catch (e) {}
+  try { Object.keys(localStorage).forEach(function (k) { if (k && k.indexOf('game:') === 0) localStorage.removeItem(k); }); } catch (e) {}
   try { if (typeof _persistDirty === 'function') _persistDirty(); } catch (e) {}
   try { invalidatePlayerRosterCache(); } catch (e) {}
   try { _rosterMigrated = false; } catch (e) {}
@@ -12071,6 +12099,7 @@ async function signOutUser() {
   // doing that with a write still queued would either lose the edit or (worse)
   // flush it into the NEXT account's row.
   try { await flushDirtySingletons(); } catch (e) {}
+  try { await _promiseTimeout(flushDirtyGames(), 8000, 'signOutFlush'); } catch (e) {}   // v1802 (M14): queued round writes too (resetSessionIdentity drops the queue)
   try { t2NotifUnsubscribe(); } catch (e) {}   // v986 (T34): otherwise the previous account keeps receiving that event's alerts
   try { await supa.auth.signOut(); } catch (e) {}
   _authUser = null; _authRole = 'guest';
@@ -17608,6 +17637,42 @@ var BG_LS_PROTECTED = ['golf:player-roster', 'golf:roster-tombstones', 'golf:hid
   // offline) that may not have reached the cloud yet — evicting it resurrects the
   // tournament everywhere. Same reasoning as golf:deleted-tourneys beside it.
   'golf:dirty-singletons', 'golf:deleted-tourneys', 'golf:dead-events'];
+// v1802 (M15): FINISHED round blobs (game:<code>) are re-fetchable from their games row
+// and were never bounded -- every round ever opened on the device stayed cached. The
+// candidates: finished, not on the dirty queue, not the last-opened round, not the
+// round on screen, and not in the Rounds list cache. Newest first.
+function _bgFinishedGameBlobs(keepKey) {
+  var out = [];
+  try {
+    var keep = {};
+    try { (JSON.parse(localStorage.getItem(KEY_RECENT) || '[]') || []).forEach(function (r) { if (r && r.code) keep[r.code] = 1; }); } catch (e) {}
+    try { (typeof _dirtyGames === 'function' ? _dirtyGames() : []).forEach(function (c) { if (c) keep[c] = 1; }); } catch (e) {}
+    try { var last = localStorage.getItem(KEY_LAST); if (last) keep[last] = 1; } catch (e) {}
+    try { if (typeof state !== 'undefined' && state && state.game && state.game.code) keep[state.game.code] = 1; } catch (e) {}
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (!k || k === keepKey || k.indexOf('game:') !== 0) continue;
+      var code = k.slice(5); if (!code || keep[code]) continue;
+      var fin = 0;
+      try { var b = JSON.parse(localStorage.getItem(k) || 'null'); fin = (b && b.finishedAt) ? Number(b.finishedAt) : 0; } catch (e) { fin = 0; }
+      if (!(fin > 0)) continue;
+      out.push({ k: k, fin: fin });
+    }
+    out.sort(function (a, b) { return b.fin - a.fin; });
+  } catch (e) {}
+  return out;
+}
+// Launch-time prune: a finished blob older than 30 days goes; beyond that at most 20 stay.
+function _bgPruneFinishedGameBlobs() {
+  var n = 0;
+  try {
+    var cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    _bgFinishedGameBlobs().forEach(function (f, idx) {
+      if (f.fin < cutoff || idx >= 20) { try { localStorage.removeItem(f.k); n++; } catch (e) {} }
+    });
+  } catch (e) {}
+  return n;
+}
 function bgLsEvict(keepKey) {
   var freed = 0;
   // 1) GPS hole caches — always safe (re-fetched from course_gps on demand).
@@ -17617,6 +17682,8 @@ function bgLsEvict(keepKey) {
     if (k && k !== keepKey && k.indexOf('golf:course-gps-cache:') === 0) drop.push(k);
   }
   drop.forEach(function (k) { try { var n = (localStorage.getItem(k) || '').length; localStorage.removeItem(k); freed += n; } catch (e) {} });
+  // v1802 (M15): finished round blobs next -- same "re-fetchable on demand" footing as the GPS caches.
+  try { _bgFinishedGameBlobs(keepKey).forEach(function (f) { try { var n2 = (localStorage.getItem(f.k) || '').length; localStorage.removeItem(f.k); freed += n2; } catch (e) {} }); } catch (e) {}
   if (freed > 300000) return freed;   // ~300 KB+ freed is plenty for a tombstone/hidden/roster write
   // 2) Still tight — drop the big re-fetchable cloud blobs, EXCEPT any with unsynced
   //    local edits (dirty) or that carry local truth. Cache-first re-pulls them.
@@ -18101,6 +18168,10 @@ async function _mergeSharedSingletonValue(key, local) {
       // cloud copy beats an UNSTAMPED local one (every local edit gets stamped, so
       // unstamped local = never edited on this device).
       b.forEach(x => { const id = idOf(x); if (id == null) return; const c = map.get(id);
+        // v1802 (H4): a TEE TIME's seats are unioned (by account id / name, honouring the
+        // per-seat join and leave stamps) so two people grabbing spots at once both stay
+        // seated; every other field of the entry keeps newest-wins below.
+        if (c && x && (x.type === 'teetime' || c.type === 'teetime') && typeof _bgTeeSeatUnion === 'function') { map.set(id, _bgTeeSeatUnion(c, x)); return; }
         if (c && typeof c.updatedAt === 'number' && (typeof x.updatedAt !== 'number' || c.updatedAt > x.updatedAt)) return;   // cloud is newer (or local was never edited here) — keep it
         map.set(id, x); });
       const out = Array.from(map.values());
@@ -18362,10 +18433,11 @@ async function safeGet(key, shared) {
         else {
           const _r = await supa
           .from('games')
-          .select('data')
+          .select('data,updated_at')   // v1802 (M8): the server stamp rides along
           .eq('code', code)
           .maybeSingle();
           data = _r.data; error = _r.error;
+          try { if (!error && data && data.updated_at) _bgGameRowFetched[code] = { at: _bgIsoMs(data.updated_at), json: null }; } catch (e) {}
         }
         if (!error && data && data.data) {
           // v863 (Tyler): "clicked Save and return home... did not finish my round.
@@ -18418,6 +18490,7 @@ async function safeGet(key, shared) {
           } catch (e) {}
           const json = JSON.stringify(data.data);
           try { bgLsSet(key, json); } catch (e) {}
+          try { if (_bgGameRowFetched[code] && data.updated_at) _bgGameRowFetched[code].json = json; } catch (e) {}   // v1802 (M8)
           return json;
         }
       }
@@ -18478,10 +18551,11 @@ async function safeSet(key, value, shared, opts) {
           return _lsOk;
         }
         try {
+          const _wIso = new Date().toISOString();   // v1802 (M8): the stamp the row will carry
           const r = await _promiseTimeout(
-            supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'saveGame');
+            supa.from('games').upsert({ code: code, data: parsed, updated_at: _wIso }), 7000, 'saveGame');
           if (r && r.error) { console.warn('Supabase write failed:', r.error); markGameDirty(code); updateSyncIndicator(false); }
-          else { _cloudOk = true; clearGameDirty(code); updateSyncIndicator(true); }
+          else { _cloudOk = true; clearGameDirty(code); updateSyncIndicator(true); try { _bgGameRowAt[code] = _bgIsoMs(_wIso); } catch (e) {} }
         } catch (e) {
           // Timeout / dropped signal: keep playing on the local copy and queue the
           // write — flushDirtyGames re-pushes it the moment the connection returns.
@@ -18674,8 +18748,14 @@ function subscribeToGame(code) {
           return false;
         };
         // Don't clobber if the incoming version is older than what we have
-        if (incoming.updatedAt && state.game.updatedAt && incoming.updatedAt < state.game.updatedAt
-            && !_bgCarries(incoming, state.game)) return;
+        // v1802 (M8): compare the row's `updated_at` (one stamp per row, the same one every
+        // reader sees) with the stamp of the row this device last wrote or adopted; the
+        // blob's own updatedAt is only the fallback when a server stamp is missing.
+        const _srvInc = _bgIsoMs(payload.new.updated_at);
+        const _srvCur = _bgGameRowAt[code] || 0;
+        const _older = (_srvInc && _srvCur) ? (_srvInc < _srvCur)
+          : !!(incoming.updatedAt && state.game.updatedAt && incoming.updatedAt < state.game.updatedAt);
+        if (_older && !_bgCarries(incoming, state.game)) return;
 
         // Did the scorer just finish the round? Capture this BEFORE we overwrite
         // state.game so we can auto-close the round on every device, not only the
@@ -18701,9 +18781,12 @@ function subscribeToGame(code) {
         // a score I entered a moment ago (the merge-on-write makes every cloud write a
         // union, so this only covers the brief in-flight window).
         try { _applyMyTouchedCells(incoming); } catch (e) {}
-        state.game = incoming;
+        // v1802 (H5): a round with UNSYNCED edits is merged with the row, not replaced by it.
+        const _adopt = _bgAdoptIncomingGame(code, incoming);
+        state.game = _adopt;
+        try { if (_srvInc) _bgGameRowAt[code] = _srvInc; } catch (e) {}   // v1802 (M8)
         // Cache the fresh copy locally
-        try { localStorage.setItem('game:' + code, JSON.stringify(incoming)); } catch (e) {}
+        try { localStorage.setItem('game:' + code, JSON.stringify(_adopt)); } catch (e) {}
 
         // Auto-close: the scorer tapped Finish → everyone's round closes into the
         // read-only results view, so no one keeps scoring a round that's over.
@@ -18828,7 +18911,12 @@ async function pollGameOnce(code, force) {
     if (!v) return;
     let incoming; try { incoming = JSON.parse(v); } catch (e) { return; }
     if (!incoming || !incoming.updatedAt) return;
-    if (state.game.updatedAt && incoming.updatedAt <= state.game.updatedAt) {
+    // v1802 (M8): the row's server stamp (recorded by safeGet for exactly this payload)
+    // beats the blob's device-clock updatedAt when both sides have one.
+    let _srvInc = 0; try { const _f = _bgGameRowFetched[code]; if (_f && _f.json === v) _srvInc = _f.at || 0; } catch (e) {}
+    const _srvCur = _bgGameRowAt[code] || 0;
+    const _stale = (_srvInc && _srvCur) ? (_srvInc <= _srvCur) : !!(state.game.updatedAt && incoming.updatedAt <= state.game.updatedAt);
+    if (_stale) {
       // v1223: same clock-skew escape hatch as the realtime path above — a finish or a
       // newer group-hole marker is always applied, whatever the two phones' clocks say.
       let _carry = false;
@@ -18843,8 +18931,11 @@ async function pollGameOnce(code, force) {
     migrateLegacyData(incoming);
     const _prevFinished = !!(state.game && state.game.finishedAt);
     try { _applyMyTouchedCells(incoming); } catch (e) {}
-    state.game = incoming;
-    try { localStorage.setItem('game:' + code, JSON.stringify(incoming)); } catch (e) {}
+    // v1802 (H5): a round with UNSYNCED edits is merged with the row, not replaced by it.
+    const _adopt = _bgAdoptIncomingGame(code, incoming);
+    state.game = _adopt;
+    try { if (_srvInc) _bgGameRowAt[code] = _srvInc; } catch (e) {}   // v1802 (M8)
+    try { localStorage.setItem('game:' + code, JSON.stringify(_adopt)); } catch (e) {}
     // Backstop the scorer-Finish auto-close too: if the realtime "finished" event was
     // dropped (common during the scorer's end-of-round burst), this poll is the only
     // path that learns the round is over — so close it here as well, for everyone.
@@ -18926,6 +19017,7 @@ function _promiseTimeout(p, ms, tag) {
 const BG_MERGE_RULES = {
   // --- identity: written once, never merged -------------------------------------
   code: 'identity', createdAt: 'identity', createdBy: 'identity', course: 'identity',
+  createdByUid: 'identity',   // v1802 (H3): the creator's account id, stamped once at start
   courseId: 'identity', tourneyId: 'identity', t2: 'identity', updatedAt: 'identity',
   editedAt: 'identity', conditions: 'identity', holes: 'identity',
   // `bracket` is an ORDERED commissioner-owned structure; a blind union corrupts it.
@@ -19370,6 +19462,10 @@ function bgPurgePlayerFromRound(g, ids, names, opts) {
       if (nmSet.has(_bgPurgeKey(p.name)) || idSet.has(String(p.t2pid)) || idSet.has(String(p.uid))) idSet.add(String(p.id));
     });
     if (Array.isArray(g.players)) g.players.forEach(p => { if (p && idSet.has(String(p.id)) && p.name) nmSet.add(_bgPurgeKey(p.name)); });
+    // v1802 (L5): a NAME tombstone hits everyone who shares the name. Keep one only when no
+    // player who is STAYING carries it -- otherwise the survivor's game entries go with it
+    // and the next merge removes the survivor too.
+    try { if (Array.isArray(g.players)) g.players.forEach(p => { if (p && p.id && !idSet.has(String(p.id)) && p.name) nmSet.delete(_bgPurgeKey(p.name)); }); } catch (e) {}
     if (!idSet.size && !nmSet.size) return false;
     const hitId = v => idSet.has(String(v));
     const hitNm = v => nmSet.has(_bgPurgeKey(v));
@@ -19784,6 +19880,19 @@ async function _mergeGameForWrite(local, opts) {
       } catch (e) {}
     }
     if (!cloud || typeof cloud !== 'object') return local;
+    _mergeGameInto(local, cloud, opts);   // v1802 (H5): the union itself is synchronous and shared with the incoming-row paths
+  } catch (e) { /* merge failure -> write local unchanged */ }
+  // v1508: authoritative correction, applied on the copy flushGame persists (v1802: unchanged, sits after the split).
+  try { _bgApplyAdminFix(local, true); } catch (e) {}
+  return local;
+}
+// v1802 (H5): the synchronous core of _mergeGameForWrite, factored out so the realtime
+// handler and pollGameOnce can fold an INCOMING row into a copy this device still has
+// queued (dirty) instead of replacing it wholesale -- which threw away every unsynced
+// edit the moment another phone's save arrived. `local` is mutated and returned.
+function _mergeGameInto(local, cloud, opts) {
+  try {
+    if (!local || !cloud || typeof cloud !== 'object') return local;
     // v796: CODE-COLLISION guard. A brand-new round can land on a code an OLD,
     // unrelated round already used (small code space). That old row is NOT a
     // concurrent scorer on THIS round — folding it in imported its players (the
@@ -19821,8 +19930,15 @@ async function _mergeGameForWrite(local, opts) {
         // participantNames / fieldNames, banker / wolf / hammer / junk, acceptedBy,
         // consentReq - survived here and was then union'd straight back out of the
         // cloud copy a few lines below. Purge BOTH sides through the one helper.
-        const _rmNames = [].concat(Array.isArray(local.removedPlayerNames) ? local.removedPlayerNames : [],
-                                   Array.isArray(cloud.removedPlayerNames) ? cloud.removedPlayerNames : []);
+        let _rmNames = [].concat(Array.isArray(local.removedPlayerNames) ? local.removedPlayerNames : [],
+                                 Array.isArray(cloud.removedPlayerNames) ? cloud.removedPlayerNames : []);
+        // v1802 (L5): a name tombstone (possibly written by an older build) must not take
+        // out a same-named player whose id is NOT tombstoned -- that one is a survivor.
+        try {
+          const _keep = new Set();
+          [local, cloud].forEach(gg => (Array.isArray(gg.players) ? gg.players : []).forEach(p => { if (p && p.id && !_s.has(p.id) && !_s.has(String(p.id)) && p.name) _keep.add(_bgPurgeKey(p.name)); }));
+          _rmNames = _rmNames.filter(n => !_keep.has(_bgPurgeKey(n)));
+        } catch (e) {}
         try { bgPurgePlayerFromRound(local, Array.from(_s), _rmNames); } catch (e) {}
         try { bgPurgePlayerFromRound(cloud, Array.from(_s), _rmNames); } catch (e) {}
       }
@@ -19964,10 +20080,25 @@ async function _mergeGameForWrite(local, opts) {
         }
       });
     }
-  } catch (e) { /* any merge failure → fall back to writing local unchanged */ }
-  // v1508: authoritative correction, applied on the copy flushGame persists.
-  try { _bgApplyAdminFix(local, true); } catch (e) {}
+  } catch (e) { /* any merge failure → fall back to local unchanged */ }
   return local;
+}
+// v1802 (H5): what the realtime handler / poll adopt. A round on the dirty queue has
+// edits the cloud has not seen; merge the incoming row INTO this device's copy (the
+// in-memory round first -- safeGet may already have overwritten the cache -- then the
+// cached blob) so those edits survive and the next flush pushes the union. A round
+// that is not dirty adopts the incoming row as before.
+function _bgAdoptIncomingGame(code, incoming) {
+  try {
+    if (!code || !incoming) return incoming;
+    if (_dirtyGames().indexOf(code) < 0) return incoming;
+    let local = null;
+    try { if (state.game && state.game.code === code) local = JSON.parse(JSON.stringify(state.game)); } catch (e) { local = null; }
+    if (!local) { try { const v = localStorage.getItem('game:' + code); local = v ? JSON.parse(v) : null; } catch (e) { local = null; } }
+    if (!local || local.code !== code) return incoming;
+    const merged = _mergeGameInto(local, incoming);
+    return merged || incoming;
+  } catch (e) { return incoming; }
 }
 
 /* ===== v1508 - AN ADMIN CORRECTION THAT ACTUALLY LANDS =======================
@@ -20122,6 +20253,12 @@ function _applyMyTouchedCells(incoming) {
 }
 // Dirty-game queue: rounds whose cloud write failed/timed out, re-pushed on the 15s
 // timer + on reconnect, so play continues offline and syncs when signal returns.
+// v1802 (M8): per-round SERVER stamps. _bgGameRowAt[code] = updated_at (ms) of the row this
+// device last wrote or adopted; _bgGameRowFetched[code] = {at, json} of the row safeGet
+// last pulled, so pollGameOnce can pair a stamp with exactly the payload it is judging.
+var _bgGameRowAt = {};
+var _bgGameRowFetched = {};
+function _bgIsoMs(s) { try { var t = s ? Date.parse(s) : NaN; return isFinite(t) ? t : 0; } catch (e) { return 0; } }
 function _dirtyGames() { try { return JSON.parse(localStorage.getItem('golf:dirty-games') || '[]') || []; } catch (e) { return []; } }
 function _dirtyGamesSave(a) { try { localStorage.setItem('golf:dirty-games', JSON.stringify(Array.from(new Set(a)).filter(Boolean))); } catch (e) {} }
 // v1105: WHEN each round first went unsynced, so the warning below can say how long
@@ -20159,9 +20296,10 @@ async function flushDirtyGames() {
       // next 15s pass rather than blind-writing over the other phone's cells.
       if (parsed && parsed.__bgMergeReadOk === false && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) continue;
       try { localStorage.setItem('game:' + code, JSON.stringify(parsed)); } catch (e) {}
+      const _wIso = new Date().toISOString();   // v1802 (M8)
       const r = await _promiseTimeout(
-        supa.from('games').upsert({ code: code, data: parsed, updated_at: new Date().toISOString() }), 7000, 'flushGame');
-      if (r && !r.error) { clearGameDirty(code); updateSyncIndicator(true); try { bgRenderSyncWarning(); } catch (e) {} }
+        supa.from('games').upsert({ code: code, data: parsed, updated_at: _wIso }), 7000, 'flushGame');
+      if (r && !r.error) { clearGameDirty(code); updateSyncIndicator(true); try { _bgGameRowAt[code] = _bgIsoMs(_wIso); } catch (e) {} try { bgRenderSyncWarning(); } catch (e) {} }
     } catch (e) { /* still offline / still hung → leave queued for the next pass */ }
   }
 }
@@ -20400,7 +20538,47 @@ function bgFillBlankPutts(g) {
     return changed;
   } catch (e) { return false; }
 }
+// v1802 PERF: score taps used to fire a full saveGame (cloud merge-read + upsert + Rounds-list
+// update) on EVERY tap, so three quick taps were three overlapping cloud writes. handleScoreChange
+// now writes the round to localStorage at once (the screen already reads from state.game) and
+// schedules ONE cloud save per round code 400 ms after the last tap. Any other saveGame for that
+// code (hole complete, hole nav, Finish, settings) cancels the timer and saves first; the app
+// going to the background flushes whatever is pending. Nothing reads the cloud between a tap and
+// its save: the only follow-ups are bgHoleCompleteAutoSave (which is a saveGame itself) and the
+// 20 s T2 birdie post (which reads state.game).
+const _bgPendingSave = {};
+function _bgScheduleSave(g) {
+  try {
+    if (!g || !g.code) return;
+    const code = g.code, p = _bgPendingSave[code];
+    if (p) clearTimeout(p.t);
+    _bgPendingSave[code] = { g: g, t: setTimeout(function () { try { flushPendingSave(code); } catch (e) {} }, 400) };
+  } catch (e) {}
+}
+function flushPendingSave(code) {
+  const p = code && _bgPendingSave[code];
+  if (!p) return null;
+  delete _bgPendingSave[code];
+  try { clearTimeout(p.t); } catch (e) {}
+  // The live round object is the freshest local truth (realtime merges protect touched cells).
+  const g = (typeof state !== 'undefined' && state && state.game && state.game.code === code) ? state.game : p.g;
+  try { return saveGame(g).catch(function () {}); } catch (e) { return null; }
+}
+function flushAllPendingSaves() { try { Object.keys(_bgPendingSave).forEach(function (c) { flushPendingSave(c); }); } catch (e) {} }
+try {
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flushAllPendingSaves(); });
+  window.addEventListener('pagehide', flushAllPendingSaves);
+} catch (e) {}
 async function saveGame(game, opts) {
+  // v1802: a pending debounced save for this code is superseded by this one (same object), or
+  // landed first when it holds a different object, so writes stay in order.
+  try {
+    const _pp = game && game.code && _bgPendingSave[game.code];
+    if (_pp) {
+      clearTimeout(_pp.t); delete _bgPendingSave[game.code];
+      if (_pp.g !== game) { try { await saveGame(_pp.g); } catch (e) {} }
+    }
+  } catch (e) {}
   try { bgFillBlankPutts(game); } catch (e) {}   // v1800
   // v1116: this round is about to change, so the event-wide field-round cache is
   // stale from here on. Dropping the entry costs nothing and keeps a scorer's own
@@ -20417,7 +20595,7 @@ async function saveGame(game, opts) {
   const ok = await safeSet('game:' + game.code, JSON.stringify(game), true, opts);
   if (ok) {
     try { bgBadgesLiveNudge(game); } catch (e) {}   /* v1657: mid-round badge check (debounced, my card only) */
-    await safeSet(KEY_LAST, game.code, false);
+    if (!opts.maintenance) await safeSet(KEY_LAST, game.code, false);   // v1802 (M10): a housekeeping save is not "last opened"
     // deferRecent: skip the Rounds-list update (a cloud read + write) on the hot
     // start path — the caller runs addToRecent() in the background so the round
     // can open the instant the game is saved. The list is play-irrelevant.
@@ -20982,34 +21160,111 @@ async function _bgOverlayCourseShards(base) {
    the 20 s cache is only filled when the first call FINISHES, so 25 callers that start together
    all miss it. Callers that arrive while a load is running now wait for that one load. */
 let _courseSavesP = null;
+// v1802 PERF: the cache used to be re-PARSED from its ~6 MB JSON string on every call (the course
+// list alone calls this ~25x in five seconds). Parse once per cache string and hand each caller a
+// SHALLOW clone: every caller that writes to the map does `saves[id] = {...}` or `delete saves[id]`
+// (all 23 sites audited 9/26), which the clone isolates exactly like the old fresh parse did. The
+// card objects themselves are shared read-only -- no caller edits a card in place.
+let _courseSavesObj = null, _courseSavesObjSrc = null;
+function _bgCourseSavesParsed() {
+  if (_courseSavesCache == null) return null;
+  if (_courseSavesObj && _courseSavesObjSrc === _courseSavesCache) return _courseSavesObj;
+  try { _courseSavesObj = JSON.parse(_courseSavesCache); _courseSavesObjSrc = _courseSavesCache; return _courseSavesObj; }
+  catch (e) { _courseSavesCache = null; _courseSavesObj = null; _courseSavesObjSrc = null; return null; }
+}
+// The full map when it is warm (within the 20 s window), else null. Read-only callers only.
+function _bgCourseSavesWarm() {
+  if (_courseSavesCache != null && (Date.now() - _courseSavesAt < 20000)) return _bgCourseSavesParsed();
+  return null;
+}
 async function getCourseSaves() {
-  if (_courseSavesCache != null && (Date.now() - _courseSavesAt < 20000)) {
-    try { return JSON.parse(_courseSavesCache); } catch (e) { _courseSavesCache = null; }
-  }
-  if (!_courseSavesP) { _courseSavesP = _bgGetCourseSavesRaw(); _courseSavesP.then(() => { _courseSavesP = null; }, () => { _courseSavesP = null; }); return await _courseSavesP; }
+  const _w = _bgCourseSavesWarm();
+  if (_w) return Object.assign({}, _w);
+  if (!_courseSavesP) { _courseSavesP = _bgGetCourseSavesRaw(); _courseSavesP.then(() => { _courseSavesP = null; }, () => { _courseSavesP = null; }); }
   const _b = await _courseSavesP;
-  try { if (_courseSavesCache != null) return JSON.parse(_courseSavesCache); } catch (e) {}
-  return _b;
+  const _p = _bgCourseSavesParsed();
+  return Object.assign({}, _p || _b || {});
+}
+// v1802 PERF: ONE course's card without the whole map. Serves from the warm map when there is
+// one; otherwise reads just that course's `shared:courses:XX` shard row (~1/64 of the library)
+// into the same _bgShardCache the full overlay uses, so a later full read skips re-downloading
+// it. Returns the card, null when the shard has no card for this id, or undefined when the shard
+// could not be read (offline / error) so the caller can fall back to the old full read.
+// Same source of truth as getCourseSaves()[id]: the shard is what players already see.
+const _bgShardOneP = {};
+async function _bgGetCourseCardFromShard(courseId) {
+  if (!courseId) return null;
+  try {
+    const _w = _bgCourseSavesWarm();
+    if (_w) return _w[courseId] || null;
+  } catch (e) {}
+  try {
+    if (!supaReady) await initSupabase();
+    if (!(supa && supaOnline)) return undefined;
+  } catch (e) { return undefined; }
+  const code = 'shared:courses:' + _courseShard(courseId);
+  const cache = window._bgShardCache || (window._bgShardCache = { rows: {}, at: {} });
+  cache.oneAt = cache.oneAt || {};
+  // A just-read shard (20 s, same window as the full map) answers repeat lookups locally.
+  if (cache.rows[code] && (Date.now() - (cache.oneAt[code] || 0)) < 20000) return cache.rows[code][courseId] || null;
+  if (!_bgShardOneP[code]) {
+    _bgShardOneP[code] = (async () => {
+      try {
+        if (cache.rows[code]) {   // known shard: ask for the timestamp first, re-download only on change
+          const mr = await supa.from('games').select('code,updated_at').eq('code', code).maybeSingle();
+          if (mr.error) return undefined;
+          if (!mr.data) { cache.oneAt[code] = Date.now(); return null; }
+          if (cache.at[code] === mr.data.updated_at) { cache.oneAt[code] = Date.now(); return cache.rows[code]; }
+        }
+        const nr = await supa.from('games').select('code,data,updated_at').eq('code', code).maybeSingle();
+        if (nr.error) return undefined;
+        cache.oneAt[code] = Date.now();
+        if (!nr.data) return null;
+        const d = nr.data.data;
+        if (d && typeof d === 'object' && !Array.isArray(d)) { cache.rows[code] = d; cache.at[code] = nr.data.updated_at; return d; }
+        return null;
+      } catch (e) { return undefined; }
+    })();
+    _bgShardOneP[code].then(() => { delete _bgShardOneP[code]; }, () => { delete _bgShardOneP[code]; });
+  }
+  const row = await _bgShardOneP[code];
+  if (row === undefined) return undefined;
+  return (row && row[courseId]) || null;
+}
+// getCourseSaves()[id] for a single course, with the same fallbacks: warm map -> one shard ->
+// (only if that shard could not be read) the full read. Exactly the value the map would hold.
+async function _bgGetCourseCard(courseId) {
+  if (!courseId) return null;
+  try { const c = await _bgGetCourseCardFromShard(courseId); if (c !== undefined) return c; } catch (e) {}
+  try { const s = await getCourseSaves(); return (s && s[courseId]) || null; } catch (e) { return null; }
 }
 async function _bgGetCourseSavesRaw() {
   if (_courseSavesCache != null && (Date.now() - _courseSavesAt < 20000)) {
     try { return JSON.parse(_courseSavesCache); } catch (e) { _courseSavesCache = null; }
   }
-  // Base: the legacy blob (cache-first localStorage; keeps offline working). It is
-  // never written again, so it can only ever be missing NEW cards — which the shards
-  // supply below. This guarantees a card is never dropped.
+  // v1802 PERF: the legacy 'golf:courses' blob (shared:courses, ~4 MB) is no longer read when
+  // the shards are reachable. Every card it holds is in the shards (the 9 that were not are being
+  // migrated server-side), and reading it cost a ~4 MB cloud fetch on a fresh device plus a ~4 MB
+  // JSON.parse on every 20 s cache expiry. The local copy is kept ONLY as the offline / demo
+  // fallback (the demo seeds Texas Star's card there and never talks to the database), because
+  // _bgShardCache lives in memory and a cold offline boot would otherwise have no cards at all.
   var base = {};
-  try { const v = await safeGet(KEY_COURSE_DATA, true); if (v) base = JSON.parse(v) || {}; } catch (e) {}
+  var _shardsOk = false;
   // Overlay: sharded rows (shared:courses:00 .. :3f). Read via an indexed key range
   // so it skips the blob itself and every other shared:* / scorecard:* singleton.
   try {
     if (!supaReady) await initSupabase();
     if (supa && supaOnline) {
       await _bgOverlayCourseShards(base);   // v888 PERF: delta-fetch — only changed shards re-download
+      _shardsOk = true;
     }
   } catch (e) {}
+  if (!_shardsOk) {
+    try { const v = localStorage.getItem(KEY_COURSE_DATA); if (v) base = Object.assign(JSON.parse(v) || {}, base); } catch (e) {}
+  }
   var json = JSON.stringify(base);
   _courseSavesCache = json; _courseSavesAt = Date.now();
+  _courseSavesObj = base; _courseSavesObjSrc = json;   // v1802: parsed cache in step with the string
   return base;
 }
 
@@ -22279,7 +22534,7 @@ async function upsertPlayerInRoster(firstName, lastName, hcp, extras) {
     // effect of some other write.
     if (extras && extras.setHcp) roster[idx].hcp = hcp;
     roster[idx].lastUsed = Date.now();
-    if (extras && extras.phone) roster[idx].phone = extras.phone;   // v640
+    // v1802 (M12): phone numbers are no longer kept on roster entries (extras.phone is ignored).
     // Don't overwrite the existing canonical spelling — keep whatever's saved
     // (e.g. keep "O'Connor" rather than letting "OConnor" overwrite it).
   } else {
@@ -22289,7 +22544,6 @@ async function upsertPlayerInRoster(firstName, lastName, hcp, extras) {
       lastName: l,
       name: combineName(f, l),
       hcp: hcp || 0,
-      phone: (extras && extras.phone) ? extras.phone : undefined,   // v640
       lastUsed: Date.now(),
       scoreHistory: []
     });
@@ -23804,8 +24058,18 @@ async function getCourseScorecard(courseId) {
   // Now: give the blob a short head start (it is cache-first, so a warm device still
   // wins instantly and the blob remains the source of truth), and if it has not
   // answered in 600ms, unblock the UI from the per-course row instead.
+  // v1802 PERF: for a player (no admin tooling open) the "blob" answer is now that course's ONE
+  // shard row, not all 64 -- see _bgGetCourseCardFromShard. A warm full map still answers
+  // instantly, a full read already in flight is reused, and a shard read failure falls back to
+  // the full read exactly as before. The 600 ms race and the per-course row fallback are unchanged.
   const _blobP = (async () => {
-    try { const s = await getCourseSaves(); return (s && s[courseId]) || null; } catch (e) { return null; }
+    try {
+      if (!_courseSavesP && !(typeof isAdmin === 'function' && isAdmin())) {
+        const c = await _bgGetCourseCardFromShard(courseId);
+        if (c !== undefined) return c;
+      }
+      const s = await getCourseSaves(); return (s && s[courseId]) || null;
+    } catch (e) { return null; }
   })();
   const _fast = await Promise.race([
     _blobP,
@@ -24513,7 +24777,7 @@ async function lhExtras(lc){
     if(!lib) lib=L.find(function(c){ if(!(c&&c.name)) return false; var cn=lhNorm(c.name); if(cn.length<6) return false; return (cn.indexOf(nn)>=0||nn.indexOf(cn)>=0) && (!c.state||!lc.state||String(c.state).toUpperCase()===lc.state||lhNorm(c.state)===lhNorm(lhStateName(lc.state))); });
     if(!lib){ _lhExCache[lc.id]=out; return out; }
     out.libId=lib.id;
-    try{ var saves=await getCourseSaves(); var sc=saves&&saves[lib.id];
+    try{ var sc=await _bgGetCourseCard(lib.id);   // v1802 PERF: one shard, not the whole map
       if(sc){ var tee=Array.isArray(sc.tees)?sc.tees.find(function(t){return t&&t.rating!=null&&t.slope!=null;}):null;
         if(tee){ out.rating=tee.rating; out.slope=tee.slope; } else if(sc.rating!=null&&sc.slope!=null){ out.rating=sc.rating; out.slope=sc.slope; } } }catch(e){}
     try{ if(typeof getScorecardImg==='function') out.scoreImg=(await getScorecardImg(lib.id))||''; }catch(e){}
@@ -26700,7 +26964,10 @@ async function loadCourseLibrary(force) {
     } catch (e) {}
     // Scorecard bootstraps are idempotent but iterate (and may write), so only
     // run them once per session — not on every library refresh.
-    if (!_courseBootstrapsDone) {
+    // v1802 PERF: both bootstraps are already applied in the live shards (verified 9/26), yet each
+    // one awaited getCourseSaves() -- every shard row -- on every player's boot. Admins keep them
+    // (they are the only ones who can repair a card anyway); players skip straight to the library.
+    if (!_courseBootstrapsDone && typeof isAdmin === 'function' && isAdmin()) {
       try { await bootstrapMichigan2026Scorecards(); } catch (e) {
         console.warn('Michigan 2026 bootstrap failed:', e);
       }
@@ -33591,7 +33858,20 @@ async function restoreRoundsFromCloud() {
 // purpose (local + shared tombstones). Runs for EVERY signed-in user (not just
 // admins). This makes a shared-blob overwrite self-correct instead of looking like
 // permanent data loss, so the manual "Restore rounds" button is rarely needed.
+let _bgHealRoundsUid = null, _bgHealRoundsP = null;
 async function healMyRoundsFromCloud() {
+  try {
+    if (!(isSignedIn() && supa && _authUser)) return;
+    // v1802: runs from initAuth's sign-in handler AND from Settings; both fired the same roster
+    // read + player_stats read + heal for the same account. Once per account per session, and a
+    // second caller waits on the first rather than starting its own pass.
+    if (_bgHealRoundsUid === _authUser.id) { if (_bgHealRoundsP) { try { await _bgHealRoundsP; } catch (e) {} } return; }
+    _bgHealRoundsUid = _authUser.id;
+    _bgHealRoundsP = _bgHealMyRoundsFromCloudOnce();
+    try { await _bgHealRoundsP; } finally { _bgHealRoundsP = null; }
+  } catch (e) { console.warn('healMyRoundsFromCloud failed', e); }
+}
+async function _bgHealMyRoundsFromCloudOnce() {
   try {
     if (!(isSignedIn() && supa && _authUser)) return;
     const me = await getMeName();
@@ -38393,7 +38673,9 @@ async function bgT2ApplyFourManTeams(t, dayId, A) {
     const keyOf = pid => (A[pid] && S.keys.indexOf(A[pid]) >= 0) ? A[pid] : '';
     if (S.isTeam) {
       const ch = P.filter(p => keyOf(p.id) && p.team !== keyOf(p.id));
-      await Promise.all(ch.map(p => supa.from('tournament_players').update({ team: keyOf(p.id) }).eq('id', p.id)));
+      // v1802 (M6): checked — stop before the carts are rebuilt on teams that never saved.
+      const _tw = await Promise.all(ch.map(p => supa.from('tournament_players').update({ team: keyOf(p.id) }).eq('id', p.id).select('id')));
+      if (_tw.some(r => !_bgWrote(r))) { showToast('Could not save the teams — nothing changed. Try again.'); return; }
     }
     const want = [];
     S.keys.forEach(k => { const ids = P.filter(p => keyOf(p.id) === k).map(p => p.id); for (let i = 0; i < ids.length; i += 4) want.push({ key: k, ids: ids.slice(i, i + 4) }); });
@@ -38429,14 +38711,16 @@ async function bgT2ApplyFourManTeams(t, dayId, A) {
       w.ids.forEach((pid, si) => {
         const m = byPid[pid];
         const team = S.isTeam ? w.key : ((m && m.team) || null);
-        if (m) { if (m.group_id !== g.id || (S.isTeam && m.team !== team)) ops.push(supa.from('tournament_group_members').update({ group_id: g.id, team: team }).eq('id', m.id)); }
+        if (m) { if (m.group_id !== g.id || (S.isTeam && m.team !== team)) ops.push(supa.from('tournament_group_members').update({ group_id: g.id, team: team }).eq('id', m.id).select('id')); }
         else ins.push({ group_id: g.id, tournament_player_id: pid, team: team, slot: si + 1 });
       });
     });
-    await Promise.all(ops);
+    // v1802 (M6): checked writes — a move that matched nothing is reported, not toasted as done.
+    const _mw = await Promise.all(ops);
+    if (_mw.some(r => !_bgWrote(r))) { showToast('Could not move every player — check the carts and try again.'); return; }
     if (ins.length) await t2AddGroupMembersBulk(ins);
     const left = gs.filter(g => !used.has(g.id));
-    if (left.length) { try { await supa.from('tournament_groups').delete().in('id', left.map(g => g.id)).is('game_code', null); } catch (e) {} }
+    if (left.length) { try { if (!_bgWrote(await supa.from('tournament_groups').delete().in('id', left.map(g => g.id)).is('game_code', null).select('id'))) showToast('The empty carts could not be removed — delete them from the cart sheet'); } catch (e) {} }
     showToast('Carts updated from the teams \u2713');
   } catch (e) { console.warn('bgT2ApplyFourManTeams', e); }
 }
@@ -40961,7 +41245,7 @@ function gatherSetup() {
 async function bgHoleCompleteAutoSave(g, h, why) {
   try {
     if (!g || !h || state.viewOnlyMode) return;
-    if (!isHoleComplete(g, h)) return;
+    if (!isHoleComplete(g, h)) { try { flushPendingSave(g.code); } catch (e) {} return; }   // v1802: leaving a hole lands any coalesced tap now
     g.holeDoneAt = g.holeDoneAt || {};
     g.holeDoneAt[h] = Date.now();
     let ok = false;
@@ -45126,7 +45410,11 @@ async function handleScoreChange(pid, action) {
     el.classList.toggle('empty', cur === null);
   }
 
-  await saveGame(g);
+  // v1802 PERF: local copy now, cloud save coalesced (see _bgScheduleSave above saveGame).
+  // updatedAt is stamped here so the poll/realtime newest-wins checks see this tap as newest.
+  g.updatedAt = Date.now();
+  try { bgLsSet('game:' + g.code, JSON.stringify(g)); } catch (e) {}
+  _bgScheduleSave(g);
 
   // Show auto-advance buttons if all scored on this hole
   const allScored = isHoleComplete(g, h);
@@ -45827,7 +46115,7 @@ function maybeShowProExplainer(){
 // explainer until no other dialog is open.
 try {
   setTimeout(injectProBadges, 1500);
-  setInterval(injectProBadges, 15000);   // v935: was 4s — cheap but needless churn
+  // v1802 PERF: the 15 s interval is gone -- injectProBadges has been a no-op since v1224.
 } catch(e){}
 
 // v1474 (Tyler, 9/4): bg_profiles_public is a SET-RETURNING rpc, so PostgREST treats it like a
@@ -46807,14 +47095,19 @@ function bgSettleNets(money, players) {
   // takes one — the units always moves to the player it was closest to anyway.
   let resid = rows.reduce((a, x) => a + x.dollars, 0);
   let guard = rows.length * 4 + 20;
+  // v1802: tie-break. Equal `gain` used to go to whoever was listed first, which depends on
+  // roster order. Now: equal gain -> the larger |balance| absorbs the dollar (least
+  // distorted in proportion), then the lower id (string order). Zero-sum is unchanged: each
+  // loop moves exactly one dollar per pass until the dollar total is 0, whoever is picked.
+  const _tieAfter = (x, p) => Math.abs(x.cents) > Math.abs(p.cents) || (Math.abs(x.cents) === Math.abs(p.cents) && String(x.id) < String(p.id));
   while (resid > 0 && guard-- > 0) {
     let pick = rows[0];
-    rows.forEach(x => { if (x.gain > pick.gain) pick = x; });
+    rows.forEach(x => { if (x.gain > pick.gain || (x.gain === pick.gain && _tieAfter(x, pick))) pick = x; });
     pick.dollars -= 1; pick.gain -= 1; resid -= 1;
   }
   while (resid < 0 && guard-- > 0) {
     let pick = rows[0];
-    rows.forEach(x => { if (x.gain < pick.gain) pick = x; });
+    rows.forEach(x => { if (x.gain < pick.gain || (x.gain === pick.gain && _tieAfter(x, pick))) pick = x; });
     pick.dollars += 1; pick.gain += 1; resid += 1;
   }
   rows.forEach(x => { out[x.id] = x.dollars; });
@@ -47241,7 +47534,7 @@ function calcSkins(g) {
     if (_hParts.length < 2) continue;
     const scores = _hParts.map(p => {
       const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
-      const net = raw != null ? netHoleScore(raw, _skHcp(p), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : null;
+      const net = raw != null ? netHoleScore(raw, _skHcp(p), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules, roundHoles(g)) : null;   // v1802: explicit hole count (9-hole allowance when called outside computeAllGameMoney)
       return { pid: p.id, name: p.name, score: raw, netScore: net, hcp: p.hcp };
     });
     const allScored = scores.every(s => s.score !== null);
@@ -47406,7 +47699,51 @@ function calcSkins(g) {
     }
   });
 
-  return { results, money, carry };
+  // v1802: a carry left standing after the last scored hole of a FINISHED round was never
+  // awarded — the Board read "17 carrying" forever. Mirror Pot of Gold (v973): on a finished
+  // round the leftover goes to the low NET total (same _skHcp allowance the skins use) over the
+  // holes actually played, judged among the players who played the most holes (a marked
+  // leaver with fewer holes is not "low" for having played less); still tied -> void.
+  // The row deliberately carries NO winnerId: consumers that count skins (Board "N won",
+  // the Skins Bandit badge, the scorecard gold circles) must not count the carry-over as a skin.
+  let carryNote = null, carryVoid = 0;
+  if (carry > 0 && g.finishedAt && (cfg.tieRule === 'carry' || cfg.tieRule === 'split')) {
+    try {
+      const _nH = roundHoles(g);
+      const _tot = participants.map(p => {
+        let t = 0, n = 0;
+        for (let hh = 0; hh < 18; hh++) {
+          const rw = (g.scores[p.id] && g.scores[p.id][hh] != null) ? g.scores[p.id][hh] : null;
+          if (rw == null) continue;
+          t += netHoleScore(rw, _skHcp(p), siFor(g, p.id, hh), parFor(g, p.id, hh), g.hcpRules, _nH);
+          n++;
+        }
+        return { pid: p.id, name: p.name, tot: t, n };
+      }).filter(x => x.n > 0);
+      const _maxN = _tot.reduce((mx, x) => Math.max(mx, x.n), 0);
+      const _elig = _tot.filter(x => x.n === _maxN);
+      if (_elig.length > 1) {
+        const _lo = Math.min.apply(null, _elig.map(x => x.tot));
+        const _win = _elig.filter(x => x.tot === _lo);
+        if (_win.length === 1) {
+          const _w = _win[0];
+          const _los = _elig.filter(x => x.pid !== _w.pid);
+          money[_w.pid] += carry * _los.length;
+          _los.forEach(l => money[l.pid] -= carry);
+          carryNote = _w.name + ' took the ' + carry + ' carry-over on low total';
+          results.push({ hole: null, winner: 'Carry-over — ' + _w.name + ' on low total', carryWinnerId: _w.pid, amount: carry, carried: carry, take: carry * _los.length, carryPayout: true });
+          carry = 0;
+        } else {
+          carryNote = 'Carry-over of ' + carry + ' void — tied on total';
+          results.push({ hole: null, winner: 'Carry-over of ' + carry + ' void — tied on total', amount: 0, carried: carry, tied: true, voided: true, carryPayout: true });
+          carryVoid = carry;
+          carry = 0;
+        }
+      }
+    } catch (e) { try { console.warn('skins carry settle failed', e); } catch (e2) {} }
+  }
+
+  return { results, money, carry, carryNote, carryVoid };
 }
 
 // Nassau
@@ -47515,7 +47852,20 @@ function settleMatch(g, aId, bId, fromHole, toHole, format, useNet) {
     const loser = winner === aId ? bId : aId;
     if (closed) {
       // closeout notation like "3&2" — won by N with M to play
-      return { winnerId: winner, loserId: loser, status: lead + '&' + remaining, open: false };
+      // v1802: `remaining` here is "holes of the segment not yet scored", so a match that
+      // was 6 up after 6 with all nine scored read "6&0" instead of "6&3". Walk the segment
+      // in order and stop at the first hole where the lead exceeded what was left — the
+      // same rule calcMatch uses. Money is unchanged; only the label.
+      let _lbl = null;
+      try {
+        for (let k = fromHole; k <= toHole; k++) {
+          const ps = pairwiseStandings(g, aId, bId, fromHole, k, useNet);
+          if (!ps) break;
+          const up = Math.abs(ps.aHolesWon - ps.bHolesWon), left = toHole - k;
+          if (up > left) { _lbl = left > 0 ? (up + '&' + left) : (up + ' up'); break; }
+        }
+      } catch (e) { _lbl = null; }
+      return { winnerId: winner, loserId: loser, status: _lbl || (remaining > 0 ? (lead + '&' + remaining) : (lead + ' up')), open: false };
     }
     return { winnerId: winner, loserId: loser, status: lead + ' up', open: false };
   }
@@ -47645,7 +47995,9 @@ function calcNassau(g) {
 
       _nassauSegs(g, inst).forEach(seg => {
         const [from, to] = segmentRange(seg, roundHoles(g));
-        if (seg === 'overall' && g.finishedAt) {
+        // v1802: on a NINE the overall IS the only bet (no front/back to double-charge), so the
+        // one-nine-played push can never apply — it silently zeroed every finished 9-hole Nassau.
+        if (seg === 'overall' && g.finishedAt && roundHoles(g) !== 9) {
           const hp = nassauHalvesPlayed(g, players.map(p => p.id));
           if (!hp.front || !hp.back) { m.overall = 'pushed — only one nine played'; return; }
         }
@@ -47734,7 +48086,8 @@ function calcNassau(g) {
     const m = { instanceIdx: instIdx, a: a.name, aId: a.id, b: b.name, bId: b.id, value: v, front: null, back: null, overall: null };
     _nassauSegs(g, inst).forEach(seg => {
       const [from, to] = segmentRange(seg, roundHoles(g));
-      if (seg === 'overall' && g.finishedAt) {
+      // v1802: same as group mode — a nine has only the overall, never push it for lacking a back nine.
+      if (seg === 'overall' && g.finishedAt && roundHoles(g) !== 9) {
         const hp = nassauHalvesPlayed(g, [a.id, b.id]);
         if (!hp.front || !hp.back) { m.overall = 'pushed — only one nine played'; return; }
       }
@@ -48433,8 +48786,9 @@ function calcBanker(g) {
       let bankerNet = bankerScore;
       let playerNet = s;
       if (cfg.net && g.sis) {
-        bankerNet = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), siFor(g, banker.id, h), parFor(g, banker.id, h), g.hcpRules);
-        playerNet = netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules);
+        const _bkNH = roundHoles(g);   // v1802: explicit hole count
+        bankerNet = netHoleScore(bankerScore, effectiveHcp(banker, g.hcpRules), siFor(g, banker.id, h), parFor(g, banker.id, h), g.hcpRules, _bkNH);
+        playerNet = netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules, _bkNH);
       }
       let outcome = 'tie';
       if (bankerNet < playerNet) {
@@ -49992,8 +50346,8 @@ function calcMatch(g) {
       const aRaw = (g.scores[a.id] && g.scores[a.id][h] != null) ? g.scores[a.id][h] : null;
       const bRaw = (g.scores[b.id] && g.scores[b.id][h] != null) ? g.scores[b.id][h] : null;
       if (aRaw === null || bRaw === null) continue;
-      const aSc = (useNet && g.sis) ? netHoleScore(aRaw, effectiveHcp(a, g.hcpRules), siFor(g, a.id, h), parFor(g, a.id, h), g.hcpRules) : aRaw;
-      const bSc = (useNet && g.sis) ? netHoleScore(bRaw, effectiveHcp(b, g.hcpRules), siFor(g, b.id, h), parFor(g, b.id, h), g.hcpRules) : bRaw;
+      const aSc = (useNet && g.sis) ? netHoleScore(aRaw, effectiveHcp(a, g.hcpRules), siFor(g, a.id, h), parFor(g, a.id, h), g.hcpRules, _mHoles) : aRaw;   // v1802: explicit hole count
+      const bSc = (useNet && g.sis) ? netHoleScore(bRaw, effectiveHcp(b, g.hcpRules), siFor(g, b.id, h), parFor(g, b.id, h), g.hcpRules, _mHoles) : bRaw;
       played++;
       let res = 'halve';
       if (aSc < bSc) { aUp++; res = 'a'; }
@@ -50408,12 +50762,16 @@ function calcShamble(g) {
   let aTotal = 0, bTotal = 0, complete = true, played = 0;
   const holes = [];
   const teamHole = (team, h) => {
+    // v1802: only a MARKED leaver (bgLeftAfter) may be missing from a hole. A partner who is
+    // still in the round but has not scored yet makes the hole incomplete — the same rule
+    // calcComboScore uses — instead of the team quietly counting one ball short.
+    let blankActive = false;
     const vals = team.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
-      if (s === null) return null;
-      return (cfg.net && g.sis) ? netHoleScore(s, bgShambleHcp(g, cfg, p), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
+      if (s === null) { if (bgActiveOnHole(g, p.id, h + 1)) blankActive = true; return null; }
+      return (cfg.net && g.sis) ? netHoleScore(s, bgShambleHcp(g, cfg, p), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules, rh) : s;
     }).filter(v => v !== null).sort((x, y) => x - y);
-    if (!vals.length) return null;
+    if (blankActive || !vals.length) return null;
     // a team with fewer scores in than `balls` counts what it has (a walked-in partner)
     return vals.slice(0, balls).reduce((t, v) => t + v, 0);
   };
@@ -50823,7 +51181,7 @@ function _bgPoolStats(g, players, hcpPct) {
       scored++;
       const par = parFor(g, p.id, h); // v1065: this player's tee par
       net += (sis && typeof netHoleScore === 'function')
-        ? netHoleScore(s, fullHcp, siFor(g, p.id, h), par, g.hcpRules || null)
+        ? netHoleScore(s, fullHcp, siFor(g, p.id, h), par, g.hcpRules || null, roundHoles(g))   // v1802: explicit hole count (hcpRules may be null here)
         : s;
       const pu = (g.puttsData && g.puttsData[p.id]) ? g.puttsData[p.id][h] : null;
       if (pu != null) { putts += Number(pu) || 0; puttHoles++; }
@@ -52414,6 +52772,9 @@ function gpsMyStatuses(g, res, myId) {
       }
     }
   } catch (e) {}
+  // v1802: `ord` was declared inside the Nassau try block below, so the Quota chip's
+  // "2nd of 4" threw ReferenceError (swallowed) and never rendered for anyone but the leader.
+  const ord = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : (n + 'th');
   // ---- Nassau — current nine's segment standing for each 1v1 instance I'm in ----
   try {
     const ncfg = g.games && g.games.nassau;
@@ -52423,7 +52784,6 @@ function gpsMyStatuses(g, res, myId) {
       const seg = h <= 9 ? 'front' : 'back';
       const segShort = seg === 'front' ? 'F' : 'B';
       const [from, to] = segmentRange(seg, roundHoles(g));
-      const ord = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : (n + 'th');
       instances.forEach(inst => {
         const ids = Array.isArray(inst.participants) ? inst.participants : [];
         if (ids.indexOf(myId) < 0) return;                 // only instances I'm in
@@ -55029,12 +55389,14 @@ function renderBoard() {
   if (skins) {
     const div = document.createElement('div');
     div.className = 'game-result';
-    div.innerHTML = `<div class="head"><span class="lbl">${bgGameIconPrefix('skins')}Skins (${g.games.skins.value} per skin)</span><span class="val">${skins.results.filter(r => r.winnerId).length} won · ${bgWhole(skins.carry)} carrying</span></div>`;
+    // v1802: a stranded carry on a finished round is now settled by calcSkins — say "N void" when it tied on total.
+    div.innerHTML = `<div class="head"><span class="lbl">${bgGameIconPrefix('skins')}Skins (${g.games.skins.value} per skin)</span><span class="val">${skins.results.filter(r => r.winnerId).length} won · ${skins.carryVoid > 0 ? bgWhole(skins.carryVoid) + ' void' : bgWhole(skins.carry) + ' carrying'}</span></div>`;
     if (skins.results.length > 0) {
       const showAll = state.skinsShowAll || false;
       const rowsToShow = showAll ? skins.results : skins.results.slice(-6);
       const hidden = skins.results.length - rowsToShow.length;
       let lines = rowsToShow.map(r => {
+        if (r.carryPayout) return `<div class="sub">${r.winner}${r.take > 0 ? ' +' + bgWhole(r.take) : ''}</div>`;   // v1802: the settled carry-over (hole: null)
         if (r.tied) return `<div class="sub">H${r.hole}: ${r.winner}</div>`;
         // Show the winner's actual units gain for this skin row.
         // r.amount is the FULL per-loser payment (incl. carry). With splits,
@@ -55335,7 +55697,7 @@ function renderBoard() {
     const payoutLabel = cfg.payout === '8020' ? '80/20' : 'winner-takes-all';
     const sp6StakeStr = isPerPoint
       ? ` · ${cfg.value || 0}/pt`
-      : (entry > 0 ? ` · ${buyin}/player · ${payoutLabel}` : ` · ${payoutLabel}`);
+      : (buyin > 0 ? ` · ${buyin}/player · ${payoutLabel}` : ` · ${payoutLabel}`);   // v1802: `entry` was never declared here (ReferenceError killed the whole Board paint)
     const sp6Holes = splixSixes.holePoints ? splixSixes.holePoints.filter(hp => hp !== null).length : 0;
     const sp6Progress = sp6Holes === 18 ? 'Complete' : sp6Holes > 0 ? `${sp6Holes}/18 holes` : 'Not started';
     div.innerHTML = `<div class="head"><span class="lbl">${bgGameIconPrefix('splixSixes')}Splix 6's</span><span class="val">${sp6StakeStr}</span></div>`;
@@ -55381,7 +55743,7 @@ function renderBoard() {
       const buyin = cfg.buyin != null ? cfg.buyin : (cfg.value || 0);
       const payoutLabel = cfg.payout === '8020' ? '80/20' : 'winner-takes-all';
       const totalPool = buyin * _sfFieldN;
-      stakeStr = entry > 0 ? ` · Pool ${totalPool} · ${buyin} entry · ${payoutLabel}` : ` · ${payoutLabel}`;
+      stakeStr = buyin > 0 ? ` · Pool ${totalPool} · ${buyin} entry · ${payoutLabel}` : ` · ${payoutLabel}`;   // v1802: `entry` was never declared here (ReferenceError killed the whole Board paint)
     }
     const netStr = cfg.net ? ' · Net' : ' · Gross';
     const sfHoles = stableford.holePoints ? stableford.holePoints.filter(hp => hp !== null).length : 0;
@@ -60507,7 +60869,7 @@ async function renderHomeBoard() {
 // caller was rendering identical rows anyway. Same pattern as _singletonInFlight /
 // _rosterInFlight already in this file.
 let _hlRowsP = null, _hlRowsAt = 0, _hlRows = null;
-const HOME_LIVE_TTL_MS = 2500;
+const HOME_LIVE_TTL_MS = 30000;   // v1802 PERF: was 2.5 s; the feed re-renders on a 60 s heartbeat, so a 30 s window serves the boot/tab/visibility bursts from one fetch
 async function _homeLiveRows() {
   const now = Date.now();
   if (_hlRows && (now - _hlRowsAt) < HOME_LIVE_TTL_MS) return _hlRows;
@@ -65635,6 +65997,7 @@ async function loadRounds() {
         );
         if (everyone) {
           await deleteRecentGame(r.code); // global: game + recent list + everyone's stats
+          try { await t2ReleaseGroupCodeForRound(r.code); } catch (e) {}   // v1802 (L6): un-start the tournament cart, if it was one
           showToast('Round deleted for all players');
           await loadRounds();
           return;
@@ -66165,6 +66528,7 @@ async function openRoundBetsSheet(code, courseName, opts) {
   // v1111: kept so the share handler can rebuild the same lines WITH payment links.
   let _evSettle = null, _evNameOf = null, _evPlayerOf = null;
   let _evRaw = [], _evPay = null;   // v1320: hoisted for the breakdown + the share text
+  let _evScores = [], _evPl = [];   // v1802: were `const` inside the try below, so the field standings block never saw them
   let t = null;
   /* v1366 (Tyler, 1 Sep 2026) — "it takes a while to build the bet summary when you
      click a round… it feels like it is having to rebuild it every time."
@@ -66225,13 +66589,14 @@ async function openRoundBetsSheet(code, courseName, opts) {
       // v1332: + the two inputs the whole-field standings need. Added to the SAME
       // Promise.all rather than awaited after it, so folding the Tournament Results
       // screen in here costs no extra wall-clock (the v1330 rule).
-      const [_raw, _pay, _evScores, _evPl] = await Promise.all([
+      const [_raw, _pay, _evSc, _evFieldPl] = await Promise.all([
         loadTourneyRawRounds(t).catch(() => []),
         t2ComputeCombinedPayouts(t).catch(() => null),
         (typeof loadTourneyScores === 'function' ? loadTourneyScores(t).catch(() => []) : Promise.resolve([])),
         t2GetPlayers(t.id).catch(() => [])
       ]);
       _evRaw = _raw || []; _evPay = _pay || null;   // v1320
+      _evScores = _evSc || []; _evPl = _evFieldPl || [];   // v1802: into the outer lets so _t2FieldStandingsHtml below gets them
       if (_pay && Array.isArray(_pay.rows) && _pay.rows.length) {
         const _dict = {}; _pay.rows.forEach(r => { _dict[r.id] = r.net || 0; });
         const _pl = _pay.players || [];
@@ -66688,7 +67053,8 @@ async function deleteRecentGame(code) {
   // A scheduled round started into this code should return to the schedule, not
   // vanish, when the round is deleted.
   try { await restoreScheduledRoundForCode(code); } catch (e) {}
-  try { tombstoneRound(code); } catch (e) {}   // shared tombstone → can't resurrect on any device
+  // v1802 (H3): the tombstone moved BELOW the cloud delete. Its scope depends on the
+  // outcome -- GLOBAL only once the row is confirmed gone, otherwise per-user ('me').
   try { expireInvitesForRound(code); } catch (e) {}   // v940: a deleted round must not keep inviting people
   try { if (typeof liveActivity !== 'undefined') liveActivity.endIfCode(code); } catch (e) {}   // v635: clear the lock-screen Live Activity card for this round
   // Remove from recent list (now shared across devices)
@@ -66735,6 +67101,10 @@ async function deleteRecentGame(code) {
       else if (_rpc && _rpc.error) console.warn('bg_round_delete_everywhere', _rpc.error);
     }
   } catch (e) { console.warn('bg_round_delete_everywhere', e); }
+  // v1802 (H3): a non-owner's delete used to write the GLOBAL tombstone before the cloud
+  // delete was even attempted -- hiding a round the host still owns from every other
+  // player. Global only when the row is really gone; otherwise "remove from MY list".
+  try { tombstoneRound(code, _cloudGone ? undefined : 'me'); } catch (e) {}
   if (!_cloudGone) {
     // A league card of record refuses by name; say which week rather than
     // blaming the host, who has nothing to do with it.
@@ -66767,6 +67137,7 @@ async function deleteRecentGame(code) {
   // If we just deleted the "last opened" pointer, clear it
   const last = await safeGet(KEY_LAST, false);
   if (last === code) await safeSet(KEY_LAST, '', false);
+  return _cloudGone;   // v1802 (H3): callers can tell "gone for everyone" from "gone from my list"
 }
 
 // ============================================================
@@ -67153,13 +67524,7 @@ async function openEditProfile(opts) {
     // Prefill phone from profiles row.
     const phoneInput = document.getElementById('edit-profile-phone');
     if (phoneInput) {
-      phoneInput.value = '';
-      try {
-        if (supa && _authUser) {
-          const { data } = await _bgRead(() => supa.from('profiles').select('phone').eq('id', _authUser.id).maybeSingle(), 'openEditProfile:phone');
-          if (data && data.phone) phoneInput.value = formatPhoneDisplay(data.phone);
-        }
-      } catch (e) { console.warn('openEditProfile: phone prefill failed', e); }
+      phoneInput.value = '';   // v1802 (M12): phone numbers are no longer read from or written to profiles
     }
     const pwInput = document.getElementById('edit-profile-password');
     if (pwInput) pwInput.value = '';
@@ -67210,19 +67575,9 @@ async function saveProfilePhone() {
   const digits = typed.replace(/\D/g, '');
   if (digits && digits.length !== 10) { showToast('Enter a 10-digit mobile number'); return; }
   const phone = digits ? typed : null;   // blank clears it; never store ''
-  try {
-    const { data, error } = await supa.from('profiles')
-      .update({ phone }).eq('id', _authUser.id)
-      .select('phone').maybeSingle();
-    if (error) throw error;
-    if (!data) { showToast('Couldn\u2019t save phone — try signing out and back in'); return; }
-    if (el) el.value = formatPhoneDisplay(data.phone || '');
-    showToast(phone ? 'Phone saved ✓' : 'Phone cleared ✓');
-  } catch (e) {
-    console.warn('saveProfilePhone', e);
-    const why = (e && e.message) ? String(e.message).slice(0, 60) : '';
-    showToast('Couldn\u2019t save phone' + (why ? ' — ' + why : ''));
-  }
+  // v1802 (M12): phone numbers are not stored on profiles any more — nothing to write.
+  if (el) el.value = '';
+  showToast(phone ? 'Phone numbers are no longer stored' : 'Phone cleared ✓');
 }
 
 async function saveProfileEmail() {
@@ -67941,7 +68296,9 @@ function bgAmInRound(g) {
     if (uid && g.players.some(p => p && p.uid === uid)) return true;
     let me = ''; try { me = (localStorage.getItem(KEY_ME) || '').trim(); } catch (e) {}
     const mn = me ? normalizeNameSegment(me) : '';
-    return !!mn && g.players.some(p => p && p.name && normalizeNameSegment(p.name) === mn);
+    // v1802 (M7): signed in, a seat that carries SOMEONE ELSE's account id is never mine,
+    // whatever its name says -- the name match only stands for seats with no id at all.
+    return !!mn && g.players.some(p => p && p.name && !(uid && p.uid) && normalizeNameSegment(p.name) === mn);
   } catch (e) { return false; }
 }
 function _bgCrewLiveWire(el) {
@@ -67993,8 +68350,12 @@ async function renderCrewLive() {
       if (!upd || upd >= sixH) return;
       const hasScore = Array.isArray(g.players) && g.players.some(p => g.scores && Array.isArray(g.scores[p.id]) && g.scores[p.id].some(s => s != null));
       if (!hasScore) return;
+      // v1802 (M10): only a round I am IN. Finishing a stranger's stale round from the
+      // 40-row feed wrote a whole blob we never merged, and the save also pointed
+      // "last opened" at it. Maintenance save: no KEY_LAST, no Rounds-list write.
+      if (typeof bgAmInRound === 'function' && !bgAmInRound(g)) return;
       g.finishedAt = upd;
-      try { saveGame(g); } catch (e) {}
+      try { saveGame(g, { deferRecent: true, maintenance: true }); } catch (e) {}
     });
   } catch (e) {}
   // Friends-only: only surface in-progress rounds that include YOU or an accepted friend.
@@ -70121,6 +70482,8 @@ async function checkLiveRoundRejoin() {
         state.currentHole = (g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
         try { await safeSet(KEY_LAST, code, false); } catch (e) {}
         try { await addToRecent(g); } catch (e) {}
+        // v1802 (M13): record me as a participant server-side, same fire-and-forget as joinRoundByCode (v1245).
+        try { Promise.resolve(supa.rpc('bg_round_add_me', { p_code: code })).catch(function () {}); } catch (e) {}
         try { enableGameTabs(true); } catch (e) {}
         try { switchTab('score'); } catch (e) {}
         try { showToast('Rejoined the round'); } catch (e) {}
@@ -70331,6 +70694,7 @@ async function acceptIncomingInvite() {
   const inv = _pendingInvite;
   document.getElementById('incoming-invite-modal').classList.remove('show');
   setTimeout(function () { try { checkPendingInvites(); } catch (e) {} }, 700);   // surface the next pending invite (e.g. the game) once this one is handled
+  _pendingInvite = null;   // v1802 (L9): cleared on accept exactly as decline does — a second tap must not re-accept
   if (!inv) return;
   // v1140: this update's { error } was dropped, so an invite that failed to accept
   // still produced the "Added to your rounds" success toast further down.
@@ -70384,6 +70748,10 @@ async function acceptIncomingInvite() {
   state.currentHole = (!g.finishedAt && g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
   await safeSet(KEY_LAST, inv.game_code, false);
   try { await addToRecent(g); } catch (e) {}
+  // v1802 (M13): record me as a participant server-side, same fire-and-forget as joinRoundByCode (v1245).
+  if (!state.viewOnlyMode) {
+    try { Promise.resolve(supa.rpc('bg_round_add_me', { p_code: inv.game_code })).catch(function () {}); } catch (e) {}
+  }
   enableGameTabs(true);
   switchTab(state.viewOnlyMode ? 'board' : 'score');
   showToast('Joined the round');
@@ -72063,6 +72431,15 @@ async function t2ReleaseGroupCode(groupId, code) {
   try { return _bgWrote(await supa.from('tournament_groups').update({ game_code: null }).eq('id', groupId).eq('game_code', code).select('id')); }
   catch (e) { return false; }
 }
+// v1802 (L6): a launched group's round was deleted — free the cart so the day can
+// launch it again instead of pointing at a scorecard that no longer exists. Keyed
+// on the code alone, so it is a safe no-op for a round that was never a T2 group.
+async function t2ReleaseGroupCodeForRound(code) {
+  try {
+    if (!supa || !code) return false;
+    return _bgWrote(await supa.from('tournament_groups').update({ game_code: null }).eq('game_code', String(code)).select('id'));
+  } catch (e) { return false; }
+}
 // Per-group staggered tee time (needs the tee_time column — Add_group_tee_time.sql).
 // Guarded so a missing column can NEVER break group creation/start.
 async function t2SetGroupTeeTime(groupId, time) {
@@ -72267,7 +72644,8 @@ async function t2SetGroupCaptain(groupId, name) {
           const others = mem.filter(m => m.id !== target.id).map(m => m.slot || 0);
           const minOther = others.length ? Math.min(0, ...others) : 0;
           if ((target.slot || 0) > minOther || others.some(s => s <= (target.slot || 0))) {
-            await supa.from('tournament_group_members').update({ slot: minOther - 1 }).eq('id', target.id);
+            // v1802 (M6): checked — the captain is set either way, but say so if the row did not move.
+            if (!_bgWrote(await supa.from('tournament_group_members').update({ slot: minOther - 1 }).eq('id', target.id).select('id'))) { try { showToast('Scorekeeper set, but could not move them to the top of the card'); } catch (e) {} }
           }
         }
       }
@@ -75903,7 +76281,11 @@ async function _t2ResolveUserIdByNameUncached(name) {
     let hit = null;
     try {
       const { data } = await supa.rpc('bg_profiles_public').ilike('my_player', pat).limit(50);   // v991
-      hit = (data || []).find(p => p && p.my_player && norm(p.my_player) === key) || null;
+      // v1802 (M9): two accounts with the same name — pick neither (mirrors notifyAddedRegisteredUsers:
+      // "two Franks and nobody is notified"). The first row won before, and the wrong Frank got the event.
+      const _same = (data || []).filter(p => p && p.my_player && norm(p.my_player) === key);
+      if (_same.length > 1) return null;
+      hit = _same[0] || null;
     } catch (e) {}
     if (hit) return hit.id;
     // Fall back to a BOUNDED fuzzy pass: normalizeNameSegment ignores case,
@@ -75914,7 +76296,9 @@ async function _t2ResolveUserIdByNameUncached(name) {
       if (first.length >= 2) {
         const fp = '%' + first.replace(/([\\%_])/g, '\\$1') + '%';
         const { data } = await supa.rpc('bg_profiles_public').ilike('my_player', fp).limit(200);   // v991
-        const h2 = (data || []).find(p => p && p.my_player && norm(p.my_player) === key);
+        const _same2 = (data || []).filter(p => p && p.my_player && norm(p.my_player) === key);   // v1802 (M9)
+        if (_same2.length > 1) return null;
+        const h2 = _same2[0] || null;
         if (h2) return h2.id;
       }
     } catch (e) {}
@@ -77755,8 +78139,17 @@ async function openT2Carts(dayNumber, dayId) {
       inp.onchange = async () => { const v = _fmt12(inp.value); const ok = await t2SetGroupTeeTime(inp.dataset.gid, v || null); showToast(ok ? 'Tee time saved ✓' : 'Couldn’t save — run Add_group_tee_time.sql'); await render(); };
     });
     body.querySelectorAll('.t2c-cap').forEach(b => b.onclick = async () => { b.disabled = true; const clear = b.dataset.on === '1'; const ok = await t2SetGroupCaptain(b.dataset.gid, clear ? null : b.dataset.nm); showToast(ok ? (clear ? 'Scorekeeper cleared' : '👑 Scorekeeper set') : 'Couldn’t save — run Add_group_captain.sql'); await render(); });
-    body.querySelectorAll('.t2c-move').forEach(b => b.onclick = async () => { b.disabled = true; try { await supa.from('tournament_group_members').update({ group_id: b.dataset.to, slot: 99 }).eq('id', b.dataset.mid); showToast('Moved to ' + b.dataset.gn); } catch (e) { showToast('Move failed'); } await render(); });
-    body.querySelectorAll('.t2c-move-sel').forEach(sel => sel.onchange = async () => { const to = sel.value; if (!to || to === sel.dataset.cur) return; sel.disabled = true; try { await supa.from('tournament_group_members').update({ group_id: to, slot: 99 }).eq('id', sel.dataset.mid); showToast('Moved \u2713'); } catch (e) { showToast('Move failed'); } await render(); });
+    // v1802 (H6/M6): a manual move refuses a full cart (5 max) and a cart the day's games
+    // can't be played in, and the write is checked (_bgWrote) instead of assumed.
+    const _moveOk = (to) => {
+      const _n = ((membersByGroup[to] || []).length) + 1;
+      if (_n > T2_MAX_GROUP_SIZE) { showToast('Cart is full (' + T2_MAX_GROUP_SIZE + ' max)'); return false; }
+      const _mis = t2DayGamesMisfit(t, dayNumber, _n);
+      if (_mis) { showToast(_mis, 5000); return false; }
+      return true;
+    };
+    body.querySelectorAll('.t2c-move').forEach(b => b.onclick = async () => { if (!_moveOk(b.dataset.to)) return; b.disabled = true; try { const _ok = _bgWrote(await supa.from('tournament_group_members').update({ group_id: b.dataset.to, slot: 99 }).eq('id', b.dataset.mid).select('id')); showToast(_ok ? 'Moved to ' + b.dataset.gn : 'Move failed — nothing changed'); } catch (e) { showToast('Move failed'); } await render(); });
+    body.querySelectorAll('.t2c-move-sel').forEach(sel => sel.onchange = async () => { const to = sel.value; if (!to || to === sel.dataset.cur) return; if (!_moveOk(to)) { sel.value = sel.dataset.cur || ''; return; } sel.disabled = true; try { const _ok = _bgWrote(await supa.from('tournament_group_members').update({ group_id: to, slot: 99 }).eq('id', sel.dataset.mid).select('id')); showToast(_ok ? 'Moved ✓' : 'Move failed — nothing changed'); } catch (e) { showToast('Move failed'); } await render(); });
     // Auto-fill tee times: 2 carts share each slot, then +gap minutes for the next pair.
     { const stg = body.querySelector('.t2c-stagger'); if (stg) stg.onclick = async () => {
       const cs = groups.slice().sort((a, b) => (a.group_number || 0) - (b.group_number || 0));
@@ -78064,8 +78457,8 @@ const T2_GAME_RULES = {
   'match':        { always: true },         // Match Play — any players (cross-group 1v1 pairs)
   'nassau':       { always: true },         // Nassau — any players
   'quota':        { always: true },         // Quota — any players
-  'ryder-cup':    { even: true },           // Ryder Cup — even teams/players
-  'scramble':     { even: true },           // Scramble — even teams/players
+  'ryder-cup':    { size: 4 },              // v1802 (H6): Ryder Cup is a 2v2 — exactly 4 (matches gatherSetup)
+  'scramble':     { even: true },           // Scramble — even teams/players (2-man is 2v2 = 4; 4-man = the whole cart, checked in t2DayGamesMisfit)
   'skins':        { always: true },         // Skins — all players
   'stableford':   { always: true },         // Stableford — all players
   'stroke':       { always: true },         // Stroke Play — all players
@@ -78082,7 +78475,7 @@ const T2_GAME_RULES = {
   // legacy day-format switch. Same rule as its siblings: even teams/players.
   'team-quota':   { even: true },           // Team Quota — even teams/players
   'team-match':   { even: true },           // Team Match Play — even teams/players
-  'vegas':        { even: true },           // Vegas — even teams/players
+  'vegas':        { size: 4 },              // v1802 (H6): Vegas is a 2v2 — exactly 4 (matches gatherSetup)
   // v829 (Tyler/Kevin): Birdie Pool was on neither the director's Configure Day
   // list nor the group list (T2_GROUP_HIDE_FIELD called it "director-owned" but
   // it was never actually added here) — so it was unselectable ANYWHERE in a
@@ -78181,6 +78574,32 @@ function t2GameFits(key, n, scope) {
     return true;
   }
   return true;
+}
+// v1802 (H6): does a cart of `n` players fit EVERY game configured for this day?
+// '' when it does, else "<Game>: <reason>" for the first one that does not. The
+// day's games are stored under gatherSetup's camelCase keys, T2_GAME_RULES under the
+// DOM keys — map across. Only per-cart rules count: Team Quota is the whole-field
+// A vs B (v1084), a 4-man team game takes the whole cart as one team, and anything
+// not on the rules list (side games, pools) has no cart rule at all.
+const _T2_CFG_RULE_KEY = { teamMatch: 'team-match', ryderCup: 'ryder-cup', teamLowball: 'team-lowball', comboScore: 'combo-score', teamQuota: 'team-quota', lowNetPool: 'lownet', girPool: 'girpool', puttsPool: 'puttspool' };
+const _T2_CFG_LABELS = { sixes: "6's", niners: 'Niners', match: 'Match Play', teamMatch: 'Team Match Play', teamLowball: 'Team Low Ball', shamble: 'Shamble', comboScore: 'Combo Score', ryderCup: 'Ryder Cup', scramble: 'Scramble', vegas: 'Vegas', stableford: 'Stableford', quota: 'Quota', skins: 'Skins', nassau: 'Nassau', stroke: 'Stroke Play' };
+function t2DayGamesMisfit(t, dayNumber, n) {
+  try {
+    const cfg = (t && t.settings && t.settings.dayGames && t.settings.dayGames[dayNumber]) || null;
+    if (!cfg || !(n > 0)) return '';
+    for (const k in cfg) {
+      const c = cfg[k]; if (!c) continue;
+      if (k === 'teamQuota') continue;                       // whole-field A vs B — one cart's size is irrelevant
+      if (c.teamMode === '4man') continue;                   // the cart IS the team
+      const rk = _T2_CFG_RULE_KEY[k] || k;
+      if (!T2_GAME_RULES[rk]) continue;                      // no per-cart rule
+      const label = _T2_CFG_LABELS[k] || k;
+      // Scramble 2-man is a 2v2: the regular-round setup requires exactly 4 (gatherSetup).
+      if (rk === 'scramble') { if (n !== 4) return label + ' (2-man): needs exactly 4 players in the group — this group has ' + n + '.'; continue; }
+      if (!t2GameFits(rk, n, 'group')) return label + ': ' + (bgWhyNoFit(rk, n, 'group') || ('does not fit a group of ' + n + '.'));
+    }
+  } catch (e) {}
+  return '';
 }
 function t2DayTypeAllowed() { return null; }    // v781: tournament TYPE no longer narrows the list — the eligibility RULES do
 function t2FilterDayConfigGames(hide) {
@@ -79490,6 +79909,7 @@ async function t2LaunchDayRounds(courseId) {
   // is the other half — it makes two groups in ONE launch mutually exclusive.
   const _issuedCodes = new Set();
   const _soloGroups = [];   // v986 (T37): groups of one, reported before we create anything
+  const _noFitGroups = [];  // v1802 (H6): carts whose size breaks one of the day's games
   for (const grp of _eligibleGroups) {
     const mem = (_membersByGroupForLaunch[grp.id] || []).slice();
     mem.sort((a, b) => (a.slot || 0) - (b.slot || 0));
@@ -79592,6 +80012,15 @@ async function t2LaunchDayRounds(courseId) {
         games.stableford = { mode: 'pool', net: true, value: 0, buyin: 0, payout: 'winner', participants: gp.map(p => p.id), participantNames: gp.map(p => p.name), _t2field: true, _t2fieldCount: (players || []).length };
       } // 'stroke' = leaderboard-only day: no game pre-configured
     }
+    // v1802 (H6): a cart that cannot play one of the day's games (a 5-cart on a Vegas day,
+    // a 3-cart on a 2v2) used to launch anyway and the engine settled nonsense. Hold it
+    // back; the commissioner is asked below, before anything is written.
+    { const _mis = t2DayGamesMisfit(t, ctx.dayNumber, gp.length);
+      if (_mis) {
+        _noFitGroups.push('Group ' + grp.group_number + ' (' + gp.length + ') — ' + _mis);
+        const _si = _soloGroups.indexOf(grp.group_number); if (_si >= 0) _soloGroups.splice(_si, 1);
+        continue;
+      } }
     // v1022 (Tyler): "it allows me to log a long putt on one user but on my other
     // user it does not give me the option." The field-wide Tournament Long Putt
     // needs a per-group entry here purely so the log control renders on THIS
@@ -79672,6 +80101,20 @@ async function t2LaunchDayRounds(courseId) {
     // v1187: day-config tees can name tees from a different card — snap here too.
     try { bgSnapTeeLabels(game); } catch (e) {}
     _toCreate.push({ grp, code, game });
+  }
+  // v1802 (H6): ask before launching around the carts that don't fit their games.
+  if (_noFitGroups.length) {
+    if (!_toCreate.length) {
+      _t2LaunchInFlight = false;
+      try { await uiConfirm('No group fits the day’s games:\n\n' + _noFitGroups.join('\n') + '\n\nRe-pair the carts or change the day’s games, then start the day.', { title: 'Nothing launched', okLabel: 'OK', cancelLabel: 'Close', danger: false }); } catch (e) {}
+      return;
+    }
+    let _goNoFit = false;
+    try {
+      _goNoFit = await uiConfirm('These groups don’t fit their games:\n\n' + _noFitGroups.join('\n') + '\n\nLaunch the others anyway? The groups above stay unstarted until they are re-paired.',
+        { title: 'Groups don’t fit', okLabel: 'Launch the others', cancelLabel: 'Cancel', danger: false });
+    } catch (e) { _goNoFit = false; }
+    if (!_goNoFit) { _t2LaunchInFlight = false; showToast('Launch cancelled — re-pair the groups, then start the day'); return; }
   }
   // v986 (T37): a group of one used to be dropped on the floor here. Ask the
   // commissioner BEFORE anything is written — nothing has been created yet.
@@ -80579,10 +81022,19 @@ async function t2SwapTap(ch) {
   const mixedDay = (ch.dataset.fmt === 'stroke' || ch.dataset.fmt === 'quota');
   if (!mixedDay && sel.team !== cur.team) { showToast('Swap teammates only (🔵 with 🔵, 🔴 with 🔴) so the format stays valid'); return; }
   if (sel.gid === cur.gid) { _t2SwapSel = null; showToast('Pick someone in a different group'); await renderT2Home(); return; }
+  // v1802 (M6): both writes were unchecked — a zero-row match (RLS, a stale member id)
+  // still toasted "Swapped". Check each; if the second fails, put the first back.
   try {
-    await supa.from('tournament_group_members').update({ group_id: cur.gid, slot: cur.slot }).eq('id', sel.mid);
-    await supa.from('tournament_group_members').update({ group_id: sel.gid, slot: sel.slot }).eq('id', cur.mid);
-    showToast('Swapped');
+    const _w1 = _bgWrote(await supa.from('tournament_group_members').update({ group_id: cur.gid, slot: cur.slot }).eq('id', sel.mid).select('id'));
+    if (!_w1) { showToast('Swap failed — nothing changed'); }
+    else {
+      const _w2 = _bgWrote(await supa.from('tournament_group_members').update({ group_id: sel.gid, slot: sel.slot }).eq('id', cur.mid).select('id'));
+      if (_w2) showToast('Swapped');
+      else {
+        try { await supa.from('tournament_group_members').update({ group_id: sel.gid, slot: sel.slot }).eq('id', sel.mid).select('id'); } catch (e) {}
+        showToast('Swap failed — nothing changed');
+      }
+    }
   } catch (e) { showToast('Swap failed'); }
   _t2SwapSel = null;
   await renderT2Home();
@@ -81024,9 +81476,8 @@ async function t2StartEventNow() {
     if (!d1 || !groups1.length) { showToast('Build Day 1\u2019s groups first'); return; }
     if (!dc1) { showToast('Pick Day 1\u2019s course first'); return; }
     if (groups1.some(g => g.game_code)) { showToast('Day 1 is already started'); return; }
-    const { error: _e } = await supa.from('tournaments').update({ status: 'live' }).eq('id', t.id);
-    if (_e) { console.error('start event update failed', _e); showToast('Could not start the event: ' + (_e.message || _e.code || 'the database rejected the change')); return; }
-    t.status = 'live'; if (_t2Current) _t2Current.status = 'live';
+    // v1802 (H2): no status pre-write — t2LaunchDayRounds flips the event to 'live' only once
+    // a round actually exists (v1766), so a Start that is backed out of leaves it as it was.
     showToast('Starting Day 1\u2026');
     await t2StartDay(d1.id, 1);
   } catch (err) { console.error('Start event failed', err); showToast("Couldn't start: " + ((err && err.message) || err)); }
@@ -82050,9 +82501,7 @@ async function renderT2Home() {
           if (!d1 || !groups1.length) { showToast('Build Day 1’s groups first'); return; }
           if (!dc1) { showToast('Pick Day 1’s course first'); return; }
           if (groups1.some(g => g.game_code)) { showToast('Day 1 is already started'); return; }
-          const { error: _startErr } = await supa.from('tournaments').update({ status: 'live' }).eq('id', t.id);
-          if (_startErr) { console.error('start event update failed', _startErr); showToast('Could not start the event: ' + (_startErr.message || _startErr.code || 'the database rejected the change')); return; }
-          t.status = 'live'; if (_t2Current) _t2Current.status = 'live';
+          // v1802 (H2): no status pre-write — t2LaunchDayRounds marks the event live once a round exists.
           showToast('Starting Day 1…');
           await t2StartDay(d1.id, 1);
         } catch (err) { console.error('Start event failed', err); showToast("Couldn't start: " + ((err && err.message) || err)); }
@@ -82410,7 +82859,10 @@ async function renderT2Home() {
         // Build groups + By handicap now live INSIDE Configure Day. Here we only
         // surface tee times + the per-day Start button once groups exist.
         if (gs.length) html += '<div style="margin:6px 0 0"><button class="bg-btn bg-btn--full full t2-stagger-tees" data-dayid="' + d.id + '" style="border-color:var(--heat-yellow)">⏱ Tee times</button></div>';
-        if (i > 1 && gs.length && _dc) html += '<button class="bg-btn bg-btn--primary bg-btn--full full t2-start-day" data-dayid="' + d.id + '" data-day="' + i + '" style="margin:6px 0 0;border-color:var(--accent)">Start day ' + i + '</button>';
+        // v1802 (H1): `_dc` was the block-scoped const from the Day-review loop above — a
+        // ReferenceError here, so no day past Day 1 ever got its Start button. Look up THIS day's course.
+        const _dcI = (t.settings && t.settings.dayCourses && t.settings.dayCourses[i]) || null;
+        if (i > 1 && gs.length && _dcI) html += '<button class="bg-btn bg-btn--primary bg-btn--full full t2-start-day" data-dayid="' + d.id + '" data-day="' + i + '" style="margin:6px 0 0;border-color:var(--accent)">Start day ' + i + '</button>';
       } else if (started) {
         html += '<div class="small-text" style="color:var(--accent);margin:2px 0">✓ Day started — groups tap ▶ Open to score. Side games: open the round, then Setup → add any games.</div>';
       }
@@ -82533,11 +82985,7 @@ async function renderT2Home() {
       if (!d1 || !groups1.length) { showToast('Build Day 1\'s groups first (⚡ Build groups)'); return; }
       if (!dc1) { showToast('Pick Day 1\'s course first (📍)'); return; }
       if (groups1.some(g => g.game_code)) { showToast('Day 1 is already started'); return; }
-      // Surface the REAL database error (v221) — a generic "Could not start" hid the
-      // actual cause (e.g. a status CHECK constraint rejecting 'live').
-      const { error: _startErr } = await supa.from('tournaments').update({ status: 'live' }).eq('id', t.id);
-      if (_startErr) { console.error('start event update failed', _startErr); showToast('Could not start the event: ' + (_startErr.message || _startErr.code || 'the database rejected the change')); return; }
-      t.status = 'live'; if (_t2Current) _t2Current.status = 'live';
+      // v1802 (H2): no status pre-write — t2LaunchDayRounds marks the event live once a round exists.
       showToast('Starting Day 1…');
       await t2StartDay(d1.id, 1);
      } catch (err) { console.error('Start event failed', err); showToast("Couldn't start: " + ((err && err.message) || err)); }
@@ -84213,7 +84661,7 @@ async function joinOpenRound(id){
     // re-test membership + capacity here, immediately before the mutation, so a
     // race that slipped through the first pass still can't double-seat or overfill.
     try {
-      var _fresh = await getTourneys();
+      var _fresh = (typeof _bgTourneysFresh === 'function') ? await _bgTourneysFresh() : await getTourneys();   // v1802 (H4): cloud, not the cache-first copy
       var _fi = Array.isArray(_fresh) ? _fresh.findIndex(function(x){ return x && x.id===id; }) : -1;
       if (_fi >= 0) {
         t = _fresh[_fi]; list = _fresh; idx = _fi;
@@ -96848,7 +97296,7 @@ async function lgAddMember(sid, name, phone, email, userId) {
     res = await supa.rpc('league_add_member', {
       p_season_id: sid, p_display_name: name,
       p_invite_email: email || null, p_user_id: userId || null,
-      p_invite_phone: phone || null });
+      p_invite_phone: null });   // v1802 (M12): phone numbers are never sent (parameter kept for callers)
   } catch (e) { res = { data: null, error: e }; }
   if (!res || res.error) {
     try { console.warn('league_add_member failed:', res && res.error); } catch (e) {}
@@ -97019,15 +97467,8 @@ async function _rosterLgAdd(name, phoneHint) {
   try {
     let uid = null;
     try { uid = await t2ResolveUserIdByName(name); } catch (e) {}
-    let phone = null;
-    if (!uid) {
-      // Use a saved number if the roster already has one (the guest form has
-      // captured phones since v640). Never prompt for one.
-      phone = String(phoneHint || '').trim();
-      if (phone.replace(/[^0-9]/g, '').length < 7) phone = '';
-      else if (typeof formatPhoneDisplay === 'function') phone = formatPhoneDisplay(phone) || phone;
-    }
-    return await lgAddMember(_rosterLgSid, name, phone || null, null, uid || null);
+    // v1802 (M12): phone numbers are no longer passed along (phoneHint is ignored; signature kept for callers).
+    return await lgAddMember(_rosterLgSid, name, null, null, uid || null);
   } finally { _rosterLgBusy = false; }
 }
 
@@ -104406,6 +104847,21 @@ window.switchTab = function(name, opts) {
   if (typeof updateActiveRoundBar === 'function') updateActiveRoundBar();
 };
 
+// v1802 (H3): may THIS account delete the live round? Admin always; otherwise the
+// creator by account id when the round carries one (createdByUid, stamped at start
+// since v1802); a legacy round with no uid falls back to the old name check, and one
+// with no recorded creator at all stays open to anyone, as before.
+async function _bgCanDeleteLiveRound(g) {
+  try {
+    if (!g) return false;
+    if (typeof isAdmin === 'function' && isAdmin()) return true;
+    const uid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) ? String(_authUser.id) : '';
+    if (g.createdByUid) return !!uid && String(g.createdByUid) === uid;
+    if (!g.createdBy) return true;   // legacy round, no recorded creator
+    let me = null; try { me = await getMeName(); } catch (e) {}
+    return !!(me && normalizeNameSegment(String(me)) === normalizeNameSegment(String(g.createdBy)));
+  } catch (e) { return false; }
+}
 // Enter edit-live-round mode: pre-fill the setup form with the active round's
 // settings, swap "Start round" for "Save changes", and show the edit banner.
 // User can tweak any game setting; saving applies the new config retroactively
@@ -104538,7 +104994,10 @@ async function enterEditLiveRoundMode() {
     const _nr = document.getElementById('btn-edit-live-newround'); if (_nr) _nr.style.display = 'none';   /* v1434: removed */
     _bgApplyLeagueSetupLock(g);   /* v1434 */
     const _lf = document.getElementById('btn-live-finish'); if (_lf) _lf.style.display = _isT ? 'none' : 'block';
-    const _ld = document.getElementById('btn-live-delete'); if (_ld) _ld.style.display = _isT ? 'none' : 'block';
+    // v1802 (H3): Delete is the creator's (by ACCOUNT id) or an admin's -- a name match is
+    // not ownership. Rounds with no uid stamp keep the old name check.
+    const _canDel = await _bgCanDeleteLiveRound(g);
+    const _ld = document.getElementById('btn-live-delete'); if (_ld) _ld.style.display = (_isT || !_canDel) ? 'none' : 'block';
   } catch (e) {}
   $('btn-cancel-setup').textContent = 'Cancel edits';
 
@@ -104838,7 +105297,7 @@ function applyLiveEditMerge(g, setup) {
   if (!g.scores) g.scores = {};
   setup.players.forEach(np => {
     if (!np || !np.name) return;
-    const existing = g.players.find(p => p.name === np.name);
+    const existing = g.players.find(p => p && _bgPurgeKey(p.name) === _bgPurgeKey(np.name));   // v1802 (L5): case/space drift is the same player
     if (existing) {
       existing.rawHcp = np.rawHcp != null ? np.rawHcp : np.hcp;
       existing.hcp = np.hcp;
@@ -105097,6 +105556,8 @@ async function init() {
     const _gks = Object.keys(localStorage).filter(k => k.indexOf('golf:course-gps-cache:') === 0);
     if (_gks.length > 150) _gks.slice(0, _gks.length - 150).forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
   } catch (e) {}
+  // v1802 (M15): and the finished round blobs -- >30 days old go, at most 20 stay (see _bgPruneFinishedGameBlobs).
+  try { _bgPruneFinishedGameBlobs(); } catch (e) {}
 
   // Initialize Supabase backend (loads CDN script, creates client)
   // v907 (Tyler): HARD CAP on the boot network phase. This await had no deadline, so a
@@ -105308,12 +105769,17 @@ async function init() {
   // Delete the live round outright (cloud + recent + everyone's stats), then drop
   // into a fresh setup. Confirmed first — it can't be undone.
   { const _ld = $('btn-live-delete'); if (_ld) _ld.onclick = async () => {
+      // v1802 (H3): the button is hidden for non-owners, but the handler checks too.
+      if (!(await _bgCanDeleteLiveRound(state.game))) { try { showToast('Only the host or an admin can delete this round'); } catch (e) {} return; }
       const ok = await uiConfirm('Delete this round for good? It is removed for everyone in it and can\'t be undone.',
         { title: 'Delete round?', okLabel: 'Delete round', cancelLabel: 'Keep it' });
       if (!ok) return;
       const code = state.game && state.game.code;
       try { exitEditLiveRoundMode(); } catch (e) {}
-      if (code) { try { await deleteRecentGame(code); } catch (e) {} }
+      let _gone = false;
+      if (code) { try { _gone = (await deleteRecentGame(code)) === true; } catch (e) {} }
+      // v1802 (H3): the row is really gone -> hand its tournament group code back (set B).
+      if (_gone && code && typeof t2ReleaseGroupCodeForRound === 'function') { try { await t2ReleaseGroupCodeForRound(code); } catch (e) {} }
       try { await discardActiveRound(); } catch (e) {}
       try { openFreshSetupForm(); } catch (e) {}
       try { showToast('Round deleted'); } catch (e) {}
@@ -105863,8 +106329,7 @@ async function init() {
       const last = (document.getElementById('roster-add-last').value || '').trim();
       if (!first) { showToast('Enter at least a first name'); return; }
       const hcp = (typeof parseHcpInput === 'function') ? parseHcpInput(document.getElementById('roster-add-hcp').value || '0') : (parseFloat(document.getElementById('roster-add-hcp').value) || 0);
-      const _phEl = document.getElementById('roster-add-phone');
-      const phone = _phEl ? String(_phEl.value || '').trim() : '';
+      const phone = '';   // v1802 (M12): the phone field is no longer read — nothing downstream stores a number
       _rs.disabled = true; _rs.textContent = 'Saving…';
       // v1149: setHcp — the roster Add-player form is the ONE place a person
       // deliberately types a handicap, so it is the one caller allowed to write
@@ -105889,7 +106354,6 @@ async function init() {
       } catch (e) {}
       _rs.disabled = false; _rs.textContent = 'Save player';
       document.getElementById('roster-add-first').value = ''; document.getElementById('roster-add-last').value = ''; document.getElementById('roster-add-hcp').value = '';
-      if (_phEl) _phEl.value = '';
       const f = document.getElementById('roster-add-form'); if (f) f.style.display = 'none';
       const se = document.getElementById('roster-search'); if (se) se.value = '';
       try { await renderRosterList(); } catch (e) {}
@@ -106485,6 +106949,7 @@ async function init() {
       sipManual: {},                        // per-hole manual sip taps: { hole: { pid: { eventId: true } } }
       tourneyId: state.editingTourneyId || null,
       createdBy: creatorName || null,
+      createdByUid: (typeof _authUser !== 'undefined' && _authUser && _authUser.id) ? String(_authUser.id) : null,   // v1802 (H3): ownership by account id, not name
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -107112,25 +107577,33 @@ async function init() {
              "Tyler Wells" drift that caused every symptom in this batch.
          The gate itself is untouched and still stands for anyone neither test recognises,
          which is exactly the first-time-guest case Tyler wants it kept for. */
-      let _gateSelf = (_gateMeN && Array.isArray(g.players))
-        ? (g.players.find(p => p && normalizeNameSegment(String(p.name || '')) === _gateMeN) || null)
-        : null;
+      /* v1802 (M7): account id FIRST. Signed in, a seat stamped with another account is
+         never me, however the names line up -- the name tests below only look at seats
+         that carry no id at all. And a seat is never stamped with my id silently any
+         more: the stamp is offered once (a one-tap confirm); declining still joins by
+         name exactly as v1467 intended, it just leaves the seat unstamped. */
+      const _myUid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) ? String(_authUser.id) : '';
+      const _plAll = Array.isArray(g.players) ? g.players : [];
+      const _plOpen = _plAll.filter(p => p && !(_myUid && p.uid));   // seats a name may still claim
+      let _gateSelf = _myUid ? (_plAll.find(p => p && p.uid && String(p.uid) === _myUid) || null) : null;
+      const _byUid = !!_gateSelf;
+      if (!_gateSelf && _gateMeN) _gateSelf = _plOpen.find(p => normalizeNameSegment(String(p.name || '')) === _gateMeN) || null;
       let _gateIn = !!_gateSelf;
       try {
-        const _myUid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) ? String(_authUser.id) : '';
-        if (!_gateSelf && Array.isArray(g.players) && _myUid) {
-          _gateSelf = g.players.find(p => p && p.uid && String(p.uid) === _myUid) || null;
-          if (_gateSelf) _gateIn = true;
-        }
-        if (!_gateIn && _gateMeN && Array.isArray(g.players)) {
+        if (!_gateIn && _gateMeN) {
           const _myFirst = _gateMeN.split(/\s+/)[0] || '';
-          const _fHits = _myFirst ? g.players.filter(p => p && normalizeNameSegment(String(p.name || '')).split(/\s+/)[0] === _myFirst) : [];
+          const _fHits = _myFirst ? _plOpen.filter(p => normalizeNameSegment(String(p.name || '')).split(/\s+/)[0] === _myFirst) : [];
           if (_fHits.length === 1) { _gateIn = true; _gateSelf = _fHits[0]; }
         }
-        // Recognised by NAME but not yet by account: stamp it now, so from here on this
-        // round is mine on the server too and I never have to be matched by a string again.
-        if (_gateSelf && !_gateSelf.uid && _myUid && !g.players.some(p => p && p.uid && String(p.uid) === _myUid)) {
-          _gateSelf.uid = _myUid;
+        // Recognised by NAME but not yet by account: offer the stamp (never silent).
+        if (_gateSelf && !_byUid && !_gateSelf.uid && _myUid && !g.finishedAt && !_plAll.some(p => p && p.uid && String(p.uid) === _myUid)) {
+          let _claim = false;
+          try {
+            _claim = (typeof uiConfirm === 'function')
+              ? await uiConfirm('Save the seat "' + String(_gateSelf.name || '') + '" to your account? Next time this round will recognise you without asking.', { title: 'That’s you?', okLabel: 'Yes, that’s me', cancelLabel: 'Not now', danger: false })
+              : false;
+          } catch (e) { _claim = false; }
+          if (_claim === true) _gateSelf.uid = _myUid;
         }
       } catch (e) {}
       if (_gateMeN && !_gateIn && !g.finishedAt) {
@@ -108570,6 +109043,7 @@ const gpsView = (() => {
   let map = null, libLoaded = false;
   let courseId = null, courseGps = {};    // courseGps = per-course data cache (always an object)
   let hole = 1, hd = null;                 // hd = this hole's data {tee,front,mid,back}
+  let _bubbleKey = '', _bubbleAt = 0;      // v1802 PERF: memo for the game-state bubbles (see refresh)
   let teeHoleYards = null, teeLabelForYds = ''; // this user's selected-tee per-hole yardages (tee-box readout)
   let targetManual = false;                // user dragged the target this hole
   let targetDragging = false;              // a target drag is in progress (block auto-snap + auto-follow)
@@ -110396,16 +110870,25 @@ const gpsView = (() => {
     }
     applyPlays();
     positionPills();
-    try { updateDriveBubble(); } catch (e) {}
-    try { updateLongPuttBubble(); } catch (e) {}
-    try { updateLongDriveLeaderBubble(); } catch (e) {}
-    try { updateQuotaBubble(); } catch (e) {}
-    try { updatePotOfGoldBubble(); } catch (e) {}
-    try { updateStablefordBubble(); } catch (e) {}
-    try { updateBBBBubble(); } catch (e) {}
-    try { updateNassauBubble(); } catch (e) {}
-    try { updatePointsLeaderBubble('gps-splix-bubble', 'splixSixes', typeof calcSplixSixes === 'function' ? calcSplixSixes : null); } catch (e) {}   // v1708
-    try { updatePointsLeaderBubble('gps-niners-bubble', 'niners', typeof calcNiners === 'function' ? calcNiners : null); } catch (e) {}           // v1708
+    try { updateDriveBubble(); } catch (e) {}   // position-based: every fix
+    // v1802 PERF: the nine bubbles below depend on the round (scores/config), the hole, the view
+    // mode and the spectate pick -- not on position -- yet every GPS fix re-ran their game
+    // engines. Recompute when any of those change, or every 3 s as a backstop for the throttled
+    // tournament field caches (LP/LD leader, team quota) they read asynchronously.
+    let _bk = '';
+    try { const _g0 = state.game; _bk = [(_g0 && _g0.code) || '', (_g0 && _g0.updatedAt) || 0, hole, mode, spectate ? (spectate.pid || '1') : ''].join('|'); } catch (e) { _bk = 'x' + Date.now(); }
+    if (_bk !== _bubbleKey || (Date.now() - _bubbleAt) > 3000) {
+      _bubbleKey = _bk; _bubbleAt = Date.now();
+      try { updateLongPuttBubble(); } catch (e) {}
+      try { updateLongDriveLeaderBubble(); } catch (e) {}
+      try { updateQuotaBubble(); } catch (e) {}
+      try { updatePotOfGoldBubble(); } catch (e) {}
+      try { updateStablefordBubble(); } catch (e) {}
+      try { updateBBBBubble(); } catch (e) {}
+      try { updateNassauBubble(); } catch (e) {}
+      try { updatePointsLeaderBubble('gps-splix-bubble', 'splixSixes', typeof calcSplixSixes === 'function' ? calcSplixSixes : null); } catch (e) {}   // v1708
+      try { updatePointsLeaderBubble('gps-niners-bubble', 'niners', typeof calcNiners === 'function' ? calcNiners : null); } catch (e) {}           // v1708
+    }
     try { pushLiveActivity(); } catch (e) {}
   }
 
@@ -112438,6 +112921,7 @@ const gpsView = (() => {
         // It also owns the v851 field-skins repaint for the group view.
         try { bgPaintGpsScorecard(); } catch (e) {}
         // If an admin saved a photo of the real scorecard, offer to view it.
+        const body = el('gps-scorecard-body');   // v1802: was never declared — the ReferenceError inside .then() was swallowed by .catch, so the button never appeared
         try { const _cid = resolveCourseId(); if (_cid && typeof getScorecardImg === 'function') getScorecardImg(_cid).then(u => { if (u && body && !body.querySelector('#gps-real-sc')) { const rb = document.createElement('button'); rb.type = 'button'; rb.className = 'bg-btn bg-btn--full bg-btn--primary'; rb.id = 'gps-real-sc'; rb.textContent = '🖼 View real scorecard'; rb.style.cssText = 'margin-bottom:8px'; rb.onclick = () => showScorecardImageFor(_cid, (state.game && state.game.course) || 'Scorecard'); body.insertBefore(rb, body.firstChild); } }).catch(() => {}); } catch (e) {}
       } catch (e) {}
     }; }
@@ -112706,12 +113190,24 @@ const gpsView = (() => {
       injectCss();
       var panel = byId('gps-setup-panel');
       if (!panel) { setTimeout(wire, 400); return; }
+      // v1802 PERF: the 700 ms safety-net poll ran for the life of the app. It only matters
+      // while the GPS overlay is open (everything it drives lives inside #gps-overlay), so it
+      // now starts when the overlay opens and stops when it closes; the observer also watches
+      // the overlay's class so open/close (and map-only flips) still refresh() immediately.
+      var _poll = null;
+      function syncPoll() {
+        var ov = byId('gps-overlay');
+        var on = !!(ov && ov.classList.contains('open') && document.body.contains(ov));
+        if (on && !_poll) { try { _poll = setInterval(refresh, 700); } catch (e) {} }
+        else if (!on && _poll) { try { clearInterval(_poll); } catch (e) {} _poll = null; }
+      }
       try {
-        var mo = new MutationObserver(function () { refresh(); });
+        var mo = new MutationObserver(function () { refresh(); syncPoll(); });
         mo.observe(panel, { attributes: true, attributeFilter: ['style'], childList: true, subtree: true });
+        var _ov0 = byId('gps-overlay');
+        if (_ov0) mo.observe(_ov0, { attributes: true, attributeFilter: ['class'] });
       } catch (e) {}
-      // Safety net: cheap periodic sync (covers state flips that don't touch the panel).
-      try { setInterval(refresh, 700); } catch (e) {}
+      syncPoll();
       refresh();
     }
   
@@ -112827,7 +113323,7 @@ const gpsView = (() => {
       // nothing" bug on already-done states). Merge the done-note into one prompt.
       let confirmMsg = 'Import every OpenStreetMap golf course in ' + stName + ' into the shared course library?\n\nExisting courses are skipped, nothing is overwritten. Takes under a minute.';
       if (progress.done[st]) confirmMsg = stName + ' was already imported (' + (progress.done[st].added || 0) + ' added before). Re-run it?\n\n' + confirmMsg;
-      if (!auto && !confirm(confirmMsg)) { panel.remove(); return null; }
+      if (!auto && !(await uiConfirm(confirmMsg, { title: 'State course import', okLabel: 'Import', cancelLabel: 'Cancel', danger: false }))) { panel.remove(); return null; }   // v1802 (L7): in-app dialog, not the native confirm()
 
       setTitle('Importing ' + stName + ' courses…');
       log('Asking OpenStreetMap for every golf course in ' + stName + '…');
@@ -113193,7 +113689,7 @@ function _timesPlayers(t){
   if(t && Array.isArray(t.playersList) && t.playersList.length){
     return t.playersList.filter(function(p){return p && (p.name||p.first);}).map(function(p){
       var nm=p.name || ((p.first||'')+' '+(p.last||'')).trim();
-      return { name:nm, first:(p.first||''), last:(p.last||''), hcp:(p.hcp!=null?p.hcp:''), tee:(p.tee||''), uid:(p.uid||null), status:(p.status||'') };
+      return { name:nm, first:(p.first||''), last:(p.last||''), hcp:(p.hcp!=null?p.hcp:''), tee:(p.tee||''), uid:(p.uid||null), status:(p.status||''), joinedAt:(p.joinedAt>0?p.joinedAt:null) };   /* v1802 (H4): keep the seat's join stamp */
     });
   }
   return String(t&&t.players||'').split(',').map(function(s){return s.trim();}).filter(Boolean).map(function(nm){var q=nm.split(/\s+/); return {name:nm,first:q[0]||'',last:q.slice(1).join(' ')||'',hcp:'',tee:'',uid:null,status:''};});
@@ -113301,8 +113797,7 @@ async function _timesTeeLabels(courseName){
   try{
     var cid=_timesCourseId(courseName);
     if(cid && typeof getCourseSaves==='function'){
-      var saves=await getCourseSaves();
-      var rec=saves && saves[cid];
+      var rec=await _bgGetCourseCard(cid);   // v1802 PERF: one shard, not the whole map
       var labels=(rec && Array.isArray(rec.tees))?rec.tees.map(function(t){return String(t&&t.label||'').trim();}).filter(Boolean):[];
       if(labels.length) return labels;
     }
@@ -113775,8 +114270,76 @@ async function timesOpenDetail(id){
     '<div class="times-actions">'+acts+'<button class="bg-btn bg-btn--ghost times-act times-act-ghost" onclick="timesCloseSheet()">Close</button></div>');   /* v1769: a Close at the bottom too (the picker's Done lands back here) */
 }
 
+/* v1802 (H4): tee-time SEATS. Two people tapping the last open spot within the cache
+   window both passed `_timesOpen(t)<=0` against a stale local copy, and whole-entry
+   newest-wins in the golf:tourneys merge then kept only one of them (or an overfull
+   row). Three pieces:
+     - _bgTourneysFresh: a forced cloud read (via the merge-on-write reader, so local
+       edits are never dropped) before any mutation, so the capacity check runs on the
+       latest seats;
+     - _bgTeeSeatUnion: the merge unions a tee time's seats by account id / name; the
+       organizer's fields (time, course, size...) stay whole-entry newest-wins;
+     - left/joinedAt markers: a seat carries `joinedAt`, an entry carries `left`
+       {seatKey: leftAtMs}; a seat whose left stamp is newer than its join stamp stays
+       out, so a leave on one phone is never resurrected by another phone's copy. Seats
+       with NO join stamp (organizer-added, or written by an older build) only ride
+       with the newer entry, exactly as before. */
+function _bgTeeSeatKey(p){ try{ if(!p) return ''; if(p.uid) return 'u:'+String(p.uid); var n=_bgPurgeKey(p.name||((p.first||'')+' '+(p.last||''))); return n?('n:'+n):''; }catch(e){ return ''; } }
+function _bgTeeNameKey(p){ try{ var n=_bgPurgeKey(p&&(p.name||((p.first||'')+' '+(p.last||'')))); return n?('n:'+n):''; }catch(e){ return ''; } }
+function _bgTeeMarkLeft(t, uid, name){
+  try{
+    if(!t) return; if(!t.left||typeof t.left!=='object') t.left={};
+    var now=Date.now();
+    if(uid) t.left['u:'+String(uid)]=now;
+    var n=_bgPurgeKey(name||''); if(n) t.left['n:'+n]=now;
+  }catch(e){}
+}
+function _bgTeeMarkJoined(t, seat, uid, name){
+  try{
+    if(seat) seat.joinedAt=Date.now();
+    if(t&&t.left&&typeof t.left==='object'){ if(uid) delete t.left['u:'+String(uid)]; var n=_bgPurgeKey(name||''); if(n) delete t.left['n:'+n]; }
+  }catch(e){}
+}
+function _bgTeeSeatUnion(cloudE, localE){
+  try{
+    if(!cloudE) return localE; if(!localE) return cloudE;
+    var cNewer=(typeof cloudE.updatedAt==='number' && (typeof localE.updatedAt!=='number' || cloudE.updatedAt>localE.updatedAt));
+    var base=cNewer?cloudE:localE, other=cNewer?localE:cloudE;
+    var out=Object.assign({}, base);
+    var left={};
+    [cloudE, localE].forEach(function(e){ var m=e&&e.left; if(m&&typeof m==='object') Object.keys(m).forEach(function(k){ var ts=Number(m[k])||0; if(ts>(left[k]||0)) left[k]=ts; }); });
+    var seats=[], seen={};
+    var leftAt=function(p){ return Math.max(left[_bgTeeSeatKey(p)]||0, left[_bgTeeNameKey(p)]||0); };
+    var add=function(p, stampedOnly){
+      if(!p) return; var k=_bgTeeSeatKey(p); if(!k) return; var nk=_bgTeeNameKey(p);
+      if(stampedOnly && !(p.joinedAt>0)) return;            // an older copy's unstamped seat may be one the newer copy removed
+      if(seen[k] || (nk && seen[nk])) return;                 // same person already seated (by id or by name)
+      if(leftAt(p)>(p.joinedAt||0)) return;                   // left after this seat was taken -> stays out
+      seen[k]=1; if(nk) seen[nk]=1; seats.push(p);
+    };
+    var bl=Array.isArray(base.playersList)?base.playersList:[], ol=Array.isArray(other.playersList)?other.playersList:[];
+    bl.forEach(function(p){ add(p,false); });
+    ol.forEach(function(p){ add(p,true); });
+    out.playersList=seats; out.players=seats.map(function(p){ return p.name||((p.first||'')+' '+(p.last||'')).trim(); }).join(', ');
+    if(Object.keys(left).length) out.left=left;
+    return out;
+  }catch(e){ return localE||cloudE; }
+}
+async function _bgTourneysFresh(){
+  var local=[]; try{ local=await getTourneys(); }catch(e){ local=[]; } if(!Array.isArray(local)) local=[];
+  try{
+    if(!supaReady) await initSupabase();
+    if(!(supa && supaOnline) || !isSignedIn()) return local;
+    var m=await _promiseTimeout(_mergeSharedSingletonValue(KEY_TOURNEYS, local), 6000, 'tourneysFresh');
+    if(m===_MERGE_READ_FAILED || !Array.isArray(m)) return local;   // read failed / nothing in the cloud -> local copy
+    try{ bgLsSet(KEY_TOURNEYS, JSON.stringify(m)); }catch(e){}
+    var out=null; try{ out=await getTourneys(); }catch(e){ out=null; }   // re-applies the tombstones + resets the change snapshot
+    return Array.isArray(out)?out:m;
+  }catch(e){ return local; }
+}
 async function _timesMutate(id, fn){
-  var list=[]; try{ list=await getTourneys(); }catch(e){ list=[]; } if(!Array.isArray(list)) list=[];
+  // v1802 (H4): FRESH copy first, so fn's capacity / membership checks see the latest seats.
+  var list=[]; try{ list=await _bgTourneysFresh(); }catch(e){ list=[]; } if(!Array.isArray(list)) list=[];
   var idx=list.findIndex(function(x){return String(x.id)===String(id);});
   if(idx<0){ try{ showToast('Tee time not found'); }catch(e){} return false; }
   var r=fn(list[idx]); if(r===false) return false;
@@ -113795,7 +114358,8 @@ async function timesJoin(id){
     var players=_timesPlayers(t);
     if(players.some(function(p){return normalizeNameSegment(p.name)===normalizeNameSegment(me);})) return false;
     if(_timesOpen(t)<=0){ try{ showToast('That tee time just filled'); }catch(e){} return false; }
-    players.push({name:me,hcp:'',tee:''}); _timesSetPlayers(t, players);
+    var _seat={name:me,hcp:'',tee:'',uid:(_timesUid()||null)}; players.push(_seat); _timesSetPlayers(t, players);
+    _bgTeeMarkJoined(t, _seat, _timesUid(), me);   // v1802 (H4)
   });
   timesCloseSheet(); renderTimes(); if(done) timesOpenDetail(id);
 }
@@ -113804,6 +114368,7 @@ async function timesLeave(id){
   await _timesMutate(id, function(t){
     var players=_timesPlayers(t).filter(function(p){return normalizeNameSegment(p.name)!==normalizeNameSegment(me);});
     _timesSetPlayers(t, players);
+    _bgTeeMarkLeft(t, _timesUid(), me);   // v1802 (H4): so another phone's copy can't seat me again
   });
   timesCloseSheet(); renderTimes(); timesOpenDetail(id);
 }
@@ -113819,6 +114384,7 @@ async function timesDecline(id){
     // Remove me from the seats → the slot opens back up
     var players=_timesPlayers(t).filter(function(p){ return !((uid&&p.uid&&String(p.uid)===String(uid))||(meN2(me)&&normalizeNameSegment(p.name)===meN2(me))); });
     _timesSetPlayers(t, players);
+    _bgTeeMarkLeft(t, uid, me);   // v1802 (H4)
   });
   try{ if(sched && String(sched)!==String(uid) && typeof sendPush==='function') sendPush(sched,'Bad Golf',(me?_timesFirst(me):'A player')+' declined — a spot opened up',{type:'teetime',tt:String(id)},'ttdec:'+id); }catch(e){}
   timesCloseSheet(); renderTimes();
@@ -113830,11 +114396,12 @@ async function timesAccept(id){
   var done=await _timesMutate(id, function(t){
     sched=t.createdByUid;
     var players=_timesPlayers(t); var meN=meN2(me); var found=false;
-    players.forEach(function(p){ if((uid&&p.uid&&String(p.uid)===String(uid))||(meN&&normalizeNameSegment(p.name)===meN)){ p.status='accepted'; if(uid&&!p.uid) p.uid=uid; found=true; } });
+    players.forEach(function(p){ if((uid&&p.uid&&String(p.uid)===String(uid))||(meN&&normalizeNameSegment(p.name)===meN)){ p.status='accepted'; if(uid&&!p.uid) p.uid=uid; found=true; _bgTeeMarkJoined(t, p, uid, me); } });   /* v1802 (H4) */
     if(!found){
       if(_timesOpen(t)<=0){ try{ showToast('That tee time is full'); }catch(e){} return false; }
       var pp=(me||'').split(/\s+/);
-      players.push({name:me,first:pp[0]||'',last:pp.slice(1).join(' ')||'',hcp:'',tee:'',uid:uid||null,status:'accepted'}); seatedNew=true;
+      var _seat={name:me,first:pp[0]||'',last:pp.slice(1).join(' ')||'',hcp:'',tee:'',uid:uid||null,status:'accepted'}; players.push(_seat); seatedNew=true;
+      _bgTeeMarkJoined(t, _seat, uid, me);   // v1802 (H4)
     }
     _timesSetPlayers(t, players);
     // accepting removes any prior decline of mine
@@ -113866,7 +114433,8 @@ async function timesJoinOpen(id){
     if(players.some(function(p){return (uid&&p.uid&&String(p.uid)===String(uid))||(meN&&normalizeNameSegment(p.name)===meN);})){ try{ showToast('You’re already in this round'); }catch(e){} return false; }
     if(_timesOpen(t)<=0){ try{ showToast('That round just filled'); }catch(e){} return false; }
     var pp=(me||'').split(/\s+/);
-    players.push({name:me,first:pp[0]||'',last:pp.slice(1).join(' ')||'',hcp:'',tee:'',uid:uid||null,status:'accepted'});
+    var _seat={name:me,first:pp[0]||'',last:pp.slice(1).join(' ')||'',hcp:'',tee:'',uid:uid||null,status:'accepted'}; players.push(_seat);
+    _bgTeeMarkJoined(t, _seat, uid, me);   // v1802 (H4)
     _timesSetPlayers(t, players);
     if(Array.isArray(t.declinedBy)) t.declinedBy=t.declinedBy.filter(function(n){return normalizeNameSegment(n)!==meN;});
     joined=true;
