@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1804-->
+<!--BGVER=v2026.11.1805-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11429,7 +11429,11 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // round save on games.updated_at; conflict → merge + one retry → plain upsert fallback) and
 // bg_teetime_seat (atomic seat join/leave/decline on shared:tourneys). Both feature-flagged
 // (BG_USE_SAVE_RPC / BG_USE_TEETIME_RPC) and fall back to the v1803 paths on any RPC error.
-const BG_BUILD = 'v2026.11.1804';
+// v1805 (audit): alias-based player merge. Merging two roster players now writes a
+// loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
+// (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
+// bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
+const BG_BUILD = 'v2026.11.1805';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -11443,6 +11447,116 @@ const BG_USE_SAVE_RPC = true;      // safeSet / flushDirtyGames -> bg_save_game 
 const BG_USE_TEETIME_RPC = true;   // tee-time seat join/leave/decline -> bg_teetime_seat (row-locked seat count)
 var _bgSaveRpcDead = false;        // set once bg_save_game answers "no such function" -> plain upsert for the session
 var _bgTeeRpcDead = false;         // same for bg_teetime_seat
+// v1805 alias: player MERGES now leave an ALIAS behind instead of rewriting history.
+// A merge on one phone used to fix only that phone's roster; every other user's roster,
+// the cloud player_stats rows, tournament_players and league_members still carried the
+// merged-away spelling, so the same person ranked twice on the Friends board and showed
+// twice in every picker. shared:player-aliases is ONE map every device reads:
+//   { "<loserNormKey>": { canon: "Survivor Name", canonKey: "<survivorNormKey>", uid, by, at } }
+// Nothing stored is ever rewritten (games rows, rosters, tournament_players,
+// league_members keep their names); surfaces that KEY a person by name resolve through
+// bgAliasKey / bgAliasCanon instead. Flip BG_USE_ALIASES off and every helper is identity.
+const BG_USE_ALIASES = true;
+const KEY_PLAYER_ALIASES = 'golf:player-aliases';   // row shared:player-aliases (see singletonRowCode)
+var _bgAliasMem = null, _bgAliasMemRaw = null, _bgAliasMemAt = 0;
+function _bgAliasNorm(s) {
+  try { return (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s == null ? '' : s)) : String(s || '').trim().replace(/\s+/g, ' ').toLowerCase(); }
+  catch (e) { return ''; }
+}
+// The cached map, synchronously. Re-parses the localStorage copy at most every 2s (the
+// singleton read/write paths keep that copy current), so hot loops pay one object read.
+function bgAliasMapSync() {
+  if (!BG_USE_ALIASES) return {};
+  try {
+    var now = Date.now();
+    if (_bgAliasMem && (now - _bgAliasMemAt) < 2000) return _bgAliasMem;
+    var raw = null; try { raw = localStorage.getItem(KEY_PLAYER_ALIASES); } catch (e) { raw = null; }
+    if (raw !== _bgAliasMemRaw || !_bgAliasMem) {
+      var m = null; try { m = raw ? JSON.parse(raw) : null; } catch (e) { m = null; }
+      _bgAliasMem = (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
+      _bgAliasMemRaw = raw;
+    }
+    _bgAliasMemAt = now;
+    return _bgAliasMem;
+  } catch (e) { return _bgAliasMem || {}; }
+}
+// normKey -> canonical normKey. Identity when there is no alias; follows a chain up to
+// 3 hops (A->B->C); a self-pointer (canonKey === key) means "this name is canonical
+// again" and stops the walk. Never returns empty for a non-empty input.
+function bgAliasKey(key) {
+  var k = String(key == null ? '' : key);
+  try {
+    if (!BG_USE_ALIASES || !k) return k;
+    var m = bgAliasMapSync(), cur = k;
+    for (var hop = 0; hop < 3; hop++) {
+      var e = m[cur];
+      if (!e || !e.canonKey || String(e.canonKey) === cur) break;
+      cur = String(e.canonKey);
+    }
+    return cur || k;
+  } catch (e) { return k; }
+}
+// display name -> canonical display name (the survivor's spelling), same walk.
+function bgAliasCanon(name) {
+  var n = String(name == null ? '' : name);
+  try {
+    if (!BG_USE_ALIASES || !n.trim()) return n;
+    var m = bgAliasMapSync(), cur = _bgAliasNorm(n), out = n;
+    for (var hop = 0; hop < 3; hop++) {
+      var e = m[cur];
+      if (!e || !e.canonKey || String(e.canonKey) === cur) break;
+      if (e.canon && String(e.canon).trim()) out = String(e.canon);
+      cur = String(e.canonKey);
+    }
+    return (out && String(out).trim()) ? out : n;
+  } catch (e) { return n; }
+}
+// Every alias key that resolves INTO canonKey (empty when nobody was merged into it).
+function bgAliasLosersOf(canonKey) {
+  var out = [];
+  try {
+    if (!BG_USE_ALIASES) return out;
+    var ck = bgAliasKey(canonKey); if (!ck) return out;
+    var m = bgAliasMapSync();
+    for (var k in m) { if (k !== ck && bgAliasKey(k) === ck) out.push(k); }
+  } catch (e) {}
+  return out;
+}
+// Cache-first cloud refresh, never awaited by a caller (boot / sign-in).
+function bgAliasWarm() {
+  try {
+    if (!BG_USE_ALIASES || typeof readSharedSingleton !== 'function') return;
+    readSharedSingleton(KEY_PLAYER_ALIASES).then(function () { _bgAliasMemAt = 0; }).catch(function () {});
+  } catch (e) {}
+}
+// Record loser -> winner. The winner is re-stamped as a SELF-pointer (not deleted): the
+// row merges as a union, so an omitted key would ride back in from the cloud, while a
+// self-pointer wins on `at` and reads as "canonical" to bgAliasKey. Aliases that pointed
+// at a loser are flattened onto the new winner so chains stay one hop long.
+async function bgAliasRecord(loserNames, winnerName, winnerUid) {
+  try {
+    if (!BG_USE_ALIASES) return false;
+    var canon = String(winnerName || '').replace(/\s+/g, ' ').trim();
+    var canonKey = _bgAliasNorm(canon); if (!canonKey) return false;
+    var m = Object.assign({}, bgAliasMapSync());
+    var by = null; try { by = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) || null; } catch (e) {}
+    var now = Date.now(), changed = false;
+    (Array.isArray(loserNames) ? loserNames : [loserNames]).forEach(function (ln) {
+      var lk = _bgAliasNorm(ln); if (!lk || lk === canonKey) return;
+      m[lk] = { canon: canon, canonKey: canonKey, uid: winnerUid || null, by: by, at: now }; changed = true;
+    });
+    if (!changed) return false;
+    if (m[canonKey] && String(m[canonKey].canonKey) !== canonKey) m[canonKey] = { canon: canon, canonKey: canonKey, uid: winnerUid || null, by: by, at: now };
+    Object.keys(m).forEach(function (k) {
+      var e = m[k]; if (!e || k === canonKey || String(e.canonKey) === canonKey) return;
+      var t = m[String(e.canonKey)];
+      if (t && String(t.canonKey) === canonKey) m[k] = Object.assign({}, e, { canon: canon, canonKey: canonKey, uid: winnerUid || e.uid || null, at: now });
+    });
+    _bgAliasMemAt = 0;
+    if (typeof writeSharedSingleton === 'function') return await writeSharedSingleton(KEY_PLAYER_ALIASES, JSON.stringify(m));
+    return false;
+  } catch (e) { return false; }
+}
 // PostgREST answers PGRST202 (HTTP 404) when the function is not in its schema cache;
 // Postgres itself says 42883 "function ... does not exist".
 function _bgRpcMissing(err) {
@@ -11857,6 +11971,7 @@ async function initAuth() {
         }
       } catch (e) {}
       await fetchMyRole();
+      try { if (_authUser && typeof bgAliasWarm === 'function') bgAliasWarm(); } catch (e) {}   // v1805 alias: cache-first, never awaited
       // Refresh THIS account's saved clubs now that auth is resolved. The startup
       // load can run as a guest (empty bag) before sign-in completes, which left
       // the GPS "plays like" suggestion ignoring the user's real bag (Kevin's bug).
@@ -17572,7 +17687,9 @@ const SHARED_SINGLETONS = ['golf:multinine-configs', 'golf:courses', 'golf:recen
   // as golf:deleted-tourneys — so this goes to the shared row, not a per-user one.
   // Without it, v1140's delete fix only ever reached the phone that pressed Delete;
   // every other player's Rounds tab went on listing the dead event's rounds forever.
-  'golf:dead-events'];
+  'golf:dead-events',
+  // v1805 alias: the player-merge alias map — global, every account reads and writes it.
+  'golf:player-aliases'];
 // v1139 — ONE guard, THREE call sites. singletonRowCode() falls back to the LEGACY
 // GLOBAL row ('shared:recent-games' / 'shared:player-roster') whenever _authUser is
 // unresolved: guest sessions, and the pre-auth window on every single boot. Those
@@ -17947,7 +18064,8 @@ const _SHARED_MERGE_STRATEGY = {
   // scorecard link nobody else could ever see, gone on reinstall.
   'golf:course-scorecard-imgs': 'objectMap',     // { courseId: url }
   'golf:event-images': 'objectMap',              // { eventId: url }
-  'golf:recent-games': 'recentGames'
+  'golf:recent-games': 'recentGames',
+  'golf:player-aliases': 'aliasMap'               // v1805 alias: union per key, newer `at` wins
 };
 const _MERGE_READ_FAILED = '__BG_MERGE_READ_FAILED__';  // cloud read FAILED (vs. cloud genuinely empty)
 // v991 THE RLS BLIND SPOT. PostgREST returns {data:null, error:null} for BOTH "no such
@@ -18213,6 +18331,16 @@ async function _mergeSharedSingletonValue(key, local) {
       b.forEach(x => { if (idOf(x) == null) out.push(x); });                    // keep id-less locals
       return out;
     }
+    if (strat === 'aliasMap') {   // v1805 alias: per-key union, the newer `at` stamp wins
+      const a = (cloud && typeof cloud === 'object' && !Array.isArray(cloud)) ? cloud : {};
+      const b = (local && typeof local === 'object' && !Array.isArray(local)) ? local : {};
+      const _out = Object.assign({}, a);
+      for (const _k in b) {
+        const _lv = b[_k], _cv = a[_k];
+        if (!_cv || (((_lv && _lv.at) || 0) >= ((_cv && _cv.at) || 0))) _out[_k] = _lv;
+      }
+      return _out;
+    }
     if (strat === 'objectMap') {
       const a = (cloud && typeof cloud === 'object' && !Array.isArray(cloud)) ? cloud : {};
       const b = (local && typeof local === 'object' && !Array.isArray(local)) ? local : {};
@@ -18287,7 +18415,7 @@ async function writeSharedSingleton(key, value) {
             // blind overwrite could SHRINK the cloud and silently drop another device's
             // entries (this is how Kevin's verified courses reverted). Skip the write,
             // keep it DIRTY, and let the 15s / online retry union once the cloud is back.
-            if (['stringSet','objectMap','tombstones','recentGames','crewBoard','roundTemplates'].indexOf(_SHARED_MERGE_STRATEGY[key]) >= 0) { return false; }
+            if (['stringSet','objectMap','tombstones','recentGames','crewBoard','roundTemplates','aliasMap'].indexOf(_SHARED_MERGE_STRATEGY[key]) >= 0) { return false; }   // v1805 alias: aliasMap too
             // other merge keys: keep prior behavior (write the local copy cached above)
           } else if (_merged !== undefined) {
             parsed = _merged; try { localStorage.setItem(key, JSON.stringify(parsed)); } catch (e) {}
@@ -18362,7 +18490,7 @@ async function _flushDirtySingletonsInner(dirtyKeys) {
           // v970: 'objectMap' was MISSING here while writeSharedSingleton guards it —
           // so a retry with a dead cloud read blind-wrote the local course map over
           // shared:courses and wiped every other admin's edits. Now symmetric.
-          if (['stringSet','objectMap','tombstones','recentGames','crewBoard','roundTemplates'].indexOf(_SHARED_MERGE_STRATEGY[key]) >= 0) { continue; }
+          if (['stringSet','objectMap','tombstones','recentGames','crewBoard','roundTemplates','aliasMap'].indexOf(_SHARED_MERGE_STRATEGY[key]) >= 0) { continue; }   // v1805 alias: aliasMap too
         } else if (_m !== undefined) { _data = _m; try { localStorage.setItem(key, JSON.stringify(_data)); } catch (e) {} }
       } catch (e) {}
       const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: _data, updated_at: new Date().toISOString() });
@@ -23011,6 +23139,13 @@ async function mergeRosterPlayers(winnerKey, loserKeys) {
   // cloud copy on the next union — that's why a merged duplicate "came back". Routing
   // through savePlayerRoster + removals makes the merge STICK across devices/boots.
   await savePlayerRoster(filtered.slice(0, 200), { removals: { players: new Set(losers.map(p => rosterRemovalKey(p))) } });
+  // v1805 alias: leave the loser -> winner alias in the shared map so every OTHER device,
+  // the cloud stats rows and the tournament / league pickers resolve the old spelling too.
+  try {
+    const _aliasNames = [];
+    losers.forEach(p => { if (!p) return; _aliasNames.push(p.name || ''); _aliasNames.push(combineName(p.firstName, p.lastName)); });
+    await bgAliasRecord(_aliasNames, winner.name, winner.uid || winner.user_id || winner._uid || null);
+  } catch (e) {}
   // Repoint any signed-in ACCOUNT that was linked to a merged-away entry onto the
   // winner, so a merged user never loses their identity — past rounds, stats and round
   // invites all follow profiles.my_player.
@@ -37770,8 +37905,25 @@ async function renderRosterList() {
     }
   } catch (e) {}
 
+  // v1805 alias: a merged-away spelling is hidden when its survivor is ALSO in this list
+  // (so the person shows once, under the name the merge kept). If the survivor is not
+  // here at all the old row stays, so nobody becomes unpickable.
+  let _aliasCanonHave = null;
+  try {
+    if (BG_USE_ALIASES && typeof bgAliasKey === 'function') {
+      _aliasCanonHave = new Set();
+      roster.forEach(p => { try { const nk = normalizeNameSegment(p.name || (((p.firstName || '') + ' ' + (p.lastName || '')).trim())); if (nk && bgAliasKey(nk) === nk) _aliasCanonHave.add(nk); } catch (e) {} });
+    }
+  } catch (e) { _aliasCanonHave = null; }
   // Search matches against either first name OR last name OR combined name.
   const filtered = roster.filter(p => {
+    if (_aliasCanonHave) {   // v1805 alias
+      try {
+        const nk = normalizeNameSegment(p.name || (((p.firstName || '') + ' ' + (p.lastName || '')).trim()));
+        const ck = bgAliasKey(nk);
+        if (nk && ck !== nk && _aliasCanonHave.has(ck)) return false;
+      } catch (e) {}
+    }
     // v618: Friends filter — only roster entries linked to an accepted friend
     // (or me). No-op when the friend set couldn't be built.
     if (friendSet && friendSet.size) {
@@ -58237,10 +58389,11 @@ function buildHomeKpiHtml(player, isMe) {
 // rounds settled off-app simply don't show, they can't distort what does.
 async function _bgFriendsFoesData(subjectName) {
   const norm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
-  const subjN = norm(subjectName);
+  const subjN = bgAliasKey(norm(subjectName));   // v1805 alias
   if (!subjN) return null;
   let roster = []; try { roster = (await getPlayerRoster()) || []; } catch (e) { return null; }
-  const subj = roster.find(p => p && norm(p.name) === subjN);
+  const _subjAll = roster.filter(p => p && bgAliasKey(norm(p.name)) === subjN);   // v1805 alias: every spelling of the subject
+  const subj = _subjAll[0];
   if (!subj) return null;
   const rKey = s => {
     if (!s) return '';
@@ -58251,17 +58404,17 @@ async function _bgFriendsFoesData(subjectName) {
   };
   const myRounds = {};   // round key -> subject's settled units that round
   try {
-    bgLiveHistory(subj.scoreHistory).forEach(s => {
+    _subjAll.forEach(sp => bgLiveHistory(sp.scoreHistory).forEach(s => {   // v1805 alias
       if (!s || !roundCountsForBets(s) || !s.money) return;   // a 0 round moved no units
       const k = rKey(s); if (k && !(k in myRounds)) myRounds[k] = Number(s.money) || 0;
-    });
+    }));
   } catch (e) {}
   if (!Object.keys(myRounds).length) return null;
   const perRound = {};   // round key -> the OTHER players' results in that round
   roster.forEach(p => {
-    if (!p || norm(p.name) === subjN) return;
+    if (!p || bgAliasKey(norm(p.name)) === subjN) return;   // v1805 alias
     let hist = []; try { hist = bgLiveHistory(p.scoreHistory); } catch (e) { return; }
-    const nm = norm(p.name);
+    const nm = bgAliasKey(norm(p.name));   // v1805 alias: both spellings aggregate on one bar
     hist.forEach(s => {
       if (!s || !roundCountsForBets(s)) return;
       const k = rKey(s); if (!k || !(k in myRounds)) return;
@@ -62066,7 +62219,11 @@ function findMyRosterPlayer(roster, me) {
   const exact = roster.find(x => x && x.name === me);
   if (exact) return exact;
   const n = normalizeNameSegment(me);
-  return roster.find(x => x && normalizeNameSegment(x.name) === n) || null;
+  const _byNorm = roster.find(x => x && normalizeNameSegment(x.name) === n);
+  if (_byNorm) return _byNorm;
+  // v1805 alias: profiles.my_player may still hold a merged-away spelling
+  try { if (BG_USE_ALIASES) { const _nc = bgAliasKey(n); return roster.find(x => x && x.name && bgAliasKey(normalizeNameSegment(x.name)) === _nc) || null; } } catch (e) {}
+  return null;
 }
 
 // Friends-only (#10): given the sorted local roster, return only YOU and your
@@ -62298,7 +62455,7 @@ async function fetchAllPlayerStats() {
 async function fetchPlayerCloudStats(name) {
   try {
     if (!(isSignedIn() && supa && _authUser) || !name) return null;
-    const nm = normalizeNameSegment(name);
+    const nm = bgAliasKey(normalizeNameSegment(name));   // v1805 alias: the survivor's key
     const data = await fetchAllPlayerStats();
     if (!Array.isArray(data)) return null;
     // A person can have MORE THAN ONE player_stats row whose player_name normalizes the
@@ -62310,7 +62467,7 @@ async function fetchPlayerCloudStats(name) {
     const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
     const out = []; const have = new Set();
     data.forEach(r => {
-      if (!r || !r.player_name || normalizeNameSegment(r.player_name) !== nm) return;
+      if (!r || !r.player_name || bgAliasKey(normalizeNameSegment(r.player_name)) !== nm) return;   // v1805 alias: a merged-away spelling's backup row counts too
       (Array.isArray(r.stats) ? r.stats : []).forEach(s => { const k = keyOf(s); if (s && k && !have.has(k)) { out.push(s); have.add(k); } });
     });
     return out.length ? out : null;
@@ -62328,6 +62485,25 @@ async function mergedPlayerHistory(player) {
   // for all of them), not just mine.
   try { const _st = await getSharedTombstones(); if (_st && _st.rounds) _st.rounds.forEach(k => _del.add(k)); } catch (e) {}
   if (_del.size) hist = hist.filter(s => !(_del.has(statsRoundKey(s)) || _del.has(rosterRoundKey(s))));
+  // v1805 alias: a merged-away spelling that still sits on THIS device's roster (the merge
+  // happened on somebody else's phone) keeps its rounds on the survivor. Union by round
+  // key, same as the cloud union below; same-NAME duplicates are still left alone (v760).
+  try {
+    if (BG_USE_ALIASES && player && player.name) {
+      const _pk = normalizeNameSegment(player.name), _ck = bgAliasKey(_pk);
+      if (_ck !== _pk || bgAliasLosersOf(_ck).length) {
+        const _ro = await getPlayerRoster();
+        const _kf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
+        const _hv = new Set(hist.map(_kf));
+        (_ro || []).forEach(r => {
+          if (!r || r === player || !r.name) return;
+          const _rk = normalizeNameSegment(r.name);
+          if (_rk === _pk || bgAliasKey(_rk) !== _ck) return;
+          (Array.isArray(r.scoreHistory) ? r.scoreHistory : []).forEach(s => { const k = _kf(s); if (s && k && !_hv.has(k) && !_del.has(k)) { hist.push(s); _hv.add(k); } });
+        });
+      }
+    }
+  } catch (e) {}
   try {
     const cloud = await fetchPlayerCloudStats(player && player.name);
     if (cloud && cloud.length) {
@@ -67895,7 +68071,7 @@ async function renderCrewLeaderboard() {
         _ps.forEach(r => {
           try {
             if (!r || !r.player_name) return;
-            const nm = normalizeNameSegment(r.player_name);
+            const nm = bgAliasKey(normalizeNameSegment(r.player_name));   // v1805 alias
             const bag = _cloudStats[nm] || (_cloudStats[nm] = { list: [], have: new Set() });
             (Array.isArray(r.stats) ? r.stats : []).forEach(s => { const k = _k(s); if (s && k && !bag.have.has(k)) { bag.list.push(s); bag.have.add(k); } });
           } catch (e) {}
@@ -67909,7 +68085,7 @@ async function renderCrewLeaderboard() {
   // Viewer + their own deleted-round keys — applied ONLY to the "me" row, exactly like
   // mergedPlayerHistory, so a round I deleted can't reappear on my line from the cloud.
   let _meNorm = '';
-  try { const _mn = await getMeName(); _meNorm = _mn ? normalizeNameSegment(_mn) : ''; } catch (e) {}
+  try { const _mn = await getMeName(); _meNorm = _mn ? bgAliasKey(normalizeNameSegment(_mn)) : ''; } catch (e) {}   // v1805 alias
   let _myDel = null;
   try { _myDel = getDeletedRoundKeys(); } catch (e) {}
   // Synchronous mirror of mergedPlayerHistory (the card awaits it per player): a
@@ -67917,7 +68093,7 @@ async function renderCrewLeaderboard() {
   // tombstone rules, same union-by-round-key. Board history === card history.
   const _lbHistory = (base, name) => {
     try {
-      const norm = normalizeNameSegment(name || (base && base.name) || '');
+      const norm = bgAliasKey(normalizeNameSegment(name || (base && base.name) || ''));   // v1805 alias
       const isMe = !!(_meNorm && norm === _meNorm);
       const keyOf = s => s ? (s.gameCode || ((s.date || '') + '|' + (s.course || ''))) : '';
       const _tombed = (s) => {
@@ -67955,7 +68131,7 @@ async function renderCrewLeaderboard() {
       const id = String((p && p.id) || '');
       if (id && _bgUserPlayerIds && _bgUserPlayerIds.has(id)) return 'pid:' + id;
     } catch (e) {}
-    return 'nm:' + normalizeNameSegment(nm);
+    return 'nm:' + bgAliasKey(normalizeNameSegment(nm));   // v1805 alias: one row per person across merged spellings
   };
   const _seen = {};
   const _uniq = [];
@@ -67966,6 +68142,12 @@ async function renderCrewLeaderboard() {
     if (_seen[k]) {
       const u = _seen[k];
       if (u.poolEntry && !u.poolEntry.avatar && p.avatar) u.poolEntry.avatar = p.avatar;
+      // v1805 alias: when the first-seen entry was the merged-away spelling and this one is
+      // the survivor, the row (and the card it opens) wears the survivor's name.
+      try {
+        const _un = normalizeNameSegment(u.name), _pn = normalizeNameSegment(nm);
+        if (BG_USE_ALIASES && bgAliasKey(_un) !== _un && bgAliasKey(_pn) === _pn) { (u.alias || (u.alias = [])).push(u.poolEntry); u.name = nm; u.poolEntry = p; return; }
+      } catch (e) {}
       (u.alias || (u.alias = [])).push(p);   // v1490: its rounds still belong to this person
       return;
     }
@@ -68137,6 +68319,10 @@ function resolveRosterPlayerByName(roster, name) {
   try {
     const want = normalizeNameSegment(String(name));
     if (want) hit = roster.find(x => x && x.name && normalizeNameSegment(x.name) === want);
+    if (!hit && want && BG_USE_ALIASES) {   // v1805 alias: the old spelling lands on the survivor's entry (and vice versa)
+      const _wc = bgAliasKey(want);
+      hit = roster.find(x => x && x.name && bgAliasKey(normalizeNameSegment(x.name)) === _wc);
+    }
   } catch (e) {}
   return hit || null;
 }
@@ -68418,7 +68604,8 @@ function bgAmInRound(g) {
     const mn = me ? normalizeNameSegment(me) : '';
     // v1802 (M7): signed in, a seat that carries SOMEONE ELSE's account id is never mine,
     // whatever its name says -- the name match only stands for seats with no id at all.
-    return !!mn && g.players.some(p => p && p.name && !(uid && p.uid) && normalizeNameSegment(p.name) === mn);
+    const _mc = mn ? bgAliasKey(mn) : '';   // v1805 alias: my old spelling on a card still reads as me
+    return !!mn && g.players.some(p => p && p.name && !(uid && p.uid) && bgAliasKey(normalizeNameSegment(p.name)) === _mc);
   } catch (e) { return false; }
 }
 function _bgCrewLiveWire(el) {
@@ -70215,7 +70402,7 @@ async function notifyAddedRegisteredUsers(g) {
          is for rounds where the name still drifted ("Tyler" vs "Tyler Wells"), and it
          only fires when that first name maps to exactly ONE account: two Franks and
          nobody is notified, which is the right answer. */
-      let pr = (p && p.uid && byId[p.uid]) || byNorm[pn];
+      let pr = (p && p.uid && byId[p.uid]) || byNorm[pn] || byNorm[bgAliasKey(pn)];   // v1805 alias
       if (!pr) {
         try {
           const _f = pn.split(/\s+/)[0] || '';
@@ -76422,6 +76609,9 @@ async function _t2ResolveUserIdByNameUncached(name) {
         if (h2) return h2.id;
       }
     } catch (e) {}
+    // v1805 alias: the name on the card may be a merged-away spelling — try the survivor's.
+    // bgAliasCanon(canon) === canon, so this recurses at most once.
+    try { const _cn = bgAliasCanon(name); if (_cn && norm(_cn) !== key) return await _t2ResolveUserIdByNameUncached(_cn); } catch (e) {}
     return null;
   } catch (e) { return null; }
 }
@@ -76462,6 +76652,8 @@ async function bgResolveUidStrict(name) {
       const { data } = await supa.rpc('bg_profiles_public').ilike('my_player', fp).limit(200);
       const hits = (data || []).filter(p => p && p.my_player && norm(p.my_player) === key);
       out = (hits.length === 1) ? hits[0].id : null;   // 0 or 2+ => refuse
+      // v1805 alias: no account under this spelling at all — try the survivor's (still strict)
+      if (!hits.length) { try { const _cn = bgAliasCanon(name); if (_cn && norm(_cn) !== key) out = await bgResolveUidStrict(_cn); } catch (e) {} }
     }
   } catch (e) { out = null; }
   _bgStrictUidCache.set(key, out);   // cache the refusal too — it will not change mid-round
@@ -76606,6 +76798,7 @@ async function _rosterT2Refresh() {
       if (typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p)) return;
       const k = _t2NameKey(p.display_name);
       if (k) { _rosterT2InSet.add(k); _rosterT2ById[k] = p.id; }
+      try { const _ck = _t2NameKey(bgAliasCanon(p.display_name)); if (_ck && _ck !== k) { _rosterT2InSet.add(_ck); if (!_rosterT2ById[_ck]) _rosterT2ById[_ck] = p.id; } } catch (e) {}   // v1805 alias
     });
   } catch (e) {
     // Do NOT pretend the event is empty — that is what made every tap look like
@@ -97567,7 +97760,8 @@ async function _rosterLgRefresh() {
       r.data.forEach(function (m) {
         const k = (typeof _t2NameKey === 'function') ? _t2NameKey(m.display_name)
                                                      : String(m.display_name || '').trim().toLowerCase();
-        if (k) { if (m.status !== 'organizer') _rosterLgInSet.add(k); _rosterLgById[k] = m; }   /* v1629: the non-playing commissioner is not a ticked player */
+        if (k) { if (m.status !== 'organizer') _rosterLgInSet.add(k); _rosterLgById[k] = m; }
+        try { const _ck = _t2NameKey(bgAliasCanon(m.display_name)); if (_ck && _ck !== k) { if (m.status !== 'organizer') _rosterLgInSet.add(_ck); if (!_rosterLgById[_ck]) _rosterLgById[_ck] = m; } } catch (e) {}   // v1805 alias   /* v1629: the non-playing commissioner is not a ticked player */
       });
     }
   } catch (e) { try { console.warn('_rosterLgRefresh', e); } catch (e2) {} }
@@ -120279,6 +120473,7 @@ async function playerMerge(){
         try{ removeKeys.delete(rosterPlayerKey(winner)); }catch(e){}
         try{ if(winner&&winner.id) removeKeys.delete('pid:'+winner.id); }catch(e){}
         await savePlayerRoster(kept.slice(0,400), { removals: { players: removeKeys } });
+        try{ await bgAliasRecord(matches.map(rnm).concat(losers), sv, winner.uid||winner.user_id||null); log('✔ Alias map updated — old spellings resolve to "'+escapeHtml(sv)+'" everywhere.','#8f8'); }catch(e){}   // v1805 alias
         log('✔ Roster merged — survivor "'+escapeHtml(sv)+'" now holds '+hist.length+' round'+(hist.length===1?'':'s')+'.','#8f8');
         var okA=0;
         if(supa){ for(var j=0;j<accts.length;j++){ try{ var er=await supa.from('profiles').update({my_player:sv}).eq('id',accts[j].id); if(!er.error) okA++; }catch(x){} } }
