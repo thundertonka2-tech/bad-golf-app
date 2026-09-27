@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1803-->
+<!--BGVER=v2026.11.1804-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11422,12 +11422,44 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // cache wipe, game:* pruning, stranded skins carry, shamble blank partner, plus speed:
 // player boot no longer downloads the whole course DB, saveGame debounce, memoized GPS
 // bubbles, once-guards. Full list: project doc AUDIT_v1801_FullApp_QA_2026-09-26.md.
-const BG_BUILD = 'v2026.11.1803';
+// v1804 (audit): two server RPCs close the last write races — bg_save_game (compare-and-set
+// round save on games.updated_at; conflict → merge + one retry → plain upsert fallback) and
+// bg_teetime_seat (atomic seat join/leave/decline on shared:tourneys). Both feature-flagged
+// (BG_USE_SAVE_RPC / BG_USE_TEETIME_RPC) and fall back to the v1803 paths on any RPC error.
+const BG_BUILD = 'v2026.11.1804';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
 // v1802 (H6): 5 — a cart holds five, and every per-cart game rule tops out there.
 const T2_MAX_GROUP_SIZE = 5;
+// v1804: the two write races that the client-side merges could only narrow, not close,
+// now go through server RPCs (league/migration_v1804_rpcs.sql). Flip either flag off to
+// return that path to the v1803 read-merge-write code, which stays in place as the
+// fallback for every error, timeout-free failure and missing-function response.
+const BG_USE_SAVE_RPC = true;      // safeSet / flushDirtyGames -> bg_save_game (compare-and-set on updated_at)
+const BG_USE_TEETIME_RPC = true;   // tee-time seat join/leave/decline -> bg_teetime_seat (row-locked seat count)
+var _bgSaveRpcDead = false;        // set once bg_save_game answers "no such function" -> plain upsert for the session
+var _bgTeeRpcDead = false;         // same for bg_teetime_seat
+// PostgREST answers PGRST202 (HTTP 404) when the function is not in its schema cache;
+// Postgres itself says 42883 "function ... does not exist".
+function _bgRpcMissing(err) {
+  try {
+    if (!err) return false;
+    var c = String(err.code || ''), m = String(err.message || err.details || err.hint || '');
+    if (c === 'PGRST202' || c === '42883' || err.status === 404) return true;
+    return /could not find the function|function .* does not exist|schema cache/i.test(m);
+  } catch (e) { return false; }
+}
+// Key-sorted stringify: jsonb re-orders object keys, so "did the triggers change what we
+// sent?" has to be a structural comparison, not a string one.
+function _bgJsonCanon(o) {
+  try {
+    return JSON.stringify(o, function (k, v) {
+      if (v && typeof v === 'object' && !Array.isArray(v)) { var s = {}; Object.keys(v).sort().forEach(function (kk) { s[kk] = v[kk]; }); return s; }
+      return v;
+    });
+  } catch (e) { return ''; }
+}
 // v1035 (Tyler, 8/15): ONE source of truth for how many players a normal round's
 // scorecard holds. Was a bare literal 5 in the row cap, the Nassau caps, the
 // live-edit prune guard and ~8 toasts — they drifted, and the drift is what let the
@@ -18551,11 +18583,25 @@ async function safeSet(key, value, shared, opts) {
           return _lsOk;
         }
         try {
+          // v1804: compare-and-set. The server only stores this blob when the row still
+          // carries the stamp this device last wrote or adopted; otherwise it hands the
+          // current row back, we fold it in (_mergeGameInto: my cells win, the rest is a
+          // union) and retry once. Two phones saving in the same second can no longer
+          // land a stale whole-blob over each other. Any non-ok answer drops through to
+          // the v1803 upsert below with the (possibly freshly merged) blob.
+          let _viaRpc = null;
+          if (BG_USE_SAVE_RPC && !_bgSaveRpcDead) {
+            _viaRpc = await _bgSaveGameRpc(code, parsed, opts, 'saveGameRpc');   // a timeout throws -> the catch below queues it, exactly as today
+            if (_viaRpc && _viaRpc.ok) { _cloudOk = true; clearGameDirty(code); updateSyncIndicator(true); try { _bgAdoptSavedGame(code, key, parsed, _viaRpc); } catch (e) {} }
+            else if (_viaRpc && _viaRpc.parsed) parsed = _viaRpc.parsed;
+          }
+          if (!_cloudOk) {
           const _wIso = new Date().toISOString();   // v1802 (M8): the stamp the row will carry
           const r = await _promiseTimeout(
             supa.from('games').upsert({ code: code, data: parsed, updated_at: _wIso }), 7000, 'saveGame');
           if (r && r.error) { console.warn('Supabase write failed:', r.error); markGameDirty(code); updateSyncIndicator(false); }
           else { _cloudOk = true; clearGameDirty(code); updateSyncIndicator(true); try { _bgGameRowAt[code] = _bgIsoMs(_wIso); } catch (e) {} }
+          }
         } catch (e) {
           // Timeout / dropped signal: keep playing on the local copy and queue the
           // write — flushDirtyGames re-pushes it the moment the connection returns.
@@ -19842,7 +19888,7 @@ function _bgStampMergeRead(o, ok) {
 async function _mergeGameForWrite(local, opts) {
   try {
     if (!supa || !supaOnline || !local || !local.code) return local;
-    let cloud = null;
+    let cloud = null, _cloudAt = 0;   // v1804: _cloudAt = the row's updated_at (ms) that came with `cloud`
     window._bgMergeReadOk = true;   // v939: tracks whether the pre-write cloud read worked
     // v970 RACE FIX: the global above is shared by every concurrent writer. The 15s
     // flushDirtyGames timer overlapping a live autosave could reset it to true after
@@ -19852,9 +19898,9 @@ async function _mergeGameForWrite(local, opts) {
     _bgStampMergeRead(local, true);
     try {
       const r = await _promiseTimeout(
-        supa.from('games').select('data').eq('code', local.code).maybeSingle(), 3000, 'mergeRead');
+        supa.from('games').select('data,updated_at').eq('code', local.code).maybeSingle(), 3000, 'mergeRead');   // v1804: + updated_at
       if (r && r.error) throw r.error;
-      if (r && r.data) cloud = r.data.data;
+      if (r && r.data) { cloud = r.data.data; try { _cloudAt = _bgIsoMs(r.data.updated_at); } catch (e) { _cloudAt = 0; } }
     } catch (e) {
       // v939: one retry with a longer window. A single 3s hiccup (course wifi /
       // weak LTE) used to fall straight through to a BLIND whole-blob write —
@@ -19862,9 +19908,9 @@ async function _mergeGameForWrite(local, opts) {
       // retry also fails, flag it so multi-scorer saves QUEUE instead of blind-writing.
       try {
         const r2 = await _promiseTimeout(
-          supa.from('games').select('data').eq('code', local.code).maybeSingle(), 5000, 'mergeRead2');
+          supa.from('games').select('data,updated_at').eq('code', local.code).maybeSingle(), 5000, 'mergeRead2');   // v1804: + updated_at
         if (r2 && r2.error) throw r2.error;
-        if (r2 && r2.data) cloud = r2.data.data;
+        if (r2 && r2.data) { cloud = r2.data.data; try { _cloudAt = _bgIsoMs(r2.data.updated_at); } catch (e) { _cloudAt = 0; } }
       } catch (e2) { window._bgMergeReadOk = false; _bgStampMergeRead(local, false); return local; }
     }
     // v991: both reads can SUCCEED and still hand back nothing when RLS denies the row.
@@ -19881,6 +19927,9 @@ async function _mergeGameForWrite(local, opts) {
     }
     if (!cloud || typeof cloud !== 'object') return local;
     _mergeGameInto(local, cloud, opts);   // v1802 (H5): the union itself is synchronous and shared with the incoming-row paths
+    // v1804: the merged copy now contains that row, so it is the row this device "adopted"
+    // (same meaning as the realtime / poll adopt) and the stamp bg_save_game must expect.
+    try { if (_cloudAt) _bgGameRowAt[local.code] = _cloudAt; } catch (e) {}
   } catch (e) { /* merge failure -> write local unchanged */ }
   // v1508: authoritative correction, applied on the copy flushGame persists (v1802: unchanged, sits after the split).
   try { _bgApplyAdminFix(local, true); } catch (e) {}
@@ -20281,6 +20330,65 @@ function clearGameDirty(code) {
   try { if (code) localStorage.removeItem('golf:score-touch:' + code); } catch (e) {}
   try { bgRenderSyncWarning(); } catch (e) {}
 }
+// v1804: one bg_save_game round-trip (plus at most one retry after a conflict).
+//   -> {ok:true, data, updated_at, inserted}   the server stored the blob; `data` is what the
+//                                              BEFORE triggers actually kept (may differ)
+//   -> {ok:false, parsed}                      use the plain upsert with `parsed` — which is
+//                                              the blob merged with the freshest row when a
+//                                              conflict came back, so the fallback is no
+//                                              staler than the v1803 path
+// A timeout is re-thrown so the caller queues the round exactly as it does today (the RPC
+// may have landed; flushDirtyGames re-merges before its next push either way).
+async function _bgSaveGameRpc(code, parsed, opts, tag) {
+  let expected = null;
+  try { expected = _bgGameRowAt[code] ? new Date(_bgGameRowAt[code]).toISOString() : null; } catch (e) { expected = null; }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let r = null;
+    try {
+      r = await _promiseTimeout(
+        supa.rpc('bg_save_game', { p_code: code, p_data: parsed, p_expected_at: expected }), 7000, tag || 'saveGameRpc');
+    } catch (e) {
+      if (e && /^timeout:/.test(String(e.message || ''))) throw e;
+      console.warn('[BG v1804] bg_save_game threw:', e);
+      return { ok: false, parsed: parsed };
+    }
+    if (r && r.error) {
+      if (_bgRpcMissing(r.error)) { _bgSaveRpcDead = true; console.warn('[BG v1804] bg_save_game not available — plain upsert for this session'); }
+      else console.warn('[BG v1804] bg_save_game error:', r.error);
+      return { ok: false, parsed: parsed };
+    }
+    const res = r && r.data;
+    if (!res || typeof res !== 'object') return { ok: false, parsed: parsed };
+    if (res.ok) return { ok: true, data: res.data, updated_at: res.updated_at, inserted: !!res.inserted };
+    if (res.conflict) {
+      try { if (res.data && typeof res.data === 'object') parsed = _mergeGameInto(parsed, res.data, opts) || parsed; } catch (e) {}
+      try { _bgGameRowAt[code] = _bgIsoMs(res.updated_at); } catch (e) {}
+      expected = res.updated_at || null;
+      continue;   // one retry with the row's current stamp
+    }
+    return { ok: false, parsed: parsed };
+  }
+  return { ok: false, parsed: parsed };   // conflicted twice -> the caller's plain upsert (merged blob)
+}
+// v1804: after an ok answer — take the server's stamp, and if the BEFORE triggers stored
+// something other than what we sent (removedPlayerIds purge, finished-score protection,
+// settledMoney precedence) adopt that: the cache always, the live round only when no
+// input is mid-edit (the realtime handler's own rule), and by MERGING into state.game so
+// the object identity the screens hold stays intact and my just-tapped cells still win.
+function _bgAdoptSavedGame(code, key, parsed, res) {
+  try { if (res && res.updated_at) _bgGameRowAt[code] = _bgIsoMs(res.updated_at); } catch (e) {}
+  try {
+    const d = res && res.data;
+    if (!d || typeof d !== 'object') return;
+    if (_bgJsonCanon(d) === _bgJsonCanon(parsed)) return;   // the triggers kept exactly what we sent
+    try { bgLsSet(key, JSON.stringify(d)); } catch (e) {}
+    if (state.game && state.game.code === code) {
+      let isEditing = false;
+      try { const focused = document.activeElement; isEditing = !!(focused && (focused.tagName === 'INPUT' || focused.tagName === 'SELECT' || focused.tagName === 'TEXTAREA')); } catch (e) { isEditing = false; }
+      if (!isEditing) _mergeGameInto(state.game, d);
+    }
+  } catch (e) {}
+}
 async function flushDirtyGames() {
   const pending = _dirtyGames();
   if (!pending.length) return;
@@ -20296,6 +20404,15 @@ async function flushDirtyGames() {
       // next 15s pass rather than blind-writing over the other phone's cells.
       if (parsed && parsed.__bgMergeReadOk === false && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) continue;
       try { localStorage.setItem('game:' + code, JSON.stringify(parsed)); } catch (e) {}
+      // v1804: same compare-and-set as safeSet; the queued blob is never pushed over a
+      // row another phone moved on since this device last saw it.
+      let _viaRpc = null, _flushed = false;
+      if (BG_USE_SAVE_RPC && !_bgSaveRpcDead) {
+        _viaRpc = await _bgSaveGameRpc(code, parsed, null, 'flushGameRpc');   // a timeout throws -> stays queued (catch below)
+        if (_viaRpc && _viaRpc.ok) { _flushed = true; clearGameDirty(code); updateSyncIndicator(true); try { _bgAdoptSavedGame(code, 'game:' + code, parsed, _viaRpc); } catch (e) {} try { bgRenderSyncWarning(); } catch (e) {} }
+        else if (_viaRpc && _viaRpc.parsed) parsed = _viaRpc.parsed;
+      }
+      if (_flushed) continue;
       const _wIso = new Date().toISOString();   // v1802 (M8)
       const r = await _promiseTimeout(
         supa.from('games').upsert({ code: code, data: parsed, updated_at: _wIso }), 7000, 'flushGame');
@@ -84657,6 +84774,21 @@ async function joinOpenRound(id){
     if (_orOpenSlots(t)<=0){ showToast('Sorry - that round just filled up'); try{await renderOpenRounds();}catch(e){} return; }
     var hcp=null, fn='', ln='';
     try { var roster=await getPlayerRoster(); var mp=findMyRosterPlayer(roster, me); if(mp){ if(mp.hcp!=null) hcp=mp.hcp; fn=mp.firstName||''; ln=mp.lastName||''; } } catch(e){}
+    // v1804: the seat is taken on the server (config mode = savedConfig.players, the exact
+    // object pushed below; status flips to 'scheduled' there when the round fills).
+    var _rpc = await _bgTeeSeatRpc(id, 'join', { firstName:fn, lastName:ln, name:me, hcp:hcp, teeLabel:null, playsGross:false }, 'config');
+    if (_rpc && _rpc.handled) {
+      if (_rpc.notOpen) { showToast('That round already filled up'); try{await renderOpenRounds();}catch(e){} return; }
+      if (_rpc.already) { showToast("You're already in this round"); return; }
+      if (_rpc.full) { showToast('Sorry - that round just filled up'); try{await renderOpenRounds();}catch(e){} return; }
+      if (_rpc.ok) {
+        try { await renderOpenRounds(); } catch(e){}
+        try { renderTourneyList(); } catch(e){}
+        if (_rpc.entry && _rpc.entry.status==='scheduled') showToast('You grabbed the last spot - round is now scheduled');
+        else showToast('Spot grabbed');
+        return;
+      }
+    }
     // v989 (U7): the checks above happened before the awaits. Re-read the list and
     // re-test membership + capacity here, immediately before the mutation, so a
     // race that slipped through the first pass still can't double-seat or overfill.
@@ -84680,6 +84812,7 @@ async function joinOpenRound(id){
     if (t.status==='scheduled') showToast('You grabbed the last spot - round is now scheduled');
     else showToast('Spot grabbed');
   } catch(e){ console.warn('joinOpenRound', e); showToast('Could not grab the spot - try again'); }
+  finally { _bgJoiningOpenRound = false; }   // v1804: the v989 guard was never released — only the first grab per page load ever ran
 }
 
 async function leaveOpenRound(id){
@@ -114356,9 +114489,58 @@ async function _timesMutate(id, fn){
   try{ showToast(saved?'Saved ✓':'Saved — syncing…'); }catch(e){}
   return true;
 }
+/* v1804: SEATS ARE TAKEN ON THE SERVER. bg_teetime_seat locks the shared:tourneys row,
+   counts the seats that are really there and appends / removes exactly one, so the
+   "two phones grab the last seat inside the cache window" race the v1802 seat union
+   could only reconcile after the fact cannot happen at all. The RPC mirrors the client
+   rules byte for byte (capacity = groupSize||capacity||4, seat key u:<uid> / n:<name>,
+   joinedAt + left stamps, savedConfig.players kept in step, updatedAt/rev bump) and hands
+   the stored entry back, which replaces the local copy. Organizer edits (time, course,
+   size, invites, cancel) stay on _timesMutate. Any error / missing function -> null, and
+   each door then runs its v1802 path unchanged. */
+async function _bgTeeSeatRpc(id, action, seat, mode){
+  if(!BG_USE_TEETIME_RPC || _bgTeeRpcDead) return null;
+  try{
+    if(!supaReady) await initSupabase();
+    if(!(supa && supaOnline) || !isSignedIn()) return null;
+    var r=await _promiseTimeout(supa.rpc('bg_teetime_seat', { p_entry_id:String(id), p_action:action, p_seat:seat, p_mode:(mode||'seats') }), 8000, 'teeSeatRpc');
+    if(r && r.error){
+      if(_bgRpcMissing(r.error)){ _bgTeeRpcDead=true; console.warn('[BG v1804] bg_teetime_seat not available — client seat path for this session'); }
+      else console.warn('[BG v1804] bg_teetime_seat error:', r.error);
+      return null;
+    }
+    var res=r && r.data; if(!res || typeof res!=='object') return null;
+    if(res.ok && res.entry) _bgTeeAdoptEntry(res.entry);
+    res.handled=true; return res;
+  }catch(e){ console.warn('[BG v1804] bg_teetime_seat threw:', e); return null; }
+}
+// The stored entry replaces the local copy (same slot _timesMutate writes through
+// saveTourneys), shielded from a stale background refresh, and its fingerprint is
+// snapshotted so the next saveTourneys does not re-stamp it as a local change.
+function _bgTeeAdoptEntry(entry){
+  try{
+    if(!entry || entry.id==null) return;
+    var raw=null; try{ raw=localStorage.getItem(KEY_TOURNEYS); }catch(e){}
+    var list=[]; try{ list=raw?JSON.parse(raw):[]; }catch(e){ list=[]; } if(!Array.isArray(list)) list=[];
+    var i=list.findIndex(function(x){ return x && String(x.id)===String(entry.id); });
+    if(i>=0) list[i]=entry; else list.push(entry);
+    try{ bgLsSet(KEY_TOURNEYS, JSON.stringify(list)); }catch(e){}
+    try{ _singletonWroteAt[KEY_TOURNEYS]=Date.now(); }catch(e){}
+    try{ var snap=window._bgTourneySnap||(window._bgTourneySnap={}); snap[entry.id]=_bgTourneyFingerprint(entry); }catch(e){}
+  }catch(e){}
+}
 async function timesJoin(id){
   var me=_timesMe(); if(!me){ try{ await _timesLoadMe(); me=_timesMe(); }catch(e){} }
   if(!me){ try{ showToast('Sign in to join'); }catch(e){} return; }
+  var _rpc=await _bgTeeSeatRpc(id, 'join', {name:me,hcp:'',tee:'',uid:(_timesUid()||null)}, 'seats');   // v1804
+  if(_rpc && _rpc.handled){
+    var _ok=!!_rpc.ok && !_rpc.already;
+    if(_rpc.cancelled){ try{ showToast('That tee time was cancelled'); }catch(e){} }
+    else if(_rpc.full){ try{ showToast('That tee time just filled'); }catch(e){} }
+    else if(_ok){ try{ showToast('Saved ✓'); }catch(e){} }
+    timesCloseSheet(); renderTimes(); if(_ok) timesOpenDetail(id);
+    return;
+  }
   var done=await _timesMutate(id, function(t){
     if(t.status==='cancelled'){ try{ showToast('That tee time was cancelled'); }catch(e){} return false; }
     var players=_timesPlayers(t);
@@ -114371,6 +114553,12 @@ async function timesJoin(id){
 }
 async function timesLeave(id){
   var me=_timesMe(); if(!me) return;
+  var _rpc=await _bgTeeSeatRpc(id, 'leave', {name:me,uid:(_timesUid()||null)}, 'seats');   // v1804
+  if(_rpc && _rpc.handled){
+    try{ showToast(_rpc.ok?'Saved ✓':'Could not leave — try again'); }catch(e){}
+    timesCloseSheet(); renderTimes(); timesOpenDetail(id);
+    return;
+  }
   await _timesMutate(id, function(t){
     var players=_timesPlayers(t).filter(function(p){return normalizeNameSegment(p.name)!==normalizeNameSegment(me);});
     _timesSetPlayers(t, players);
@@ -114383,6 +114571,16 @@ async function timesDecline(id){
   try{ ok=await uiConfirm('Decline this tee time? Your spot opens back up and the organizer is notified.',{title:'Decline',okLabel:'Decline',cancelLabel:'Keep it',danger:true}); }catch(e){ ok=true; }
   if(!ok) return;
   var me=_timesMe(); var uid=_timesUid(); var sched=null;
+  var _rpc=await _bgTeeSeatRpc(id, 'decline', {name:me,uid:(uid||null)}, 'seats');   // v1804: leave + declined[] on the server
+  if(_rpc && _rpc.handled){
+    if(_rpc.ok){
+      sched=_rpc.entry&&_rpc.entry.createdByUid;
+      try{ if(sched && String(sched)!==String(uid) && typeof sendPush==='function') sendPush(sched,'Bad Golf',(me?_timesFirst(me):'A player')+' declined — a spot opened up',{type:'teetime',tt:String(id)},'ttdec:'+id); }catch(e){}
+      try{ showToast('Saved ✓'); }catch(e){}
+    } else { try{ showToast('Could not decline — try again'); }catch(e){} }
+    timesCloseSheet(); renderTimes();
+    return;
+  }
   await _timesMutate(id, function(t){
     sched=t.createdByUid;
     t.declined=Array.isArray(t.declined)?t.declined:[];
@@ -114399,6 +114597,21 @@ function meN2(me){ return me?normalizeNameSegment(me):''; }
 async function timesAccept(id){
   var me=_timesMe(); if(!me){ try{ await _timesLoadMe(); me=_timesMe(); }catch(e){} }
   var uid=_timesUid(); var sched=null; var seatedNew=false;
+  if(me){   // v1804: accept = join with status 'accepted' (the server applies the found-seat touch-up or seats me)
+    var _pp0=(me||'').split(/\s+/);
+    var _rpc=await _bgTeeSeatRpc(id, 'join', {name:me,first:_pp0[0]||'',last:_pp0.slice(1).join(' ')||'',hcp:'',tee:'',uid:uid||null,status:'accepted'}, 'seats');
+    if(_rpc && _rpc.handled){
+      if(_rpc.cancelled){ try{ showToast('That tee time was cancelled'); }catch(e){} }
+      else if(_rpc.full){ try{ showToast('That tee time is full'); }catch(e){} }
+      else if(_rpc.ok){
+        sched=_rpc.entry&&_rpc.entry.createdByUid;
+        try{ if(sched && String(sched)!==String(uid) && typeof sendPush==='function') sendPush(sched,'Bad Golf',(me?_timesFirst(me):'A player')+' accepted your tee time',{type:'teetime',tt:String(id)},'ttacc:'+id); }catch(e){}
+        try{ showToast('Saved ✓'); }catch(e){}
+      }
+      timesCloseSheet(); renderTimes(); if(_rpc.ok) timesOpenDetail(id);
+      return;
+    }
+  }
   var done=await _timesMutate(id, function(t){
     sched=t.createdByUid;
     var players=_timesPlayers(t); var meN=meN2(me); var found=false;
@@ -114432,6 +114645,23 @@ async function timesJoinOpen(id){
   try{ ok=await uiConfirm('Add yourself to this round at '+(t0.course||'this course')+when+'?',{title:'Join this round',okLabel:'Accept — add me',cancelLabel:'Not now',danger:false}); }catch(e){ ok=true; }
   if(!ok) return;
   var uid=_timesUid(); var sched=null; var joined=false;
+  {   // v1804: the seat is taken on the server (seats mode: playersList, like the client below)
+    var _pp0=(me||'').split(/\s+/);
+    var _rpc=await _bgTeeSeatRpc(id, 'join', {name:me,first:_pp0[0]||'',last:_pp0.slice(1).join(' ')||'',hcp:'',tee:'',uid:uid||null,status:'accepted'}, 'seats');
+    if(_rpc && _rpc.handled){
+      var _ok=!!_rpc.ok && !_rpc.already;
+      if(_rpc.cancelled){ try{ showToast('That round was cancelled'); }catch(e){} }
+      else if(_rpc.already){ try{ showToast('You’re already in this round'); }catch(e){} }
+      else if(_rpc.full){ try{ showToast('That round just filled'); }catch(e){} }
+      else if(_ok){
+        sched=_rpc.entry&&_rpc.entry.createdByUid;
+        try{ if(sched && String(sched)!==String(uid) && typeof sendPush==='function') sendPush(sched,'Bad Golf',(me?_timesFirst(me):'A player')+' joined your round'+((t0&&t0.course)?' at '+t0.course:''),{type:'round',tt:String(id)},'rndjoin:'+id); }catch(e){}
+        try{ showToast('You’re in ✓'); }catch(e){}
+      }
+      timesCloseSheet(); renderTimes(); if(_ok) timesOpenDetail(id);
+      return;
+    }
+  }
   var done=await _timesMutate(id, function(t){
     if(t.status==='cancelled'||t._ttDeleted){ try{ showToast('That round was cancelled'); }catch(e){} return false; }
     sched=t.createdByUid; var meN=meN2(me);
