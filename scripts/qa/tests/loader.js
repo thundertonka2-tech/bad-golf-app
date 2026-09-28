@@ -37,8 +37,8 @@ function makeStorage() {
   };
 }
 
-function load() {
-  const src = fs.readFileSync(SRC, 'utf8');
+function load(srcPath, setup) {   // v1811 review (R): optional script path + a hook to patch the sandbox before boot
+  const src = fs.readFileSync(srcPath || SRC, 'utf8');
   const noop = () => {};
   const timers = { setTimeout: () => 0, setInterval: () => 0, clearTimeout: noop, clearInterval: noop, requestAnimationFrame: () => 0, cancelAnimationFrame: noop, queueMicrotask: noop };
   const doc = inertElement();
@@ -87,6 +87,7 @@ function load() {
   };
   ctx.window = ctx; ctx.self = ctx; ctx.globalThis = ctx; ctx.top = ctx; ctx.parent = ctx;
   vm.createContext(ctx);
+  try { if (typeof setup === 'function') setup(ctx); } catch (e) {}
   try {
     vm.runInContext(src, ctx, { filename: 'main.js', displayErrors: true });
   } catch (e) {

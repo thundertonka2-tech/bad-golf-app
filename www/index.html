@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1811-->
+<!--BGVER=v2026.11.1812-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11436,7 +11436,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1811';
+const BG_BUILD = 'v2026.11.1812';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -20629,7 +20629,13 @@ async function _bgSaveGameRpc(code, parsed, opts, tag) {
      row only ever came in via the Home feed) meant p_expected_at = null -- a blind overwrite of
      whatever the row holds now. One cheap read of the stamp first; a missing row keeps null
      (that is an insert), and a failed read changes nothing about today's behaviour. */
-  if (!expected) {
+  /* v1811 (review R3): the merge read in _mergeGameForWrite runs on EVERY save (there is no solo /
+     finished skip) and caches the row's stamp, so `expected` is only ever empty here for a brand-new
+     round, or right after that read failed twice / was denied. In the failure case the signal is the
+     problem: one more 4 s timeout before the 7 s RPC timeout only made the Finish tap wait longer for
+     a stamp it was never going to get. Skip the pre-read when the merge read just failed. */
+  const _mergeReadFailed = !!(parsed && parsed.__bgMergeReadOk === false);
+  if (!expected && !_mergeReadFailed) {
     try {
       if (supa && supaOnline) {
         const _q = await _promiseTimeout(supa.from('games').select('updated_at').eq('code', code).maybeSingle(), 4000, 'saveGameRpcAt');
@@ -21071,7 +21077,7 @@ async function _bgRecentMutate(mutate) {
     const v = await safeGet(KEY_RECENT, true);
     if (v) try { const a = JSON.parse(v); if (Array.isArray(a)) recent = a; } catch (e) {}
     let next = null;
-    try { next = await mutate(recent); } catch (e) { next = null; }
+    try { next = await mutate(recent); } catch (e) { next = null; try { console.warn('[BadGolf] recent-list mutator threw -- nothing written', e); } catch (e2) {} }   // v1811 (review R5)
     if (!Array.isArray(next)) return recent;
     await safeSet(KEY_RECENT, JSON.stringify(next), true);
     return next;
@@ -23539,12 +23545,24 @@ function bgSnapTeeLabels(game) {
    archiveScoresFromRound uses (uid -> email -> alias -> normalised name), decided once per card.
    A uid on the card is decisive both ways -- a card stamped with somebody else's account is
    never me, whatever the name says. `meName` is the caller's resolved name (getMeName). */
-function _bgRoundCardIsMe(p, meName) {
+function _bgRoundCardIsMe(p, meName, roster) {
   try {
     if (!p) return false;
     const _u = String((typeof _authUser !== 'undefined' && _authUser && _authUser.id) || '').trim();
     const _pu = String((p.uid || p.user_id) || '').trim();
-    if (_u && _pu) return _pu === _u;
+    if (_u && _pu && _pu === _u) return true;
+    /* v1811 (review R2): a card stamped with ANOTHER uid is only decisively not-me when the
+       roster actually holds that account -- that is exactly when the ladder below (uid ->
+       email -> alias -> name) resolves it to somebody else's row. A stale / mislinked uid on
+       my own card (an alias-merge survivor, a slot linked to the wrong account) that no roster
+       row carries falls through to the name test, the same way the archive's own lookup does,
+       so the deleted-round guard and the archive cannot disagree about who the card is. */
+    if (_u && _pu && _pu !== _u) {
+      try {
+        if (Array.isArray(roster) && roster.some(r => r && String((r.uid || r.user_id) || '').trim() === _pu)) return false;
+      } catch (e) {}
+      if (!Array.isArray(roster)) return false;   // no roster to consult: keep the strict reading
+    }
     const _em = String((typeof _authUser !== 'undefined' && _authUser && _authUser.email) || '').trim().toLowerCase();
     const _pe = String(p.email || '').trim().toLowerCase();
     if (_em && _pe && _pe.indexOf('@') > 0) return _pe === _em;
@@ -23839,7 +23857,7 @@ async function archiveScoresFromRound(g) {
        the roster match further down is by uid / email / alias / normalised name, so a card that
        carries my uid under a different spelling ("Tim" vs "Tim Payne") sailed past the guard and
        re-archived a round I had deleted. One resolver, same ladder, decided per card. */
-    const _pIsMe = _bgRoundCardIsMe(p, meName);
+    const _pIsMe = _bgRoundCardIsMe(p, meName, roster);   // v1811 (review R2): roster-aware uid test
     // A player who never entered a single hole still gets a MONEY-ONLY entry when
     // they won/lost units this round (a money-only participant whose scorecard
     // nobody filled in) — so their totals still reach Game history. Only when
@@ -40917,7 +40935,12 @@ function applySavedConfig(config) {
   // default even split.
   try { renderTeamPickers(); } catch (e) {}
   // Apply exclusivity rules in case Ryder Cup / Scramble was restored
-  if (typeof enforceTeamGameExclusivity === 'function') enforceTeamGameExclusivity();
+  // v1811 (audit R6): NOT called here on purpose. Before v1811 this line was a silent no-op (the function was nested
+  // inside init()). Now that it is hoisted it would run for real -- and it does not only lock, it UNTICKS: a launched
+  // Ryder Cup / Alt Shot day carries games.ryderCup plus the day's remapped pools, so restoring that config into the
+  // editor would strip the pools and the next Save would write the round without them. The toggle handler still
+  // enforces the rule the moment a user touches a checkbox; a saved config is shown as saved.
+  // (kept: typeof enforceTeamGameExclusivity === 'function' && enforceTeamGameExclusivity())
   // v1526 (Tyler, tournament Day games): "CTP should only show for par 3's not every
   // hole." refreshParHoleChips only ran from the CTP checkbox's change handler, so a
   // config restored with CTP already on -- the day-config path -- showed all 18.
@@ -56660,7 +56683,7 @@ function renderBoard() {
   if (p3greenie) {
     const div = document.createElement('div');
     div.className = 'game-result';
-    div.id = 'game-results-p3greenie';   // v870: repaint target for the field-wide Total/Tournament view
+    div.id = _grpPass ? 'game-results-p3greenie-grp' : 'game-results-p3greenie';   // v870: repaint target for the field-wide Total/Tournament view · v1811 (audit R7): the cart's own greenie card keeps its own id so the whole-field repaint never paints over it
     const cfg = g.games.p3greenie;
     const bfNote = (cfg.bfEnabled !== false) ? ` · Hero Tax ${cfg.bfValue}` : '';
     div.innerHTML = `<div class="head"><span class="lbl">⛳ Par 3 Greenie (${cfg.value}${bfNote})</span><span class="val">${p3greenie.events.length} event${p3greenie.events.length === 1 ? '' : 's'}</span></div>`;
@@ -66575,7 +66598,14 @@ async function loadRounds() {
               liveEntries.forEach(r => { if (r && r.code && r.finishedAt) _byCode[r.code] = r; });
               await _bgRecentMutate(list => {
                 let hit = false;
-                list.forEach(x => { const s = x && x.code && _byCode[x.code]; if (s) { Object.assign(x, s); hit = true; } });
+                list.forEach(x => {
+                  const s = x && x.code && _byCode[x.code]; if (!s) return;
+                  // v1811 (review R4): a row another writer already finished AND refreshed since our
+                  // snapshot is newer than the healed copy -- leave it; only a still-live row, or an
+                  // older finished one, takes the heal.
+                  if (x.finishedAt && (Number(x.updatedAt) || 0) > (Number(s.updatedAt) || 0)) return;
+                  Object.assign(x, s); hit = true;
+                });
                 return hit ? list : null;
               });
             } catch (e) {}
@@ -77986,19 +78016,30 @@ async function t2StartDay(dayId, dayNumber, opts) {
   // backdrop, three-nine picker closed) left _t2StartCtx set and the caller's disabled "▶ Start Day"
   // button dead until the next render. Resolve true once the launch ran, false when it was backed out.
   return new Promise((resolve, reject) => {
-    t2OpenCoursePicker({ allowSkip: false, cancelLabel: 'Cancel',
-      onCancel: () => { _t2StartCtx = null; resolve(false); },
-      onPick: async (cid) => {
-        _t2CourseCancelCb = null;
-        try {
-          if (cid && typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[cid]) {
-            const _combo = await t2PickNineCombo(cid);
-            if (!_combo) { _t2StartCtx = null; resolve(false); return; }
-            cid = _combo;
-          }
-          resolve(await t2LaunchDayRounds(cid));
-        } catch (e) { reject(e); }
-      } });
+    // v1811 (review R1): t2OpenCoursePicker is async and was not awaited -- if it rejected (course
+    // library / geolocation / render failure) neither callback ever ran and this Promise stayed
+    // pending: the Review-step "Start Day" button that awaits it stayed disabled for good. Settle
+    // exactly once; a late failure after a pick or a cancel is ignored.
+    let _settled = false;
+    const _res = (v) => { if (_settled) return; _settled = true; resolve(v); };
+    const _rej = (e) => { if (_settled) return; _settled = true; _t2StartCtx = null; reject(e); };
+    let _open = null;
+    try {
+      _open = t2OpenCoursePicker({ allowSkip: false, cancelLabel: 'Cancel',
+        onCancel: () => { _t2StartCtx = null; _res(false); },
+        onPick: async (cid) => {
+          _t2CourseCancelCb = null;
+          try {
+            if (cid && typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[cid]) {
+              const _combo = await t2PickNineCombo(cid);
+              if (!_combo) { _t2StartCtx = null; _res(false); return; }
+              cid = _combo;
+            }
+            _res(await t2LaunchDayRounds(cid));
+          } catch (e) { _rej(e); }
+        } });
+    } catch (e) { _rej(e); return; }
+    try { if (_open && typeof _open.catch === 'function') _open.catch(_rej); } catch (e) {}
   });
 }
 
