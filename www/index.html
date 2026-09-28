@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1809-->
+<!--BGVER=v2026.11.1810-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11436,7 +11436,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1809';
+const BG_BUILD = 'v2026.11.1810';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -12253,6 +12253,19 @@ async function signOutUser() {
   // flush it into the NEXT account's row.
   try { await flushDirtySingletons(); } catch (e) {}
   try { await _promiseTimeout(flushDirtyGames(), 8000, 'signOutFlush'); } catch (e) {}   // v1802 (M14): queued round writes too (resetSessionIdentity drops the queue)
+  /* v1810 (audit C4): M14 wipes the queue and every game:* blob below. Offline, the flush
+     returns at once, so a round that only exists on this phone was deleted by a one-tap
+     sign-out. Anything still queued now needs an explicit "lose it" from the user. */
+  try {
+    const _left = (typeof _dirtyGames === 'function') ? _dirtyGames().filter(Boolean) : [];
+    if (_left.length) {
+      const _n = _left.length;
+      const _ok = (typeof uiConfirm === 'function')
+        ? await uiConfirm(_n + ' round' + (_n === 1 ? ' has' : 's have') + " not reached the cloud yet (" + _left.join(', ') + "). Signing out now deletes " + (_n === 1 ? 'it' : 'them') + " from this phone. Get a signal and try again, or sign out and lose " + (_n === 1 ? 'it' : 'them') + "?", { title: 'Unsaved rounds', okLabel: 'Sign out anyway', cancelLabel: 'Stay signed in' })
+        : false;
+      if (_ok !== true) { try { showToast('Still signed in — your unsaved rounds are safe'); } catch (e) {} return; }
+    }
+  } catch (e) {}
   try { t2NotifUnsubscribe(); } catch (e) {}   // v986 (T34): otherwise the previous account keeps receiving that event's alerts
   try { await supa.auth.signOut(); } catch (e) {}
   _authUser = null; _authRole = 'guest';
@@ -20230,7 +20243,22 @@ function _mergeGameInto(local, cloud, opts) {
     const cfgFresh = state._configEditedAt && (Date.now() - state._configEditedAt < 60000);
     if (!cfgFresh) {
       if (Array.isArray(cloud.players) && Array.isArray(local.players)) {
-        local.players = local.players.map(lp => (cloud.players.find(p => p && p.id === lp.id) || lp));
+        local.players = local.players.map(lp => {
+          const cp = cloud.players.find(p => p && p.id === lp.id);
+          if (!cp) return lp;
+          /* v1810 (audit C3): the cloud copy replaced the local player object wholesale, so the
+             account stamp written by joinRoundByCode ("Yes, that's me") and the token burn in
+             bindAccountToSlot never reached the cloud -- the seat re-asked every time, an invite
+             link stayed claimable by a second account, and the v1809 participant pull rejected
+             the card (it needs players[].uid). Identity fields are additive: a value the cloud
+             row does not have yet rides along; a value it has is never overwritten here. */
+          try {
+            ['uid', 'email', 'puid', 'tokUsedBy', 'tokUsedAt'].forEach(k => {
+              if ((cp[k] == null || cp[k] === '') && lp[k] != null && lp[k] !== '') cp[k] = lp[k];
+            });
+          } catch (e) {}
+          return cp;
+        });
         cloud.players.forEach(cp => { if (cp && !(_rmPids && _rmPids.has(cp.id)) && !local.players.some(p => p && p.id === cp.id)) local.players.push(cp); });
       }
       // v1467: 'startHole' joins 'nineMode' here. Without it a second phone still
@@ -20401,14 +20429,38 @@ function _applyMyTouchedCells(incoming) {
         const ts = tf[pid]; if (!ts || !Array.isArray(pf[pid])) return;
         if (!incoming[field]) incoming[field] = {};
         if (!Array.isArray(incoming[field][pid])) incoming[field][pid] = pf[pid].slice();
-        ts.forEach(i => {
+        /* v1810 (audit C1): the re-assert below was unconditional and copied only the VALUE.
+           The in-memory touch set outlives the save (clearGameDirty drops the localStorage
+           mirror, not state._scoreTouch), so once another phone CORRECTED a cell I had tapped
+           earlier, its newer value arrived, I put my old one back over it, and -- because the
+           incoming row's cellAt (the other phone's newer stamp) was adopted wholesale -- my old
+           value now carried THEIR stamp. Equal stamps mean local-wins in _mergeGameArrays, so
+           every save from either phone flipped the cell, and whoever tapped Finish settled on
+           its own copy. The write merge has honoured the v1497 stamps since v1497; the receive
+           side now does too: a strictly newer stamp on the incoming cell wins and releases my
+           touch flag; otherwise my value is re-asserted WITH my stamp so the next write merge
+           sees the same recency the cloud will. */
+        const _lAt = (typeof _bgCellStamps === 'function') ? _bgCellStamps(prev, field, pid) : null;
+        const _cAt = (typeof _bgCellStamps === 'function') ? _bgCellStamps(incoming, field, pid) : null;
+        Array.from(ts).forEach(i => {
+          const _mine = (_lAt && _lAt[i]) || 0, _theirs = (_cAt && _cAt[i]) || 0;
+          if (_theirs > 0 && _mine > 0 && _theirs > _mine) { try { ts.delete(i); } catch (e) {} return; }   // a later edit elsewhere wins
           // v939: a concurrent write race (the other phone's save read the cloud
           // BEFORE my save landed) can wipe my cell from the cloud row. Re-assert
           // it locally (as before) AND queue a re-push so the cloud gets my cell
           // back within ~15s — before, the wipe stuck unless I happened to save again.
           if (incoming[field][pid][i] == null && pf[pid][i] != null) _wiped = true;
           incoming[field][pid][i] = pf[pid][i];
+          if (_mine > 0) {
+            try {
+              if (!incoming.cellAt) incoming.cellAt = {};
+              if (!incoming.cellAt[field]) incoming.cellAt[field] = {};
+              if (!Array.isArray(incoming.cellAt[field][pid])) incoming.cellAt[field][pid] = [];
+              if (!(incoming.cellAt[field][pid][i] > _mine)) incoming.cellAt[field][pid][i] = _mine;
+            } catch (e) {}
+          }
         });
+        try { if (typeof _bgTouchPersist === 'function') _bgTouchPersist(touch); } catch (e) {}
       });
     });
     // v1604: same protection for the greenie winner I just tapped. If the incoming
@@ -23502,7 +23554,7 @@ async function archiveScoresFromRound(g) {
             const _pk = g.code + '@' + g.finishedAt;
             if (!window._bgSettledPublished[_pk]) {
               window._bgSettledPublished[_pk] = 1;
-              Promise.resolve().then(() => saveGame(g)).catch(() => {
+              Promise.resolve().then(() => saveGame(g, { maintenance: true, deferRecent: true })).catch(() => {   // v1810 (audit C8): a background archive must not re-point "last opened" or add a friend's round to MY list
                 // let a later archive retry it — the figure is not lost, only unpublished
                 try { delete window._bgSettledPublished[_pk]; } catch (e) {}
               });
@@ -34160,7 +34212,6 @@ async function bgPullMyParticipantRounds() {
   try {
     if (!(typeof isSignedIn === 'function' && isSignedIn() && supa && _authUser && _authUser.id)) return 0;
     if (_bgPartPullUid === _authUser.id) return 0;
-    _bgPartPullUid = _authUser.id;
     const _me = _authUser.id;
     const { data, error } = await supa.from('games')
       .select('code,updated_at')
@@ -34169,7 +34220,9 @@ async function bgPullMyParticipantRounds() {
       .not('data->>finishedAt', 'is', null)
       .order('updated_at', { ascending: false })
       .limit(40);
-    if (error || !Array.isArray(data) || !data.length) return 0;
+    if (error || !Array.isArray(data)) return 0;      // v1810 (audit C11): an offline / failed read is retried by the next sign-in handler, not burned
+    _bgPartPullUid = _authUser.id;
+    if (!data.length) return 0;
     let recent = []; try { recent = (await getRecent()) || []; } catch (e) {}
     const have = new Set(recent.map(r => r && r.code).filter(Boolean));
     let hidden = []; try { hidden = getHiddenRounds() || []; } catch (e) {}
@@ -45876,7 +45929,9 @@ function bgT2PostHoleBirdies(g, hole) {
       else if (rel <= -3) { label = 'an ALBATROSS'; emoji = '\ud83e\udd85'; }
       else if (rel === -2) { label = 'an EAGLE'; emoji = '\ud83e\udd85'; }
       const body = emoji + ' ' + first + ' made ' + label + ' on #' + hole + '!';
-      if (typeof t2ChatPost === 'function') t2ChatPost(g.t2.tournamentId, { kind: 'system', event: 'birdie', body: body });
+      // v1810 (audit D3): a deterministic id, so two phones that both complete the hole (bracket
+      // rounds, director + scorekeeper) post ONE message -- t2ChatPost's union dedupes on id.
+      if (typeof t2ChatPost === 'function') t2ChatPost(g.t2.tournamentId, { id: 'bird:' + key, kind: 'system', event: 'birdie', body: body });
     });
   } catch (e) {}
 }
@@ -48767,7 +48822,10 @@ function calcStroke(g) {
   // Units is initialized for everyone but only participants get charged the entry
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
-  if (completed.length < 2) {
+  // v1810 (audit): while the round is LIVE the pool paid as soon as any two participants had
+  // 18 holes in -- a player with one blank box saw the board settle without him. Live now
+  // waits for the whole field; a finished (shortened) round settles among those who played it.
+  if (completed.length < 2 || (!g.finishedAt && completed.length < participants.length)) {
     return { winners: [], money, pot: cfg.buyin * participants.length, complete: false, winShare: 0 };
   }
   // v821 (Tyler): per-game handicap allowance for the prize pool's NET award only. Each
@@ -49328,7 +49386,10 @@ function calcVegas(g) {
       // the trailing score, so a pair of 10 and 12 came out 130 instead of 1210 —
       // a nonsense team score the whole hole was then settled on. The flip branch
       // below already uses the correct ×100 form (10 and 12 → 1012); match it.
-      if (hi >= 10) return (lo >= 10) ? (hi * 100 + lo) : (hi * 10 + lo); // 4 and 10 → 104; 10 and 12 → 1210
+      // v1810 (audit): two 10+ scores pair LOW-first (10 and 12 → 1012) like any other pair; the flip
+      // branches below put the high one first (1210). Before, this returned 1210 and the flip
+      // returned 1012 -- a birdie flip LOWERED the flipped team's number by 198.
+      if (hi >= 10) return (lo >= 10) ? (lo * 100 + hi) : (hi * 10 + lo); // 4 and 10 → 104; 10 and 12 → 1012
       return lo * 10 + hi;
     }
 
@@ -49386,7 +49447,7 @@ function calcVegas(g) {
       // v973 (Tyler code review): the flip was skipped entirely when the opponent
       // pair contained a 10+, yet flipNote below still said "flipped". pairScores
       // puts a 10+ FIRST (10 and 6 -> 106), so its flip is low-first: 610.
-      bTeamScore = (hi < 10) ? (hi * 10 + lo) : (lo * 100 + hi);
+      bTeamScore = (hi < 10) ? (hi * 10 + lo) : ((lo >= 10) ? (hi * 100 + lo) : (lo * 100 + hi));   // v1810: 10+12 flips to 1210
       if (aTier > 1) multiplier *= aTier;
       flipNote = teamA.map(p => p.name).join(' & ') + (aEagles ? (aEagles >= 2 ? ' eagled multiple — flipped + ' + aTier + 'x' : ' eagled — flipped + 2x') : (aBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
     } else if (bTier > 0 && aTier === 0) {
@@ -49394,7 +49455,7 @@ function calcVegas(g) {
       const lo = Math.min(aScores[0], aScores[1]);
       const hi = Math.max(aScores[0], aScores[1]);
       // v973: see above — flip must still apply when the pair contains a 10+.
-      aTeamScore = (hi < 10) ? (hi * 10 + lo) : (lo * 100 + hi);
+      aTeamScore = (hi < 10) ? (hi * 10 + lo) : ((lo >= 10) ? (hi * 100 + lo) : (lo * 100 + hi));   // v1810: 10+12 flips to 1210
       if (bTier > 1) multiplier *= bTier;
       flipNote = teamB.map(p => p.name).join(' & ') + (bEagles ? (bEagles >= 2 ? ' eagled multiple — flipped + ' + bTier + 'x' : ' eagled — flipped + 2x') : (bBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
     } else if (aTier > 0 && bTier > 0) {
@@ -49552,7 +49613,10 @@ function calcDynamicVegas(g) {
     function pairScores(s1, s2) {
       const lo = Math.min(s1, s2), hi = Math.max(s1, s2);
       // v983: see calcVegas — `hi * 10 + lo` mangles a pair of 10 and 12 into 130.
-      if (hi >= 10) return (lo >= 10) ? (hi * 100 + lo) : (hi * 10 + lo); // 4 and 10 → 104; 10 and 12 → 1210
+      // v1810 (audit): two 10+ scores pair LOW-first (10 and 12 → 1012) like any other pair; the flip
+      // branches below put the high one first (1210). Before, this returned 1210 and the flip
+      // returned 1012 -- a birdie flip LOWERED the flipped team's number by 198.
+      if (hi >= 10) return (lo >= 10) ? (lo * 100 + hi) : (hi * 10 + lo); // 4 and 10 → 104; 10 and 12 → 1012
       return lo * 10 + hi;
     }
 
@@ -49594,14 +49658,14 @@ function calcDynamicVegas(g) {
       // v973 (Tyler code review): the flip was skipped entirely when the opponent
       // pair contained a 10+, yet flipNote below still said "flipped". pairScores
       // puts a 10+ FIRST (10 and 6 -> 106), so its flip is low-first: 610.
-      bTeamScore = (hi < 10) ? (hi * 10 + lo) : (lo * 100 + hi);
+      bTeamScore = (hi < 10) ? (hi * 10 + lo) : ((lo >= 10) ? (hi * 100 + lo) : (lo * 100 + hi));   // v1810: 10+12 flips to 1210
       if (aTier > 1) multiplier *= aTier;
       flipNote = teamA.map(p => p.name).join(' & ') + (aEagles ? (aEagles >= 2 ? ' eagled multiple — flipped + ' + aTier + 'x' : ' eagled — flipped + 2x') : (aBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
     } else if (bTier > 0 && aTier === 0) {
       const lo = Math.min(aScores[0], aScores[1]);
       const hi = Math.max(aScores[0], aScores[1]);
       // v973: see above — flip must still apply when the pair contains a 10+.
-      aTeamScore = (hi < 10) ? (hi * 10 + lo) : (lo * 100 + hi);
+      aTeamScore = (hi < 10) ? (hi * 10 + lo) : ((lo >= 10) ? (hi * 100 + lo) : (lo * 100 + hi));   // v1810: 10+12 flips to 1210
       if (bTier > 1) multiplier *= bTier;
       flipNote = teamB.map(p => p.name).join(' & ') + (bEagles ? (bEagles >= 2 ? ' eagled multiple — flipped + ' + bTier + 'x' : ' eagled — flipped + 2x') : (bBirdies >= 2 ? ' double-birdied — flipped + 2x' : ' birdied — flipped'));
     } else if (aTier > 0 && bTier > 0) {
@@ -50810,8 +50874,10 @@ function calcTeamMatch(g) {
   let played = 0;
   let complete = true;
   const holes = [];
+  // v1810 (audit L2): a nine walked holes 10-18 too, so `complete` stayed false and no money showed until Finish. Same guard calcShamble has.
+  const _rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
 
-  for (let h = 0; h < 18; h++) {
+  for (let h = 0; h < _rh; h++) {
     const aScores = teamA.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
@@ -50960,8 +51026,10 @@ function calcComboScore(g) {
      hole is only meaningful once every player on both sides has a score, which is
      the same rule the totals use. */
   const holes = {};
+  // v1810 (audit L2): a nine walked holes 10-18 too, so `complete` stayed false and no money showed until Finish. Same guard calcShamble has.
+  const _rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
 
-  for (let h = 0; h < 18; h++) {
+  for (let h = 0; h < _rh; h++) {
     const aScores = teamA.map(p => hole(p, h));
     const bScores = teamB.map(p => hole(p, h));
     const aVals = aScores.filter(s => s !== null), bVals = bScores.filter(s => s !== null);
@@ -51019,8 +51087,10 @@ function calcTeamLowball(g) {
   let aTotal = 0, bTotal = 0;
   let complete = true;
   let played = 0;
+  // v1810 (audit L2): a nine walked holes 10-18 too, so `complete` stayed false and no money showed until Finish. Same guard calcShamble has.
+  const _rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
 
-  for (let h = 0; h < 18; h++) {
+  for (let h = 0; h < _rh; h++) {
     const aScores = teamA.map(p => {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return null;
@@ -62331,6 +62401,17 @@ async function ensureMyNameSet() {
 // the right player.
 function findMyRosterPlayer(roster, me) {
   if (!Array.isArray(roster)) return null;
+  /* v1810 (audit C6): archiveScoresFromRound resolves my row uid-first and mints a uid-stamped
+     entry when nothing matches, but every "me" reader came through here with only email + name
+     paths -- a round archived under a uid-only row (a nickname on the card) was invisible to
+     Stats, the handicap and the player_stats sync. Same order as the archive: uid, email, name. */
+  try {
+    const _uid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) ? String(_authUser.id) : '';
+    if (_uid) {
+      const byUid = roster.find(x => x && x.uid && String(x.uid) === _uid);
+      if (byUid) return byUid;
+    }
+  } catch (e) {}
   // v943: resolve "me" by EMAIL FIRST. The name path below is what let one account
   // land on a different person's player when two people share a name — the exact
   // failure behind the Paul Kim / Paul Renner crossover. The account's email is the
@@ -67519,7 +67600,11 @@ async function deleteRecentGame(code) {
   // zero rows and raises NO error — it vanished from their phone and quietly
   // stayed in the cloud, which is what kept feeding "Live now". Ask for the
   // deleted rows back so we can tell the difference, and say so plainly.
-  let _cloudGone = true;
+  /* v1810 (audit C2): this started TRUE and only turned false inside the online branch, so an
+     Abandon / "Throw away round" tapped OFFLINE never attempted the delete and still wrote the
+     GLOBAL tombstone -- hiding the host's live round from every player once the queued
+     tombstone flushed. Start false; the round is "gone everywhere" only when the cloud says so. */
+  let _cloudGone = false;
   let _delErr = null;
   try {
     if (!supaReady) await initSupabase();
@@ -67530,6 +67615,7 @@ async function deleteRecentGame(code) {
         console.warn('game delete removed 0 rows (not the host?)', code);
         _cloudGone = false;
       }
+      else _cloudGone = true;
     }
   } catch (e) {
     console.warn('Supabase game delete failed:', e);
@@ -80311,10 +80397,15 @@ async function t2LaunchDayRounds(courseId) {
      without a link is matched to a Bad Golf account by exact name (the same resolver the Add a
      player picker uses) and the link is saved back to the event. */
   try {
+    // v1810 (audit D1): an account already on the roster (picked, or linked a moment ago) is never
+    // stamped onto a second, same-named "Add anyway" row -- that gave one player two scorecards
+    // and left the guest's seat unclaimable. Same guard _t2LinkNameOnlySlots already has.
+    const _takenUids = new Set(players.map(x => x && x.user_id).filter(Boolean));
     for (const _tp of players) {
       if (!_tp || _tp.user_id || !_tp.display_name) continue;
       let _u = null; try { _u = await t2ResolveUserIdByName(_tp.display_name); } catch (e) {}
-      if (!_u) continue;
+      if (!_u || _takenUids.has(_u)) continue;
+      _takenUids.add(_u);
       _tp.user_id = _u;
       try { await supa.from('tournament_players').update({ user_id: _u }).eq('id', _tp.id).is('user_id', null); } catch (e) {}
     }
@@ -80621,7 +80712,7 @@ async function t2LaunchDayRounds(courseId) {
       supa.from('tournaments').update({ status: 'live' }).eq('id', t.id).then(function () {}, function () {});
     }
   } catch (e) {}
-  await t2SetDayStatus(ctx.dayId, 'active');
+  if (made > 0 || _lostGroups > 0) await t2SetDayStatus(ctx.dayId, 'active');   // v1810 (audit D2): same gate as the event status -- a launch that created nothing must not lock the carts ("This day is already underway")
   // v986 (T26): the in-flight guard was only ever cleared by its own 15s timer,
   // so a fast second launch of the NEXT day was refused for the rest of that
   // window. Clear it on the success path.
@@ -108048,6 +108139,7 @@ async function init() {
     // v1242: identity gate — see bgJoinIdentityGate above. Finished rounds skip it
     // (they open read-only anyway); an account with no player name yet skips it
     // (the v1041 identity chain is still naming/matching them).
+    let _bgSeatStamped = false;   // v1810 (audit C3): "Yes, that's me" must reach the cloud even on a rejoin
     try {
       let _gateMe = null; try { _gateMe = await getMeName(); } catch (e) {}
       const _gateMeN = _gateMe ? normalizeNameSegment(String(_gateMe)) : '';
@@ -108088,7 +108180,7 @@ async function init() {
               ? await uiConfirm('Save the seat "' + String(_gateSelf.name || '') + '" to your account? Next time this round will recognise you without asking.', { title: 'That’s you?', okLabel: 'Yes, that’s me', cancelLabel: 'Not now', danger: false })
               : false;
           } catch (e) { _claim = false; }
-          if (_claim === true) _gateSelf.uid = _myUid;
+          if (_claim === true) { _gateSelf.uid = _myUid; _bgSeatStamped = true; }
         }
       } catch (e) {}
       if (_gateMeN && !_gateIn && !g.finishedAt) {
@@ -108125,7 +108217,7 @@ async function init() {
         if (Array.isArray(g.declinedBy) && g.declinedBy.some(n => normalizeNameSegment(n) === _meN)) { g.declinedBy = g.declinedBy.filter(n => normalizeNameSegment(n) !== _meN); _dirty = true; }
         if (!Array.isArray(g.acceptedBy)) g.acceptedBy = [];
         if (!g.acceptedBy.some(n => normalizeNameSegment(n) === _meN)) { g.acceptedBy.push(_me); _dirty = true; }
-        if (_dirty) await saveGame(g);
+        if (_dirty || _bgSeatStamped) await saveGame(g);
       }
     } catch (e) {}
     // v1245 (security 0.1, Phase B): record me as a PARTICIPANT of this round,
