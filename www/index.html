@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1810-->
+<!--BGVER=v2026.11.1811-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11436,7 +11436,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1810';
+const BG_BUILD = 'v2026.11.1811';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -12180,6 +12180,7 @@ function resetSessionIdentity() {
     window._avatarHealedOnce = false;
     window._statsSyncedOnce = false;
     window._hcpSnapOnce = false;
+    window._notifPrefsWired = false;   // v1811 (audit D9): re-read the Settings push checkboxes for the next account on this launch
   } catch (e) {}
   // v935: drop the 60s social caches so a new account never sees the prior account's friend graph.
   try { _bgSocialCacheBust(); } catch (e) {}
@@ -12212,7 +12213,8 @@ function resetSessionIdentity() {
   });
   try { if (typeof _persistDirty === 'function') _persistDirty(); } catch (e) {}
   try { _tombCache = null; } catch (e) {}
-  try { if (typeof _recentCache !== 'undefined') _recentCache = null; } catch (e) {}
+  // v1811 (audit static §8): the `_recentCache = null` line that sat here was typeof-guarded against a
+  // variable that does not exist anywhere in the script -- a silent no-op, removed.
   // v1794 (Tyler, 9/25: "I signed out, signed in as a new user and now I see my old
   // profile pic ... and all my round info"). More of the previous account survived the
   // switch: the last-opened round, home course, badges, Pro flag, inbox/invite seen-marks,
@@ -12846,6 +12848,19 @@ async function crSendReply(row, text, status) {
     const entry = { at: Date.now(), by: (_authUser && _authUser.id) || null, by_name: me || 'Bad Golf', text: msg.slice(0, 1000), status: status || (row.status || 'open') };
     const { error } = await supa.from('course_requests').update({ replies: cur.concat([entry]) }).eq('id', row.id);
     if (error) { try { showToast(error.message || 'Could not save the reply'); } catch (e) {} return false; }
+    // v1811 (audit D10): read-modify-write -- two admins answering the same request inside one round trip
+    // lose a reply (no array-append RPC on this table). Re-read once: if our entry is not on the row,
+    // somebody else's write landed after our read; merge onto THEIR array and write once more.
+    try {
+      const _same = (r) => !!(r && r.at === entry.at && r.by === entry.by && r.text === entry.text);
+      const _rr = await supa.from('course_requests').select('replies').eq('id', row.id).maybeSingle();
+      const _now = (_rr && _rr.data && Array.isArray(_rr.data.replies)) ? _rr.data.replies : null;
+      if (_now && !_now.some(_same)) {
+        const _merged = _now.concat(cur.filter(c => !_now.some(n => n && c && n.at === c.at && n.by === c.by && n.text === c.text)), [entry]);
+        const _r2 = await supa.from('course_requests').update({ replies: _merged }).eq('id', row.id);
+        if (_r2 && _r2.error) { try { console.warn('crSendReply: merge retry failed', _r2.error); } catch (e) {} }
+      }
+    } catch (e) {}
     if (row.requester_id) {
       const nm = row.course_name || 'your course';
       const title = status === 'resolved' ? (row.type === 'remap' ? 'Course re-mapped ✅' : 'Your course is ready ⛳') : (status === 'rejected' ? 'About your course request' : 'Bad Golf team replied');
@@ -17809,14 +17824,21 @@ var BG_LS_PROTECTED = ['golf:player-roster', 'golf:roster-tombstones', 'golf:hid
 // and were never bounded -- every round ever opened on the device stayed cached. The
 // candidates: finished, not on the dirty queue, not the last-opened round, not the
 // round on screen, and not in the Rounds list cache. Newest first.
+// v1811 (audit C13): the codes no prune may touch -- shared by the finished and the stale-unfinished passes.
+function _bgGameBlobKeep() {
+  var keep = {};
+  try { (JSON.parse(localStorage.getItem(KEY_RECENT) || '[]') || []).forEach(function (r) { if (r && r.code) keep[r.code] = 1; }); } catch (e) {}
+  try { (typeof _dirtyGames === 'function' ? _dirtyGames() : []).forEach(function (c) { if (c) keep[c] = 1; }); } catch (e) {}
+  try { var last = localStorage.getItem(KEY_LAST); if (last) keep[last] = 1; } catch (e) {}
+  try { if (typeof state !== 'undefined' && state && state.game && state.game.code) keep[state.game.code] = 1; } catch (e) {}
+  try { Object.keys(_bgPendingSave || {}).forEach(function (c) { if (c) keep[c] = 1; }); } catch (e) {}
+  try { Object.keys(_bgSaveInFlight || {}).forEach(function (c) { if (c) keep[c] = 1; }); } catch (e) {}
+  return keep;
+}
 function _bgFinishedGameBlobs(keepKey) {
   var out = [];
   try {
-    var keep = {};
-    try { (JSON.parse(localStorage.getItem(KEY_RECENT) || '[]') || []).forEach(function (r) { if (r && r.code) keep[r.code] = 1; }); } catch (e) {}
-    try { (typeof _dirtyGames === 'function' ? _dirtyGames() : []).forEach(function (c) { if (c) keep[c] = 1; }); } catch (e) {}
-    try { var last = localStorage.getItem(KEY_LAST); if (last) keep[last] = 1; } catch (e) {}
-    try { if (typeof state !== 'undefined' && state && state.game && state.game.code) keep[state.game.code] = 1; } catch (e) {}
+    var keep = _bgGameBlobKeep();   // v1811 (audit C13): one keep-list for every blob prune
     for (var i = 0; i < localStorage.length; i++) {
       var k = localStorage.key(i);
       if (!k || k === keepKey || k.indexOf('game:') !== 0) continue;
@@ -17838,6 +17860,63 @@ function _bgPruneFinishedGameBlobs() {
     _bgFinishedGameBlobs().forEach(function (f, idx) {
       if (f.fin < cutoff || idx >= 20) { try { localStorage.removeItem(f.k); n++; } catch (e) {} }
     });
+    /* v1811 (audit C13): a round that never finished (abandoned, a friend's round opened once,
+       a spectated round) was kept forever -- the pass above only looked at finishedAt. A blob
+       that is on nobody's list (not in the Rounds cache, not dirty, no pending save, not
+       last-opened, not on screen) and untouched for 30 days is re-fetchable from its row and
+       goes. A blob with no stamp at all is left alone -- nothing proves it is stale. */
+    var keep = _bgGameBlobKeep(), stale = [];
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (!k || k.indexOf('game:') !== 0) continue;
+      var code = k.slice(5); if (!code || keep[code]) continue;
+      try {
+        var b = JSON.parse(localStorage.getItem(k) || 'null');
+        if (!b || b.finishedAt) continue;   // finished blobs were judged above
+        var at = Number(b.updatedAt || b.createdAt || 0);
+        if (at > 0 && at < cutoff) stale.push(k);
+      } catch (e) {}
+    }
+    stale.forEach(function (k) { try { localStorage.removeItem(k); n++; } catch (e) {} });
+  } catch (e) {}
+  try { n += _bgPruneSmallPerCodeKeys(); } catch (e) {}
+  return n;
+}
+// v1811 (audit C13): the tiny per-code / per-event keys were only ever cleared by
+// resetSessionIdentity. Same boot pass: a stamp-carrying family goes by age, a display-pref
+// family goes when its round blob is gone (or past a count, the way the GPS caches do).
+function _bgPruneSmallPerCodeKeys() {
+  var n = 0;
+  try {
+    var now = Date.now(), old = now - 30 * 24 * 60 * 60 * 1000;
+    var keep = _bgGameBlobKeep();
+    var keys = []; for (var i = 0; i < localStorage.length; i++) { var k0 = localStorage.key(i); if (k0) keys.push(k0); }
+    var hasBlob = function (code) { try { return !!code && (keep[code] || localStorage.getItem('game:' + code) != null); } catch (e) { return true; } };
+    var drop = function (k) { try { localStorage.removeItem(k); n++; } catch (e) {} };
+    var scv = [], evs = [];
+    keys.forEach(function (k) {
+      try {
+        if (k.indexOf('golf:draft:pars:') === 0) {          // same 12 h rule the editor applies when reopened
+          var d = JSON.parse(localStorage.getItem(k) || 'null');
+          if (d && d.t && (now - Number(d.t)) > 12 * 60 * 60 * 1000) drop(k);
+        } else if (k.indexOf('golf:betalert:') === 0) {     // value = when it last fired; the once-a-day rule needs 24 h
+          var t = Number(localStorage.getItem(k) || 0);
+          if (!t || t < old) drop(k);
+        } else if (k.indexOf('golf:adminfix:') === 0) {     // value = the fix stamp applied; the blob is gone or the fix is a month old
+          var code = k.slice('golf:adminfix:'.length), at = Number(localStorage.getItem(k) || 0);
+          if (!hasBlob(code) || (at > 0 && at < old)) drop(k);
+        } else if (k.indexOf('golf:score-touch:') === 0) {  // v1811 (audit C14) keeps the LIVE round's mirror; an orphan (no blob, not dirty) goes
+          var c2 = k.slice('golf:score-touch:'.length);
+          if (!hasBlob(c2)) drop(k);
+        } else if (k.indexOf('golf:scview:') === 0) {
+          if (!hasBlob(k.slice('golf:scview:'.length))) drop(k); else scv.push(k);
+        } else if (k.indexOf('golf:evscview:') === 0) {
+          evs.push(k);
+        }
+      } catch (e) {}
+    });
+    if (scv.length > 100) scv.slice(0, scv.length - 100).forEach(drop);
+    if (evs.length > 100) evs.slice(0, evs.length - 100).forEach(drop);
   } catch (e) {}
   return n;
 }
@@ -18711,6 +18790,7 @@ async function safeSet(key, value, shared, opts) {
   // Shared keys: also push to Supabase
   if (key.startsWith('game:')) {
     const code = key.slice(5);
+    try { _bgSaveInFlight[code] = (_bgSaveInFlight[code] || 0) + 1; } catch (e) {}   // v1811 (audit C5): an incoming row merges, not replaces, while this save is out
     try {
       if (!supaReady) await initSupabase();
       if (supa && supaOnline) {
@@ -18727,6 +18807,7 @@ async function safeSet(key, value, shared, opts) {
         // which must land immediately) keep the old direct-write path.
         if (parsed && parsed.__bgMergeReadOk === false && Array.isArray(parsed.players) && parsed.players.length > 1 && !parsed.finishedAt) {
           markGameDirty(code); updateSyncIndicator(false);
+          _bgSaveInFlightDone(code);   // v1811 (audit C5)
           return _lsOk;
         }
         try {
@@ -18761,6 +18842,7 @@ async function safeSet(key, value, shared, opts) {
       console.warn('Supabase write error:', e);
       markGameDirty(code); updateSyncIndicator(false);
     }
+    _bgSaveInFlightDone(code);   // v1811 (audit C5)
     // v970: true only if the round actually landed SOMEWHERE (local cache or cloud).
     // Offline is still "true" — the local copy is real and flushDirtyGames pushes it.
     return (_lsOk || _cloudOk);
@@ -20302,7 +20384,14 @@ function _mergeGameInto(local, cloud, opts) {
 function _bgAdoptIncomingGame(code, incoming) {
   try {
     if (!code || !incoming) return incoming;
-    if (_dirtyGames().indexOf(code) < 0) return incoming;
+    /* v1811 (audit C5): a round with a save still inside the 400 ms debounce, or one whose
+       save is out on the wire, is not on the dirty queue -- yet its junkData / banker press /
+       wolf pick / holeDoneAt made in that window exist only on this phone. Adopting the row
+       wholesale threw them away and flushPendingSave then saved the replaced object. Merge
+       exactly as the dirty case does; the pending save pushes the union a moment later. */
+    let _ahead = false;
+    try { _ahead = !!(_bgPendingSave[code] || (_bgSaveInFlight[code] > 0)); } catch (e) { _ahead = false; }
+    if (!_ahead && _dirtyGames().indexOf(code) < 0) return incoming;
     let local = null;
     try { if (state.game && state.game.code === code) local = JSON.parse(JSON.stringify(state.game)); } catch (e) { local = null; }
     if (!local) { try { const v = localStorage.getItem('game:' + code); local = v ? JSON.parse(v) : null; } catch (e) { local = null; } }
@@ -20513,7 +20602,15 @@ function markGameDirty(code) {
 function clearGameDirty(code) {
   try { const a = _dirtyGames(); const i = a.indexOf(code); if (i >= 0) { a.splice(i, 1); _dirtyGamesSave(a); } } catch (e) {}
   try { const m = _dirtySince(); if (m[code]) { delete m[code]; _dirtySinceSave(m); } } catch (e) {}
-  try { if (code) localStorage.removeItem('golf:score-touch:' + code); } catch (e) {}
+  /* v1811 (audit C14): this ran on EVERY successful save, so after a reload the restored touch
+     set for the round still on screen was empty and "my cells win" stopped protecting it. The
+     live, unfinished round keeps its mirror (the boot prune drops an orphan once its blob is
+     gone); any other code's mirror, and a finished round's, is removed as before. */
+  try {
+    var _live = false;
+    try { _live = !!(typeof state !== 'undefined' && state && state.game && state.game.code === code && !state.game.finishedAt); } catch (e) { _live = false; }
+    if (code && !_live) localStorage.removeItem('golf:score-touch:' + code);
+  } catch (e) {}
   try { bgRenderSyncWarning(); } catch (e) {}
 }
 // v1804: one bg_save_game round-trip (plus at most one retry after a conflict).
@@ -20528,6 +20625,21 @@ function clearGameDirty(code) {
 async function _bgSaveGameRpc(code, parsed, opts, tag) {
   let expected = null;
   try { expected = _bgGameRowAt[code] ? new Date(_bgGameRowAt[code]).toISOString() : null; } catch (e) { expected = null; }
+  /* v1811 (audit C12): no stamp on hand (merge read skipped on a solo / finished round, or the
+     row only ever came in via the Home feed) meant p_expected_at = null -- a blind overwrite of
+     whatever the row holds now. One cheap read of the stamp first; a missing row keeps null
+     (that is an insert), and a failed read changes nothing about today's behaviour. */
+  if (!expected) {
+    try {
+      if (supa && supaOnline) {
+        const _q = await _promiseTimeout(supa.from('games').select('updated_at').eq('code', code).maybeSingle(), 4000, 'saveGameRpcAt');
+        if (_q && !_q.error && _q.data && _q.data.updated_at) {
+          expected = _q.data.updated_at;
+          try { _bgGameRowAt[code] = _bgIsoMs(_q.data.updated_at); } catch (e) {}
+        }
+      }
+    } catch (e) { /* stay null, exactly as before */ }
+  }
   for (let attempt = 0; attempt < 2; attempt++) {
     let r = null;
     try {
@@ -20850,6 +20962,9 @@ function bgFillBlankPutts(g) {
 // its save: the only follow-ups are bgHoleCompleteAutoSave (which is a saveGame itself) and the
 // 20 s T2 birdie post (which reads state.game).
 const _bgPendingSave = {};
+// v1811 (audit C5): saves out on the wire, per code (safeSet increments, _bgSaveInFlightDone decrements).
+const _bgSaveInFlight = {};
+function _bgSaveInFlightDone(code) { try { if (code && _bgSaveInFlight[code] > 0) _bgSaveInFlight[code]--; if (code && !(_bgSaveInFlight[code] > 0)) delete _bgSaveInFlight[code]; } catch (e) {} }
 function _bgScheduleSave(g) {
   try {
     if (!g || !g.code) return;
@@ -20940,35 +21055,63 @@ function migrateLegacyData(g) {
   }
 }
 
+/* v1811 (audit C7): ONE writer at a time for the Rounds list. addToRecent (participant pull,
+   discover, every save), healRecentScoreLines and the Rounds-tab live-row verify all did
+   read -> modify -> safeSet on KEY_RECENT with nothing between them, and the two heals wrote
+   a snapshot taken seconds (and up to 8 loadGame round-trips) earlier -- so a round the pull
+   had just added was dropped from the list, locally and in the cloud, until the next sign-in.
+   Every writer now queues on this chain and gets a FRESH copy of the list to patch; the
+   mutator returns the new array, or null for "nothing to write". Same shape as
+   _singletonInFlight, but for writes. */
+let _bgRecentChain = Promise.resolve();
+async function _bgRecentMutate(mutate) {
+  const run = async () => {
+    let recent = [];
+    try { await migrateRecentToPerUser(); } catch (e) {}   // v945: seed recent:<uid> before first use
+    const v = await safeGet(KEY_RECENT, true);
+    if (v) try { const a = JSON.parse(v); if (Array.isArray(a)) recent = a; } catch (e) {}
+    let next = null;
+    try { next = await mutate(recent); } catch (e) { next = null; }
+    if (!Array.isArray(next)) return recent;
+    await safeSet(KEY_RECENT, JSON.stringify(next), true);
+    return next;
+  };
+  const p = _bgRecentChain.then(run, run);
+  _bgRecentChain = p.then(() => {}, () => {});
+  return p;
+}
 async function addToRecent(game) {
-  let recent = [];
-  try { await migrateRecentToPerUser(); } catch (e) {}   // v945: seed recent:<uid> before first use
-  const v = await safeGet(KEY_RECENT, true);
-  if (v) try { recent = JSON.parse(v); } catch (e) {}
-  const prevEntry = recent.find(g => g.code === game.code);
-  recent = recent.filter(g => g.code !== game.code);
   // Per-player gross for the Rounds list description (e.g. "Tyler 79 · Steve 82").
   // First names only so it fits a mobile row; players with no holes entered yet
   // are skipped. Falls back to the names string for older records without this.
   let scoreLine = '';
   try { scoreLine = grossScoreLineFor(game); } catch (e) {}
-  recent.unshift({
-    code: game.code,
-    course: game.course || 'Untitled course',
-    players: game.players.map(p => p.name).join(', '),
-    scoreLine: scoreLine,
-    createdBy: game.createdBy || null,
-    // Stable "played on" date for the Rounds list. updatedAt bumps on every save
-    // (which made a re-touched round's date crawl forward to "today"); createdAt is
-    // fixed at round creation. Preserve a prior entry's date so older rounds settle.
-    createdAt: game.createdAt || (prevEntry && (prevEntry.createdAt || prevEntry.updatedAt)) || game.updatedAt,
-    updatedAt: game.updatedAt,
-    finishedAt: game.finishedAt || null, // lets the Rounds tab show LIVE vs complete
-    t2: game.t2 || null,                 // mark tournament rounds so they don't show under "Scheduled Rounds"
-    lg: (game.lg && game.lg.sid) ? { sid: game.lg.sid } : null   // v1660: league marker for the Rounds tab sections
+  // v1811 (audit A, LOW): the account ids on the card, so recentRowHasName can recognise
+  // my own round by uid before it falls back to the name test (a renamed / mislinked
+  // account still sees its rounds). Small -- a handful of strings per row.
+  let uids = [];
+  try { uids = (game.players || []).map(p => p && p.uid).filter(Boolean); } catch (e) { uids = []; }
+  const recent = await _bgRecentMutate(list => {   // v1811 (audit C7): patch the FRESH list
+    const prevEntry = list.find(g => g && g.code === game.code);
+    list = list.filter(g => g && g.code !== game.code);
+    list.unshift({
+      code: game.code,
+      course: game.course || 'Untitled course',
+      players: game.players.map(p => p.name).join(', '),
+      scoreLine: scoreLine,
+      createdBy: game.createdBy || null,
+      uids: uids,
+      // Stable "played on" date for the Rounds list. updatedAt bumps on every save
+      // (which made a re-touched round's date crawl forward to "today"); createdAt is
+      // fixed at round creation. Preserve a prior entry's date so older rounds settle.
+      createdAt: game.createdAt || (prevEntry && (prevEntry.createdAt || prevEntry.updatedAt)) || game.updatedAt,
+      updatedAt: game.updatedAt,
+      finishedAt: game.finishedAt || null, // lets the Rounds tab show LIVE vs complete
+      t2: game.t2 || null,                 // mark tournament rounds so they don't show under "Scheduled Rounds"
+      lg: (game.lg && game.lg.sid) ? { sid: game.lg.sid } : null   // v1660: league marker for the Rounds tab sections
+    });
+    return list.slice(0, 50);
   });
-  recent = recent.slice(0, 50);
-  await safeSet(KEY_RECENT, JSON.stringify(recent), true);
   try { await _mirrorRecentToLegacy(recent); } catch (e) {}   // v945 transitional
 }
 
@@ -21114,15 +21257,26 @@ async function healRecentScoreLines() {
     }).slice(0, 8);
     if (!suspects.length) return false;
     let changed = false;
+    const _lines = {};   // v1811 (audit C7): code -> healed line, applied to a FRESH list below
     for (const r of suspects) {
       try {
         const g = await loadGame(r.code);
         if (!g || !Array.isArray(g.players) || !g.scores) continue;
         const line = grossScoreLineFor(g);
-        if (line && line !== r.scoreLine) { r.scoreLine = line; changed = true; }
+        if (line && line !== r.scoreLine) { r.scoreLine = line; _lines[r.code] = line; changed = true; }
       } catch (e) {}
     }
-    if (changed) { try { await safeSet(KEY_RECENT, JSON.stringify(recent), true); } catch (e) {} }
+    /* v1811 (audit C7): `recent` was read before up to 8 loadGame round-trips; writing it back
+       dropped any round addToRecent put on the list meanwhile. Patch the current list instead. */
+    if (changed) {
+      try {
+        await _bgRecentMutate(list => {
+          let hit = false;
+          list.forEach(x => { if (x && x.code && _lines[x.code] && x.scoreLine !== _lines[x.code]) { x.scoreLine = _lines[x.code]; hit = true; } });
+          return hit ? list : null;
+        });
+      } catch (e) {}
+    }
     return changed;
   } catch (e) { return false; }
 }
@@ -21590,6 +21744,19 @@ async function topUpMyRoundsFromBackup(roster) {
     if (!mine) return roster;                       // a fully-dropped profile is rebuilt by healMyRoundsFromCloud instead
     if (!Array.isArray(mine.scoreHistory)) mine.scoreHistory = [];
     const del = getDeletedRoundKeys();
+    /* v1811 (audit C9): LOCAL deletes only, while the roster heal and syncMyStatsToCloud
+       union the shared tombstones (which carry my per-user "Remove from my list" deletes
+       from another device). So on phone B the heal skipped the round but this top-up put it
+       back on EVERY roster read until a restart. Union the tombstone CACHE the async readers
+       keep (getSharedTombstones fills it at boot and on every read) -- never await a cloud
+       read here, this sits under getPlayerRoster. Tombstoned rows leave the backup for good. */
+    try { if (_tombCache && _tombCache.rounds && _tombCache.rounds.size) _tombCache.rounds.forEach(k => del.add(k)); } catch (e) {}
+    try {
+      if (del.size) {
+        const _kept = backup.filter(s => !(s && del.has(statsRoundKey(s))));
+        if (_kept.length !== backup.length) window._myStatsBackupRounds = _kept;
+      }
+    } catch (e) {}
     const norm = s => normalizeNameSegment(String(s || ''));
     const dayOf = bgDayKey;   // v980: LOCAL day, not UTC — see bgDayKey
     const contentKey = s => s ? (norm(s.course) + '|' + dayOf(s.date) + '|' + (s.gross == null ? '' : s.gross) + '|' + (s.holesScored == null ? '' : s.holesScored)) : '';
@@ -23368,6 +23535,29 @@ function bgSnapTeeLabels(game) {
     });
   } catch (e) {}
 }
+/* v1811 (audit C10): is this round card ME? The same ladder the roster match in
+   archiveScoresFromRound uses (uid -> email -> alias -> normalised name), decided once per card.
+   A uid on the card is decisive both ways -- a card stamped with somebody else's account is
+   never me, whatever the name says. `meName` is the caller's resolved name (getMeName). */
+function _bgRoundCardIsMe(p, meName) {
+  try {
+    if (!p) return false;
+    const _u = String((typeof _authUser !== 'undefined' && _authUser && _authUser.id) || '').trim();
+    const _pu = String((p.uid || p.user_id) || '').trim();
+    if (_u && _pu) return _pu === _u;
+    const _em = String((typeof _authUser !== 'undefined' && _authUser && _authUser.email) || '').trim().toLowerCase();
+    const _pe = String(p.email || '').trim().toLowerCase();
+    if (_em && _pe && _pe.indexOf('@') > 0) return _pe === _em;
+    if (!meName) return false;
+    const _pn = p.name || combineName(p.firstName || '', p.lastName || '');
+    const _meK = normalizeNameSegment(meName);
+    if (!_pn || !_meK) return false;
+    if (normalizeNameSegment(_pn) === _meK) return true;
+    try { if (typeof bgMyNames === 'function' && bgMyNames().some(n => normalizeNameSegment(n) === normalizeNameSegment(_pn))) return true; } catch (e) {}
+    try { if (BG_USE_ALIASES) { const _cn = bgAliasCanon(_pn); if (_cn && normalizeNameSegment(_cn) === _meK) return true; } } catch (e) {}
+    return false;
+  } catch (e) { return !!(p && meName && p.name === meName); }
+}
 async function archiveScoresFromRound(g) {
   if (!g || !g.players || !g.scores) return;
   try { bgFillBlankPutts(g); } catch (e) {}   // v1800: blank putts on a scored hole = 0 once finished
@@ -23645,6 +23835,11 @@ async function archiveScoresFromRound(g) {
   g.players.forEach(p => {
     const arr = g.scores[p.id] || [];
     const holesScored = arr.filter(s => s != null).length;
+    /* v1811 (audit C10): the deleted-round skip below compared `p.name === meName` exactly while
+       the roster match further down is by uid / email / alias / normalised name, so a card that
+       carries my uid under a different spelling ("Tim" vs "Tim Payne") sailed past the guard and
+       re-archived a round I had deleted. One resolver, same ladder, decided per card. */
+    const _pIsMe = _bgRoundCardIsMe(p, meName);
     // A player who never entered a single hole still gets a MONEY-ONLY entry when
     // they won/lost units this round (a money-only participant whose scorecard
     // nobody filled in) — so their totals still reach Game history. Only when
@@ -23658,8 +23853,8 @@ async function archiveScoresFromRound(g) {
     // consent gate is REMOVED — an added player's round now counts like any other
     // round, no acceptance required. consentReq may still exist on old games but no
     // longer gates archiving.
-    if (iSkipThisRound && p.name === meName) return;
-    if (iDeletedThisRound && p.name === meName) return;
+    if (iSkipThisRound && _pIsMe) return;
+    if (iDeletedThisRound && _pIsMe) return;   // v1811 (audit C10): same identity ladder as the roster match
 
     // Only count gross + differential for complete 18-hole rounds (per WHS,
     // a partial round's gross is meaningless). Incomplete rounds still get
@@ -32798,7 +32993,10 @@ async function tnNineGreenCounts(baseId, keys) {
   const out = {};
   try {
     if (!baseId || !Array.isArray(keys) || !keys.length) return out;
-    if (typeof ensureSupa === 'function') { await ensureSupa(); }
+    // v1811 (audit static §8): `ensureSupa` is scoped inside the course-GPS IIFE, so the typeof guard
+    // that used to sit here never called it -- a picker opened before the client was up returned {}.
+    // Same two lines ensureSupa runs, inline.
+    try { if (!supaReady) await initSupabase(); } catch (e) {}
     if (!supa) return out;
     const ids = keys.map(k => baseId + '#' + k);
     const { data } = await supa.from('course_gps').select('course_id,holes').in('course_id', ids);
@@ -32821,6 +33019,10 @@ function openNinePicker(courseId) {
   const m = $('nine-picker-modal');
   if (!nineSet || !m) return;
   _pendingNineCourseId = courseId;
+  // v1811 (audit D7): the GPS-note refresh used to be ADDED as a change listener on every open, so a
+  // picker opened earlier for course A kept firing A's closure (A's green counts) over course B's
+  // selects. Bound once via onchange below; start every open with no refresh and no note.
+  try { window._bgNineGpsRefresh = null; $('nine-front').onchange = null; $('nine-back').onchange = null; const _gn = $('nine-gps-note'); if (_gn) _gn.style.display = 'none'; } catch (e) {}
   // Only real nine entries (skip metadata keys like combos / _label).
   const keys = Object.keys(nineSet).filter(k => nineSet[k] && Array.isArray(nineSet[k].pars));
   const opts = keys.map(k => `<option value="${k}">${nineSet[k].name}</option>`).join('');
@@ -32869,9 +33071,11 @@ function openNinePicker(courseId) {
             + (blind.length * 9) + ' holes.';
           note.style.display = 'block';
         };
-        fEl.addEventListener('change', refresh);
-        bEl.addEventListener('change', refresh);
-        const _sg = $('nine-single-toggle'); if (_sg) _sg.addEventListener('change', refresh);
+        // v1811 (audit D7): bind once (onchange replaces, addEventListener stacked); the single-nine
+        // toggle keeps its own onchange (_applyNineMode) and calls this through window._bgNineGpsRefresh.
+        fEl.onchange = refresh;
+        bEl.onchange = refresh;
+        window._bgNineGpsRefresh = refresh;
         refresh();
       });
     } catch (e) {}
@@ -32889,6 +33093,7 @@ function openNinePicker(courseId) {
       : 'This course plays as two of its three nines. Pick your front and back nine — the scorecard builds itself.';
     if ($('nine-confirm')) $('nine-confirm').textContent = on ? 'Use this nine' : 'Use these nines';
     $('nine-picker-warn').style.display = 'none';
+    try { if (typeof window._bgNineGpsRefresh === 'function') window._bgNineGpsRefresh(); } catch (e) {}   // v1811 (audit D7): one nine vs two changes which nines the GPS note covers
   };
   if (_single) { _single.checked = false; _single.onchange = _applyNineMode; }
   _applyNineMode();
@@ -42907,7 +43112,8 @@ function _nassauInstCross(g, inst) {
 }
 function _nassauAnyCross(g) {
   try {
-    const cfg = g && g.games && g.games.nassau; if (!cfg) return false;
+    const _m = (typeof bgMainCfg === 'function') ? bgMainCfg(g, 'nassau') : null;   // v1811 (audit D4): both buckets
+    const cfg = _m && _m.cfg; if (!cfg) return false;
     const insts = (Array.isArray(cfg.instances) && cfg.instances.length) ? cfg.instances : [cfg];
     return insts.some(inst => _nassauInstCross(g, inst));
   } catch (e) { return false; }
@@ -42926,8 +43132,11 @@ function renderGameBanners() {
   //
   // This is in addition to the Huckle banner below — Huckles get their own
   // section since they're optional sub-bets that not every Nassau group uses.
-  if (g.games.nassau && (getParticipants(g, g.games.nassau).length >= 2 || _nassauAnyCross(g))) {
-    const cfg = g.games.nassau;
+  // v1811 (audit D4): a cart's pre-launch Nassau lives in g.groupGames -- resolve both buckets.
+  const _nasMain = (typeof bgMainCfg === 'function') ? bgMainCfg(g, 'nassau') : null;
+  const _nasCfg = _nasMain ? _nasMain.cfg : null;
+  if (_nasCfg && (getParticipants(g, _nasCfg).length >= 2 || _nassauAnyCross(g))) {
+    const cfg = _nasCfg;
     const instances = Array.isArray(cfg.instances) && cfg.instances.length > 0
       ? cfg.instances
       : [cfg];
@@ -43083,7 +43292,7 @@ function renderGameBanners() {
   } catch (e) {}
 
   // NASSAU + HUCKLE banner — shows current segment standings + a button to call a Huckle
-  if (g.games.nassau && g.games.nassau.allowHuckle !== false && getParticipants(g, g.games.nassau).length >= 2) {
+  if (_nasCfg && _nasCfg.allowHuckle !== false && getParticipants(g, _nasCfg).length >= 2) {   // v1811 (audit D4): group-bucket Nassau reaches Huckle too
     const eligible = computeEligibleHuckles(g, h);
     /* v1808 (Tyler, 9/27): "the prompt is annoying when you are trying to play." The #5
        auto-prompt that popped the Call-a-Huckle modal the moment an opportunity opened is
@@ -44402,6 +44611,54 @@ function bgSideCfg(g, key) {
   } catch (e) { return null; }
 }
 try { window.bgSideCfg = bgSideCfg; } catch (e) {}
+// v1811 (audit D4): the MAIN-game twin of bgSideCfg. A cart's pre-launch Skins / Nassau /
+// Quota / 6's ... live in g.groupGames (t2LaunchDayRounds), and computeAllGameMoney settles
+// them under results['grp:<key>'] -- but the Board cards and the Score-tab Nassau/Huckle
+// banners only ever read g.games.<key>, so those games had units and no card, and Huckle was
+// unreachable. Same lookup order as bgSideCfg (g.games wins), plus WHICH bucket answered so a
+// caller can pick the matching results entry and label the card. Read-only; never merges.
+function bgMainCfg(g, key) {
+  try {
+    if (!g || !key) return null;
+    if (g.games && g.games[key]) return { cfg: g.games[key], group: false, resKey: key };
+    if (g.groupGames && g.groupGames[key]) return { cfg: g.groupGames[key], group: true, resKey: 'grp:' + key };
+    return null;
+  } catch (e) { return null; }
+}
+// v1811 (audit D4): the shallow "this round, but games = its groupGames" view. It is exactly
+// the `sub` computeAllGameMoney builds for its group recursion (same keys, same
+// _noGroupGames guard), so a card painted from this view + results['grp:*'] shows the same
+// numbers the units breakdown shows. null when the round has no group games.
+function bgGroupGamesView(g) {
+  try {
+    if (!g || !g.groupGames || g._noGroupGames || typeof g.groupGames !== 'object' || !Object.keys(g.groupGames).length) return null;
+    const sub = {}; for (const k in g) { if (k === 'games' || k === 'groupGames') continue; sub[k] = g[k]; }
+    sub.games = g.groupGames; sub._noGroupGames = true;
+    return sub;
+  } catch (e) { return null; }
+}
+// v1811 (audit D4): the results -> named-consts mapping renderBoard's cards read. Pulled out
+// so the same cards can be painted from the field results and from the grp: results.
+function _bgBoardResultsView(g, results) {
+  results = results || {};
+  return {
+    skins: results.skins, nassau: results.nassau, stroke: results.stroke, banker: results.banker,
+    vegas: results.vegas, dvegas: results.dvegas, sixes: results.sixes, splixSixes: results.splixSixes,
+    stableford: results.stableford, bingoBangoBongo: results.bingoBangoBongo, wolf: results.wolf,
+    hammer: results.hammer, matchPlay: results.matchPlay, teamMatch: results.teamMatch,
+    // v1726: a tournament's 4-man best ball is event-owned, so computeAllGameMoney leaves it
+    // out of `results` (no units inside the cart) -- which is why this card said "No games
+    // configured". The card is about the SCORE, so build it straight from the round.
+    teamLowball: results.teamLowball || (function () {
+      try { const c = g.games && g.games.teamLowball; return (c && c.teamMode === '4man' && typeof calcTeamLowball4man === 'function') ? calcTeamLowball4man(g, c) : null; } catch (e) { return null; }
+    })(),
+    shamble: results.shamble, comboScore: results.comboScore, quota: results.quota, teamQuota: results.teamQuota,
+    p3greenie: results.p3greenie, ctp: results.ctp, longPutt: results.longPutt, longDrive: results.longDrive,
+    junk: results.junk, birdiePool: results.birdiePool, ryderCup: results.ryderCup, scramble: results.scramble,
+    umbrella: results.umbrella, potofgold: results.potofgold
+  };
+}
+try { window.bgMainCfg = bgMainCfg; window.bgGroupGamesView = bgGroupGamesView; } catch (e) {}
 function renderJunkEntry() {
   const g = state.game;
   const _jcfg = bgSideCfg(g, 'junk');   // v912: group games live in g.groupGames
@@ -48620,7 +48877,10 @@ function calcNassau(g) {
 //     by 2+
 //   - Counter-Huckles are blocked: only the original trailer can stack.
 function computeEligibleHuckles(g, currentHole) {
-  const cfg = g.games.nassau;
+  // v1811 (audit D4): the Nassau may be the cart's own pre-launch one (g.groupGames). Same
+  // g.games-first order as everywhere else, so a round with both keeps its old behaviour.
+  const _m = (typeof bgMainCfg === 'function') ? bgMainCfg(g, 'nassau') : null;
+  const cfg = _m ? _m.cfg : null;
   if (!cfg) return [];
   // v1808: nothing left to play for -- a finished round, or standing on the last hole with
   // its scores already in -- offered "call a Huckle from hole 18" after the 18th was in.
@@ -53224,7 +53484,8 @@ function gpsMyStatuses(g, res, myId) {
   const ord = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : (n + 'th');
   // ---- Nassau — current nine's segment standing for each 1v1 instance I'm in ----
   try {
-    const ncfg = g.games && g.games.nassau;
+    const _nm = (typeof bgMainCfg === 'function') ? bgMainCfg(g, 'nassau') : null;   // v1811 (audit D4): both buckets
+    const ncfg = _nm ? _nm.cfg : null;
     if (ncfg && typeof pairwiseStandings === 'function' && typeof segmentRange === 'function') {
       const instances = Array.isArray(ncfg.instances) && ncfg.instances.length ? ncfg.instances : [ncfg];
       const h = state.currentHole || 1;
@@ -53309,7 +53570,9 @@ function gpsMyStatuses(g, res, myId) {
         try {
           if (typeof pairwiseStandings === 'function' && typeof segmentRange === 'function') {
             const seg = segmentRange(hk.segment, roundHoles(g)); const to = seg[1];
-            const _hin = (g.games && g.games.nassau) ? ((Array.isArray(g.games.nassau.instances) && g.games.nassau.instances[hk.nassauIdx || 0]) || g.games.nassau) : null;
+            const _hn = (typeof bgMainCfg === 'function') ? bgMainCfg(g, 'nassau') : null;   // v1811 (audit D4): both buckets
+            const _hnc = _hn ? _hn.cfg : null;
+            const _hin = _hnc ? ((Array.isArray(_hnc.instances) && _hnc.instances[hk.nassauIdx || 0]) || _hnc) : null;
             const st = pairwiseStandings(g, hk.callerId, hk.opponentId, hk.callHole, Math.min(hNow, to), !(_hin && _hin.net === false));
             if (st && st.holesPlayed > 0) {
               const diff = (st.a.id === myId) ? (st.bStrokes - st.aStrokes) : (st.aStrokes - st.bStrokes);
@@ -55568,40 +55831,12 @@ function renderBoard() {
     }
   } catch (e) {}
   const { results, combined: money } = moneyData;
-  const skins = results.skins;
-  const nassau = results.nassau;
-  const stroke = results.stroke;
-  const banker = results.banker;
-  const vegas = results.vegas;
-  const dvegas = results.dvegas;
-  const sixes = results.sixes;
-  const splixSixes = results.splixSixes;
-  const stableford = results.stableford;
-  const bingoBangoBongo = results.bingoBangoBongo;
-  const wolf = results.wolf;
-  const hammer = results.hammer;
-  const matchPlay = results.matchPlay;
-  const teamMatch = results.teamMatch;
-  // v1726: a tournament's 4-man best ball is event-owned, so computeAllGameMoney leaves it
-  // out of `results` (no units inside the cart) -- which is why this card said "No games
-  // configured". The card is about the SCORE, so build it straight from the round.
-  const teamLowball = results.teamLowball || (function () {
-    try { const c = g.games && g.games.teamLowball; return (c && c.teamMode === '4man' && typeof calcTeamLowball4man === 'function') ? calcTeamLowball4man(g, c) : null; } catch (e) { return null; }
-  })();
-  const shamble = results.shamble;   // v1764
-  const comboScore = results.comboScore;
-  const quota = results.quota;
-  const teamQuota = results.teamQuota;
-  const p3greenie = results.p3greenie;
-  const ctp = results.ctp;
-  const longPutt = results.longPutt;
-  const longDrive = results.longDrive;
-  const junk = results.junk;
-  const birdiePool = results.birdiePool;
-  const ryderCup = results.ryderCup;
-  const scramble = results.scramble;
-  const umbrella = results.umbrella;
-  const potofgold = results.potofgold;
+  // v1811 (audit D4): the per-key consts moved into _bgBoardResultsView so the game cards
+  // below can be painted a second time from the grp: results (this group's own games).
+  const { skins, nassau, stroke, banker, vegas, dvegas, sixes, splixSixes, stableford, bingoBangoBongo,
+          wolf, hammer, matchPlay, teamMatch, teamLowball, shamble, comboScore, quota, teamQuota,
+          p3greenie, ctp, longPutt, longDrive, junk, birdiePool, ryderCup, scramble, umbrella, potofgold }
+        = _bgBoardResultsView(g, results);
 
   const sorted = [...g.players].sort((a, b) => money[b.id] - money[a.id]);
   const puttsGirTotals = calcPuttsGirTotals(g);
@@ -55849,6 +56084,18 @@ function renderBoard() {
   const gr = $('game-results-list');
   gr.innerHTML = '';
 
+  // v1811 (audit D4): every card below reads `results.<key>` + `g.games.<key>`, so a game a
+  // cart set up BEFORE launch (g.groupGames -- settled by computeAllGameMoney under
+  // results['grp:<key>'] and shown "(your group)" in the breakdown) had units and no card:
+  // no hole-by-hole Skins, no Nassau F/B/O line. The cards are now an inner painter that runs
+  // once on the round + field results and once on bgGroupGamesView(g) + the grp: results, so
+  // the group cards read the very shape the units came from. Both passes paint when both
+  // buckets hold the same game (field Skins AND group Skins); the second pass is labelled.
+  const _bgPaintGameCards = function (g, results, _grpPass) {
+  const { skins, nassau, stroke, banker, vegas, dvegas, sixes, splixSixes, stableford, bingoBangoBongo,
+          wolf, hammer, matchPlay, teamMatch, teamLowball, shamble, comboScore, quota, teamQuota,
+          p3greenie, ctp, longPutt, longDrive, junk, birdiePool, ryderCup, scramble, umbrella, potofgold }
+        = _bgBoardResultsView(g, results);
   if (skins) {
     const div = document.createElement('div');
     div.className = 'game-result';
@@ -56442,7 +56689,7 @@ function renderBoard() {
     if (g.trackPutts) { const pa = (g.puttsData && g.puttsData[p.id]) || []; return sc.some((v, i) => v != null && pa[i] != null); }
     return sc.some(v => v != null);
   });
-  if (puttsUsed || girUsed || fwUsed || sandUsed) {
+  if (!_grpPass && (puttsUsed || girUsed || fwUsed || sandUsed)) {   // v1811 (audit D4): tracking card is per round, not per game bucket
     const div = document.createElement('div');
     div.className = 'game-result';
     div.id = 'game-results-puttsgir';   // v865: repaint target for the field-wide Total/Tournament view
@@ -56745,6 +56992,34 @@ function renderBoard() {
         : '');
     gr.appendChild(div);
   }
+  };   // end _bgPaintGameCards (v1811, audit D4)
+  _bgPaintGameCards(g, results, false);
+  // v1811 (audit D4): this cart's OWN games. Same view computeAllGameMoney recursed on, fed
+  // the results it filed under 'grp:' -- so "Skins (your group)" on the card is the same
+  // Skins (your group) column in the breakdown. Nothing here touches `money`/`results`.
+  try {
+    const _gv = (typeof bgGroupGamesView === 'function') ? bgGroupGamesView(g) : null;
+    if (_gv) {
+      const _gres = {};
+      Object.keys(results || {}).forEach(k => { if (typeof k === 'string' && k.indexOf('grp:') === 0 && results[k]) _gres[k.slice(4)] = results[k]; });
+      if (Object.keys(_gres).length) {
+        const _before = gr.children.length;
+        _bgPaintGameCards(_gv, _gres, true);
+        for (let _i = _before; _i < gr.children.length; _i++) {
+          try {
+            const _c = gr.children[_i];
+            const _l = _c && _c.querySelector ? _c.querySelector('.lbl') : null;
+            if (!_l || (_l.querySelector && _l.querySelector('.bg-grp-tag'))) continue;
+            const _tag = document.createElement('span');
+            _tag.className = 'bg-grp-tag';
+            _tag.style.cssText = 'font-weight:400;color:var(--text-muted);font-size:11px';
+            _tag.textContent = ' (your group)';
+            _l.appendChild(_tag);
+          } catch (e2) {}
+        }
+      }
+    }
+  } catch (e) { try { console.warn('[BadGolf] group game cards failed', e); } catch (e2) {} }
 
   // v1112 (Tyler, 8/19): "the main game was team quota so we should show that first
   // not last." The day's FORMAT game is the headline game of the round, but it was
@@ -59030,7 +59305,10 @@ async function leaveHomeRound(r) {
         }
       } catch (e) {}
       try {
-        if (t.createdBy) {
+        // v1811 (audit D11): the Times code stamps createdByUid (v924) -- use it, so two accounts sharing
+        // a name can't send the "left your round" push to the wrong organizer. Name match is the fallback.
+        if (t.createdByUid) notifyId = String(t.createdByUid);
+        else if (t.createdBy) {
           const profs = await fetchProfiles();
           const cN = norm(t.createdBy);
           const pr = (profs || []).find(p => p && (norm(p.my_player) === cN || norm(p.display_name) === cN));
@@ -65788,10 +66066,8 @@ async function removeRoundForMe(code) {
   // Also physically drop it from YOUR recent list (per-user) so it can't resurface
   // in Saved rounds — hiding alone left a LIVE round you're in able to reappear.
   // Other players keep the round; this only touches your own recent cache.
-  try {
-    const recent = await getRecent();
-    const pruned = (recent || []).filter(r => r && r.code !== code);
-    if (pruned.length !== (recent || []).length) await safeSet(KEY_RECENT, JSON.stringify(pruned), true);
+  try {   // v1811 (audit C7): through the single KEY_RECENT writer chain
+    await _bgRecentMutate(list => { const pruned = list.filter(r => r && r.code !== code); return pruned.length !== list.length ? pruned : null; });
   } catch (e) {}
   // Pull MY score record for this round — the handicap index derives from
   // scoreHistory, so removing the record IS the recalculation.
@@ -66290,7 +66566,19 @@ async function loadRounds() {
             } catch (e) {}
           }));
           if (patched) {
-            try { await safeSet(KEY_RECENT, JSON.stringify(fullRecent), true); } catch (e) {}
+            /* v1811 (audit C7): fullRecent is a snapshot from before the parallel loads; a
+               round added to the list in the meantime (participant pull, a save on another
+               screen) was dropped by writing it back whole. Apply the healed rows, by code,
+               onto the list as it is NOW. */
+            try {
+              const _byCode = {};
+              liveEntries.forEach(r => { if (r && r.code && r.finishedAt) _byCode[r.code] = r; });
+              await _bgRecentMutate(list => {
+                let hit = false;
+                list.forEach(x => { const s = x && x.code && _byCode[x.code]; if (s) { Object.assign(x, s); hit = true; } });
+                return hit ? list : null;
+              });
+            } catch (e) {}
             try { await loadRounds(); } catch (e) {}
           }
         } finally { window._roundsLiveVerify = false; }
@@ -66695,6 +66983,9 @@ async function gameHasMe(g) {
 // commas) — cheap pre-filter before the full game is even loaded.
 function recentRowHasName(r, meName) {
   if (!meName || !r || !r.players) return true;
+  // v1811 (audit A, LOW): addToRecent now stores the cards' account ids; my uid on the row is
+  // proof enough, and it is checked before the name test so a renamed account keeps its rounds.
+  try { const _uid = _authUser && _authUser.id; if (_uid && Array.isArray(r.uids) && r.uids.indexOf(_uid) >= 0) return true; } catch (e) {}
   // v1151: match on ANY name that means me, not just the linked one. With a
   // mislinked account this filter hid the user's own rounds from their own Rounds
   // list — Tyler finished 18 holes at Woodbridge and the round simply was not there,
@@ -67584,11 +67875,8 @@ async function deleteRecentGame(code) {
   try { expireInvitesForRound(code); } catch (e) {}   // v940: a deleted round must not keep inviting people
   try { if (typeof liveActivity !== 'undefined') liveActivity.endIfCode(code); } catch (e) {}   // v635: clear the lock-screen Live Activity card for this round
   // Remove from recent list (now shared across devices)
-  let recent = [];
-  const v = await safeGet(KEY_RECENT, true);
-  if (v) try { recent = JSON.parse(v); } catch (e) {}
-  recent = recent.filter(g => g.code !== code);
-  await safeSet(KEY_RECENT, JSON.stringify(recent), true);
+  // v1811 (audit C7): through the single KEY_RECENT writer chain (a fresh read, a filter, one write)
+  try { await _bgRecentMutate(list => list.filter(g => g && g.code !== code)); } catch (e) {}
   // Also hide on THIS device so a late realtime echo or autosave that re-adds the
   // round to the shared list can't make it reappear in the Rounds tab here.
   try { const h = getHiddenRounds(); if (!h.includes(code)) { h.push(code); setHiddenRounds(h); } } catch (e) {}
@@ -69202,7 +69490,7 @@ async function wireNotifPrefs() {
     Object.keys(map).forEach(function (id) {
       const el = document.getElementById(id);
       if (!el) return;
-      if (row && row[map[id]] === false) el.checked = false;
+      el.checked = !(row && row[map[id]] === false);   // v1811 (audit D9): default ON, off only when this account's row says so -- used to only ever uncheck, so a re-wire after an account switch kept the previous account's unticked boxes
       el.onchange = function () {
         try {
           const patch = { user_id: _authUser.id, updated_at: new Date().toISOString() };
@@ -72914,6 +73202,11 @@ async function t2SeatPlayersIntoGroups(dayId, groups, membersByGroup, newcomers)
   if (!newcomers || !newcomers.length) return false;
   const counts = {};
   (groups || []).forEach(g => { counts[g.id] = ((membersByGroup && membersByGroup[g.id]) || []).length; });
+  // v1811 (audit D12): `counts + 1` handed out a slot that already existed after a removal (members
+  // [1,3] -> newcomer at 3, tying the launch tee order). Next slot = highest existing slot + 1, the
+  // way t2MoveHere numbers a mover; the A/B team default still alternates on seat count as before.
+  const maxSlot = {};
+  (groups || []).forEach(g => { maxSlot[g.id] = ((membersByGroup && membersByGroup[g.id]) || []).reduce((mx, m) => Math.max(mx, parseInt(m && m.slot, 10) || 0), 0); });
   let maxNum = 0;
   (groups || []).forEach(g => { maxNum = Math.max(maxNum, parseInt(g.group_number, 10) || 0); });
   let any = false;
@@ -72925,12 +73218,13 @@ async function t2SeatPlayersIntoGroups(dayId, groups, membersByGroup, newcomers)
     if (!target) {
       target = await t2CreateGroup(dayId, { groupNumber: ++maxNum, size: 1 });
       if (!target) continue;
-      (groups || []).push(target); counts[target.id] = 0;
+      (groups || []).push(target); counts[target.id] = 0; maxSlot[target.id] = 0;
       if (membersByGroup) membersByGroup[target.id] = [];
     }
-    const slot = counts[target.id] + 1;
-    const ok = await t2AddGroupMember(target.id, p.id, p.team || (slot % 2 === 1 ? 'A' : 'B'), slot);
-    if (ok) { counts[target.id] = slot; any = true; }
+    const seat = counts[target.id] + 1;                              // v1811 (audit D12): team parity, as before
+    const slot = Math.max(maxSlot[target.id] || 0, counts[target.id]) + 1;   // v1811 (audit D12): never a slot someone already holds
+    const ok = await t2AddGroupMember(target.id, p.id, p.team || (seat % 2 === 1 ? 'A' : 'B'), slot);
+    if (ok) { counts[target.id] = seat; maxSlot[target.id] = slot; if (membersByGroup && Array.isArray(membersByGroup[target.id])) membersByGroup[target.id].push({ tournament_player_id: p.id, slot: slot }); any = true; }
   }
   if (any) showToast(newcomers.length + ' player' + (newcomers.length === 1 ? '' : 's') + ' added to the existing carts');
   return any;
@@ -77394,7 +77688,7 @@ async function t2OpenCoursePicker(opts) {
   _t2CoursePickCb = opts.onPick;
   _t2CourseCancelCb = opts.onCancel || null;
   // v493: label the dismiss button "← Back" when a caller supplies a back target.
-  { const _cc = document.getElementById('t2-course-cancel'); if (_cc) _cc.textContent = opts.onCancel ? '← Back' : 'Cancel'; }
+  { const _cc = document.getElementById('t2-course-cancel'); if (_cc) _cc.textContent = opts.cancelLabel || (opts.onCancel ? '← Back' : 'Cancel'); }   // v1811 (audit D5): cancelLabel lets t2StartDay hear about a Cancel without relabelling it "← Back\"
   // v1066: this modal is shared with the home-course setting now, so restore the
   // tournament copy on every open — the other caller re-labels it after this runs.
   try {
@@ -77657,7 +77951,7 @@ async function t2StartDay(dayId, dayNumber, opts) {
       $('new-round-confirm-text').innerHTML =
         'You have a round in progress at <strong>' + escapeHtml(String(_c == null ? '' : _c)) + '</strong>. Save or discard it before starting this tournament day.';
       $('new-round-confirm-modal').classList.add('show'); try { _nrcLockTourneyButtons(); } catch (e) {}
-      return;
+      return false;   // v1811 (audit D5): nothing launched -- the caller re-enables its Start button; _afterActiveResolve re-runs us
     }
   } catch (e) {}
   _t2StartCtx = { dayId: dayId, dayNumber: dayNumber, onlyGroupId: (opts && opts.onlyGroupId) || null };   // v1171
@@ -77671,7 +77965,9 @@ async function t2StartDay(dayId, dayNumber, opts) {
      so a Start that was backed out of (course picker closed, the v1560 invite prompt's
      Later, a failed launch, the in-flight guard) still flipped the event. The write now
      lives at the end of t2LaunchDayRounds, once a round has actually been created. */
-  try { if (!(opts && opts.onlyGroupId)) t2NotifyAllPlayers(t); } catch (e) {}   // invite all linked players now the event is starting (v520 #2)
+  // v1811 (audit D6): the v520 #2 t2NotifyAllPlayers(t) call that sat here fired BEFORE the course was
+  // picked, so a cancelled picker still pushed "X added you to <event>" to every linked player. It now
+  // runs at the end of t2LaunchDayRounds, once a round actually exists (same once-per-player guard).
   // Per-day course chosen in the setup screen? Launch straight from it (no prompt).
   const dc = (t && t.settings && t.settings.dayCourses) ? t.settings.dayCourses[dayNumber] : null;
   if (dc && dc.id !== undefined && dc.id !== null) { showToast('Course: ' + (dc.name || 'course')); return t2LaunchDayRounds(dc.id); }
@@ -77686,14 +77982,24 @@ async function t2StartDay(dayId, dayNumber, opts) {
       return t2LaunchDayRounds(defId);
     }
   }
-  t2OpenCoursePicker({ allowSkip: false, onPick: async (cid) => {
-    if (cid && typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[cid]) {
-      const _combo = await t2PickNineCombo(cid);
-      if (!_combo) return;
-      cid = _combo;
-    }
-    t2LaunchDayRounds(cid);
-  } });
+  // v1811 (audit D5): the picker used to be fire-and-forget, so a Start that was backed out of (Cancel,
+  // backdrop, three-nine picker closed) left _t2StartCtx set and the caller's disabled "▶ Start Day"
+  // button dead until the next render. Resolve true once the launch ran, false when it was backed out.
+  return new Promise((resolve, reject) => {
+    t2OpenCoursePicker({ allowSkip: false, cancelLabel: 'Cancel',
+      onCancel: () => { _t2StartCtx = null; resolve(false); },
+      onPick: async (cid) => {
+        _t2CourseCancelCb = null;
+        try {
+          if (cid && typeof THREE_NINE_COURSES === 'object' && THREE_NINE_COURSES[cid]) {
+            const _combo = await t2PickNineCombo(cid);
+            if (!_combo) { _t2StartCtx = null; resolve(false); return; }
+            cid = _combo;
+          }
+          resolve(await t2LaunchDayRounds(cid));
+        } catch (e) { reject(e); }
+      } });
+  });
 }
 
 // Pick the COURSE for a specific day in the setup screen (stored on the
@@ -80017,6 +80323,11 @@ function t2PickNineCombo(baseId) {
     if (fEl) fEl.value = keys[0];
     if (bEl) bEl.value = keys[1] || keys[0];
     if (warn) warn.style.display = 'none';
+    // v1811 (audit D7): this picker shares the modal with openNinePicker but never registered a GPS
+    // lookup of its own, so the setup picker's leftover change handler painted ITS course's "not
+    // mapped" note here. Drop that handler and hide the note; also stop a still-pending lookup from
+    // the setup picker relabelling these options.
+    try { _pendingNineCourseId = null; window._bgNineGpsRefresh = null; if (fEl) fEl.onchange = null; if (bEl) bEl.onchange = null; const _gn = document.getElementById('nine-gps-note'); if (_gn) _gn.style.display = 'none'; } catch (e) {}
     // Tournament day rounds are 18-hole. The modal DOM is shared with the setup
     // single-nine picker — force it back to two-nine mode and hide the toggle.
     { const _sr = document.getElementById('nine-single-row'); if (_sr) _sr.style.display = 'none';
@@ -80341,13 +80652,13 @@ function _t2DayHcpRules(t, dayNumber, pars) {
 async function t2LaunchDayRounds(courseId) {
   document.getElementById('t2-course-modal').classList.remove('show');
   const ctx = _t2StartCtx; _t2StartCtx = null;
-  const t = _t2Current; if (!t || !ctx) return;
+  const t = _t2Current; if (!t || !ctx) return false;   // v1811 (audit D5): false on every bail-out so the Start button comes back
   // v863: found real duplicate-round data in production -- two separate `games`
   // rows created for the SAME group, ~80ms apart. Almost certainly a double-tap or
   // a duplicate click-handler binding firing this function twice before the first
   // call's group_code claim landed. Hard-guard against a second concurrent launch;
   // auto-clears after 15s as a safety net in case an error path skips past it.
-  if (_t2LaunchInFlight) { showToast('Already creating rounds — one moment…'); return; }
+  if (_t2LaunchInFlight) { showToast('Already creating rounds — one moment…'); return false; }   // v1811 (audit D5)
   _t2LaunchInFlight = true;
   setTimeout(() => { _t2LaunchInFlight = false; }, 15000);
   showToast('Creating rounds…');
@@ -80440,7 +80751,7 @@ async function t2LaunchDayRounds(courseId) {
     if (!_lmRead.ok) {
       _t2LaunchInFlight = false;
       try { showToast("Couldn't reach the groups \u2014 nothing was launched. Check your signal and try again.", 7000); } catch (e) {}
-      return;
+      return false;   // v1811 (audit D5)
     }
     _allLaunchMembers = _lmRead.data || [];
   }
@@ -80660,14 +80971,14 @@ async function t2LaunchDayRounds(courseId) {
     if (!_toCreate.length) {
       _t2LaunchInFlight = false;
       try { await uiConfirm('No group fits the day’s games:\n\n' + _noFitGroups.join('\n') + '\n\nRe-pair the carts or change the day’s games, then start the day.', { title: 'Nothing launched', okLabel: 'OK', cancelLabel: 'Close', danger: false }); } catch (e) {}
-      return;
+      return false;   // v1811 (audit D5)
     }
     let _goNoFit = false;
     try {
       _goNoFit = await uiConfirm('These groups don’t fit their games:\n\n' + _noFitGroups.join('\n') + '\n\nLaunch the others anyway? The groups above stay unstarted until they are re-paired.',
         { title: 'Groups don’t fit', okLabel: 'Launch the others', cancelLabel: 'Cancel', danger: false });
     } catch (e) { _goNoFit = false; }
-    if (!_goNoFit) { _t2LaunchInFlight = false; showToast('Launch cancelled — re-pair the groups, then start the day'); return; }
+    if (!_goNoFit) { _t2LaunchInFlight = false; showToast('Launch cancelled — re-pair the groups, then start the day'); return false; }   // v1811 (audit D5)
   }
   // v986 (T37): a group of one used to be dropped on the floor here. Ask the
   // commissioner BEFORE anything is written — nothing has been created yet.
@@ -80678,7 +80989,7 @@ async function t2LaunchDayRounds(courseId) {
       _goOn = await uiConfirm('Group ' + _sl + ' ' + (_soloGroups.length === 1 ? 'has' : 'have') + ' only one player.\n\nLaunch ' + (_soloGroups.length === 1 ? 'it' : 'them') + ' as a solo scorecard? Tap Cancel to go back and re-pair the groups first.',
         { title: 'Group of one', okLabel: 'Launch anyway', cancelLabel: 'Go back', danger: false });
     } catch (e) { _goOn = true; }
-    if (!_goOn) { _t2LaunchInFlight = false; showToast('Launch cancelled — re-pair the groups, then start the day'); return; }
+    if (!_goOn) { _t2LaunchInFlight = false; showToast('Launch cancelled — re-pair the groups, then start the day'); return false; }   // v1811 (audit D5)
   }
   // v858 (Tyler): create every group's round IN PARALLEL (each save was
   // previously awaited one group at a time) and skip the Rounds-list
@@ -80713,6 +81024,10 @@ async function t2LaunchDayRounds(courseId) {
     }
   } catch (e) {}
   if (made > 0 || _lostGroups > 0) await t2SetDayStatus(ctx.dayId, 'active');   // v1810 (audit D2): same gate as the event status -- a launch that created nothing must not lock the carts ("This day is already underway")
+  // v1811 (audit D6): the event-wide "X added you to <tournament>" invite (v520 #2) moved here from the
+  // top of t2StartDay, where it went out before the course was even picked. Only once a round exists,
+  // never for a single-cart start (as before); t2NotifyAllPlayers keeps its once-per-player guard.
+  if (made > 0 && !(ctx && ctx.onlyGroupId)) { try { t2NotifyAllPlayers(t); } catch (e) {} }
   // v986 (T26): the in-flight guard was only ever cleared by its own 15s timer,
   // so a fast second launch of the NEXT day was refused for the rest of that
   // window. Clear it on the success path.
@@ -80737,9 +81052,10 @@ async function t2LaunchDayRounds(courseId) {
   try {
     const _myUid = _authUser && _authUser.id;
     const _mine = _myUid ? _madeGames.find(g => g && g.code && Array.isArray(g.players) && g.players.some(p => p && p.uid === _myUid)) : null;
-    if (_mine) { await openT2Round(_mine.code); return; }
+    if (_mine) { await openT2Round(_mine.code); return true; }   // v1811 (audit D5): the launch ran
   } catch (e) {}
   await renderT2Home();
+  return true;   // v1811 (audit D5)
 }
 
 // Open a tournament group round to score (live, not read-only) and follow
@@ -81804,6 +82120,16 @@ function t2OpenLogoPicker(team) {
   card.querySelector('#t2-logo-cancel').onclick = close;
 }
 
+// v1811 (audit D8): why a "⤵ here" target must be refused, or null when the move is fine. A launched
+// cart's players are the snapshot t2LaunchDayRounds took (see there) -- a mover would never reach that
+// scorecard -- and a cart holds T2_MAX_GROUP_SIZE, the same cap t2SeatPlayersIntoGroups honours.
+// o = { launched: bool, count: members already in the target }
+function t2MoveHereRefusal(o) {
+  o = o || {};
+  if (o.launched) return 'That group already opened its round — its players are set. Swap instead, or move before the day starts.';
+  if ((parseInt(o.count, 10) || 0) >= T2_MAX_GROUP_SIZE) return 'Cart is full (' + T2_MAX_GROUP_SIZE + ' max)';
+  return null;
+}
 // Move (not swap): tap a player chip, then "⤵ here" on another group.
 // Mixed-format days only — team formats need balanced 2v2s, so use swap there.
 async function t2MoveHere(btn) {
@@ -81813,6 +82139,7 @@ async function t2MoveHere(btn) {
   if (fmt !== 'stroke' && fmt !== 'quota') { showToast('This format needs even sides — swap two players instead'); return; }
   if (btn.dataset.day !== sel.day) { showToast('Move within the same day'); _t2SwapSel = null; await renderT2Home(); return; }
   if (btn.dataset.gid === sel.gid) { showToast('They\'re already in that group'); _t2SwapSel = null; await renderT2Home(); return; }
+  { const _why0 = t2MoveHereRefusal({ launched: btn.dataset.launched === '1', count: btn.dataset.n }); if (_why0) { showToast(_why0); return; } }   // v1811 (audit D8): what the card showed; re-checked against the cloud below
   try {
     // v986 (T44): every moved player was written with slot 99, so the target
     // group's tee order collapsed (all the movers tied at 99, sorted arbitrarily
@@ -81829,6 +82156,11 @@ async function t2MoveHere(btn) {
         _t2SwapSel = null;
         return;
       }
+      // v1811 (audit D8): the card can be stale (another device launched or filled this cart) -- refuse
+      // on the fresh rows, not just the button's data-* snapshot.
+      let _grpLaunched = false;
+      try { const _gr = await _bgRead(() => supa.from('tournament_groups').select('game_code').eq('id', btn.dataset.gid).maybeSingle(), 't2MoveHere:group'); _grpLaunched = !!(_gr && _gr.ok && _gr.data && _gr.data.game_code); } catch (e) {}
+      { const _why = t2MoveHereRefusal({ launched: _grpLaunched, count: (_memRead.data || []).length }); if (_why) { showToast(_why); _t2SwapSel = null; await renderT2Home(); return; } }
       _slot = (_memRead.data || []).reduce((mx, r) => Math.max(mx, parseInt(r && r.slot, 10) || 0), 0) + 1;
     } catch (e) {}
     // v986 (T47): the result was discarded — an RLS-filtered or failed update
@@ -83040,7 +83372,8 @@ async function renderT2Home() {
             if (_ab.dayId) _dayId = _ab.dayId;
             try { const _tf2 = await t2Get(t.id); if (_tf2) { t.settings = _tf2.settings; t.num_days = _tf2.num_days; if (_t2Current && _t2Current.id === t.id) { _t2Current.settings = _tf2.settings; _t2Current.num_days = _tf2.num_days; } } } catch (e) {}
           }
-          await t2StartDay(_dayId, parseInt(sdb.dataset.day, 10) || 1);
+          const _went = await t2StartDay(_dayId, parseInt(sdb.dataset.day, 10) || 1);
+          if (!_went) sdb.disabled = false;   // v1811 (audit D5): backed out (picker cancelled, active-round gate, launch refused) -- give the button back
         }
         catch (err) { console.error('Start day failed', err); showToast("Couldn't start the day: " + ((err && err.message) || err)); sdb.disabled = false; }
       }; }
@@ -83343,7 +83676,7 @@ async function renderT2Home() {
         '<div style="display:flex;align-items:center;gap:6px;font-size:13px">' +
         '<div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600">Group ' + g2.group_number + (_tt ? ' · ⏱ ' + t2esc(_tt) : '') + (_cap ? ' · 👑 ' + t2esc(String(_cap).split(/\s+/)[0]) : '') + '</div>' +
         (amCommish ? '<button class="bg-btn bg-btn--sm small t2-pick-captain" data-gid="' + g2.id + '" data-cap="' + t2esc(_cap) + '" data-mem="' + t2esc(_memNames.join('|')) + '" title="Set the group scorekeeper">👑</button>' : '') +
-        (canSwap ? '<button class="bg-btn bg-btn--sm small t2-move-here" data-gid="' + g2.id + '" data-day="' + i + '" data-fmt="' + (d.format || 'stroke') + '" title="Move the selected player to this group">⤵ here</button>' : '') +
+        ((canSwap && !g2.game_code) ? '<button class="bg-btn bg-btn--sm small t2-move-here" data-gid="' + g2.id + '" data-day="' + i + '" data-fmt="' + (d.format || 'stroke') + '" data-n="' + mem.length + '" data-launched="0" title="Move the selected player to this group">⤵ here</button>' : '') +   // v1811 (audit D8): no "⤵ here" on a cart that already opened its round (its players are the launch snapshot); data-n feeds the size cap
         (g2.game_code ? '<button class="bg-btn bg-btn--sm small t2-grp-sidebets" data-code="' + t2esc(g2.game_code) + '" title="Side games for this group only">🏆</button>' : '') +
         (g2.game_code ? '<button class="bg-btn bg-btn--sm small t2-open-round" data-code="' + t2esc(g2.game_code) + '">Open</button>' : '') +
         '</div>' +
@@ -92250,7 +92583,7 @@ function _bgTeeGamesLine(t) {
   try {
     var g = t && t.savedConfig && t.savedConfig.games; if (!g || typeof g !== 'object') return '';
     var names = Object.keys(g).filter(function (k) { return g[k]; }).map(function (k) {
-      try { if (typeof bgGameLabel === 'function') { var l = bgGameLabel(k); if (l) return l; } } catch (e) {}
+      try { var l = BG_GAME_LABELS[k]; if (l) return l; } catch (e) {}   // v1811 (audit static §8): `bgGameLabel` never existed -- BG_GAME_LABELS is the app's wording for these config keys; the camelCase split below stays as the fallback
       return String(k).replace(/([a-z])([A-Z0-9])/g, '$1 $2').replace(/^./, function (c) { return c.toUpperCase(); });
     });
     return names.length ? names.join(' \u00B7 ') : '';
@@ -106123,6 +106456,86 @@ async function runPhase2CleanSlateOnce() {
   } catch (e) { console.warn('Phase 2 clean slate failed:', e); }
 }
 
+// v1811 (audit static §1): hoisted out of init() -- see the note at the "Game toggles" wiring inside
+// init. Top level so applySavedConfig (a saved-config / day-config restore) can reach it too.
+// When Ryder Cup or Scramble is active, dim + disable incompatible games.
+// Only Junk, Par 3 Greenie, and Birdie Pool can run alongside team formats.
+// Ryder Cup and Scramble are also mutually exclusive with each other.
+const TEAM_COMPATIBLE = new Set(['p3greenie', 'ctp', 'ryder-cup', 'scramble']);
+const ALL_GAME_KEYS   = ['skins','nassau','stroke','banker','vegas','dvegas','sixes','splix-sixes','stableford','bbb','wolf','match','team-match','team-lowball','shamble','combo-score','quota','team-quota','p3greenie','ctp','junk','snake','birdiePool','ryder-cup','scramble','niners','high-low','animals','marks','hot-potato','hammer','umbrella','potofgold'];
+// Ryder Cup and Scramble use ONE shared team score per hole (no individual
+// strokes) — so they can't coexist with ANY strokes-based game, in EITHER
+// direction. (Previously only enforced team→individual; a per-player game like
+// Quota left Scramble tappable, which then showed a nonsense "team of 1" note.)
+const SHARED_TEAM_SCORE = new Set(['ryder-cup', 'scramble']);
+const INDIVIDUAL_STROKE_GAMES = new Set(['skins','nassau','stroke','banker','vegas','dvegas','sixes','splix-sixes','stableford','bbb','wolf','hammer','match','team-match','team-lowball','shamble','combo-score','quota','team-quota','niners','high-low','umbrella','potofgold']);
+
+function enforceTeamGameExclusivity() {
+  const ryderOn   = $('game-ryder-cup').checked;
+  const scrambleOn = $('game-scramble').checked;
+  const teamActive = ryderOn || scrambleOn;   // a shared-team-score game is on
+  // Reverse direction: any individual/per-player strokes game currently on?
+  // If so, the shared-team-score games (Ryder Cup, Scramble) must be locked.
+  const individualOn = Array.from(INDIVIDUAL_STROKE_GAMES).some(g => {
+    const c = $('game-' + g); return !!(c && c.checked);
+  });
+
+  ALL_GAME_KEYS.forEach(g => {
+    const cb     = $('game-' + g);
+    if (!cb) return;
+    const toggle = cb.parentElement; // <label class="game-toggle">
+    const opts   = $('opts-' + g);
+
+    let locked = false;
+    if (teamActive) {
+      if (!TEAM_COMPATIBLE.has(g)) {
+        locked = true; // shared-team-score game on → lock individual-stroke games
+      } else if (g === 'ryder-cup' && scrambleOn) {
+        locked = true; // scramble on → lock ryder-cup
+      } else if (g === 'scramble' && ryderOn) {
+        locked = true; // ryder-cup on → lock scramble
+      }
+    }
+    // Reverse rule: an individual game is on → lock Ryder Cup / Scramble.
+    if (individualOn && SHARED_TEAM_SCORE.has(g)) locked = true;
+
+    toggle.classList.toggle('locked', locked);
+    if (locked && cb.checked) {
+      cb.checked = false;
+      if (opts) opts.classList.remove('show');
+    }
+  });
+
+  /* v1563 (Tyler, 9/8): "If I am playing Ryder Cup format, Tournament Skins, Fewest
+     Putts, GIRs and the Low Net Pool should not be available. Ryder Cup has scramble
+     and alternate shot which would throw these off." Those pools pay on individual
+     scores and stats, and a shared-ball round has none. The tournament pool tiles
+     (tpot-*) and the normal round's own three pools were never in ALL_GAME_KEYS, so
+     the lock above never reached them. Same rule, same two triggers (Ryder Cup or
+     Scramble): greyed with the reason, unticked if they were on. */
+  try {
+    const _why = teamActive ? ((ryderOn ? 'Ryder Cup' : 'Scramble') + ' plays a shared ball — no individual scores or stats to pay this on') : '';
+    ['tpot-skins-on', 'tpot-lownet-on', 'tpot-girs-on', 'tpot-putts-on', 'game-lownet', 'game-girpool', 'game-puttspool'].forEach(id => {
+      const c = document.getElementById(id); if (!c) return;
+      const card = c.closest('.game-toggle'); if (!card) return;
+      if (_why && card.classList.contains('bg-gate-off') && card.dataset.bgGateSrc && card.dataset.bgGateSrc !== 'team') return;   // somebody else's gate owns it
+      if (_why && c.checked) {
+        c.checked = false;
+        const o = document.getElementById('opts-' + id.replace(/^game-/, '').replace(/^tpot-(.*)-on$/, 'tpot-$1')); if (o) o.classList.remove('show');
+        try { c.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+      }
+      bgGateGame(card, c, _why, 'team');
+    });
+  } catch (e) {}
+  // Show / hide the explanatory banners
+  $('team-game-note').style.display = teamActive ? 'block' : 'none';
+  const hcpNote = $('hcp-team-game-note');
+  if (hcpNote) hcpNote.style.display = teamActive ? 'block' : 'none';
+  // v1539: one format per round rides on the same triggers (every toggle change,
+  // every saved-config restore).
+  try { enforceFormatExclusivity(); } catch (e) {}
+}
+
 async function init() {
   // Keep the per-course map cache bounded so it can never fill localStorage and
   // block the sign-in session from saving (that silently broke WEB sign-in after
@@ -107061,83 +107474,11 @@ async function init() {
     $('si-grid').querySelectorAll('input').forEach((inp, i) => inp.value = DEFAULT_SI[i]);
   };
 
-  // When Ryder Cup or Scramble is active, dim + disable incompatible games.
-  // Only Junk, Par 3 Greenie, and Birdie Pool can run alongside team formats.
-  // Ryder Cup and Scramble are also mutually exclusive with each other.
-  const TEAM_COMPATIBLE = new Set(['p3greenie', 'ctp', 'ryder-cup', 'scramble']);
-  const ALL_GAME_KEYS   = ['skins','nassau','stroke','banker','vegas','dvegas','sixes','splix-sixes','stableford','bbb','wolf','match','team-match','team-lowball','shamble','combo-score','quota','team-quota','p3greenie','ctp','junk','snake','birdiePool','ryder-cup','scramble','niners','high-low','animals','marks','hot-potato','hammer','umbrella','potofgold'];
-  // Ryder Cup and Scramble use ONE shared team score per hole (no individual
-  // strokes) — so they can't coexist with ANY strokes-based game, in EITHER
-  // direction. (Previously only enforced team→individual; a per-player game like
-  // Quota left Scramble tappable, which then showed a nonsense "team of 1" note.)
-  const SHARED_TEAM_SCORE = new Set(['ryder-cup', 'scramble']);
-  const INDIVIDUAL_STROKE_GAMES = new Set(['skins','nassau','stroke','banker','vegas','dvegas','sixes','splix-sixes','stableford','bbb','wolf','hammer','match','team-match','team-lowball','shamble','combo-score','quota','team-quota','niners','high-low','umbrella','potofgold']);
-
-  function enforceTeamGameExclusivity() {
-    const ryderOn   = $('game-ryder-cup').checked;
-    const scrambleOn = $('game-scramble').checked;
-    const teamActive = ryderOn || scrambleOn;   // a shared-team-score game is on
-    // Reverse direction: any individual/per-player strokes game currently on?
-    // If so, the shared-team-score games (Ryder Cup, Scramble) must be locked.
-    const individualOn = Array.from(INDIVIDUAL_STROKE_GAMES).some(g => {
-      const c = $('game-' + g); return !!(c && c.checked);
-    });
-
-    ALL_GAME_KEYS.forEach(g => {
-      const cb     = $('game-' + g);
-      if (!cb) return;
-      const toggle = cb.parentElement; // <label class="game-toggle">
-      const opts   = $('opts-' + g);
-
-      let locked = false;
-      if (teamActive) {
-        if (!TEAM_COMPATIBLE.has(g)) {
-          locked = true; // shared-team-score game on → lock individual-stroke games
-        } else if (g === 'ryder-cup' && scrambleOn) {
-          locked = true; // scramble on → lock ryder-cup
-        } else if (g === 'scramble' && ryderOn) {
-          locked = true; // ryder-cup on → lock scramble
-        }
-      }
-      // Reverse rule: an individual game is on → lock Ryder Cup / Scramble.
-      if (individualOn && SHARED_TEAM_SCORE.has(g)) locked = true;
-
-      toggle.classList.toggle('locked', locked);
-      if (locked && cb.checked) {
-        cb.checked = false;
-        if (opts) opts.classList.remove('show');
-      }
-    });
-
-    /* v1563 (Tyler, 9/8): "If I am playing Ryder Cup format, Tournament Skins, Fewest
-       Putts, GIRs and the Low Net Pool should not be available. Ryder Cup has scramble
-       and alternate shot which would throw these off." Those pools pay on individual
-       scores and stats, and a shared-ball round has none. The tournament pool tiles
-       (tpot-*) and the normal round's own three pools were never in ALL_GAME_KEYS, so
-       the lock above never reached them. Same rule, same two triggers (Ryder Cup or
-       Scramble): greyed with the reason, unticked if they were on. */
-    try {
-      const _why = teamActive ? ((ryderOn ? 'Ryder Cup' : 'Scramble') + ' plays a shared ball — no individual scores or stats to pay this on') : '';
-      ['tpot-skins-on', 'tpot-lownet-on', 'tpot-girs-on', 'tpot-putts-on', 'game-lownet', 'game-girpool', 'game-puttspool'].forEach(id => {
-        const c = document.getElementById(id); if (!c) return;
-        const card = c.closest('.game-toggle'); if (!card) return;
-        if (_why && card.classList.contains('bg-gate-off') && card.dataset.bgGateSrc && card.dataset.bgGateSrc !== 'team') return;   // somebody else's gate owns it
-        if (_why && c.checked) {
-          c.checked = false;
-          const o = document.getElementById('opts-' + id.replace(/^game-/, '').replace(/^tpot-(.*)-on$/, 'tpot-$1')); if (o) o.classList.remove('show');
-          try { c.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
-        }
-        bgGateGame(card, c, _why, 'team');
-      });
-    } catch (e) {}
-    // Show / hide the explanatory banners
-    $('team-game-note').style.display = teamActive ? 'block' : 'none';
-    const hcpNote = $('hcp-team-game-note');
-    if (hcpNote) hcpNote.style.display = teamActive ? 'block' : 'none';
-    // v1539: one format per round rides on the same triggers (every toggle change,
-    // every saved-config restore).
-    try { enforceFormatExclusivity(); } catch (e) {}
-  }
+  // v1811 (audit static §1): enforceTeamGameExclusivity and its game-key tables used to be declared HERE,
+  // nested inside init(). applySavedConfig's `typeof enforceTeamGameExclusivity === 'function'` guard
+  // therefore saw `undefined` and a restored Ryder Cup / Scramble config never re-locked the other
+  // games. Both live at top level now (just above init) so the restore path and the toggle handler
+  // below call the same function; behaviour for the toggle handler is unchanged.
 
   // Game toggles
   ['skins','nassau','stroke','banker','vegas','dvegas','sixes','splix-sixes','stableford','bbb','wolf','match','team-match','team-lowball','shamble','combo-score','quota','team-quota','p3greenie','ctp','longputt','longdrive','junk','snake','birdiePool','ryder-cup','scramble','niners','high-low','animals','marks','hot-potato','hammer','umbrella','potofgold','lownet','girpool','puttspool'].forEach(g => {
