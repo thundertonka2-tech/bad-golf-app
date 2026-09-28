@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1808-->
+<!--BGVER=v2026.11.1809-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11433,7 +11433,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1808';
+const BG_BUILD = 'v2026.11.1809';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -34134,7 +34134,68 @@ async function healMyRoundsFromCloud() {
     _bgHealRoundsUid = _authUser.id;
     _bgHealRoundsP = _bgHealMyRoundsFromCloudOnce();
     try { await _bgHealRoundsP; } finally { _bgHealRoundsP = null; }
+    try { bgPullMyParticipantRounds().catch(function () {}); } catch (e) {}   // v1809: rounds I'm in that never reached my list
   } catch (e) { console.warn('healMyRoundsFromCloud failed', e); }
+}
+
+/* v1809 (Tyler, 9/28: "make sure this never happens again" / "as clean as possible").
+   Every heal in this file keys off MY recent: list -- the Stats missing-round pass,
+   healRecentScoreLines, the crew profile heal, resyncMyStats. A round only reaches that
+   list when THIS phone touches it (addToRecent on create / join / open / finish). So a
+   player who was put on the card by someone else and never opened the app during the
+   round -- Tim Payne (BOGEY77), Britt Hogland (FRONT18 / MULLIGAN73 / PINE36), Tar Heel
+   Boy (PITCH27) -- had nothing to heal FROM, and each one needed a hand repair by SQL.
+   The cloud already knows the answer: bg_sync_round_participants (v1791) keeps
+   games.participants = every uid on the card, and RLS lets a participant read the row.
+   Ask it once per sign-in: finished rounds that list me and are not in my list. Each
+   one is loaded, confirmed against the card by uid, added to my Rounds list exactly as
+   if I had opened it, and archived into my history (idempotent). Never a live round,
+   never a round I hid or deleted, at most 10 per pass, once per account per session,
+   in the background after the player_stats heal. */
+let _bgPartPullUid = null;
+async function bgPullMyParticipantRounds() {
+  try {
+    if (!(typeof isSignedIn === 'function' && isSignedIn() && supa && _authUser && _authUser.id)) return 0;
+    if (_bgPartPullUid === _authUser.id) return 0;
+    _bgPartPullUid = _authUser.id;
+    const _me = _authUser.id;
+    const { data, error } = await supa.from('games')
+      .select('code,updated_at')
+      .eq('type', 'game')
+      .contains('participants', [_me])
+      .not('data->>finishedAt', 'is', null)
+      .order('updated_at', { ascending: false })
+      .limit(40);
+    if (error || !Array.isArray(data) || !data.length) return 0;
+    let recent = []; try { recent = (await getRecent()) || []; } catch (e) {}
+    const have = new Set(recent.map(r => r && r.code).filter(Boolean));
+    let hidden = []; try { hidden = getHiddenRounds() || []; } catch (e) {}
+    const dead = new Set(hidden);
+    try { const _dk = getDeletedRoundKeys(); if (_dk && _dk.forEach) _dk.forEach(k => dead.add(k)); } catch (e) {}
+    try { const _st = await getSharedTombstones(); if (_st && _st.rounds && _st.rounds.forEach) _st.rounds.forEach(c => dead.add(c)); } catch (e) {}
+    const missing = data.filter(row => row && row.code && !have.has(row.code) && !dead.has(row.code)
+      && !dead.has((typeof statsRoundKey === 'function') ? statsRoundKey({ gameCode: row.code }) : row.code)).slice(0, 10);
+    if (!missing.length) return 0;
+    let n = 0;
+    for (const row of missing) {
+      try {
+        const g = await loadGame(row.code);
+        if (!(g && g.finishedAt && Array.isArray(g.players) && g.players.length && g.scores)) continue;
+        // participants got us here; the card itself must agree before anything is written.
+        if (!g.players.some(p => p && p.uid === _me)) continue;
+        await addToRecent(g);
+        try { await archiveScoresFromRound(g); } catch (e) {}
+        n++;
+      } catch (e) {}
+    }
+    if (n) {
+      try { console.warn('[BadGolf] participant pull: added ' + n + ' finished round(s) I was on but never opened'); } catch (e) {}
+      try { if (typeof renderHome === 'function') renderHome(); } catch (e) {}
+      try { if (typeof renderStats === 'function') renderStats(); } catch (e) {}
+      try { const _pr = document.getElementById('panel-rounds'); if (_pr && _pr.classList.contains('active') && typeof loadRounds === 'function') loadRounds(); } catch (e) {}
+    }
+    return n;
+  } catch (e) { return 0; }
 }
 async function _bgHealMyRoundsFromCloudOnce() {
   try {
@@ -66120,7 +66181,28 @@ async function loadRounds() {
           await Promise.all(liveEntries.map(async r => {
             try {
               const g = await loadGame(r.code);
-              if (g && g.finishedAt) { r.finishedAt = g.finishedAt; patched = true; }
+              if (g && g.finishedAt) {
+                r.finishedAt = g.finishedAt;
+                /* v1809 (Tyler, 9/28: "make sure this never happens again"). Tim Payne's
+                   recent: row for BOGEY77 was a MID-ROUND snapshot ("Tommy 9 · Tim 9 ·
+                   Britt 10 · Tim 9", finishedAt null) written by a server-side repair while
+                   the round was still live. This heal only re-stamped finishedAt, so the row
+                   would have flipped to Complete while keeping the 2-hole score line, and
+                   healRecentScoreLines could not fix it either (it compares the line to MY
+                   scoreHistory gross, which a participant who never opened the app does not
+                   have). Home's heal skips rows untouched for 12h+ (isRoundStale) as well.
+                   Refresh the whole row from the finished game record - same fields, same
+                   helper, as addToRecent writes - so a stale live snapshot from ANY source
+                   (manual repair, clobbered sync, another device) converges on the first
+                   Rounds-tab open. In place: no reorder, no extra write. */
+                try { r.updatedAt = g.updatedAt || r.updatedAt; } catch (e) {}
+                try { if (g.createdAt) r.createdAt = g.createdAt; } catch (e) {}
+                try { if (Array.isArray(g.players)) r.players = g.players.map(p => p.name).join(', '); } catch (e) {}
+                try { const _ln = grossScoreLineFor(g); if (_ln) r.scoreLine = _ln; } catch (e) {}
+                try { r.t2 = g.t2 || r.t2 || null; } catch (e) {}
+                try { r.lg = (g.lg && g.lg.sid) ? { sid: g.lg.sid } : (r.lg || null); } catch (e) {}
+                patched = true;
+              }
             } catch (e) {}
           }));
           if (patched) {
