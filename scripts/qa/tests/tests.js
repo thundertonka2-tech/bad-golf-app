@@ -487,6 +487,19 @@ section('Vegas');
   check('naturalBoost: net 34 v 44 with NO flip -> 10 pts', [rN.holeResults[0].aScore, rN.holeResults[0].bScore, rN.holeResults[0].flipNote], [34, 44, '']);
   const gN2 = mkRound({ players: pl(ids4, [1, 0, 0, 0]), scores: scN, games: { vegas: { net: true, value: 1, rotate: 'rotate', participants: ids4 } } });
   check('no naturalBoost: net birdie flips (44 -> 44) still 10 pts', E.calcVegas(gN2).holeResults[0].flipNote, 'P1 & P2 birdied — flipped');
+  // (h2) v1814 per-game birdieBasis (Tommy): net scores, only natural birdies flip/double.
+  const gH = mkRound({ players: pl(ids4, [1, 0, 0, 0]), scores: scN, games: { vegas: { net: true, birdieBasis: 'gross', value: 1, rotate: 'rotate', participants: ids4 } } });
+  const rH = E.calcVegas(gH);
+  check('v1814 hybrid: net 34 v 44, pop birdie does NOT flip', [rH.holeResults[0].aScore, rH.holeResults[0].bScore, rH.holeResults[0].flipNote], [34, 44, '']);
+  const gHn = mkRound({ players: pl(ids4, [1, 0, 0, 0]), scores: scN, naturalBoost: true, games: { vegas: { net: true, birdieBasis: 'net', value: 1, rotate: 'rotate', participants: ids4 } } });
+  check('v1814 birdieBasis net beats round naturalBoost: pop birdie flips', E.calcVegas(gHn).holeResults[0].flipNote, 'P1 & P2 birdied — flipped');
+  // pop eagle: p1 hcp 1 makes a gross 3 on the #1 index par 4 -> net 2. Hybrid: it is a natural BIRDIE -> flip, no double.
+  const scE = parAll(ids4); scE.p1 = withHoles(parRow(PARS), { 1: 3 });
+  const rE = E.calcVegas(mkRound({ players: pl(ids4, [1, 0, 0, 0]), scores: scE, games: { vegas: { net: true, birdieBasis: 'gross', value: 1, rotate: 'rotate', participants: ids4 } } }));
+  check('v1814 hybrid: pop eagle (gross birdie) flips but does not double', [rE.holeResults[0].multiplier, rE.holeResults[0].flipNote], [1, 'P1 & P2 birdied — flipped']);
+  const rE2 = E.calcVegas(mkRound({ players: pl(ids4, [1, 0, 0, 0]), scores: scE, games: { vegas: { net: true, birdieBasis: 'net', value: 1, rotate: 'rotate', participants: ids4 } } }));
+  check('v1814 net basis: same pop eagle flips AND doubles', [rE2.holeResults[0].multiplier, rE2.holeResults[0].flipNote], [2, 'P1 & P2 eagled — flipped + 2x']);
+  check('v1814 _bgVegasNetSel', [E._bgVegasNetSel({ net: true }), E._bgVegasNetSel({ net: true, birdieBasis: 'net' }), E._bgVegasNetSel({ net: true, birdieBasis: 'gross' }), E._bgVegasNetSel({ net: false })], ['hybrid', 'net', 'hybrid', 'gross']);
   // (i) 9-hole rotate plan 3/3/3
   const g9 = mkRound({ pars: P9, sis: S9, players: pl(ids4), scores: parAll(ids4, P9), hcpRules: { noHandicaps: true }, games: gX.games });
   check('9-hole rotate plan 0-3, 3-6, 6-9', E.vegasSegmentPlan(g9, g9.games.vegas, g9.players).map(s => s.start + ',' + s.end).join('|'), '0,3|3,6|6,9');
@@ -513,6 +526,12 @@ section('Dynamic Vegas');
   sc.p3[3] = 6; sc.p4[3] = 3;
   const r2 = E.calcDynamicVegas(g);
   check('dvegas re-pair after h4: p4&p3 v p1&p2', r2.teamsByHole[4].map(t => t.join('&')).join('|'), 'p4&p3|p1&p2');
+  // v1814: Dynamic Vegas honours birdieBasis too. p1 (hcp 1) pars the #1 index -> net birdie.
+  const scP = parAll(ids4);
+  const rDh = E.calcDynamicVegas(mkRound({ code: 'A', players: pl(ids4, [1, 0, 0, 0]), scores: scP, games: { dvegas: { net: true, birdieBasis: 'gross', value: 1, participants: ids4 } } }));
+  check('v1814 dvegas hybrid: pop birdie scores 34 v 44 but no flip', [rDh.holeResults[0].aScore, rDh.holeResults[0].bScore, rDh.holeResults[0].flipNote], [34, 44, '']);
+  const rDn = E.calcDynamicVegas(mkRound({ code: 'A', players: pl(ids4, [1, 0, 0, 0]), scores: scP, games: { dvegas: { net: true, birdieBasis: 'net', value: 1, participants: ids4 } } }));
+  check('v1814 dvegas net basis: pop birdie flips', rDn.holeResults[0].flipNote.indexOf('flipped') > 0, true);
 }
 
 // ================================================================ 8. SIXES / SPLIX / NINERS
