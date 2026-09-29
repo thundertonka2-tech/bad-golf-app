@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1687
+**Build Version:** v2026.11.1815
 **Documentation Date:** September 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -34,7 +34,7 @@
 
 ### Sign-In Options
 
-Users access the **Sign in to Bad Golf** modal from the Stats tab (Account section) or when joining a round.
+Users access the sign-in screen — titled **"Bad Golf, Better Times"** — from the Stats tab (Account section) or when joining a round.
 
 **Sign-in methods:**
 - **Continue with Google** — OAuth sign-in via Google account
@@ -49,10 +49,13 @@ Users access the **Sign in to Bad Golf** modal from the Stats tab (Account secti
 - Tap **Create account** on the sign-in modal
 - Enter email and password (minimum 6 characters)
 - Confirm the name you'll play as (see below)
+- **Already have an account with that email?** Instead of a raw error you get: *"An account already exists for that email. Try Login with Google or Apple, sign in with your password, or use "Forgot password"."*
 
 **Requirements:** iPhone/iPad on **iOS 15 or newer**. Bad Golf is also live on **Google Play** — the invite links include both stores, since the sender can't know which phone you carry.
 
-**Sharing a phone.** Signing out clears the cached roster, friends and profile data, so the next person to sign in never sees — or absorbs — the previous account's players and history.
+**Sharing a phone.** Signing out clears the cached roster, friends and profile data and **reloads the app**, so the next person to sign in never sees — or absorbs — the previous account's players and history. If a different account signs in on the same phone, the previous account's photo, name, home course, rounds, drafts and badges are wiped from the phone too.
+
+**Rounds that haven't synced yet.** If a round on this phone hasn't reached the cloud, **Sign out** asks first — **"Unsaved rounds"**: signing out now would delete it from this phone. Tap **"Stay signed in"** and let it sync (a bar of signal is enough), or **"Sign out anyway"** if you're sure.
 
 **Signed out means nothing loads from the cloud.** A device that hasn't signed in reads only what's stored on that phone. It used to be able to pick up a shared, app-wide list of recent rounds — everybody's rounds — and even prune its own history against it. Anything you save while signed out is written to your own account on the first sync after you sign in.
 
@@ -79,6 +82,10 @@ If your buddies added you as a guest before you signed up, the app offers to han
 If someone added you at the first tee and sent you the link, signing in gives you **one confirmation** — e.g. *"You are set up as Brian Myers, handicap 12"* — and you're in, using the name and handicap the host entered. No name prompt, no handicap prompt, no phone prompt.
 
 If the link isn't tied to a specific person, you get a **"Which player are you?"** picker — and it lists **only the open guest spots**: players the host added by name who don't have an account attached yet. The host's own row, anyone who signed in with an account, and any spot already claimed through a link never appear, so there's nothing to pick by mistake. Tap your name and you're in — name and handicap come from the spot, no prompts. There's also **"I'm someone else"** and **"None of these — I'm new"** (which runs normal signup); if the round has no open spot at all, the picker is skipped and normal signup runs. An account that already has a linked player is never renamed by a link.
+
+**"That's you?"** If you join a round where an unlinked player spot matches your name, the app asks once: *"Save the seat "‹name›" to your account? Next time this round will recognise you without asking."* Tap **"Yes, that's me"** and the round, its scores and your stats follow your account; **"Not now"** leaves it alone. Your answer sticks — you won't be asked again for that round.
+
+**"⛳ Rejoin your round?"** is only offered for a round you're actually on — matched by your account (or by your name when signed out) — and waits until any name or handicap prompt is closed.
 
 If a claim fails, the app now says why — whether the slot is already tied to one of *your* other logins (naming the email you're signed in as) or to somebody else's — and opens the event anyway. *This is the classic "the invite just dumps me on the home screen" complaint, and the usual cause is a duplicate account.*
 
@@ -163,7 +170,7 @@ The fix for a genuine duplicate is an **admin account merge** (see Admin → Use
 - **Home** — your dashboard. While a round is live and you're on the scoring screen, this first slot becomes **Score** instead.
 - **Rounds** — open rounds, scheduled rounds, your saved round history and round templates. *(This tab used to be called Events.)*
 - **The middle button** reads **Play** normally and **Round** while a round is live. It used to be the Bad Golf logo artwork; since v1030 it's the word, because nobody knew what the logo did. Its ring is **red while a round is live** and green when nothing is active. On the round-setup screen it hides itself — it sat directly under **"▶ Start round now"** and people were tapping the wrong one.
-- **Friends** — your friends, the roster, the crew message board and a **Live now** list you can spectate from. *(This slot used to be labelled Crew.)*
+- **Friends** — your friends, the roster and the crew message board. *(This slot used to be labelled Crew. The **Live now** list lives on **Home** now, directly above Your rounds.)*
 - **More** — opens a sheet of solid, colour-coded tiles, alphabetical: **🏅 BG Badges · 🗺️ Courses · 💡 Info · ⛳ League · 🧑 Profile · 📊 Stats · 📅 Times · 🏆 Tourney**, drawn **four across in two rows**, with **🛡️ Admin** for admins only. The Badges tile carries a pill with the number of badges you haven't looked at yet. The bottom bar itself uses the same full-colour glyphs — 🏠 Home, 📋 Rounds, 🧑‍🤝‍🧑 Friends, and ✏️ Score while a round is live. **League is open to every signed-in user** — the BETA pill and the tester-only access list are both gone. Because there are now six tiles, the sheet draws them as a **3-across, two-row grid**; signed-out users still see a five-across single row without League.
 
 **An info dot and a sync dot sit in the bar's lower-right corner.** Tap the **i** for your build number; the dot beside it colours itself by sync status.
@@ -359,9 +366,11 @@ A single card near the top of Home holds your crew's social feed.
 
 > **Everything on Home is friends-only.** The old Friends only / Everyone scope dropdown was removed — crew highlights and the message board are permanently limited to you and your accepted friends.
 
-### Watching Friends Play — "Live now" (Crew Tab)
+### Watching Friends Play — "Live now" (Home Tab)
 
-**Live now moved off Home.** The card that used to list in-progress rounds on the Home tab was removed to slim the screen down. **The Crew tab still has its own "Live now" list, with Spectate buttons on each row** — that's where you go to watch a friend play.
+**Live now sits on Home, directly above "Your rounds"** — *"Friends' rounds in progress — tap 👀 Spectate to watch live."* It only shows while something is live. *(It used to be on the Crew/Friends tab.)*
+
+**Your own live round says "▶ Join", never Spectate.** If you're a player in a round that's in progress, its row reads **"▶ Join"** and tapping it drops you into the round to score. A Spectate link for your own round (from a notification or alert) takes you into the round too. Friends' rounds keep **👀 Spectate**.
 
 - Rounds currently in progress by you and your accepted friends, refreshing in real time
 - **Player names**, **course**, and **status** (holes scored so far)
@@ -629,7 +638,7 @@ The Score tab is live during a round — enter scores hole-by-hole and track sid
 - **Fairway chip** — HIT/MISS for par 4s and 5s
 - **+pen tap** — beside the fairway chip when penalties tracking is on
 - **🏖️ tap** — sand saves, available on every hole
-- **Putts counter** — under the score (tap to edit)
+- **Putts counter** — under the score (tap to edit). **Chip in or hole out from off the green?** Tap **−** on an empty putts box and it logs **0** (tap **+** and it starts at 2)
 
 ### Starting Somewhere Other Than Hole 1
 
@@ -775,6 +784,8 @@ Notes worth knowing:
 Birdie and eagle pop-ups now identify you by **account**, not by matching your name — so you no longer see every player in the field's celebration on your own phone. In a tournament, an identity the app can't resolve shows **nothing** rather than showing everything; a plain single-phone round still shows all of them.
 
 In a live tournament round, **birdies, eagles, long putt, long drive and lead changes surface as toasts** on screen. They used to be posted only into tournament chat with nothing listening, so you'd only see them if the chat panel happened to be open. Only events that arrive **after** you open the round are shown, each once, and never your own.
+
+**"SNOWMAN ALERT" only fires on an 8.** Other blow-up holes get one of the other lines. The **Snowman Season** badge is unchanged (an 8 on one hole).
 
 ### A Player Leaves Mid-Round
 
@@ -991,7 +1002,7 @@ The GPS is the marquee feature — satellite view of every hole with live distan
 - **"Score" button** (blue pill below the scorecard) — opens the full GPS view of the hole
 - **"Track Shot" pill** — manually log a drive distance
 
-**Spectate mode:** from the Crew tab's **Live now** list, tap any live round to open GPS read-only, following that player.
+**Spectate mode:** from the **Live now** card on Home, tap **👀 Spectate** on a friend's live round to open GPS read-only, following that player. *(Your own live round shows **▶ Join** instead.)*
 
 **It works offline on iPhone.** The map library is bundled on the device, so a course with no signal still draws the map.
 
@@ -1057,7 +1068,7 @@ Previewing a course always shows each hole **from the mapped tee**, even if you'
 
 ### Spectate / Watch Another Player
 
-From the **Crew** tab → **"👀 Live now"**, tap any player's row. GPS opens in **spectator mode** (read-only), showing their live location if they've shared it, with scores and shots updating in real time. A dropdown at the top — **"Spectating: [Player Name]"** — switches between players in the same round.
+From **Home** → the **Live now** card, tap **👀 Spectate** on a friend's round. GPS opens in **spectator mode** (read-only), showing their live location if they've shared it, with scores and shots updating in real time. A dropdown at the top — **"Spectating: [Player Name]"** — switches between players in the same round.
 
 **Spectating somebody else's group no longer costs you your own round.** The app remembers your round, your hole and your tab, and the **✕** puts you back there. Before, opening **Awards → Group award** forced your own live round into spectator mode and the ✕ discarded it outright — you could lose your round by looking at your own award.
 
@@ -1182,6 +1193,7 @@ This section details every game with rules, setup, and award logic. Four games a
   - *Support note: the stroke dots on the scorecard show the **round-level** pops. If Skins is running at a different allowance, the dots and the Skins result can legitimately differ on a hole. That's expected, not a bug.*
 - **Skins use your COURSE handicap** (index adjusted for the tee), not the raw index. Before v1043 tournament Skins used the raw index and handed every player about two strokes too many — results settled before that build may have gone to the wrong players (the prize pool total was always right).
 - **Award math:** prize pool ÷ number of skins won = per-skin value; each player nets unit totals minus their entry share, shown as `+13.33 units (2)`.
+- **A carry left at the end of a finished round** goes to the player with the **lowest net total** — among the players who played the most holes. Tied on total, it's **void**. The Games screen header reads e.g. *"5 won · 1 void"* (or *"carrying"* while the round is live), and the row reads *"Carry-over — ‹name› on low total"* or *"Carry-over of N void — tied on total"*. It doesn't count as a skin for badges or scorecard circles.
 - **The saved round card prints the setup**, e.g. `Pool — split by skins won · 80% hcp · All players`.
 - **In tournaments:** the tie setting is exactly **"No carry overs" / "Carry overs"**. With only one group on the course, Skins settle **live on the leaderboard** as you play — a hole pays as soon as every player in the field has posted a score for it, so a late-entered score can't take a skin back.
 
@@ -1191,7 +1203,10 @@ This section details every game with rules, setup, and award logic. Four games a
 - **Two scoring formats:** **Stroke play** (lowest total wins each segment) or **Match play** (holes won, e.g. "3&2").
 - **⚠️ Ties CARRY, in every format.** There is one Nassau rule: lowest net wins each segment, and if a segment ties, nothing settles and the units **rolls onto the next segment**. Any carry left over after the Overall is forfeited. *Exception: in a field of more than 10 players where the prize pool pays 2–3 places, ties still split.*
 - **Special-score bonuses:** every **birdie, eagle, and hole-in-one** pays a bonus from each other player (Albatross pays at the eagle rate).
-- **📣 Huckle (the press):** if you're **down 2+** in any segment — strokes in stroke play, holes in match play — you can call a **Huckle**: a fresh side game for the same amount, between you and the current leader, from that hole to the end of the segment. The original segment game plays out separately. **Huckles are available on stroke-play Nassau again** (they'd been restricted to match play since v683). Cross-group Nassau still shows the "Huckles off" note.
+- **📣 Huckle (the press):** if you're **down 2+** in any segment — strokes in stroke play, holes in match play — you can call a **Huckle**: a fresh side game for the same amount, between you and the current leader, from that hole to the end of the segment. The original segment game plays out separately.
+  - **How you call one:** nothing pops up on its own. When someone is eligible, the Score screen shows a highlighted **"📣 Huckle available"** banner (*"N player(s) down 2+ — tap to see the options"*) with a **"📣 Call Huckle"** button that opens the options. No Huckle is offered on a finished round, or on the last hole once its scores are in.
+  - A **cart's own Nassau** in a tournament gets the same banner.
+  - **Huckles are available on stroke-play Nassau again** (they'd been restricted to match play since v683). Cross-group Nassau still shows the "Huckles off" note.
 - **Quit-early rules:** a stroke segment only settles when **both players completed it** — a player who walks off after 12 holes can no longer win the back or the overall. A fully played front still pays normally; an unfinished segment is void. Group Nassau (3–5 players) pays out on an early finish too; it used to pay nobody.
 
 #### **💰 Stroke Play Prize Pool** *(free)*
@@ -1231,7 +1246,11 @@ This section details every game with rules, setup, and award logic. Four games a
   - **🆕 Switch teams at the turn (9 & 9)** — you pick the front-nine 2v2 (the picker relabels to **"Teams — front nine"**) and partners **auto-swap on hole 10**, so nobody plays with the same partner twice. A live preview under the picker shows both nines and refuses to guess a back nine if the front isn't a clean 2v2. It settles as **one running total across all 18** (one Vegas line in final standings), and **the tie multiplier resets at the turn** — a tie on hole 9 does not double hole 10. The on-course banner reads *"Front nine · Holes 1–9 · teams switch at the turn"* then *"Back nine · Holes 10–18 · teams switched"*, with a **"Show both nines"** table.
 - **Boosts:** a **birdie flips** the opponent's number (5+4 becomes 54) — and it genuinely flips against a 10 or higher, which it silently failed to do before. **Two birdies, or any eagle, also doubles** the hole; two eagles ×4. If both teams boost they cancel, but the next hole still doubles.
 - **Tie escalation:** a tied hole **doubles** the next hole's game — **and the doubling is capped.** It used to be unbounded: six ordinary tied holes made hole 7 worth ×64, turning a 1 units-a-point game into a 352 units hole. The first hole someone wins clears the streak.
-- **Setup options:** Units per point, net or gross, team rotation.
+- **Setup options:** Units per point, team rotation, and **Net or gross** — three choices *(v1814)*:
+  - **Net — only natural birdies/eagles flip or double** *(default)* — handicap strokes count toward every score and can win the hole, but only a real (gross) birdie or eagle flips the other team's number or doubles. A 4 on a par 4 with a stroke is a net 3 that can win, but it does not flip.
+  - **Net — handicap-stroke birdies/eagles flip & double too** — the old net behaviour.
+  - **Gross.**
+  - Rounds played before v1814 settle exactly as they did. Starting a new round from an old setup picks the new default.
 
 #### **6️⃣ 6's / Round Robin (4 players)**
 - **Players:** exactly 4 (2v2 teams)
@@ -1289,7 +1308,7 @@ A scramble off the tee, then real golf. **Everyone on the team tees off, the tea
 - **Scoring:** on each hole a team counts its **best 1 or 2 net scores** (you choose at setup) and adds them together. The **lowest 18-hole team total wins** the Units per player; a tie is a push.
 - **Shamble handicap allowance:** because everyone plays from the best drive, handicaps are cut — **50% by default** (50% is common for pairs, 30–35% for foursomes). It **replaces** the round's handicap percentage for this game only, and still respects no-strokes-on-par-3s and gross players.
 - **Tracking drives:** the Score screen shows a **Shamble** row with a chip for each player on each team. Tap whose drive the team used on the hole (tap again to clear). The scorecard keeps a running count per player and shows **n/min** on anyone short of the **Minimum drives per player** (3 by default; **0** turns the check off). The Game results card lists **🚗 Drives used** with a ⚠️ next to anyone under the minimum. **Drives never move any units.**
-- **Walked-in partner:** a team with fewer scores than the balls it counts on a hole uses the scores it has.
+- **A partner who has to leave:** mark them with **"· left the round?"** and from the next hole the team counts the balls it has. **A blank score from a player who is still playing leaves the hole incomplete** — it isn't treated as a walk-in.
 - **Ending early:** settles on the holes played.
 
 > **Example:** 5 units per player, best 1 net ball, 50% allowance. Team A's best net balls add up to **71**, Team B's to **74**. Team A wins by 3 — **each Team A player +5, each Team B player −5.**
@@ -1391,7 +1410,7 @@ Three pools where everyone pays the same entry and the single best result takes 
 The **most greens in regulation over 18** takes the prize pool. **Turning this on switches GIR tracking on automatically**, and a toast tells you it did. If nobody makes a single GIR, the prize pool is void.
 
 #### **Fewest Putts Pool**
-The **fewest total putts over 18** takes the prize pool. **Turning this on switches putt tracking on automatically.** You need a putt count on every hole you score — a player missing putt data **can't win** it but still pays his entry.
+The **fewest total putts over 18** takes the prize pool. **Turning this on switches putt tracking on automatically.** **Blank putts count as 0 once the round is finished.** On any hole you scored with the putts box left empty, the app treats it as **0 putts** (a chip-in or hole-out) — as long as you logged putts at least once that round. There are no mid-round warnings. A player who logged **no putts at all** can't win it but still pays his entry.
 
 ### Side Games
 
@@ -1508,7 +1527,7 @@ The **Info** tab (More → 💡 Info) is the app's built-in **rulebook and help 
 - **Support address: `support@officialbadgolf.com`.** This is the address on the About card's **Support** row and behind both in-app feedback links.
 - **The About card's copyright line reads "© 2026 Bad Golf".**
 - **The Terms of Service and the Privacy Policy name the party as "Kevin Wells, an individual doing business as Bad Golf."** Same wording on the public terms, privacy, support and delete-account pages, and in the ToS and Privacy PDFs.
-- **The company line is "Bad Golf, Better Times"**, on the splash, the public site, the footer and the share card.
+- **The company line is "Bad Golf, Better Times"**, on the splash, the sign-in screen, the public site, the footer and the share card.
 
 Games and side games carry the gold **PRO** pill here too. The handicap, tournament, league and help topics are never badged — they're not games.
 
@@ -1604,7 +1623,13 @@ A plain card at the **top of the Profile tab** with three buttons: **System · L
 
 ### 🔔 Push Notifications
 
-One card covers everything Bad Golf pushes, split into what goes out and what comes in. Turn any of them on or off at any time. *(On iPhone you also need to allow notifications for Bad Golf in your phone's Settings. In-app alerts always show while the app is open.)*
+One card covers everything Bad Golf pushes, split into what goes out and what comes in. Turn any of them on or off at any time. *(On iPhone you also need to allow notifications for Bad Golf in your phone's Settings — see below. In-app alerts always show while the app is open.)*
+
+**Turning notifications on (phone app).** The app no longer asks for permission the moment it opens. After you sign in — and never while you're scoring a live round — a card appears:
+
+- **🔔 "Turn on notifications"** — *"You'll hear when you're invited to a round or a tee time, when your group starts, and when a course you asked for is ready."* Tap **"Turn on notifications"** to bring up your phone's permission prompt, or **"Not now"**.
+- **🔕 "Notifications are off"** — if you said no before. On iPhone, **"Open Settings"** takes you there (turn on **Notifications → Allow Notifications**). On Android the card shows the path: **Settings › Apps › Bad Golf › Notifications**.
+- The card comes back **once every 30 days** until notifications are on, and never shows once they are.
 
 **What I send**
 
@@ -1675,6 +1700,8 @@ The **"Compare to a friend"** dropdown on Stats (and its twin on Friends) is a p
 
 - Deliberately limited to **finished** rounds (live rounds stay out of stats), **rounds you're actually a player in**, and **never a round you deleted** — local deletes and shared tombstones are both honoured
 - Up to 10 recovered per pass
+
+**Rounds someone else put you on show up by themselves.** Once per session after you sign in, finished rounds where your account is on the card are added to your **Rounds** list and **Stats** — even if you never opened them. Same limits: finished rounds only, up to 10 per pass, never a round you hid or deleted.
 
 **Partial rounds that carried real units now count toward Lifetime Games.** A round used to need to be complete or carry a gross score, so walking in after 14 holes down 42.50 units silently vanished from game history. Genuine ghost rows (0 units, no gross, no holes) are still excluded.
 
@@ -1836,7 +1863,8 @@ Delete lives on the round's Games sheet.
 ### Scheduled Rounds
 
 - The list is **personalized to you** — only scheduled rounds you're actually in, plus templates you created
-- Tap a scheduled round to **edit its setup or start it now**; tap a template to load the whole setup into Play
+- **Tapping a scheduled round opens the same screen from Home and from Rounds**, and nothing starts until you tap Start. A tee time opens its details on **Times**; a tournament opens the event (the event hub for the commissioner). Tap a template to load the whole setup into Play
+- **"Start round now"** on a scheduled round with a saved setup goes **straight into the round** on the Score tab — no setup screen. The Times card's **"▶ Start round"** does the same. A round with only the basics filled in still opens the setup form
 - Phantom **"SCHEDULED"** rows left behind by a duplicate launch clear themselves on the next load
 
 ### Invites
@@ -1928,7 +1956,7 @@ Setup runs one step at a time and **saves as it goes** — a green *"✓ Everyth
 5. **💰 Tournament pot** *(team events)* — a checkbox and a **buy-in per player**, with a live sum ("8 players × 20 = 160 in the pot"). The side with the most cup points across every day takes the pot, split among its players; a tie splits it. A **fee reserve** — a percent or a flat amount per player, with a label — can be held back off the top, and the summary then reads *"… held back for X · N to the winners"*.
 6. **Then, for each day:** **Pick the course** (titled "Pick the course — Day 2" on later days) → **Set the date** (Day 2+ defaults to the day after Day 1) → **Configure games** → **Assign tees** → **Carts & teams** → **Add scorekeepers** → **Review & start**.
 
-**Carts & teams** builds the carts from the matchups you made on Configure games — two matches per cart, unmatched pairs seated team-vs-team as four-man carts — and each group header carries a **Time** field (AM/PM shown in full on the phone). Groups hold up to 8; **"👥 One group"** seats the whole field together. **A blocked step tells you why** — Next stays greyed but names what's missing: *"2 groups still need a scorekeeper: Group 2 and Group 4."*
+**Carts & teams** builds the carts from the matchups you made on Configure games — two matches per cart, unmatched pairs seated team-vs-team as four-man carts — and each group header carries a **Time** field (AM/PM shown in full on the phone). **Groups hold up to 5** (*"Cart is full (5 max)"*); **"👥 One group"** seats a field of up to 5 together. Older events with bigger carts are rebuilt when you open them. The add-player picker opens one at a time, shows *"Loading players…"* on a slow connection, and the button reads **"Adding…"** while it saves. **A blocked step tells you why** — Next stays greyed but names what's missing: *"2 groups still need a scorekeeper: Group 2 and Group 4."*
 
 **Exactly four players, two a side?** The Configure Day match pairing is made automatically and shown as *"Tyler O. + Tar B. vs Gregory J. + Steve M."* with a **Change teams** button.
 
@@ -1954,6 +1982,8 @@ A guest added by name sees an **"Is this you?"** card the moment they sign in an
 ### Starting and Playing a Day
 
 - **▶ Start Day N** sits on the event card, one per day, grouped as **📅 Day N · date · status · N groups**. A live event opens on the Review step with the next day's Start button and "· scheduled / in play / finished" per day.
+- **Each cart has to fit the day's games** — Vegas and Ryder Cup need exactly 4, a 2-man scramble needs 4. If some carts don't fit, you're asked *"Launch the others anyway?"* and those carts stay unstarted until they're re-paired. If none fit, **"Nothing launched"** tells you which to fix. Moving a player into a cart whose round has already opened is blocked — swap instead.
+- **Games a cart set up for itself** (its own Nassau, Skins, Greenie, Birdie Bump…) get their own cards on the Games screen, tagged **(your group)**, alongside the field games.
 - Starting a day lands the commissioner in their own group's round. Each group is its own round; its **scorekeeper** keeps the card the way any round is scored. The Score tab's **"· left the round?"** works here too.
 - **The Event Leaderboard** — the 🏆 icon on the card — tabs by **Day N · Group M** (a sideways-scrolling pill strip on phones) with a **Strokes | ⚔️ Matches (N)** pair on match days, cross-group matches included. The Long Drive pot row names the winner and the day.
 - **Cup standings** (team events) are kept per real side; at three or more teams the cup card becomes a ranked table.
@@ -2097,7 +2127,9 @@ If a player can't make a week, the seat is filled directly — there's no invite
   - **League points go to the side being subbed for** — the match and the standings credit the absent player's seat, not the sub
   - **Weekly pools charge the sub** — whoever actually posted the card pays into, and can win, that week's skins, low net and the rest
   - **Stats save under the sub** — their own handicap and round history record the round, because they played it
-- A designated sub never counts toward the pairing math, never appears in the standings, and **never pays the season entry** — but does pay into the weekly pools on nights they play.
+- A designated sub never counts toward the pairing math, never appears in the standings or field weeks, and **never pays the season entry** — but does pay into the weekly pools on nights they play.
+- **In a team league** a missing player's seat is settled by a **sub** or a **forfeit** only — the "Out this week" card doesn't offer a blind draw or "play the course" for teams.
+- **A member removed mid-season:** their remaining one-on-one matches become **byes** for their opponents instead of forfeits.
 
 ### Side Games and Season Pools
 
@@ -2140,6 +2172,7 @@ If a player can't make a week, the seat is filled directly — there's no invite
 ### Season Standings
 
 - **Head-to-head and team leagues** rank on points: weeks played, wins/losses/ties, with a countback tiebreak (back 9, then 6, then 3, then 1).
+- **Playoff weeks don't count** toward the regular-season table or the season pot, and the season pot pays out only once every regular-season week is final.
 - **Individual field leagues** run a **to-par season race**: every posted card's net score, converted to strokes against the par of the holes actually played, adds to a running total. **Lowest total wins.**
 
 > **A field league is strict about attendance.** Miss a week with no card posted and you're marked **OUT** for the season. There is no "best N of M" cushion. The only way back in is the commissioner entering your card by hand — which brings its own real strokes with it, not a free pass.
@@ -2226,7 +2259,7 @@ Tap **"+ Create a League"** under **More → ⛳ League**. **The create screen a
 
 ## Friends Tab
 
-The Friends tab is your player roster, your friend network and the **Live now** list. It's free — the whole social layer is.
+The Friends tab is your player roster and your friend network. It's free — the whole social layer is. *(The **Live now** list is on Home.)*
 
 **Order on the tab:** Friend requests → Bad Golf Users → **Player stats** (with the picked player's badges row) → Compare to a friend. The Player stats picker shows each player's profile circle and full name, with you pinned first as "(me)".
 
@@ -2245,11 +2278,11 @@ The Friends tab is your player roster, your friend network and the **Live now** 
 - **"Friend requests"** shows pending requests from other players
 - **A red pill on the Friends header** reads **"1 request ▾"** / **"N requests ▾"** when you have pending requests. Tap the header to expand to Accept / ✕
 - An in-app **friend-request pop-up** appears when someone sends one, and a badge appears on the Friends tab
-- Accept and they appear in your Friends list; you can then invite each other to rounds, see each other on Live now, and read each other's posts on the crew message board
+- Accept and they appear in your Friends list; you can then invite each other to rounds, see each other on Home's Live now card, and read each other's posts on the crew message board
 
 ### 👀 Live Now
 
-The Friends tab's **Live now** list is where you watch a friend play — one row per live round, with a **Spectate** button. *(The Home tab's version of this card was removed; this is the one that stayed. The old Wager button is gone with the rest of the wagering feature.)*
+The **Live now** card on **Home** (directly above Your rounds) is where you watch a friend play — one row per live round, with a **👀 Spectate** button. A round you're playing in shows **▶ Join** instead. *(It moved from this tab to Home. The old Wager button is gone with the rest of the wagering feature.)*
 
 ### Player Stats — All Eight Tiles Tap Through
 
@@ -2263,6 +2296,7 @@ Open a player's card → **Player stats** (this also works from the leaderboard 
 - Leaderboard rows fall back to the person's account profile photo when their roster entry has no avatar
 - **Removing a player from the roster is an admin function** — see [Admin → User Management](#user-management)
 - **View** on a completed round in a player's rounds list opens the **💵 Games sheet**
+- **Merged players show as one person.** When two spellings of the same player are merged, every phone shows one row with combined totals — in Friends, Bad Golf Users, Friends & Foes and every round, tournament, league and tee-time picker — on the next refresh, no force-close needed
 
 ---
 
@@ -2791,8 +2825,8 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 ### Watching a Friend's Round
 
-1. **Friends tab** → **"👀 Live now"**
-2. Tap a friend's live round row → **Spectate**
+1. **Home** → the **Live now** card (above Your rounds)
+2. Tap **👀 Spectate** on a friend's live round *(your own round shows ▶ Join)*
 3. **GPS opens in spectator mode** (read-only)
 4. See their live location if they've shared it; scores update in real time
 5. Tap the **player dropdown** to switch between players
@@ -2920,7 +2954,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 ## Glossary
 
-*New since the last edition: the 💵 Games screen (formerly Board); per-tee par; the 🏠 home course and the home/away badge; 2–12 team tournaments and Small Teams (2-man); Vegas switch-at-the-turn; Team Quota as a prize pool; gross-and-net per nine; "Running totals — not final"; the single 📲 Text Final Standings button; 🔄 Resync my stats; the 🌎 global snapshot; and the retirement of Abandon round, Live Holes Across America, tournament templates and the Home Live now card.*
+*New since the last edition: Vegas's "Net — only natural birdies/eagles flip or double" (the new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
 
 | Term | Definition |
 |------|-----------|
@@ -2937,6 +2971,8 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 | **GIR** | Greens in Regulation; ball on the putting surface in par − 2 shots |
 | **Stroke Index (SI)** | 1–18 ranking of holes by difficulty (1–9 on a nine); used to allocate handicap strokes |
 | **Net / Gross** | Score with / without handicap strokes. Every scorecard shows both on Out, In and Total |
+| **Natural birdie** | A birdie on your real (gross) score, with no handicap stroke. In Vegas's default net mode — and in Banker, High & Low, Birdie Pool, Animals and Marks by default — only a natural birdie or eagle triggers a flip or double |
+| **Pop** | Slang for a handicap stroke on a hole — a 4 with a pop on a par 4 is a net 3 |
 | **Games screen (💵)** | The units surface — final standings, standings, per-game breakdown, scorecard, game results. **This is the tab that used to be called Board** |
 | **Games sheet (💵)** | The same layout opened from a finished round via **View** |
 | **Running totals — not final** | The stamp on final standings while a round is unfinished; the numbers can still move |
