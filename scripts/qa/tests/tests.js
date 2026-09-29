@@ -1193,6 +1193,24 @@ section('Probes: more skins / vegas / banker / pools');
 
 // ================================================================ REPORT
 
+// v1826 (Hoon / Tyler): auto-advance only when every input the hole asks for is in.
+section('Auto-advance gate (v1826)');
+{
+  const base = () => { const sc = parAll(ids4); return mkRound({ players: pl(ids4), scores: sc, finished: false }); };
+  check('plain hole, all scored -> fully entered', E.bgHoleFullyEntered(base(), 4), true);
+  { const g = base(); g.scores[ids4[1]][3] = null; check('a missing score -> not', E.bgHoleFullyEntered(g, 4), false); }
+  { const g = base(); g.trackPutts = true; g.puttsData = {}; check('putts tracked, none entered -> not', E.bgHoleFullyEntered(g, 4), false);
+    ids4.forEach(id => { g.puttsData[id] = new Array(18).fill(null); g.puttsData[id][3] = 2; }); check('putts tracked, all entered -> ok', E.bgHoleFullyEntered(g, 4), true); }
+  { const g = base(); g.trackFairways = true; g.fairwaysData = {}; const par = g.pars[3]; const exp = (par === 4 || par === 5) ? false : true; check('fairways tracked, none marked on hole 4 -> ' + exp, E.bgHoleFullyEntered(g, 4), exp); }
+  { const g = base(); g.games = { p3greenie: { value: 1 } }; const p3 = g.pars.findIndex(p => p === 3) + 1; g.p3greenieData = {};
+    check('greenie on, par 3 without a winner -> not', E.bgHoleFullyEntered(g, p3), false);
+    g.p3greenieData[p3] = { winners: [ids4[0]], threePutts: [] }; check('greenie winner picked -> ok', E.bgHoleFullyEntered(g, p3), true); }
+  { const g = base(); g.games = { ctp: { value: 1, holes: [7] } }; check('CTP hole without a winner -> not', E.bgHoleFullyEntered(g, 7), false); g.ctpData = { 7: { pid: ids4[2] } }; check('CTP winner -> ok', E.bgHoleFullyEntered(g, 7), true); check('non-CTP hole unaffected', E.bgHoleFullyEntered(g, 8), true); }
+  { const g = base(); g.games = { longDrive: { value: 1, hole: 9 } }; check('Long Drive hole without a winner -> not', E.bgHoleFullyEntered(g, 9), false); g.longDriveData = { pid: ids4[1] }; check('Long Drive winner -> ok', E.bgHoleFullyEntered(g, 9), true); }
+  { const g = base(); g.trackPenalties = true; g.trackSands = true; g.trackMulligans = true; check('penalties / sand / mulligans blank never block', E.bgHoleFullyEntered(g, 4), true); }
+  check('default mode is GPS', E.bgAutoAdvanceLabel(undefined), '→ GPS');
+}
+
 // v1821 (Hoon, Feedback #14; Tyler): Mulligans tracker.
 section('Mulligans tracker (v1821)');
 {
