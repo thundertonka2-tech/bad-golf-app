@@ -563,6 +563,7 @@ _See [Games](#games-35) for complete rules and options._
 | **Fairways** | A hit/miss tap on par 4s and 5s (par 3s have no fairway). |
 | **Penalties** | A **+pen** tap beside the fairway chip. Auto-fills the **Rolo** side game. |
 | **Sand saves** | A **🏖️ sand** tap on every hole. Par or better from the sand auto-fills **Sandy**. |
+| **🔁 Mulligans** *(v1821)* | A do-over stepper beside putts, with an optional **per-player cap** set at setup. Mulligans never change the score or any game — but **any player who takes one has that round left out of their handicap** (the round's "Count toward my handicap" switch is locked off and says why). The Games sheet lists each player's count and a **"🔁 Most mulligans"** line. Earns the **Do-Over** badge (first mulligan) and **Breakfast Ball** (a mulligan on hole 1). |
 
 **Game visibility (who sees what):** **Everyone** · **Friends only** · **Just me**. *(When two accounts share a name, the app keeps the more restrictive of the two settings, so a "just me" player can never be exposed by a same-named stranger's choice. A change that doesn't reach the server now says so rather than confirming a privacy setting that never saved.)*
 
@@ -722,15 +723,16 @@ Scores you type with no signal **survive an app restart** — the record of whic
 - **Scramble and Ryder Cup team rows keep the plain header** — a team row has no single handicap
 - On a genuine 9-hole round the "In" column is empty by construction
 
-### GIR / Fairways / Putts / Penalties / Sand Saves
+### GIR / Fairways / Putts / Penalties / Sand Saves / Mulligans
 
-Set these five toggles under **Round Tracking** during setup. On the scorecard:
+Set these six toggles under **Round Tracking** during setup. On the scorecard:
 
 - **Putts** — tap the number under each score to edit
 - **GIRs** — tap the chip on each hole if putts is off
 - **Fairways** — tap HIT or MISS on par 4s/5s
 - **Penalties** — tap **+pen** each time a player takes a penalty stroke
 - **Sand saves** — tap **🏖️ sand** when a player was in a bunker
+- **🔁 Mulligans** — tap **+** beside putts each time a player takes a do-over (− backs it out; the + greys out at the cap). Stats shows **Mulligans / round** on the Player stats card and in Compare. A round with a mulligan does not post to that player's handicap.
 
 All of it syncs to your Stats tab and lifetime statistics.
 

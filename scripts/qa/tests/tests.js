@@ -1193,6 +1193,29 @@ section('Probes: more skins / vegas / banker / pools');
 
 // ================================================================ REPORT
 
+// v1821 (Hoon, Feedback #14; Tyler): Mulligans tracker.
+section('Mulligans tracker (v1821)');
+{
+  const g = { trackMulligans: true, mulliganCap: 2, mulliganData: { a: [1, null, 2, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null], b: new Array(18).fill(null) } };
+  check('bgMulliganTotal sums the holes', E.bgMulliganTotal(g, 'a'), 3);
+  check('bgMulliganHoles counts holes with >= 1', E.bgMulliganHoles(g, 'a'), 2);
+  check('untouched player -> 0', E.bgMulliganTotal(g, 'b'), 0);
+  check('no data -> 0, no throw', E.bgMulliganTotal({}, 'zz'), 0);
+  // handicap rule: a round with mulligans is parked and not switchable
+  const rec0 = { gameCode: 'X', differential: 5.2, differentialRaw: 6.1, complete: true, mulligans: 0 };
+  check('no mulligans -> switchable', E.bgHcpSwitchable(rec0), true);
+  const rec1 = Object.assign(E.bgApplyHcpOff({ gameCode: 'X', differential: 5.2, differentialRaw: 6.1, complete: true }, true, 1000), { mulligans: 1 });
+  check('mulligan round -> differential parked (null)', rec1.differential, null);
+  check('mulligan round -> hcpOff', rec1.hcpOff, true);
+  check('mulligan round -> NOT switchable', E.bgHcpSwitchable(rec1), false);
+  // archive path: the source must force hcpOff from record.mulligans
+  const src = require('fs').readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  check('archive forces hcpOff when mulligans > 0', /record\.mulligans > 0 && typeof bgApplyHcpOff === 'function'\) \{ Object\.assign\(record, bgApplyHcpOff\(record, true/.test(src), true);
+  check('mulliganData is a per-cell merge key', /mulliganData: 'perCell'/.test(src), true);
+  check('mulliganData rides the per-player blob list (sync merge)', /BG_PLAYER_BLOBS = \[[^\]]*'mulliganData'/.test(src), true);
+  check('badges: doover + breakfastball registered', /'doover', 'breakfastball'\]/.test(src) && /"id":"doover"/.test(src) && /"id":"breakfastball"/.test(src), true);
+}
+
 // v1819 (Tyler): "I know Tommy played a round yesterday, why don't I see it here?"
 // The Game history sheet opened from a cached payload or THIS device's roster copy of a
 // player's rounds, never the cloud union the board row and the card use. Pin the shape:
