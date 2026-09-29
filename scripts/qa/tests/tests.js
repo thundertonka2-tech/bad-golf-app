@@ -1193,6 +1193,35 @@ section('Probes: more skins / vegas / banker / pools');
 
 // ================================================================ REPORT
 
+// v1829 (Tyler): GPS Long Drive button — which hole, and who leads.
+section('Long Drive from the GPS (v1829)');
+{
+  const g = mkRound({ players: pl(ids4), scores: parAll(ids4), finished: false });
+  check('no Long Drive game -> no hole', E.bgLongDriveHoleFor(g), null);
+  g.games = { longDrive: { value: 5, hole: 7 } };
+  check('round side game -> its hole', E.bgLongDriveHoleFor(g), 7);
+  g.games = { longDrive: { value: 0, hole: 12, fieldOnly: true } };
+  check('league pot stamp -> its hole', E.bgLongDriveHoleFor(g), 12);
+  g.games = { longDrive: { value: 5, hole: null } };
+  check('game on but no hole picked -> no button', E.bgLongDriveHoleFor(g), null);
+  const r1 = E.bgLongDriveApply(null, { pid: 'p1', yds: 260, via: 'gps' });
+  check('first drive leads', r1.lead && r1.leader.pid, 'p1');
+  const r2 = E.bgLongDriveApply(r1.leader, { pid: 'p2', yds: 250, via: 'gps' });
+  check('shorter drive does not lead', r2.lead, false);
+  check('...leader unchanged', r2.leader.pid, 'p1');
+  const r3 = E.bgLongDriveApply(r1.leader, { pid: 'p3', yds: 281, via: 'gps' });
+  check('longer drive takes the lead', r3.lead && r3.leader.pid, 'p3');
+  const r4 = E.bgLongDriveApply(r3.leader, { pid: 'p3', yds: 270, via: 'gps' });
+  check('leader can re-measure his own drive', r4.lead && r4.leader.yds, 270);
+  const r5 = E.bgLongDriveApply({ pid: 'p4' }, { pid: 'p1', yds: 240, via: 'gps' });
+  check('a hand pick with no yards is beaten by any measured drive', r5.lead, true);
+  const r6 = E.bgLongDriveApply({ pid: 'p4', yds: 300 }, { pid: 'p1', yds: 240, via: 'gps' });
+  check('a hand pick WITH yards holds against a shorter drive', r6.lead, false);
+  const src = require('fs').readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  check('tap asks "In the fairway?" before recording', /title: 'In the fairway\?'/.test(src), true);
+  check('league launch stamps the pot hole into games.longDrive', /_g\.longDrive = \{ value: 0, hole: Number\(_wk\.longest_drive\.hole\), fieldOnly: true \}/.test(src), true);
+}
+
 // v1826 (Hoon / Tyler): auto-advance only when every input the hole asks for is in.
 section('Auto-advance gate (v1826)');
 {
