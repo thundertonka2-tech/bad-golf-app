@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1824-->
+<!--BGVER=v2026.11.1825-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11469,7 +11469,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1824';
+const BG_BUILD = 'v2026.11.1825';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -23907,6 +23907,7 @@ async function archiveScoresFromRound(g) {
   let _genderByName = {};
   try { const _roster = await getPlayerRoster(); (_roster || []).forEach(rp => { if (rp && rp.name) _genderByName[normalizeNameSegment(rp.name)] = playerGender(rp); }); } catch (e) {}
 
+  const _pubRecs = [];   // v1825: settled records for the OTHER account-holders on this card
   g.players.forEach(p => {
     const arr = g.scores[p.id] || [];
     const holesScored = arr.filter(s => s != null).length;
@@ -24519,6 +24520,9 @@ async function archiveScoresFromRound(g) {
     entry.scoreHistory.sort((a, b) => (b.date || 0) - (a.date || 0));
     entry.scoreHistory = entry.scoreHistory.slice(0, 200);
     entry.lastUsed = Date.now();
+    // v1825: this phone just computed THIS player's settled record for a finished round.
+    // Publish it to their own cloud row so a friend's history never waits on their phone.
+    try { if (g.finishedAt && p.uid && !_pIsMe && record && record.gameCode) _pubRecs.push({ uid: String(p.uid), record: record }); } catch (e) {}
   });
 
   if (changed) {
@@ -24526,7 +24530,34 @@ async function archiveScoresFromRound(g) {
     await savePlayerRoster(roster);
   }
   try { await syncMyStatsToCloud(roster); } catch (e) {}   // mirror MY stats to the RLS-protected store
+  try { bgPublishRoundStats(g, _pubRecs); } catch (e) {}   // v1825: the other players' rows — fire and forget
   try { bgBadgesOnRound(g); } catch (e) {}   // v1611: badges ride the archive — detached, never in front of paint
+}
+
+// ── v1825 (Tyler, 9/29: "Britt … Tim Payne … check every player that played that round") ──
+// A friend's Game history / stats card / leaderboard row reads that friend's player_stats
+// row, which only THEIR phone used to write (syncMyStatsToCloud). Britt (old build, hadn't
+// opened the app) had an empty row and Tim Payne had none, so BOGEY77 existed only on the
+// scorekeeper's phone. Now the phone that archives a FINISHED round hands every other
+// account-holder's settled record to `bg_publish_round_stats`, which merges it into their
+// row server-side (validated against the round: finished, caller on it, target on it,
+// gameCode matches; never shrinks; a settled figure is only replaced by a newer settlement).
+// Once per (round, finishedAt) per session, so re-archives don't spam the server.
+const _bgPublishedRounds = new Set();
+function bgPublishRoundStats(g, recs) {
+  try {
+    if (!g || !g.code || !g.finishedAt || !Array.isArray(recs) || !recs.length) return;
+    if (!(isSignedIn() && supa && _authUser)) return;
+    if (typeof BG_DEMO !== 'undefined' && BG_DEMO) return;
+    const key = g.code + '@' + g.finishedAt;
+    if (_bgPublishedRounds.has(key)) return;
+    _bgPublishedRounds.add(key);
+    const slim = recs.filter(r => r && r.uid && r.record && r.uid !== _authUser.id).slice(0, 8);
+    if (!slim.length) return;
+    Promise.resolve(supa.rpc('bg_publish_round_stats', { p_code: g.code, p_records: slim }))
+      .then(res => { if (res && res.error) { _bgPublishedRounds.delete(key); console.warn('publish round stats', res.error.message || res.error); } })
+      .catch(e => { _bgPublishedRounds.delete(key); console.warn('publish round stats', e); });
+  } catch (e) {}
 }
 
 // One-time-per-boot backfill: walks every saved round in the recent-games
