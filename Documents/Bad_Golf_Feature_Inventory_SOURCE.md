@@ -1711,7 +1711,7 @@ The **"Compare to a friend"** dropdown on Stats (and its twin on Friends) is a p
 
 **"Differentials" section** lists recent rounds with **date**, **course**, **gross score**, **differential**, and **tee played**. Tap any round to view the full scorecard. Tournament rounds carry a **🏆 trophy**.
 
-**"⛳ Add a Round"** — log a round from before you used Bad Golf: date, course, gross score, tee, holes played. It counts toward your handicap if it has a complete round + full rating/slope data.
+**"⛳ Enter a Past Round"** — log a round from before you used Bad Golf: date, course, gross score, tee, holes played. It counts toward your handicap if it has a complete round + full rating/slope data.
 
 - The date defaults correctly (it used to pre-fill *tomorrow* when you logged a round in the evening)
 - Double-tapping **Save** can't create two handicap rounds
@@ -1719,9 +1719,9 @@ The **"Compare to a friend"** dropdown on Stats (and its twin on Friends) is a p
 
 **"🗑️ Remove this round from my stats"** on a round card works on iPhone (it used to silently do nothing).
 
-### ⛳ Add a Round — Entering Rounds You Already Played
+### ⛳ Enter a Past Round — Entering Rounds You Already Played
 
-The Stats tab's old single-round **"Add a past round"** button is now **"⛳ Add a Round"**, and it opens a bulk entry tool. The point is a golfer arriving from another app: post several rounds at once and get a real Handicap Index straight away instead of waiting out the 54-hole minimum.
+The Stats tab's old single-round **"Add a past round"** button is now **"⛳ Enter a Past Round"**, and it opens a bulk entry tool. The point is a golfer arriving from another app: post several rounds at once and get a real Handicap Index straight away instead of waiting out the 54-hole minimum.
 
 **Two modes:**
 
@@ -1858,7 +1858,7 @@ Delete lives on the round's Games sheet.
 
 ### Manual / Past Round Entries
 
-**"⛳ Add a Round"**: date picker → course search → gross score → tee → holes played (9 or 18) → **Save**.
+**"⛳ Enter a Past Round"**: date picker → course search → gross score → tee → holes played (9 or 18) → **Save**.
 
 ### Scheduled Rounds
 
@@ -2880,7 +2880,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 1. **Stats tab** → your handicap section
 2. View your **index**, **status** (Established / Provisional / TEMP) and **recent differentials**
-3. Tap **"⛳ Add a Round"** to log rounds you played before using the app
+3. Tap **"⛳ Enter a Past Round"** to log rounds you played before using the app
 4. Tap **"📤 Share handicap"** to export your index + recent rounds
 5. It updates automatically each time you finish or add a round
 6. **Round missing?** Open the Rounds tab or Stats and it usually heals itself. If not, tap **"🔄 Resync my stats"**. If the number still looks wrong after an app update, tap **"♻️ Recalculate handicap"**
