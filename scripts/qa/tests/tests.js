@@ -507,6 +507,22 @@ section('Vegas');
   check('3 participants -> null', E.calcVegas(mkRound({ players: pl(ids3), scores: scoresAll(ids3, 4), games: { vegas: { net: false, value: 1, participants: ids3 } } })), null);
 }
 
+section('Spectate group hole (v1818)');
+{
+  // holes 1-3 scored by everyone -> group is on hole 4
+  const sc = parAll(ids4); Object.keys(sc).forEach(k => { sc[k] = sc[k].map((v, i) => i < 3 ? v : null); });
+  const g = mkRound({ players: pl(ids4), scores: sc, finished: false });
+  check('stale non-scorer ping (hole 2) -> group hole 4', E.bgGroupHole(g, 2), 4);
+  check('ping on the group hole keeps it', E.bgGroupHole(g, 4), 4);
+  check('ping walking ahead (hole 5) is trusted', E.bgGroupHole(g, 5), 5);
+  check('no ping -> group hole', E.bgGroupHole(g, null), 4);
+  // back-nine start: startHole 10, holes 10-12 scored -> group on 13; a ping of 2 is AHEAD in play order? no: order 10..18,1..9 -> 2 is ahead of 13
+  const sc2 = parAll(ids4); Object.keys(sc2).forEach(k => { sc2[k] = sc2[k].map((v, i) => (i >= 9 && i < 12) ? v : null); });
+  const g2 = mkRound({ players: pl(ids4), scores: sc2, startHole: 10, finished: false });
+  check('back-nine start: ping 11 behind group -> 13', E.bgGroupHole(g2, 11), 13);
+  check('back-nine start: ping 2 is later in play order -> 2', E.bgGroupHole(g2, 2), 2);
+}
+
 section('Dynamic Vegas');
 {
   // code 'A': hash = 65 -> 65 % 3 = 2 -> hole-1 pairing [[0,3],[1,2]]
