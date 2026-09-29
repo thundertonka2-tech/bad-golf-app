@@ -1192,6 +1192,24 @@ section('Probes: more skins / vegas / banker / pools');
 }
 
 // ================================================================ REPORT
+
+// v1819 (Tyler): "I know Tommy played a round yesterday, why don't I see it here?"
+// The Game history sheet opened from a cached payload or THIS device's roster copy of a
+// player's rounds, never the cloud union the board row and the card use. Pin the shape:
+// openBetHistory must rebuild from mergedPlayerHistory and must not trust the cache first.
+section('Game history sheet reads the cloud union (v1819)');
+{
+  const src = require('fs').readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const i0 = src.indexOf('async function openBetHistory(');
+  const body = i0 >= 0 ? src.slice(i0, i0 + 4000) : '';
+  check('openBetHistory exists', i0 >= 0, true);
+  check('rebuilds from mergedPlayerHistory (local ∪ player_stats)', body.includes('await mergedPlayerHistory(_p)'), true);
+  check('resolves the player the way the board and card do', body.includes('resolveRosterPlayerByName(_roster, nameHint)'), true);
+  check('friend not on this roster -> cloud row alone', body.includes('fetchPlayerCloudStats(nameHint)'), true);
+  check('cache is a fallback, not the first read', !/let data = \(window\._betHistStore \|\| \{\}\)\[key\];\s*\n\s*if \(!data/.test(body), true);
+  check('roster-only history is never the source', !/bgLiveHistory\(_p\.scoreHistory\)/.test(body), true);
+}
+
 const pass = results.filter(r => r.ok).length, fail = results.length - pass;
 const bySec = {};
 results.forEach(r => { (bySec[r.section] = bySec[r.section] || []).push(r); });
