@@ -653,7 +653,7 @@ The Score tab is live during a round — enter scores hole-by-hole and track sid
 
 Once the last score on a hole goes in, the app can move to the next hole for you. A small pill appears at the bottom — **"Next hole → GPS in 3…"** with a **Stay** button — and counts down three seconds. Any tap on the hole (a putt, a chip, a junk pick) restarts the clock, so you're never pulled away while you finish the hole's extras; **Stay** keeps you on the hole; the two next-hole buttons still work exactly as before.
 
-- **Setting:** More › ⚙️ Additional settings › **"Auto-advance after the last score"** — **→ GPS** (the default: the next hole opens on the GPS map), **→ Scorecard** (the next hole's scoring screen), or **Off**. The same choice sits as a small chip right under the next-hole buttons; tap it to switch mid-round.
+- **Setting:** More › ⚙️ Additional settings › **"Auto-advance after the last score"** — **GPS** (the default: the next hole opens on the GPS map), **Scorecard** (the next hole's scoring screen), or **Off**; the chosen one is highlighted with a ✓. The same choice sits as a small chip right under the next-hole buttons; tap it to switch mid-round.
 - **It only fires when the hole is fully entered.** Every player's score; putts for everyone when putts are tracked; a fairway hit or miss for everyone on a par 4/5 when fairways are tracked; the **Greenie** winner on a par 3; the **CTP** winner on a CTP hole; the **Long Drive** winner on its hole; and no missing **Wolf** pick. If anything is still blank, nothing happens and you advance with the buttons as usual. Things that are simply "none" when blank — penalties, sand, mulligans, junk chips, sips — never hold it up.
 - It never fires while you're scrolled back looking at an earlier hole, while spectating, or on the round's last hole (Finish takes over there).
 
@@ -1806,7 +1806,7 @@ When a commissioner deletes a tournament, the rounds played in it used to keep t
 
 **Round pop-ups** — 🐦 birdies & eagles · 🍺 sips · 💥 blowups, on **this phone**.
 
-**Auto-advance after the last score** — **→ GPS** · **→ Scorecard** · **Off** (see *Auto-Advance After the Last Score* under Scoring).
+**Auto-advance after the last score** — **GPS** · **Scorecard** · **Off** (see *Auto-Advance After the Last Score* under Scoring).
 
 **Stats visibility** — **Everyone** · **Friends only** · **Just me**. *(When two accounts share a name the app keeps the more restrictive setting of the two. A change that doesn't reach the server now says so — this is a privacy setting and it used to confirm silently either way.)*
 
@@ -1873,6 +1873,8 @@ Delete lives on the round's Games sheet.
 ### Manual / Past Round Entries
 
 **"⛳ Enter a Past Round"**: date picker → course search → gross score → tee → holes played (9 or 18) → **Save**.
+
+**Hole-by-hole goes fast.** In the 18-box grid the number pad opens, and after you type a score the cursor jumps to the next hole by itself (a "1" waits a moment in case a 10–19 is coming; Enter or the keyboard's Next also moves on; Backspace on an empty box goes back one). Type eighteen numbers and you're done — no tapping between boxes.
 
 ### Scheduled Rounds
 

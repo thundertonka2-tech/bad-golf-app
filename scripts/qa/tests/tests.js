@@ -1208,7 +1208,7 @@ section('Auto-advance gate (v1826)');
   { const g = base(); g.games = { ctp: { value: 1, holes: [7] } }; check('CTP hole without a winner -> not', E.bgHoleFullyEntered(g, 7), false); g.ctpData = { 7: { pid: ids4[2] } }; check('CTP winner -> ok', E.bgHoleFullyEntered(g, 7), true); check('non-CTP hole unaffected', E.bgHoleFullyEntered(g, 8), true); }
   { const g = base(); g.games = { longDrive: { value: 1, hole: 9 } }; check('Long Drive hole without a winner -> not', E.bgHoleFullyEntered(g, 9), false); g.longDriveData = { pid: ids4[1] }; check('Long Drive winner -> ok', E.bgHoleFullyEntered(g, 9), true); }
   { const g = base(); g.trackPenalties = true; g.trackSands = true; g.trackMulligans = true; check('penalties / sand / mulligans blank never block', E.bgHoleFullyEntered(g, 4), true); }
-  check('default mode is GPS', E.bgAutoAdvanceLabel(undefined), '→ GPS');
+  check('default mode is GPS', E.bgAutoAdvanceLabel(undefined), 'GPS');
 }
 
 // v1821 (Hoon, Feedback #14; Tyler): Mulligans tracker.
