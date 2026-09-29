@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1824
+**Build Version:** v2026.11.1827
 **Documentation Date:** September 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -648,6 +648,14 @@ The Score tab is live during a round — enter scores hole-by-hole and track sid
 > **⚠️ If your group starts on the back nine, update the app.** Match Play could declare the match over and settle early on any round that didn't start at hole 1 — it miscounted the holes remaining. The same fault hit cross-group 1-v-1 matchups inside a tournament. Fixed, but a phone on an older build still has it.
 
 **The next-hole buttons are always visible.** **"Next hole → GPS"** and **"Next hole → Scorecard"** stay on screen, greyed until every player's score for the hole is in. They used to disappear entirely on a round that started on the back nine.
+
+### Auto-Advance After the Last Score *(new)*
+
+Once the last score on a hole goes in, the app can move to the next hole for you. A small pill appears at the bottom — **"Next hole → GPS in 3…"** with a **Stay** button — and counts down three seconds. Any tap on the hole (a putt, a chip, a junk pick) restarts the clock, so you're never pulled away while you finish the hole's extras; **Stay** keeps you on the hole; the two next-hole buttons still work exactly as before.
+
+- **Setting:** More › ⚙️ Additional settings › **"Auto-advance after the last score"** — **→ GPS** (the default: the next hole opens on the GPS map), **→ Scorecard** (the next hole's scoring screen), or **Off**. The same choice sits as a small chip right under the next-hole buttons; tap it to switch mid-round.
+- **It only fires when the hole is fully entered.** Every player's score; putts for everyone when putts are tracked; a fairway hit or miss for everyone on a par 4/5 when fairways are tracked; the **Greenie** winner on a par 3; the **CTP** winner on a CTP hole; the **Long Drive** winner on its hole; and no missing **Wolf** pick. If anything is still blank, nothing happens and you advance with the buttons as usual. Things that are simply "none" when blank — penalties, sand, mulligans, junk chips, sips — never hold it up.
+- It never fires while you're scrolled back looking at an earlier hole, while spectating, or on the round's last hole (Finish takes over there).
 
 ### Editing a Score Without Leaving the Card
 
@@ -1797,6 +1805,8 @@ When a commissioner deletes a tournament, the rounds played in it used to keep t
 **"⚙️ Settings"** (collapsible):
 
 **Round pop-ups** — 🐦 birdies & eagles · 🍺 sips · 💥 blowups, on **this phone**.
+
+**Auto-advance after the last score** — **→ GPS** · **→ Scorecard** · **Off** (see *Auto-Advance After the Last Score* under Scoring).
 
 **Stats visibility** — **Everyone** · **Friends only** · **Just me**. *(When two accounts share a name the app keeps the more restrictive setting of the two. A change that doesn't reach the server now says so — this is a privacy setting and it used to confirm silently either way.)*
 
@@ -2960,7 +2970,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 ## Glossary
 
-*New since the last edition: the **Mulligans** tracker (do-over counter, per-player cap, scorecard marks, "Most mulligans", Do-Over and Breakfast Ball badges — and a mulligan round doesn't post to your handicap); **"⛳ Enter a Past Round"** (the Stats button and form were called "Add a Round"); a friend's **Game history** showing every round they played, not just the ones you were in; spectating a group keeps every player on the same hole; the Bad Golf team can reply to your Contact us messages in the app; Vegas's "Net — only natural birdies/eagles flip or double" (the previous edition's new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
+*New since the last edition: **Auto-advance after the last score** (the next hole opens by itself once every field on the hole is in — a setting: → GPS, → Scorecard or Off); the **Mulligans** tracker (do-over counter, per-player cap, scorecard marks, "Most mulligans", Do-Over and Breakfast Ball badges — and a mulligan round doesn't post to your handicap); **"⛳ Enter a Past Round"** (the Stats button and form were called "Add a Round"); a friend's **Game history** showing every round they played, not just the ones you were in; spectating a group keeps every player on the same hole; the Bad Golf team can reply to your Contact us messages in the app; Vegas's "Net — only natural birdies/eagles flip or double" (the previous edition's new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
 
 | Term | Definition |
 |------|-----------|
