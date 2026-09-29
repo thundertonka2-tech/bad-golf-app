@@ -59,5 +59,7 @@ class MainViewController: CAPBridgeViewController {
         // Live Activity (Lock Screen / Dynamic Island round card) — same explicit
         // registration path, for the same Release-build stripping reason.
         bridge?.registerPluginInstance(LiveActivityPlugin())
+        // v1830: AR distance measure (Long Putt / Closest to the Pin), same reason.
+        bridge?.registerPluginInstance(BGMeasurePlugin())
     }
 }

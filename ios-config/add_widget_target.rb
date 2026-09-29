@@ -27,7 +27,7 @@ end
 # ---- 1. LiveActivityPlugin.swift/.m into the App target ----
 app_group = proj.main_group.find_subpath("App", false) || proj.main_group["App"]
 abort("App group not found") unless app_group
-["LiveActivityPlugin.swift", "LiveActivityPlugin.m"].each do |f|
+["LiveActivityPlugin.swift", "LiveActivityPlugin.m", "BGMeasurePlugin.swift", "BGMeasurePlugin.m"].each do |f|   # v1830: + AR measure
   ref = ensure_ref(app_group, f)
   unless in_sources?(app, ref)
     app.add_file_references([ref])
