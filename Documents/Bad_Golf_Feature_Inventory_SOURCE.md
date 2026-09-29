@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1815
+**Build Version:** v2026.11.1824
 **Documentation Date:** September 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -563,7 +563,7 @@ _See [Games](#games-35) for complete rules and options._
 | **Fairways** | A hit/miss tap on par 4s and 5s (par 3s have no fairway). |
 | **Penalties** | A **+pen** tap beside the fairway chip. Auto-fills the **Rolo** side game. |
 | **Sand saves** | A **🏖️ sand** tap on every hole. Par or better from the sand auto-fills **Sandy**. |
-| **🔁 Mulligans** *(v1821)* | A do-over stepper beside putts, with an optional **per-player cap** set at setup. Mulligans never change the score or any game — but **any player who takes one has that round left out of their handicap** (the round's "Count toward my handicap" switch is locked off and says why). The Games sheet lists each player's count and a **"🔁 Most mulligans"** line. Earns the **Do-Over** badge (first mulligan) and **Breakfast Ball** (a mulligan on hole 1). |
+| **Mulligans** *(new)* | A do-over counter beside putts (the toggle is plain "Mulligans", like the others), with an optional **Mulligans per player** cap set at setup. Mulligans never change the score or any game — but **any player who takes one has that round left out of their handicap** (the round's "Count toward my handicap" switch is locked off and says why). Every hole with a mulligan gets a small do-over mark on the scorecard, the Board standings show "3 mulligans" under the player, the Board's tracking card and the Games sheet list each player's count with a **"Most mulligans"** line, and Stats shows **Mulligans / round**. Earns the **Do-Over** badge (first mulligan) and **Breakfast Ball** (a mulligan on hole 1). |
 
 **Game visibility (who sees what):** **Everyone** · **Friends only** · **Just me**. *(When two accounts share a name, the app keeps the more restrictive of the two settings, so a "just me" player can never be exposed by a same-named stranger's choice. A change that doesn't reach the server now says so rather than confirming a privacy setting that never saved.)*
 
@@ -732,7 +732,7 @@ Set these six toggles under **Round Tracking** during setup. On the scorecard:
 - **Fairways** — tap HIT or MISS on par 4s/5s
 - **Penalties** — tap **+pen** each time a player takes a penalty stroke
 - **Sand saves** — tap **🏖️ sand** when a player was in a bunker
-- **🔁 Mulligans** — tap **+** beside putts each time a player takes a do-over (− backs it out; the + greys out at the cap). Stats shows **Mulligans / round** on the Player stats card and in Compare. A round with a mulligan does not post to that player's handicap.
+- **Mulligans** — tap **+** in the "Mull" stepper beside putts each time a player takes a do-over (− backs it out; the + greys out at the cap). A small do-over mark shows on that hole of the scorecard. Stats shows **Mulligans / round** on the Player stats card and in Compare. A round with a mulligan does not post to that player's handicap.
 
 All of it syncs to your Stats tab and lifetime statistics.
 
@@ -1592,6 +1592,8 @@ Delete a round and any badge it earned goes too — per-round badges drop, an ×
 
 There's also a separate **Contact us** form for course problems and general questions.
 
+**We can write back.** When the Bad Golf team replies to a message you sent through Contact us or Help us improve, you get a push ("Bad Golf team replied 💬") and a ✉️ item in your inbox: "The Bad Golf team replied to your message." Tap it to read your message and every reply in full; **✉️ Write back** opens Contact us with the topic already filled in. Replies stay in the inbox for 60 days.
+
 ---
 
 ## Profile Tab
@@ -2290,6 +2292,8 @@ The **Live now** card on **Home** (directly above Your rounds) is where you watc
 
 Open a player's card → **Player stats** (this also works from the leaderboard player popup). **All 8 tiles are tappable**, including **Rounds** (their rounds list) and **Lifetime Games** (their game history), plus GIR %, Fairways %, Putts, Avg score and the rest. A player with no data shows **N/A**.
 
+**Game history is complete for friends.** Tapping a friend's units on the leaderboard, or **Lifetime Games** on their card, now lists **every** round they've played with games — including rounds you weren't in. It used to show only the rounds your own phone had seen, so a friend's Sunday round with another group was missing and the total under it disagreed with the leaderboard row. Both now read the same place.
+
 ### Crew Management
 
 - The **"Crew"** section lists all players ever in a round with you (your shared roster), sorted **A–Z**
@@ -2956,7 +2960,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 ## Glossary
 
-*New since the last edition: Vegas's "Net — only natural birdies/eagles flip or double" (the new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
+*New since the last edition: the **Mulligans** tracker (do-over counter, per-player cap, scorecard marks, "Most mulligans", Do-Over and Breakfast Ball badges — and a mulligan round doesn't post to your handicap); **"⛳ Enter a Past Round"** (the Stats button and form were called "Add a Round"); a friend's **Game history** showing every round they played, not just the ones you were in; spectating a group keeps every player on the same hole; the Bad Golf team can reply to your Contact us messages in the app; Vegas's "Net — only natural birdies/eagles flip or double" (the previous edition's new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
 
 | Term | Definition |
 |------|-----------|
@@ -2975,6 +2979,8 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 | **Net / Gross** | Score with / without handicap strokes. Every scorecard shows both on Out, In and Total |
 | **Natural birdie** | A birdie on your real (gross) score, with no handicap stroke. In Vegas's default net mode — and in Banker, High & Low, Birdie Pool, Animals and Marks by default — only a natural birdie or eagle triggers a flip or double |
 | **Pop** | Slang for a handicap stroke on a hole — a 4 with a pop on a par 4 is a net 3 |
+| **Mulligan** | A do-over off the tee that your group lets slide. Track it with the Mulligans toggle: it never changes the score, but a round with one doesn't post to that player's handicap |
+| **Breakfast ball** | A mulligan on the first hole — and the name of the badge you get for it |
 | **Games screen (💵)** | The units surface — final standings, standings, per-game breakdown, scorecard, game results. **This is the tab that used to be called Board** |
 | **Games sheet (💵)** | The same layout opened from a finished round via **View** |
 | **Running totals — not final** | The stamp on final standings while a round is unfinished; the numbers can still move |
