@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1833-->
+<!--BGVER=v2026.11.1834-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -3778,7 +3778,12 @@
   .mini-sc td.pn .pn-in { display: flex; align-items: baseline; min-width: 0; overflow: hidden; }
   .mini-sc td.pn .pn-in .sc-nm { flex: 0 1 auto; min-width: 0; max-width: none; }
   .mini-sc td.pn .pn-in .sc-hcp { flex: 0 0 auto; }
-  #gps-scorecard-body { touch-action: pan-x pan-y; }   /* v1817: two-finger pinch zooms the CARD (our handler), never the whole page */
+  #gps-scorecard-body { touch-action: pan-x pan-y; }
+  /* v1834 (Tyler, 9/30 screenshot): a zoomed / full card grew the sheet up under the iPhone
+     status bar, so "Map", minus and plus sat on the clock and battery. The sheet now always
+     stops below the notch/status bar with room to spare; the card scrolls inside it. */
+  #gps-scorecard-panel { max-height: min(80vh, calc(100% - env(safe-area-inset-top, 0px) - 64px)) !important; }
+  #gps-scorecard-panel > div:first-child { position: sticky; top: -12px; z-index: 2; background: var(--bgx-frost-98); padding-top: 12px; margin-top: -12px !important; }   /* v1817: two-finger pinch zooms the CARD (our handler), never the whole page */
   .mini-sc td.pn .sc-nm { display: inline-block; max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
   /* v1692 (Tyler, 9/13): "when you click the group 1 tab it's messed up again."
      The scores were right -- they were the TEAM's -- but each row was labelled with
@@ -11600,7 +11605,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1833';
+const BG_BUILD = 'v2026.11.1834';
 // v1030 (Tyler, 8/15): "we should allow for one group in tourney mode." Largest
 // number of players a single tournament group may hold. Auto-sort still builds
 // foursomes by default; this is the ceiling for a manually consolidated group.
@@ -19491,6 +19496,7 @@ const BG_MERGE_RULES = {
   games: 'cloudWins', hcpRules: 'cloudWins', pars: 'cloudWins', sis: 'cloudWins',
   tees: 'cloudWins', teeYards: 'cloudWins', teePars: 'cloudWins', teeSis: 'cloudWins',
   unranked: 'cloudWins', nineMode: 'cloudWins', startHole: 'cloudWins',
+  supersededBy: 'cloudWins', supersededAt: 'cloudWins',   // v1834: closed out by a newer round at the same course
   trackPutts: 'cloudWins', trackGirs: 'cloudWins', trackFairways: 'cloudWins',
   trackPenalties: 'cloudWins', trackSands: 'cloudWins', trackMulligans: 'cloudWins', mulliganCap: 'cloudWins', naturalBoost: 'cloudWins',
   hydration: 'cloudWins',
@@ -20452,6 +20458,11 @@ function _mergeGameInto(local, cloud, opts) {
       const L = local.longDriveData, C = cloud.longDriveData;
       const _yd = d => (d && d.pid && d.yds != null) ? Number(d.yds) : -1;
       if (C && (C.pid || C.yds != null) && _yd(C) > _yd(L)) local.longDriveData = C;
+      // v1834: two phones each holding one half of an exact tie -> keep every tied player.
+      else if (C && L && C.pid && L.pid && _yd(C) === _yd(L) && _yd(C) >= 0) {
+        const all = [L.pid].concat(L.co || [], [C.pid], C.co || []).filter((p, i, a) => p && a.indexOf(p) === i);
+        if (all.length > 1) local.longDriveData = Object.assign({}, L, { pid: all[0], co: all.slice(1) });
+      }
     } catch (e) {}
     // v1223 (Tyler, 8/25): the broadcast markers — group hole, finish-open, hole
     // celebration, sip — were in NO merge list, so for them "local wins" unconditionally.
@@ -21651,6 +21662,52 @@ const OPEN_ROUNDS_LIMIT = 5;
 // forgotten round can't block you from starting a new one.
 const LIVE_RECENT_MS = 12 * 60 * 60 * 1000; // 12 hours
 function isRoundStale(r) { return !!(r && r.updatedAt && (Date.now() - r.updatedAt > LIVE_RECENT_MS)); }
+/* v1834: my own open rounds at the course I'm about to start at (last 12 h). */
+async function bgSameCourseOpenRounds(setup) {
+  const out = [];
+  try {
+    if (!setup || !setup.course) return out;
+    if (typeof state !== 'undefined' && state && (state._t2DayConfig || state._t2GroupConfig || state._lgSideGamesCfg || state.editingLiveRound)) return out;
+    const cn = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const want = cn(setup.course);
+    let me = null; try { me = await getMeName(); } catch (e) {}
+    const meN = me ? normalizeNameSegment(me) : '';
+    let myUid = ''; try { myUid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) ? String(_authUser.id) : ''; } catch (e) {}
+    const seen = new Set();
+    const consider = r => {
+      try {
+        if (!r || !r.code || seen.has(r.code) || r.finishedAt || r.supersededBy) return;
+        if (/^(MAP-|SIM)/.test(String(r.code)) || r.t2 || r.lg || r.tourneyId) return;
+        if (cn(r.course) !== want) return;
+        const at = Number(r.updatedAt || r.createdAt || 0);
+        if (!at || Date.now() - at > 12 * 60 * 60 * 1000) return;
+        const mineBy = (meN && r.createdBy && normalizeNameSegment(String(r.createdBy)) === meN) ||
+          (myUid && Array.isArray(r.uids) && r.uids.indexOf(myUid) >= 0) ||
+          (myUid && Array.isArray(r.players) && r.players.some(p => p && p.uid && String(p.uid) === myUid));
+        if (!mineBy) return;
+        seen.add(r.code);
+        const pl = Array.isArray(r.players) ? r.players.map(p => (p && p.name) || '').filter(Boolean).join(', ') : String(r.players || '');
+        out.push({ code: r.code, players: pl });
+      } catch (e) {}
+    };
+    try { if (state && state.game && !state.viewOnlyMode) consider(state.game); } catch (e) {}
+    let rec = []; try { rec = (await getRecent()) || []; } catch (e) {}
+    (rec || []).forEach(consider);
+  } catch (e) {}
+  return out;
+}
+async function bgSupersedeRounds(codes, newCode) {
+  for (const c of (codes || [])) {
+    try {
+      if (!c || c === newCode) continue;
+      const g = await loadGame(c);
+      if (!g || g.finishedAt || g.supersededBy) continue;
+      g.supersededBy = newCode; g.supersededAt = Date.now();
+      await saveGame(g, { deferRecent: true, maintenance: true });
+      try { console.log('[BG v1834] ' + c + ' closed out by ' + newCode); } catch (e) {}
+    } catch (e) { console.warn('bgSupersedeRounds', e); }
+  }
+}
 async function countMyOpenRounds() {
   // Count only rounds the user CREATED that are still open + recent. (Previously
   // it counted every round you were merely a player in — so a crew member who
@@ -22079,12 +22136,47 @@ function bgDayKey(d) {
   } catch (e) { return String(d || ''); }
 }
 function _bgStripAngle(s){ return String(s==null?'':s).replace(/[<>]/g,''); }
-function displayFirst(p) {
+function _bgFirstRaw(p) {
   if (!p) return '';
   if (p.firstName) return _bgStripAngle(p.firstName);
   // Legacy / no-structured-name fallback: take first token of combined name
   if (p.name) return _bgStripAngle(p.name.trim().split(/\s+/)[0] || p.name);
   return '';
+}
+function _bgLastRaw(p) {
+  try {
+    if (!p) return '';
+    if (p.lastName) return _bgStripAngle(String(p.lastName).trim());
+    const parts = String(p.name || '').trim().split(/\s+/);
+    return parts.length > 1 ? _bgStripAngle(parts.slice(1).join(' ')) : '';
+  } catch (e) { return ''; }
+}
+/* v1834 (Tyler, 9/30 -- "three Tommy's playing in the same round and they can't tell who
+   is who on the score card"). When two players on the same card share a first name, add
+   the last initial ("Tommy H.", "Tommy C."), growing to 2-3 letters only if the initials
+   clash too. Players with a unique first name are untouched, so nothing gets wider on a
+   normal card. `list` is the card to compare against; without it the live round
+   (state.game) is used when p is one of its players. Display only -- never a match key. */
+function displayFirst(p, list) {
+  const f = _bgFirstRaw(p);
+  if (!f) return f;
+  try {
+    let L = Array.isArray(list) ? list : null;
+    if (!L && typeof state !== 'undefined' && state && state.game && Array.isArray(state.game.players)) {
+      const _sp = state.game.players;
+      if (_sp.indexOf(p) >= 0 || (p.id && _sp.some(x => x && x.id === p.id && x.name === p.name))) L = _sp;
+    }
+    if (!L || L.length < 2) return f;
+    const key = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const k = key(f);
+    const clash = L.filter(x => x && x !== p && !(p.id && x.id === p.id) && key(_bgFirstRaw(x)) === k);
+    if (!clash.length) return f;
+    const last = _bgLastRaw(p);
+    if (!last) return f;
+    let n = 1;
+    while (n < 3 && clash.some(x => key(_bgLastRaw(x)).slice(0, n) === key(last).slice(0, n))) n++;
+    return f + ' ' + last.charAt(0).toUpperCase() + last.slice(1, n) + '.';
+  } catch (e) { return f; }
 }
 function displayFull(p) {
   if (!p) return '';
@@ -36854,7 +36946,7 @@ function bgSimPaintPill() {
 }
 function bgSimHeadHtml(t1, t2) {
   return '<div class="sim-head">' +
-    '<button type="button" class="bg-btn bg-btn--ghost bg-btn--icon sim-hbtn" data-sim="min" title="Minimize" aria-label="Minimize">✕</button>' +
+    '<button type="button" class="bg-btn bg-btn--ghost bg-btn--icon sim-hbtn" data-sim="min" title="Minimize (Sim Games keeps going \u2014 end it from \u22ef)" aria-label="Minimize">✕</button>' +
     '<div class="sim-htitle"><div class="sim-t1">' + escapeHtml(t1) + '</div><div class="sim-t2">' + escapeHtml(t2) + '</div></div>' +
     '<button type="button" class="bg-btn bg-btn--ghost bg-btn--icon sim-hbtn" data-sim="menu" title="More" aria-label="More">⋯</button>' +
     '<button type="button" data-esc-close data-sim="min" class="sim-escbtn" tabindex="-1" aria-hidden="true"></button>' +
@@ -41430,6 +41522,15 @@ function applySavedConfig(config) {
       if (p.name && p.teeLabel) {
         state.playerTees[p.name] = p.teeLabel;
       }
+      // v1834: on Edit settings of a live round, remember WHICH round player this row is,
+      // so retyping the name renames that player instead of adding a copy of them.
+      try {
+        if (p.id && state && state.editingLiveRound) {
+          const _rws = document.querySelectorAll('#players-list .player-row');
+          const _lr = _rws[_rws.length - 1];
+          if (_lr) _lr.dataset.livePid = String(p.id);
+        }
+      } catch (e) {}
       // v1763: a saved config / tee time seat that knows the account stamps the row, exactly
       // as the roster picker does, so gatherSetup carries uid + email onto the round player.
       try {
@@ -42107,7 +42208,9 @@ function gatherSetup() {
       // longer existed in game.players, dropping participants silently.
       let playerId = null;
       if (state.editingLiveRound && state.game && Array.isArray(state.game.players)) {
-        const existing = state.game.players.find(p => p.name === name);
+        let existing = state.game.players.find(p => p.name === name);
+        // v1834: a renamed row keeps its player (see applySavedConfig livePid).
+        try { if (!existing && row.dataset.livePid) existing = state.game.players.find(p => p && p.id === row.dataset.livePid) || null; } catch (e) {}
         if (existing && existing.id) playerId = existing.id;
       }
       if (!playerId && state._schedStartPids) {
@@ -42144,6 +42247,7 @@ function gatherSetup() {
       players.push({
         id: playerId,
         puid: row.dataset.puid, // stable row id — keys team assignments (name-edit safe)
+        livePid: (function () { try { return row.dataset.livePid || null; } catch (e) { return null; } })(),   // v1834
         // v1467: the ACCOUNT behind this player, when they were PICKED rather than typed.
         // This is what makes the invite, the join link and the RLS read clause work
         // without anyone having to spell a name the same way twice. Dropped if the name
@@ -42173,6 +42277,18 @@ function gatherSetup() {
     }
   });
 
+  /* v1834 (ROUGH31, 9/30): Tommy Curtis went onto the card carrying Tommy Hall's account
+     id, so the app treated both seats as "me". One account can only ever be ONE seat --
+     the first row keeps it (the organizer's own row is row 1), any repeat is cleared. */
+  try {
+    const _seenUid = new Set();
+    players.forEach(p => {
+      if (!p || !p.uid) return;
+      const _u = String(p.uid);
+      if (_seenUid.has(_u)) { try { console.warn('[BG v1834] cleared a repeated account id on', p.name); } catch (e) {} p.uid = null; }
+      else _seenUid.add(_u);
+    });
+  } catch (e) {}
   if (players.length < 1) {
     showToast('Need at least 1 player with a name');
     return null;
@@ -43764,6 +43880,7 @@ function renderScoreEntry() {
   if (!g) return;
   _bgWatchSyncSoon();   // keep the paired Apple Watch on this hole/score
   const h = state.currentHole;
+  try { bgRememberHole(g, h); } catch (e) {}   // v1834
   try { if (_bgAA.hole != null && _bgAA.hole !== h) bgAutoAdvanceCancel(); if (_bgAA.stayHole != null && _bgAA.stayHole !== h) _bgAA.stayHole = null; if (_bgAA.lastScoreHole != null && _bgAA.lastScoreHole !== h) _bgAA.lastScoreHole = null; bgPaintAutoAdvanceMode(); } catch (e) {}   // v1826
   $('cur-hole').textContent = h;
   // v1065: with mixed tees a single number is a lie - show every par in play.
@@ -46572,6 +46689,12 @@ function renderLongDriveEntry() {
     html += '<span class="junk-chip ' + (hd.pid === p.id ? 'active' : '') + '" data-ld-pid="' + p.id + '">' + displayFirst(p) + '</span>';
   });
   html += '</div>';
+  try {   // v1834: show a tie
+    if (hd.pid && Array.isArray(hd.co) && hd.co.length) {
+      const _tn = [hd.pid].concat(hd.co).map(id => { const p = g.players.find(x => x && x.id === id); return p ? displayFirst(p) : ''; }).filter(Boolean);
+      html += '<div class="small-text" style="margin-top:6px;font-weight:600">\ud83e\udd1d Tied at ' + (hd.yds != null ? hd.yds + ' yd' : '') + ': ' + escapeHtml(_tn.join(' & ')) + ' \u2014 the prize pool splits</div>';
+    }
+  } catch (e) {}
   if (hd.pid) {
     html += '<div style="display:flex;align-items:center;gap:8px;margin-top:10px">' +
       '<span style="font-size:12px;font-weight:500">Distance (optional):</span>' +
@@ -46584,6 +46707,7 @@ function renderLongDriveEntry() {
     chip.onclick = async () => {
       const pid = chip.dataset.ldPid;
       g.longDriveData.pid = (g.longDriveData.pid === pid) ? null : pid;
+      try { delete g.longDriveData.co; } catch (e) {}   // v1834: a hand pick replaces any tie
       if (!g.longDriveData.pid) g.longDriveData.yds = null;
       try { renderLongDriveEntry(); } catch (e) {}   // v1735: paint first, then save (the tap no longer waits on the cloud)
       await saveGame(g);
@@ -47561,7 +47685,7 @@ function maybeAnnounceGroupHole(leaving) {
       if (_cur !== null) {
         // Identical play-order comparison to the receiving side, so send and
         // receive cannot disagree about which way is forward.
-        const _start = (g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
+        const _start = bgPlayStart(g);   // v1834
         const _pos = (h) => ((h - _start + 18) % 18);
         if (_pos(state.currentHole) < _pos(_cur)) _bgSkipMarker = true;
       }
@@ -47610,7 +47734,7 @@ function reactToGroupHole() {
     // until the hole's done or I move it back myself.) Compare in play order so a
     // back-nine start still wraps correctly.
     try {
-      const _start = (g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
+      const _start = bgPlayStart(g);   // v1834
       const _pos = (h) => ((h - _start + 18) % 18);
       if (_pos(target) < _pos(state.currentHole)) { _pendingGroupHole = null; return; } // target is behind us -> ignore
     } catch (e) {}
@@ -47623,6 +47747,9 @@ function reactToGroupHole() {
     // time it mattered. Note it is only DEFERRED here, never dropped — the pending
     // target is applied as soon as the field loses focus.
     if (_bgFieldFocused()) return;
+    // v1834 (Tyler: "advance only after scoring"): a player's phone holds its hole until that
+    // hole is scored; the move is kept pending and applied once it is. Spectators still follow.
+    try { if (!state.viewOnlyMode && typeof isHoleComplete === 'function' && !isHoleComplete(g, state.currentHole)) return; } catch (e) {}
     _pendingGroupHole = null;
     // If the GPS rangefinder is open (this includes spectators), follow the played
     // hole onto it so the whole group tracks the scorer.
@@ -53118,41 +53245,75 @@ function bgLongDriveHoleFor(g) { const hs = bgLongDriveHolesFor(g); return hs.le
 // Pure: does a new drive take the lead? Returns { lead, leader } — `leader` is what
 // longDriveData should become. My own earlier GPS record can always be replaced by me
 // (a re-measure), anything else only by a longer drive.
+// v1834 (Tyler): an EXACT tie shares the lead -- `co` lists the other leaders' ids and
+// the prize pool is split (calcLongDrive). A re-measure by a co-leader: longer takes it
+// outright, shorter drops them out of the tie.
 function bgLongDriveApply(cur, rec) {
   const curY = (cur && cur.yds != null && isFinite(Number(cur.yds))) ? Number(cur.yds) : -1;
-  const mineBefore = !!(cur && cur.pid && cur.pid === rec.pid && cur.via === 'gps');
-  if (!cur || !cur.pid || Number(rec.yds) > curY || mineBefore) return { lead: true, leader: rec };
+  const y = Number(rec.yds);
+  const co = (cur && Array.isArray(cur.co)) ? cur.co.slice() : [];
+  const leaders = cur && cur.pid ? [cur.pid].concat(co) : [];
+  const mineBefore = !!(cur && leaders.indexOf(rec.pid) >= 0 && (cur.via === 'gps' || cur.via === 'manual'));
+  if (!cur || !cur.pid || y > curY) return { lead: true, leader: rec };
+  if (mineBefore) {
+    if (leaders.length === 1) return { lead: true, leader: rec };            // sole leader re-measuring
+    if (y === curY) return { lead: true, tie: true, leader: cur };
+    const rest = leaders.filter(p => p !== rec.pid);                          // shorter: out of the tie
+    return { lead: false, leader: Object.assign({}, cur, { pid: rest[0], co: rest.slice(1) }) };
+  }
+  if (y === curY) return { lead: true, tie: true, leader: Object.assign({}, cur, { co: co.concat([rec.pid]) }) };
   return { lead: false, leader: cur };
 }
 async function bgLongDriveTap(h) {
   try {
     const g = state.game;
     if (!g || state.viewOnlyMode) return;
-    const d = window._bgLdDrive;
-    if (!d || d.hole !== h || !(d.yds > 0) || (Date.now() - (d.at || 0)) > 20000) {
-      try { showToast('Walk to your ball first \u2014 Long Drive measures from where you teed off', 'warn'); } catch (e) {}
-      return;
-    }
-    const yds = Math.round(d.yds);
     let me = null; try { me = gpsResolveMyId(g); } catch (e) {}
     const meP = me ? (g.players || []).find(p => p && p.id === me) : null;
     if (!meP) { try { showToast('Couldn\u2019t tell which player you are on this card', 'warn'); } catch (e) {} return; }
-    const ok = await uiConfirm('Your drive: ' + yds + ' yards on hole ' + h + '.\n\nOnly a drive that finishes in the fairway counts for Long Drive.',
-      { title: 'In the fairway?', okLabel: 'Yes \u2014 record it', cancelLabel: 'No', danger: false });
-    if (!ok) { try { showToast('Not recorded \u2014 Long Drive has to be in the fairway'); } catch (e) {} return; }
-    const rec = { pid: meP.id, yds: yds, at: Date.now(), via: 'gps', h: h };
+    // v1834: tee box -> where I'm standing, straight line. No fairway question (Tyler:
+    // "the users know not to mark unless they are in the fairway").
+    let m = null; try { m = (typeof window._bgLdMeasure === 'function') ? window._bgLdMeasure(h) : null; } catch (e) { m = null; }
+    let yds = (m && m.yds > 0) ? m.yds : null;
+    let via = 'gps';
+    if (yds == null) {
+      // Never a dead end again: no fix / tee not mapped -> type it.
+      const why = (m && m.err === 'notee') ? 'This hole\u2019s tee isn\u2019t mapped, so GPS can\u2019t measure it.' : 'No GPS fix right now.';
+      let typed = null;
+      try { typed = await uiPrompt(why + ' Type your drive in yards:', { title: 'Long Drive \u2014 hole ' + h, value: '', okLabel: 'Record' }); } catch (e) { typed = null; }
+      const n = parseInt(String(typed == null ? '' : typed).replace(/[^0-9]/g, ''), 10);
+      if (!(n > 0 && n <= 500)) { if (typed != null) { try { showToast('Enter yards between 1 and 500', 'warn'); } catch (e) {} } return; }
+      yds = n; via = 'manual';
+    } else if (yds < 100 || yds > 430) {
+      const ok = await uiConfirm('That measures ' + yds + ' yards from your tee box on hole ' + h + '. Are you standing at your ball?',
+        { title: 'Long Drive', okLabel: 'Yes \u2014 record ' + yds, cancelLabel: 'Cancel', danger: false, dismissValue: false });
+      if (!ok) return;
+    }
+    const rec = { pid: meP.id, yds: yds, at: Date.now(), via: via, h: h };
     if (meP.t2pid) rec.t2pid = meP.t2pid;
+    const _before = g.longDriveData;
     const res = bgLongDriveApply(g.longDriveData, rec);
     if (!res.lead) {
+      if (res.leader !== _before) {   // I dropped out of a tie by re-measuring shorter
+        g.longDriveData = res.leader;
+        try { _markScoreTouched && _markScoreTouched('longDriveData'); } catch (e) {}
+        try { renderLongDriveEntry(); } catch (e) {}
+        try { await saveGame(g); } catch (e) {}
+      }
       const lp = (g.players || []).find(p => p && p.id === (g.longDriveData && g.longDriveData.pid));
-      try { showToast('Recorded ' + yds + ' yds \u2014 ' + (lp ? displayFirst(lp) : 'the leader') + ' still leads at ' + g.longDriveData.yds); } catch (e) {}
+      try { showToast('Recorded ' + yds + ' yds \u2014 ' + (lp ? displayFirst(lp) : 'the leader') + ' leads at ' + g.longDriveData.yds); } catch (e) {}
       return;
     }
     g.longDriveData = res.leader;
     try { _markScoreTouched && _markScoreTouched('longDriveData'); } catch (e) {}
     try { renderLongDriveEntry(); } catch (e) {}
     try { await saveGame(g); } catch (e) { console.warn('long drive save', e); }
-    try { showToast('\ud83c\udfcc\ufe0f Long Drive: ' + yds + ' yds \u2014 you lead'); } catch (e) {}
+    if (res.tie) {
+      const others = [g.longDriveData.pid].concat(g.longDriveData.co || []).filter(p => p !== meP.id).map(pid => { const p = (g.players || []).find(x => x && x.id === pid); return p ? displayFirst(p) : ''; }).filter(Boolean);
+      try { showToast('\ud83e\udd1d Long Drive: ' + yds + ' yds \u2014 tied with ' + (others.join(' & ') || 'the leader') + ', the prize pool splits'); } catch (e) {}
+    } else {
+      try { showToast('\ud83c\udfcc\ufe0f Long Drive: ' + yds + ' yds \u2014 you lead'); } catch (e) {}
+    }
     try {
       const tid = g.t2 && g.t2.tournamentId;
       if (tid) {
@@ -53178,12 +53339,16 @@ function calcLongDrive(g) {
   const events = [];
   const hd = g.longDriveData;
   if (hd && hd.pid) {
-    const w = partIds.has(hd.pid) ? participants.find(p => p.id === hd.pid) : null;
-    if (w) {
+    // v1834: exact ties (hd.co) split the prize pool evenly between the tied players.
+    const ids = [hd.pid].concat(Array.isArray(hd.co) ? hd.co : []).filter((id, i, a) => id && a.indexOf(id) === i && partIds.has(id));
+    const ws = ids.map(id => participants.find(p => p.id === id)).filter(Boolean);
+    if (ws.length) {
       const per = cfg.value || 0;
-      participants.forEach(p => { if (p.id === w.id) return; money[p.id] -= per; money[w.id] += per; });
+      const k = ws.length;
+      const losers = participants.filter(p => ids.indexOf(p.id) < 0);
+      losers.forEach(p => { money[p.id] -= per; ws.forEach(w => { money[w.id] += per / k; }); });
       // v973: see calcLongPutt — display figure must use the pool's participants.
-      events.push({ kind: 'longdrive', playerId: w.id, name: w.name + (hd.yds != null ? ' (' + hd.yds + ' yd)' : ''), amt: per * (participants.length - 1) });
+      ws.forEach(w => events.push({ kind: 'longdrive', playerId: w.id, name: w.name + (hd.yds != null ? ' (' + hd.yds + ' yd' + (k > 1 ? ', tie' : '') + ')' : ''), amt: per * losers.length / k }));
     }
   }
   if (events.length === 0) return null;
@@ -70582,6 +70747,34 @@ function _bgCrewLiveWire(el) {
     row.onclick = () => { if (row.dataset.mine === '1') { try { window.joinRoundByCode(row.dataset.code); } catch (e) {} return; } openCrewRound(row.dataset.code); };
   });
 }
+/* v1834 (Tyler, 9/30: "Why am I seeing two spectates in here for the same round?").
+   Tommy started ROUGH31, hit the name bugs, and restarted as HOOK16 twenty minutes later
+   -- the first one was never closed, so both sat in Live now. A live round is hidden when
+   a NEWER round at the same course shares a player with it: the same group can't be on
+   two cards at once. Works for rounds started on older builds too (no stamp needed). */
+function bgLiveSupersededBy(x, arr) {
+  try {
+    const g = x && x.g; if (!g || !Array.isArray(arr)) return false;
+    const cn = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const keysOf = gg => {
+      const out = new Set();
+      (gg.players || []).forEach(p => { if (!p) return; if (p.uid) out.add('u:' + p.uid); if (p.name) out.add('n:' + cn(p.name)); });
+      return out;
+    };
+    const mine = keysOf(g);
+    const myAt = Number(g.createdAt) || 0;
+    return arr.some(y => {
+      if (!y || y === x || !y.g || y.code === x.code) return false;
+      if (cn(y.g.course) !== cn(g.course)) return false;
+      const yAt = Number(y.g.createdAt) || 0;
+      if (!(yAt > myAt)) return false;
+      const ys = keysOf(y.g);
+      for (const k of mine) if (ys.has(k)) return true;
+      return false;
+    });
+  } catch (e) { return false; }
+}
+try { window.bgLiveSupersededBy = bgLiveSupersededBy; } catch (e) {}
 async function renderCrewLive() {
   const el = document.getElementById('crew-live');
   if (!el) return;
@@ -70630,7 +70823,8 @@ async function renderCrewLive() {
   } catch (e) {}
   // Friends-only: only surface in-progress rounds that include YOU or an accepted friend.
   const allowed = await friendNameSet();
-  const thruOf = g => { let thru = 0; try { for (let h = 0; h < 18; h++) { if (g.players.some(p => g.scores && g.scores[p.id] && g.scores[p.id][h] != null)) thru = h + 1; } } catch (e) {} return thru; };
+  // v1834: "thru" = holes actually played (a round started on 4 and through 6 holes read "thru 9")
+  const thruOf = g => { let thru = 0; try { for (let h = 0; h < 18; h++) { if (g.players.some(p => g.scores && g.scores[p.id] && g.scores[p.id][h] != null) || (typeof isHoleComplete === 'function' && isHoleComplete(g, h + 1))) thru++; } } catch (e) {} return thru; };
   /* v1712 (Tyler, 9/17): "Somehow it thinks I have two rounds open in spectate. I only
      have one round open. The other was a test round I deleted mid round from the
      scoring screen."
@@ -70658,8 +70852,11 @@ async function renderCrewLive() {
     .filter(x => !(typeof bgRoundCardComplete === 'function' && bgRoundCardComplete(x.g)))
     .filter(x => x.t >= cutoff)
     .filter(x => allowed && allowed.size && x.g.players.some(p => p && p.name && allowed.has(normalizeNameSegment(p.name))))
+    .filter(x => !x.g.supersededBy)                           // v1834: closed out by a newer round
+    .filter(x => x.t >= Date.now() - 60 * 60 * 1000)          // v1834: an hour with nothing saved = not live
     .map(x => ({ ...x, thru: thruOf(x.g) }))
-    .filter(x => x.thru > 0); // only rounds actually teed off (no "thru 0" = not started)
+    .filter(x => x.thru > 0) // only rounds actually teed off (no "thru 0" = not started)
+    .filter((x, i, arr) => !bgLiveSupersededBy(x, arr));      // v1834: a restart of the same round hides the old one
   // v1372: the card lives on Home now and hides itself when nothing is live, so Home
   // never carries an empty box. The help text stays for the (guarded) case where the
   // wrapper is missing — a future re-add on another tab keeps the old behaviour.
@@ -70682,9 +70879,9 @@ async function renderCrewLive() {
       const _noHcp = !!(g.hcpRules && g.hcpRules.noHandicaps);
       playersStr = g.players.map(p => {
         const t = _tot[p.id] || {};
-        if (!(t.count > 0)) return escapeHtml(displayFirst(p));
+        if (!(t.count > 0)) return escapeHtml(displayFirst(p, g.players));
         const _g = Math.round(t.gross), _n = Math.round(t.net);
-        return escapeHtml(displayFirst(p)) + ' <span style="color:var(--text)">' + _g + '</span>' +
+        return escapeHtml(displayFirst(p, g.players)) + ' <span style="color:var(--text)">' + _g + '</span>' +
           ((_noHcp || _n === _g) ? '' : ' <span style="opacity:.8">· ' + _n + ' net</span>');
       }).join('<br>');
     } catch (e) { playersStr = escapeHtml(g.players.map(p => displayFirst(p)).join(', ')); }
@@ -72960,6 +73157,44 @@ async function showIncomingInvite(inv) {
   return true;
 }
 
+/* v1834 (Tyler, 9/30: Kevin joined the scramble from the invite and the top of his screen
+   still said Sim Games -- he'd closed the book with the X, which only MINIMIZES it, so the
+   old Sim Games stayed running on his phone). Before joining someone's round: if an older
+   round or Sim Games is still open here, ask to leave it. Leaving saves it as incomplete:
+   Sim Games goes to Game history; a real round simply stays in Rounds, unfinished. */
+async function bgConfirmLeaveForJoin(newCode, newG) {
+  try {
+    if (!newG || newG.finishedAt) return true;
+    const host = (function () { try { const n = newG.createdBy || (newG.players && newG.players[0] && newG.players[0].name) || ''; return n ? String(n).split(/\s+/)[0] + '\u2019s' : 'this'; } catch (e) { return 'this'; } })();
+    const where = newG.course ? ' at ' + newG.course : '';
+    let s = null; try { s = (typeof bgSimLoad === 'function') ? bgSimLoad() : null; } catch (e) { s = null; }
+    if (s) {
+      const ok = await uiConfirm('You still have Sim Games open' + (s.finishedAt ? '' : ' (hole ' + ((s.cur | 0) + 1) + ')') + '.\n\nLeave it and join ' + host + ' round' + where + '? The Sim Games will be saved to your Game history as incomplete.',
+        { title: 'Leave Sim Games?', okLabel: 'Leave & join', cancelLabel: 'Stay', danger: false, dismissValue: false });
+      if (!ok) return false;
+      try {
+        if (!s.finishedAt) s.finishedAt = Date.now();
+        s.incomplete = true;
+        await bgSimSaveResults(s);
+      } catch (e) { console.warn('sim save on leave', e); }
+      try { if (bgSimLoad()) { bgSimSave(null); } } catch (e) {}
+      try { const _pl = document.getElementById('sim-pill'); if (_pl) _pl.style.display = 'none'; } catch (e) {}
+      try { if (typeof bgSimClose === 'function') bgSimClose(); } catch (e) {}
+    }
+    const cur = (typeof state !== 'undefined' && state) ? state.game : null;
+    if (cur && cur.code && cur.code !== newCode && !cur.finishedAt && !state.viewOnlyMode && !cur.supersededBy) {
+      const at = Number(cur.updatedAt || cur.createdAt || 0);
+      const fresh = at && (Date.now() - at) < 12 * 60 * 60 * 1000;
+      let mineIn = true; try { mineIn = (typeof bgAmInRound === 'function') ? bgAmInRound(cur) : true; } catch (e) {}
+      if (fresh && mineIn) {
+        const ok2 = await uiConfirm('You have an unfinished round' + (cur.course ? ' at ' + cur.course : '') + '.\n\nLeave it and join ' + host + ' round' + where + '? Your round stays in the Rounds list as incomplete.',
+          { title: 'Leave your round?', okLabel: 'Leave & join', cancelLabel: 'Stay', danger: false, dismissValue: false });
+        if (!ok2) return false;
+      }
+    }
+  } catch (e) { console.warn('bgConfirmLeaveForJoin', e); }
+  return true;
+}
 async function acceptIncomingInvite() {
   const inv = _pendingInvite;
   document.getElementById('incoming-invite-modal').classList.remove('show');
@@ -72997,6 +73232,7 @@ async function acceptIncomingInvite() {
   }
   const g = await loadGame(inv.game_code);
   if (!g) { showToast('Round not found — it may have ended'); return; }
+  if (!(await bgConfirmLeaveForJoin(inv.game_code, g))) { showToast('Stayed put \u2014 you can join from Home \u203a Live now any time'); return; }   // v1834
   // Accepting = I've joined, so this round counts toward my stats. Clear the
   // not-joined flag and undo any earlier decline.
   try {
@@ -94399,8 +94635,56 @@ async function deleteTourney(id) {
 // least one player hasn't entered a score yet. If every hole is fully scored,
 // returns 18 (so the user lands on the last hole). Used to auto-position the
 // Score tab when the user re-opens it instead of always starting at hole 1.
+/* v1834 (Tyler, 9/30: "we started on hole 4 but every time the screen went to a lock
+   screen it bounced all over the place"). He started a normal round and swiped to 4, so
+   the round still said startHole 1. Every "where am I" helper then walked 1,2,3 -- all
+   unscored -- and put him back on hole 1. The start hole a group REALLY used is readable
+   from the card: if the round's hole 1 has no score but later holes do, play began at the
+   first scored hole after a gap. Derived at read time (never saved -- startHole is a
+   cloud-wins field, and every phone reading the same scores gets the same answer).
+   Events, leagues, a back-nine start and finished rounds keep their stored start. */
+function bgPlayStart(g) {
+  try {
+    const s = (g && g.startHole >= 1 && g.startHole <= 18) ? Number(g.startHole) : 1;
+    if (!g || s !== 1 || g.finishedAt || g.t2 || g.lg || g.tourneyId) return s;
+    const n = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
+    const scored = h => {
+      try {
+        if ((g.players || []).some(p => p && g.scores && Array.isArray(g.scores[p.id]) && g.scores[p.id][h - 1] != null)) return true;
+        return (typeof isHoleComplete === 'function') ? !!isHoleComplete(g, h) : false;
+      } catch (e) { return false; }
+    };
+    if (scored(1)) return 1;
+    for (let h = 2; h <= n; h++) { if (scored(h) && !scored(h - 1)) return h; }
+    return 1;
+  } catch (e) { return (g && g.startHole) || 1; }
+}
+try { window.bgPlayStart = bgPlayStart; } catch (e) {}
+// v1834: the hole this phone was last on, per round -- so a resume stays put.
+function bgRememberHole(g, h) {
+  try {
+    if (!g || !g.code || !(h >= 1 && h <= 18) || g.finishedAt) return;
+    if (window._bgRememberedHole === g.code + ':' + h) return;
+    window._bgRememberedHole = g.code + ':' + h;
+    let m = {}; try { m = JSON.parse(localStorage.getItem('golf:cur-hole') || '{}') || {}; } catch (e) { m = {}; }
+    m[g.code] = { h: h, at: Date.now() };
+    const ks = Object.keys(m).sort((a, b) => (m[b].at || 0) - (m[a].at || 0)).slice(0, 10);
+    const o = {}; ks.forEach(k => { o[k] = m[k]; });
+    localStorage.setItem('golf:cur-hole', JSON.stringify(o));
+  } catch (e) {}
+}
+function bgRecallHole(g) {
+  try {
+    if (!g || !g.code || g.finishedAt) return null;
+    const m = JSON.parse(localStorage.getItem('golf:cur-hole') || '{}') || {};
+    const r = m[g.code];
+    if (!r || !(r.h >= 1 && r.h <= 18) || (Date.now() - (r.at || 0)) > 12 * 60 * 60 * 1000) return null;
+    const n = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
+    return r.h <= n ? r.h : null;
+  } catch (e) { return null; }
+}
 function findNextUnscoredHole(g) {
-  const first = (g && g.startHole) || 1;
+  const first = bgPlayStart(g);   // v1834: was g.startHole
   if (!g || !g.players || g.players.length === 0) return first;
   /* v1271 FIX (QA G-4): this was the one hole-walking helper still hardcoded to
      18 -- lastHoleOfRound and allHolesScored, directly below, both use
@@ -94424,7 +94708,7 @@ function findNextUnscoredHole(g) {
 // The 18th hole in PLAY ORDER for this round — handles rounds that start on the
 // back nine. startHole 1 → 18; startHole 10 → 9.
 function lastHoleOfRound(g) {
-  const start = (g && g.startHole) || 1;
+  const start = bgPlayStart(g);   // v1834
   const _rh = roundHoles(g);
   return ((start + _rh - 2) % _rh) + 1;
 }
@@ -107737,7 +108021,33 @@ function applyLiveEditMerge(g, setup) {
   if (!g.scores) g.scores = {};
   setup.players.forEach(np => {
     if (!np || !np.name) return;
-    const existing = g.players.find(p => p && _bgPurgeKey(p.name) === _bgPurgeKey(np.name));   // v1802 (L5): case/space drift is the same player
+    let existing = g.players.find(p => p && _bgPurgeKey(p.name) === _bgPurgeKey(np.name));   // v1802 (L5): case/space drift is the same player
+    /* v1834 (ROUGH31, 9/30): Tommy retyped "Tommy Curtis" in Edit settings; the 900 ms
+       auto-save fired after one keystroke, found no player called "Tommys Curtis" and
+       ADDED one -- a 4th player, and the banker game moved onto the copy. A row that came
+       from a round player (livePid) now RENAMES that player. */
+    try {
+      if (!existing && np.livePid) {
+        const _byPid = g.players.find(p => p && p.id === np.livePid);
+        const _stillNamed = _byPid && (setup.players || []).some(o => o && o !== np && _bgPurgeKey(o.name) === _bgPurgeKey(_byPid.name));
+        if (_byPid && !_stillNamed) {
+          const _old = _byPid.name;
+          _byPid.name = np.name;
+          _byPid.firstName = np.firstName || '';
+          _byPid.lastName = np.lastName || '';
+          if (np.uid) _byPid.uid = np.uid;
+          if (np.email) _byPid.email = np.email;
+          try { if (state.playerTees && state.playerTees[_old] != null && state.playerTees[np.name] == null) state.playerTees[np.name] = state.playerTees[_old]; } catch (e) {}
+          try {
+            [g.games, g.groupGames].forEach(bag => {
+              if (!bag || typeof bag !== 'object') return;
+              Object.keys(bag).forEach(k => { const c = bag[k]; if (c && Array.isArray(c.participantNames)) c.participantNames = c.participantNames.map(n => n === _old ? np.name : n); });
+            });
+          } catch (e) {}
+          existing = _byPid;
+        }
+      }
+    } catch (e) {}
     if (existing) {
       existing.rawHcp = np.rawHcp != null ? np.rawHcp : np.hcp;
       existing.hcp = np.hcp;
@@ -109334,6 +109644,19 @@ async function init() {
         return;
       }
     } catch (e) {}
+    // v1834 (ROUGH31 -> HOOK16): starting again at the same course while an earlier round
+    // there is still open. Ask, then close the old one out (kept in Rounds as incomplete)
+    // so it stops showing as a second Live round with its own Spectate button.
+    let _bgSupersede = [];
+    try {
+      _bgSupersede = await bgSameCourseOpenRounds(setup);
+      if (_bgSupersede.length) {
+        const _o = _bgSupersede[0];
+        const _okNew = await uiConfirm('You already have a round going at ' + (setup.course || 'this course') + (_o.players ? ' (' + _o.players + ')' : '') + '.\n\nStart a new one? The old round will be closed out and kept in your Rounds list as incomplete.',
+          { title: 'Round already going', okLabel: 'Start new round', cancelLabel: 'Go back', danger: false, dismissValue: false });
+        if (!_okNew) return;
+      }
+    } catch (e) { _bgSupersede = []; }
     // Show the branded loader NOW (after any confirm dialogs) so the start feels
     // instant while the save + GPS warm up behind it.
     const _rl = showRoundLoading();
@@ -109365,6 +109688,7 @@ async function init() {
     let code = $('display-code').dataset.code || generateCode();
     // v796: make sure this round's code isn't already used by another round in the
     // cloud (small code space → collisions imported an old round's phantom players).
+    try { if (_bgSupersede && _bgSupersede.length) { setTimeout(function () { try { bgSupersedeRounds(_bgSupersede.map(r => r.code), code); } catch (e) {} }, 1500); } } catch (e) {}   // v1834
     try { code = await ensureUniqueGameCode(code); const _dc = $('display-code'); if (_dc) { _dc.dataset.code = code; try { _dc.textContent = code; } catch (e) {} } } catch (e) {}
     const courseId = $('course-name').dataset.courseId || '';
     let creatorName = null;
@@ -110013,6 +110337,7 @@ async function init() {
       if (state.game && state.game.code === code) return;
       showToast('That round isn’t live yet — the host may not have started it (or it ended). Try again once they tee off.'); return;
     }
+    if (!(await bgConfirmLeaveForJoin(code, g))) return;   // v1834
     // v1242: identity gate — see bgJoinIdentityGate above. Finished rounds skip it
     // (they open read-only anyway); an account with no player name yet skips it
     // (the v1041 identity chain is still naming/matching them).
@@ -110080,7 +110405,7 @@ async function init() {
     state.game = g;
     state.viewOnlyMode = !!g.finishedAt;
     state._scoreResumeAsked = true;   // v673: a join link IS the choice — skip the chooser
-    state.currentHole = findNextUnscoredHole(g);
+    state.currentHole = bgRecallHole(g) || findNextUnscoredHole(g);   // v1834: a rejoin stays on my hole
     await safeSet(KEY_LAST, code, false);
     try { await addToRecent(g); } catch (e) { console.warn('addToRecent on join failed:', e); }
     // v624 CONSENT: joining by code IS acceptance — record it so the round
@@ -111369,7 +111694,8 @@ async function tryRestore() {
   state.viewOnlyMode = !!g.finishedAt;
   // Position the score tab on the next unscored hole so a page reload
   // mid-round doesn't bounce the user back to hole 1.
-  state.currentHole = findNextUnscoredHole(g);
+  // v1834: the hole this phone was last on wins (a relaunch must stay on the hole).
+  state.currentHole = bgRecallHole(g) || findNextUnscoredHole(g);
   enableGameTabs(true);
 }
 
@@ -112691,6 +113017,43 @@ const gpsView = (() => {
       b.style.display = 'block';
     } catch (e) { hide(); }
   }
+  /* v1834 (Tyler, 9/30: "I click it and it said walk to the ball ... nothing ever happened").
+     The button read the Est. Drive number, which only exists once the phone has PARKED at
+     the tee and then moved away (the dwell detector). Stand on the tee a few seconds too
+     short, start on a hole you didn't tee off with GPS open, or lock the phone -- and there
+     was never a number, so every tap said "walk to your ball". Tyler's rule now: a straight
+     line from THIS player's tee box on the mapped hole to where the phone is right now. */
+  window._bgLdMeasure = function (h) {
+    try {
+      if (mode !== 'view' || h !== hole) return { err: 'hole' };
+      if (!hd || !Array.isArray(hd.tee)) return { err: 'notee' };
+      if (!Array.isArray(ball) || (Date.now() - (window._gpsLastFixAt || 0)) > 30000) return { err: 'nofix' };
+      let yds = ydsBetween(hd.tee, ball);
+      // The mapped tee is the tips; move it up to this player's tee box (same scaling the
+      // Est. Drive bubble has used since v972).
+      try {
+        if (Array.isArray(hd.mid)) {
+          const _tees = (state.game && Array.isArray(state.game.tees) && state.game.tees.length) ? state.game.tees : null;
+          let _myLbl = '';
+          try {
+            const _me = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(state.game) : null;
+            const _mp = _me && state.game.players ? state.game.players.find(x => x.id === _me) : null;
+            _myLbl = (_mp && state.playerTees && state.playerTees[_mp.name]) || (_mp && _mp.teeLabel) || '';
+          } catch (e) {}
+          if (_tees && _myLbl) {
+            const _mine = _tees.find(t => t && String(t.label || '') === String(_myLbl));
+            const _long = _tees.reduce((a, t) => (t && t.yards > (a ? a.yards : 0)) ? t : a, null);
+            if (_mine && _long && _mine.yards > 0 && _long.yards > 0 && _mine.yards < _long.yards) {
+              const _ratio = Math.max(0.8, Math.min(1, _mine.yards / _long.yards));
+              const _drop = ydsBetween(hd.tee, hd.mid) * (1 - _ratio);
+              if (_drop > 5) yds = yds - Math.round(_drop);
+            }
+          }
+        }
+      } catch (e) {}
+      return { yds: Math.max(0, Math.round(yds)) };
+    } catch (e) { return { err: 'x' }; }
+  };
   // v1829: the Long Drive button. Only on the hole this round's Long Drive is on (round
   // side game, league pot or tournament day), only for a player (never a spectator).
   function updateLongDriveButton() {
@@ -112703,7 +113066,7 @@ const gpsView = (() => {
       if (ldHoles.indexOf(hole) < 0) { b.style.display = 'none'; return; }
       let me = null; try { me = gpsResolveMyId(g); } catch (e) {}
       const cur = g.longDriveData;
-      const mine = !!(me && cur && cur.pid === me && cur.via === 'gps');
+      const mine = !!(me && cur && (cur.pid === me || (Array.isArray(cur.co) && cur.co.indexOf(me) >= 0)) && (cur.via === 'gps' || cur.via === 'manual'));   // v1834: ties
       b.textContent = mine ? ('Long Drive \u2713 ' + cur.yds) : 'Long Drive';
       b.classList.toggle('done', mine);
       if (!b._bgWired) { b._bgWired = true; b.onclick = async (ev) => { try { ev.stopPropagation(); } catch (e) {} try { await bgLongDriveTap(hole); } catch (e) {} try { updateLongDriveButton(); } catch (e) {} }; }   // repaint "✓ 268" at once
@@ -113853,7 +114216,10 @@ const gpsView = (() => {
               const target = (g && g.groupHole && g.groupHole.hole >= 1 && g.groupHole.hole <= 18) ? g.groupHole.hole : null;
               // Don't rip an active scorer off their hole — only nudge an IDLE phone.
               const _active = (typeof isUserActiveNow === 'function') && isUserActiveNow();
-              if (target && target >= 1 && target <= 18 && target !== hole && mode === 'view' && !_active) {
+              // v1834 (Tyler: "advance only after scoring"): never move off a hole that isn't scored yet.
+              let _curDone = true;
+              try { _curDone = (typeof isHoleComplete === 'function') ? !!isHoleComplete(g, hole) : true; } catch (e) { _curDone = true; }
+              if (target && target >= 1 && target <= 18 && target !== hole && mode === 'view' && !_active && _curDone) {
                 // FORWARD-ONLY: never pull a player back to an earlier hole (play-order
                 // aware so a back-nine start still wraps). If the group is behind us,
                 // hold our current hole. An idle non-scorer catches the group forward
@@ -113861,7 +114227,7 @@ const gpsView = (() => {
                 // they never move.
                 let _forward = true;
                 try {
-                  const _start = (g && g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
+                  const _start = bgPlayStart(g);   // v1834
                   const _pos = (h) => ((h - _start + 18) % 18);
                   _forward = _pos(target) >= _pos(hole);
                 } catch (e) {}
