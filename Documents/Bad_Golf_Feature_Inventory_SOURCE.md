@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1827
+**Build Version:** v2026.11.1836
 **Documentation Date:** September 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -1056,6 +1056,43 @@ Tapping the scorecard overlay in a tournament shows **the whole field**, not jus
 
 The **fairway target** (light green dot, if mapped) shows the ideal landing area for par 4s and 5s — the aim point an admin set as the wizard's "target" tap. The rangefinder uses it to suggest the layup yardage. Par 3s don't display one.
 
+### 🎯 Distance Arcs & Miss Zone
+
+Yardage arcs drawn on the hole map from where you stand, like a yardage book for every shot, plus a **miss zone** around your target. It's **off until you turn it on**, and it's all drawing — nothing is saved or sent while you use it.
+
+**Turn it on:** More › ⚙️ Additional settings › **"🎯 Distance arcs & miss zone"**. A new **ARCS** button then appears on the right side of the GPS map, under the Strokes box.
+
+**The ARCS button — tap to step through:**
+- **Arcs** (off) → **Yards** → **Clubs** → back to off. The button turns **green** while arcs are showing, and its label tells you which view you're in
+- It **stays on from hole to hole** and **resets to off when a new round starts**
+- Not shown while spectating or during a course-mapping session
+
+**Yards — yardage arcs:**
+- Up to five curved lines centred on **you** (on the tee until your GPS takes over): your target distance in the middle, with arcs before and beyond it
+- The **target arc** is the bold one, with its yardage on a dark label
+- **Spacing follows your zoom** — about 50 yards apart when you can see the whole hole, tightening to 20 and then 10 yards as you pinch in
+- **Wind, slope, temperature and altitude:** the arcs stay at the real ground yardage, and a second line reads **"plays 238"** whenever conditions move a number by 2 yards or more. It's the same math as the **Plays like** pills, so the target arc always matches the pill
+- Drag the target and the arcs follow it
+
+**Clubs — one arc per club:**
+- Each club in your bag gets an arc at the spot **it lands today** — your club's number, adjusted for today's wind, slope and temperature. For example, a 150-yard 7-iron into the wind might sit at **"7i 142y"** with **"plays 150"** underneath
+- Up to five clubs near your target show; the one closest to your target is the bold arc
+- A club with **5 or more saved shots** uses what you really hit it (the label adds **"measured"**); otherwise it uses the middle of the range you typed in **My clubs**, and with no bag set up it uses a standard bag
+- The putter never gets an arc, and neither does the driver when you're previewing a shot off the fairway
+
+**To green — preview your next shot:**
+- While arcs are on, a **TO GREEN** button appears under ARCS on par 4s and 5s (when your target is 40+ yards short of the green)
+- Tap it and the arcs **redraw from your target spot toward the green** — "if my drive lands here, what's left?" The button changes to **FROM ME**; tap it to go back
+- It turns itself off when you move to the next hole
+
+**The miss zone — the gold band under the target:**
+- Shows how wide your miss might be, labelled under the crosshair (e.g. **"miss ±15y"**)
+- **To start with it's a width you choose:** under the setting, pick **±10y**, **±15y** (the default), **±20y** or **±30y** — how far either side of the target you tend to miss
+- **Then it becomes your real miss.** Once the club you'd hit has **5 tracked shots saved with an aim** (see *Shot Tracking*), the band becomes a **gold oval** built from those shots — shifted toward the way you actually miss and sized to your typical miss. The caption reads like **"7i miss ±12y · tends 4y right, 6y short · 8 shots"**
+- Before that, the caption counts you in: **"7i: 3 of 5 shots"**
+
+*Example:* on a 410-yard par 4 you drag the target to 245 yards. **Yards** shows arcs at 195 / 220 / 245 / 270 / 295 with "plays 252" on the target arc (it's into the wind). Tap again for **Clubs**: **"Dr 248y"** sits right on the target, **"3W 226y"** short of it. Tap **TO GREEN** and the arcs jump to your target spot, aimed at the green 165 yards away — in Clubs view **"6i 163y"** is the bold arc.
+
 ### Wind & Temperature *(PRO)*
 
 **Wind panel** (left side): direction dial (where the wind is blowing **to**), speed & colour (0–5 green, 5–15 yellow, 15+ red), and light streaks drifting across the map. **Temperature panel** shows current temp and a "feels like" carry adjustment. Toggle with the **⊙** and **🌡** icons.
@@ -1097,6 +1134,13 @@ From **Home** → the **Live now** card, tap **👀 Spectate** on a friend's rou
 
 Tracked shots are saved in **Stats tab → My Shots** — a searchable log with date, course, hole, distance, wind, temp and club. Tap **×** to delete any shot.
 
+**Track Shot now remembers where you were aiming.** When you tap **"Track Shot"**, the app notes where the **target crosshair** is. When you finish and **save the shot with a club**, it also records how far the ball finished **left or right** of that line and **long or short** of the target. The save dialog shows it — e.g. **"vs aim: 4y right, 6y short"**.
+
+- **Aim first, then track:** drag the target to the spot you're actually aiming at *before* you tap Track Shot
+- **Pick the right club** in the save dialog — that's how the miss is filed
+- Five of these per club turn that club's **miss zone** on the map into your real miss (see *Distance Arcs & Miss Zone*)
+- Obvious junk is left out automatically — a target under 30 yards away, a shot under 20 yards, or a finish nowhere near the line
+
 ### Club Suggester & My Clubs / Bag *(PRO)*
 
 **"🏌️ My clubs"** (Stats tab): one input per club with a **distance range** in yards, renameable labels, drag-to-reorder, blanks to skip clubs you don't carry, and a **"Reset to standard bag"** button. On GPS, the club recommendation appears on the Plays-Like sheet and updates as you drag the target; **"Pick from My Clubs"** overrides the auto-pick.
@@ -1118,6 +1162,8 @@ Under each club's entered range, My clubs shows what your **tracked shots** say 
 - **The range is the median and the 25th–75th percentile**, not the average and not min-to-max. One shank, or one bad GPS read, can't blow the range out.
 - **The line is tinted in the accent colour** when the midpoint you typed and the measured median are more than 10% apart. That's the whole signal — no badge, no toast, no nagging.
 - **It is display-only.** There's no "update to this" button, nothing is written back to your entered range, and **your GPS club recommendations are unchanged by it.** It tells you; you decide.
+- **Club arcs do use it.** With 5+ shots, a club's arc on the GPS map (Distance arcs → Clubs) is drawn at the measured number.
+- **Your miss, too.** Once a club has 5 tracked shots saved with an aim, the line adds its miss pattern — e.g. `📏 measured 148–156 · 9 shots · miss ±12y, tends 4y right`.
 
 #### 🏷️ Brand, Model and Type
 
@@ -1811,6 +1857,8 @@ When a commissioner deletes a tournament, the rounds played in it used to keep t
 **Stats visibility** — **Everyone** · **Friends only** · **Just me**. *(When two accounts share a name the app keeps the more restrictive setting of the two. A change that doesn't reach the server now says so — this is a privacy setting and it used to confirm silently either way.)*
 
 **Drive distance estimate** — auto-log drive distances from GPS.
+
+**🎯 Distance arcs & miss zone** — **off** by default. Turn it on to get the **ARCS** button on the GPS map (yardage arcs, club arcs, To green preview and the miss zone — see the GPS section). Underneath, pick the miss zone width you start with: **±10y · ±15y · ±20y · ±30y**. It's a setting on **this phone**.
 
 **Alert friends** — notify friends when you start a round.
 
@@ -2912,8 +2960,9 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 5. **Wind panel** (⊙ icon) shows direction and speed
 6. **Club suggestion** (Plays-Like mode) — tap to switch from Plays-As
 7. Check the right-hand bubbles for this hole's **🪙 Pot of Gold** value, **📏 Long Putt**, the **LEADER** net bubble, the **🏹 Team Quota** standing and your match status
-8. Tap **"Track Shot"** to log a drive distance
-9. Tap **"Score"** to close GPS and enter the score
+8. Tap **"Track Shot"** to log a drive distance — aim the target first, and save it with a club to build your miss zone
+9. **Optional — Distance arcs:** tap **ARCS** for yardage arcs, again for club arcs; on par 4s and 5s tap **TO GREEN** to preview your next shot (turn it on first in More › ⚙️ Additional settings)
+10. Tap **"Score"** to close GPS and enter the score
 
 ### Marking Junk Games on Scorecard
 
@@ -2972,7 +3021,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 ## Glossary
 
-*New since the last edition: **Auto-advance after the last score** (the next hole opens by itself once every field on the hole is in — a setting: → GPS, → Scorecard or Off); the **Mulligans** tracker (do-over counter, per-player cap, scorecard marks, "Most mulligans", Do-Over and Breakfast Ball badges — and a mulligan round doesn't post to your handicap); **"⛳ Enter a Past Round"** (the Stats button and form were called "Add a Round"); a friend's **Game history** showing every round they played, not just the ones you were in; spectating a group keeps every player on the same hole; the Bad Golf team can reply to your Contact us messages in the app; Vegas's "Net — only natural birdies/eagles flip or double" (the previous edition's new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
+*New since the last edition: **🎯 Distance arcs & miss zone** on the GPS map (yardage arcs with plays-like labels, club arcs, the TO GREEN preview, and a miss zone that learns from your tracked shots); Track Shot remembering your aim; **Auto-advance after the last score** (the next hole opens by itself once every field on the hole is in — a setting: → GPS, → Scorecard or Off); the **Mulligans** tracker (do-over counter, per-player cap, scorecard marks, "Most mulligans", Do-Over and Breakfast Ball badges — and a mulligan round doesn't post to your handicap); **"⛳ Enter a Past Round"** (the Stats button and form were called "Add a Round"); a friend's **Game history** showing every round they played, not just the ones you were in; spectating a group keeps every player on the same hole; the Bad Golf team can reply to your Contact us messages in the app; Vegas's "Net — only natural birdies/eagles flip or double" (the previous edition's new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
 
 | Term | Definition |
 |------|-----------|
@@ -2982,6 +3031,9 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 | **Published handicap** | The index your account publishes so every device shows the same number for you |
 | **Provisional** | Status when < 5 rounds played; the calculation is valid but temporary |
 | **TEMP** | A handicap you typed at sign-up rather than one the app computed. Marked everywhere — and never shown on the Crew leaderboard |
+| **Distance arcs** | Optional GPS lines showing yardages from where you stand (Yards) or where each of your clubs lands today (Clubs). Turned on in Additional settings |
+| **Miss zone** | The gold band or oval at your target showing how far you typically miss — a width you choose until a club has 5 aimed shots, then built from them |
+| **To green preview** | Redraws the distance arcs from your target spot toward the green, so you can plan the next shot before you hit |
 | **PRO badge** | A gold pill marking a future Bad Golf Pro feature. **Nothing is locked today**, and early members keep 90 days of Pro free after plans launch |
 | **Handicap allowance** | A per-game percentage of your course handicap. On **Skins** and **Low Net Pool** it **replaces** the round's percentage; on the **stroke prize pool** it still stacks |
 | **Per-tee par** | Where a club publishes different pars for different tees, each player is scored against **their own tee's** par and stroke index. The hole header shows e.g. `4 / 5` |
@@ -3051,6 +3103,8 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 - **Wind mode:** turn on wind visualization to see how direction and speed affect the ball
 - **Watch the bubbles:** the 🪙 Pot of Gold bubble tells you what this hole is worth before you tee off — the No. 1 handicap hole is the big one. In a tournament, long-press the 🏹 Team Quota bubble to see every team
 - **Track drives:** tap "Track Shot" after big drives to refine your club setup over time
+- **Distance arcs:** turn on **🎯 Distance arcs & miss zone** in Additional settings. Use **Clubs** on the tee to see which club reaches the fat part of the fairway, and **TO GREEN** to check what's left before you commit
+- **Build a real miss zone:** drag the target to your real aim, then Track Shot and save it with the club. Five saves per club and the gold oval shows how *you* miss — plan around it
 - **Pinch to zoom** works everywhere, which helps a lot in bright sun
 
 ### Turn On the Right Tracking

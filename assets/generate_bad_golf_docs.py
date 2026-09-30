@@ -170,7 +170,11 @@ def callouts(html):
     # leaving stray <em> tags that italicised every page after it. Requiring the
     # captured span to contain no paragraph break keeps the match inside one <p>.
     return re.sub(r'<p><em>((?:(?!</?p>).)*?)</em></p>',
-                  r'<div class="callout note"><span class="lbl">Note</span><p>\1</p></div>', html, flags=re.S)
+                  # v1836: keep the <em> wrapper INSIDE the callout. Python-Markdown renders an
+                  # all-italic paragraph with bold inside it as <em>a </em><em>b</em><em> c</em>, so
+                  # stripping only the outer pair left a dangling <em> that italicised every page
+                  # after the first such note (the GPS chapter onward, since v1827 or earlier).
+                  r'<div class="callout note"><span class="lbl">Note</span><p><em>\1</em></p></div>', html, flags=re.S)
 def build_toc(md_text):
     items = re.findall(r'^##\s+(.+)$', md_text, flags=re.M)
     return "".join(f'<div class="toc-item"><span class="num">{n:02d}</span><span class="ttl">{t.strip()}</span></div>'
