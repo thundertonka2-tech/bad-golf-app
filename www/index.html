@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1846-->
+<!--BGVER=v2026.11.1847-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -7755,7 +7755,7 @@ html.bg-modal-lock, body.bg-modal-lock { overflow: hidden !important; }
             <input type="checkbox" id="tpot-lownet-on"><span class="gt-ic" aria-hidden="true">🏅</span>
             <div style="flex:1">
               <div class="name">Low Net Pool</div>
-              <div class="desc">Whole field — lowest net 18 (full handicap) wins the prize pool. Ties split.</div>
+              <div class="desc">Whole field — lowest net 18 (full handicap) wins the prize pool. Ties go to a card-off (back 9, 6, 3, last hole), then split.</div>
             </div>
           </label>
           <div class="game-options" id="opts-tpot-lownet">
@@ -11766,7 +11766,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1846';
+const BG_BUILD = 'v2026.11.1847';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -90520,6 +90520,46 @@ function t2ComputeFieldBirdiePool(rows) {
   } catch (e) { return null; }
 }
 
+/* v1847 (gap list #3) - USGA-style card-off.
+   players: the tied players; netsOf(p) -> that player's per-hole NET array (0-based).
+   nH: 18 or 9. Steps: 18 holes = back 9, back 6, back 3, 18th; 9 holes = last 6,
+   last 3, 9th. Lowest net over each span survives to the next step. Returns
+   { winners, step } where step names the span that settled it, or null if still level. */
+const BG_CARDOFF_FROM = Date.parse('2026-10-01T20:31:23Z');   // same moment as the league migration
+function bgTsMs(v) {
+  if (v == null || v === '') return 0;
+  if (typeof v === 'number') return v < 1e12 ? v * 1000 : v;
+  const n = Date.parse(String(v)); return isFinite(n) ? n : 0;
+}
+function bgCardOffApplies(createdMs) { return !!createdMs && createdMs >= BG_CARDOFF_FROM; }
+function bgCardOff(players, netsOf, nH) {
+  const n = (nH === 9) ? 9 : 18;
+  const steps = (n === 9)
+    ? [['last 6', 3], ['last 3', 6], ['9th hole', 8]]
+    : [['back 9', 9], ['back 6', 12], ['back 3', 15], ['18th hole', 17]];
+  let pool = players.slice(), lastCut = null;
+  for (const [label, from] of steps) {
+    const sums = pool.map(p => {
+      const a = netsOf(p) || []; let t = 0;
+      for (let h = from; h < n; h++) { if (a[h] == null) return null; t += Number(a[h]); }
+      return t;
+    });
+    if (sums.some(s => s == null)) return { winners: pool, step: null };   // a card is missing a hole: no card-off
+    const best = Math.min(...sums);
+    const next = pool.filter((p, i) => sums[i] === best);
+    if (next.length < pool.length) {
+      pool = next; lastCut = label;
+      if (pool.length === 1) return { winners: pool, step: label };
+    }
+  }
+  return { winners: pool, step: lastCut };
+}
+function bgCardOffNote(step) {
+  const M = { 'back 9': 'Won on a card-off — back 9', 'back 6': 'Won on a card-off — back 6', 'back 3': 'Won on a card-off — back 3', '18th hole': 'Won on a card-off — 18th hole',
+              'last 6': 'Won on a card-off — last 6', 'last 3': 'Won on a card-off — last 3', '9th hole': 'Won on a card-off — 9th hole' };
+  return M[step] || 'Won on a card-off';
+}
+
 function t2ComputeFieldSidePots(rows, cfg) {
   try {
     if (!cfg || !Array.isArray(rows) || !rows.length) return null;
@@ -90539,6 +90579,7 @@ function t2ComputeFieldSidePots(rows, cfg) {
       byDay[day] = byDay[day] || { parts: {}, nH: _nH, rounds: 0, finished: 0 };
       byDay[day].nH = Math.min(byDay[day].nH, _nH);
       byDay[day].rounds++; if (g.finishedAt) byDay[day].finished++;
+      try { const _c = bgTsMs(g.createdAt); if (_c && (!byDay[day].created || _c < byDay[day].created)) byDay[day].created = _c; } catch (e) {}   // v1847
       g.players.forEach(p => {
         if (!p || !p.name) return;
         const sc = (g.scores && g.scores[p.id]) || [];
@@ -90553,11 +90594,14 @@ function t2ComputeFieldSidePots(rows, cfg) {
         let lnHcp = fullHcp;
         try { const _ln = cfg.lowNet || {}; if (_ln.gross) lnHcp = 0; else if (_ln.hcpPct != null && Number(_ln.hcpPct) !== 100) lnHcp = Math.round(fullHcp * (Number(_ln.hcpPct) / 100)); } catch (e) {}
         let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
+        const nets = new Array(_nH).fill(null);   // v1847: per-hole net, for the card-off
         for (let h = 0; h < 18; h++) {
           const s = sc[h]; if (s == null) continue;
           scored++;
           const par = parFor(g, p.id, h); // v1065: this player's tee par
-          net += (sis ? netHoleScore(s, lnHcp, siFor(g, p.id, h), par, g.hcpRules || null, _nH) : s);
+          const _hn = (sis ? netHoleScore(s, lnHcp, siFor(g, p.id, h), par, g.hcpRules || null, _nH) : s);
+          net += _hn;
+          if (h < _nH) nets[h] = _hn;
           const pu = (g.puttsData && g.puttsData[p.id]) ? g.puttsData[p.id][h] : null;
           if (pu != null) {
             putts += Number(pu) || 0; puttHoles++;
@@ -90566,7 +90610,7 @@ function t2ComputeFieldSidePots(rows, cfg) {
         }
         if (!scored) return;
         const k = nmk(p.name); const cur = byDay[day].parts[k];
-        if (!cur || scored > cur.scored) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), scored: scored, net: net, girs: girs, putts: putts, puttHoles: puttHoles };
+        if (!cur || scored > cur.scored) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), scored: scored, net: net, girs: girs, putts: putts, puttHoles: puttHoles, nets: nets };
       });
     });
     const POT_LABELS = { lowNet: '🏅 Low Net', girs: '🟢 Most GIRs', putts: '🥅 Fewest Putts' };
@@ -90606,6 +90650,15 @@ function t2ComputeFieldSidePots(rows, cfg) {
           bestVal = statOf(sorted[0]);
           winners = sorted.filter(p => statOf(p) === bestVal);
         }
+        // v1847 (gap list #3, Tyler: "USGA card-off"): a Low Net tie (Stroke play is the
+        // same pool) goes to a card-off -- net on the back 9, 6, 3, then the 18th
+        // (a nine-hole day: last 6, last 3, last hole). Still level = split, as before.
+        // Only days whose rounds started after this shipped, so a finished event never
+        // re-settles under a rule it wasn't played under.
+        let cardoff = null;
+        if (k === 'lowNet' && winners.length > 1 && bgCardOffApplies(byDay[day].created)) {
+          try { const co = bgCardOff(winners, p => p.nets, _nHd); if (co && co.winners.length < winners.length) { winners = co.winners; cardoff = co.step; } } catch (e) {}
+        }
         const paying = done && winners.length > 0;   // no qualifier → prize pool void, no units moves
         const rowsOut = _inP.map(p => {
           const isW = winners.some(w => nmk(w.name) === nmk(p.name));
@@ -90613,7 +90666,7 @@ function t2ComputeFieldSidePots(rows, cfg) {
           if (paying && money !== 0) { const tk = nmk(p.name); totalsByName[tk] = totalsByName[tk] || { first: p.first, net: 0 }; totalsByName[tk].net += money; }
           return { name: p.name, first: p.first, money: money, winner: isW, stat: statOf(p) };
         }).sort((a, b) => (b.money - a.money) || String(a.first || '').localeCompare(String(b.first || '')));
-        dayOut.pots.push({ key: k, label: POT_LABELS[k], value: val, pot: pot, done: done, paying: paying, winners: winners.map(w => w.first || w.name), winnerNames: winners.map(w => w.name || w.first), best: bestVal, rows: rowsOut });
+        dayOut.pots.push({ key: k, label: POT_LABELS[k], value: val, pot: pot, done: done, paying: paying, winners: winners.map(w => w.first || w.name), winnerNames: winners.map(w => w.name || w.first), best: bestVal, rows: rowsOut, cardoff: cardoff });
       });
       if (dayOut.pots.length) perDay.push(dayOut);
     });
@@ -92655,7 +92708,7 @@ function bgPotRowsForEvent(t, raw) {
           const who = (Array.isArray(p.winnerNames) && p.winnerNames.length ? p.winnerNames : (p.winners || []).map(nm)).join(' & ');   // v1160
           const det = (p.best != null && who) ? (p.best + ' ' + (UNIT[p.key] || '')) : '';
           const each = (p.winners && p.winners.length > 1) ? (p.pot / p.winners.length) : p.pot;
-          out.push(_bgPotRow((PLAIN[p.key] || p.key) + ' — whole field', who, det.trim(), p.paying ? each : 0, p.paying ? '' : 'not settled yet'));
+          out.push(_bgPotRow((PLAIN[p.key] || p.key) + ' — whole field', who, det.trim(), p.paying ? each : 0, p.paying ? (p.cardoff ? bgCardOffNote(p.cardoff) : '') : 'not settled yet'));
         }));
       }
     } catch (e) {}
@@ -94759,7 +94812,7 @@ function openTourneySidePotsConfig(t, onDone) {
   const sp = (t.settings && t.settings.tourneySidePots) || {};
   const lp = (t.settings && t.settings.tourneyLongPutt) || { on: false, mode: 'buyin', value: '' };
   const POTS = [
-    { id: 'lownet', ic: '🏅', name: 'Low Net Pool', note: 'Lowest net 18 — FULL handicap. Ties split.', cfg: sp.lowNet },
+    { id: 'lownet', ic: '🏅', name: 'Low Net Pool', note: 'Lowest net 18 — FULL handicap. Ties go to a card-off (back 9, 6, 3, last hole), then split.', cfg: sp.lowNet },
     { id: 'girs', ic: '🟢', name: 'Most GIRs Pool', note: 'Most greens in regulation — auto from tracked putts or the GIR chip. Ties split.', cfg: sp.girs },
     { id: 'putts', ic: '🥅', name: 'Fewest Putts Pool', note: 'Fewest total putts — needs putts logged on all 18. Ties split.', cfg: sp.putts },
     { id: 'longputt', ic: '📏', name: 'Long Putt Pool', note: 'Longest made putt across ALL groups takes the prize pool.', cfg: { on: !!lp.on, value: lp.value } }

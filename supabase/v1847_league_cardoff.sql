@@ -1,0 +1,13 @@
+-- v1847 league card-off. ALREADY APPLIED to Supabase on 2026-10-01 (migrations
+-- v1847_league_cardoff, v1847_bg_backup_lockdown, v1847_league_cardoff_fix_rowcompare).
+-- Kept here as the record. What changed, in plain terms:
+--   league_finalize_week   field-league positions: net total, then net on the last 9, 6, 3, 1
+--                          holes; still level = the v1270 pooled points. result_json carries
+--                          'countback' {b9,b6,b3,b1}.
+--   league_money_recompute weekly Low Net pool: same card-off picks the winner; still level =
+--                          split. Only weeks finalized after 2026-10-01 20:31:23 UTC.
+-- The pre-change definitions are saved in bg_backup.fn_defs (not exposed to the API).
+-- ROLLBACK, if ever needed:
+--   do $$ declare d text; begin
+--     for d in select def from bg_backup.fn_defs where note = 'before v1847 card-off' loop execute d; end loop;
+--   end $$;
