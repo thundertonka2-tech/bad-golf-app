@@ -1689,6 +1689,8 @@ A plain card at the **top of the Profile tab** with three buttons: **System · L
 
 ### 🔔 Push Notifications
 
+**📅 Event pushes** (new) switches off every tournament reminder — tee time tomorrow, sign-ups closing, join requests and approvals. **🌐 Show me on public event pages** (Profile) keeps your name and scores off any tournament's shareable event page.
+
 One card covers everything Bad Golf pushes, split into what goes out and what comes in. Turn any of them on or off at any time. *(On iPhone you also need to allow notifications for Bad Golf in your phone's Settings — see below. In-app alerts always show while the app is open.)*
 
 **Turning notifications on (phone app).** The app no longer asks for permission the moment it opens. After you sign in — and never while you're scoring a live round — a card appears:
@@ -2134,6 +2136,32 @@ Every tournament has a shared **📸 Photos** album (leagues too — see Leagues
 - **🏆 Results** — the event leaderboard: net to par, gross and thru, by flight when flights are on.
 
 *Names in Korean, Japanese or Chinese characters don't print yet — the PDF font covers Western European letters.*
+
+### 🌐 Event Page
+
+**Settings → 🌐 Event page** makes an **unlisted web page** for the tournament that anyone with the link can open — **no account, no app**. Great for family, sponsors and the group chat.
+
+- **Leaderboard** (net to par, today, thru — by flight when flights are on; refreshes every minute), **Tee times** for every day (or each group's starting hole on a shotgun day) and **Photos** from the album.
+- **Full names.** A player who switches off **Profile → 🌐 Show me on public event pages** doesn't appear anywhere on it — not in the tee times, not on the leaderboard, not in photos they added.
+- **🔗 Share the page link**, **👀 Open the page** (preview it yourself), **🚫 Turn off the link** (two taps — the old link stops working; make a new one any time).
+- On a quick-setup event the page link opens after your first **💾 Save**, like the join link.
+
+### 🤝 Sponsors
+
+**Settings → 🤝 Sponsors** — the commissioner adds each sponsor's **name**, **logo** (pick a picture; it's resized on your phone) and an optional **website**, and can give a sponsor **holes**. Deals and payments happen outside the app.
+
+- Logos show on the **event page**, along the bottom of the **📺 TV board**, and on every **printable** (*"Thank you to our sponsors"*).
+- A **sponsored hole** shows *"Sponsored by Acme Golf"* under the hole number on every scorecard in the event, and the printed scorecard lists the hole sponsors.
+- A hole belongs to one sponsor — picking a hole another sponsor has moves it.
+
+### 📅 Event Reminders
+
+Pushes that go to **everyone in the event** (commissioner included):
+
+- **Tee time tomorrow** — about 6 pm the evening before each day: *"Day 2 is tomorrow at Waterview Golf Club — your group tees off at 8:10 AM."* (or your starting hole on a shotgun day).
+- **Sign-ups close tomorrow** — set an optional **Sign-ups close** date on the **🙋 Join requests** sheet. The day before, players get a nudge to pass the link on and the commissioner hears how many requests are waiting. After that date the link stops taking requests.
+- **Join requests and approvals** — the commissioner hears when someone asks to join; the player hears when they're approved.
+- Turn them all off with **Profile → 🔔 Push notifications → 📅 Event pushes**.
 
 ### Ties — the Card-Off
 

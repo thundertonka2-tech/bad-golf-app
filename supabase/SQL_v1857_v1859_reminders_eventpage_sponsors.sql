@@ -1,0 +1,15 @@
+-- Record only (applied 2026-10-01 to ojclesuwxhtzvrymqrwg as migrations
+--   v1857_event_reminders, v1857_event_push_optout, v1857_event_reminders_wording,
+--   v1858_event_page, v1859_tv_board_sponsors).
+-- v1857: notif_prefs.event_pushes (default true); event_notif_log (dedupe); _bg_event_tz(settings);
+--   bg_event_reminders() hourly via cron 'event-reminders' ('5 * * * *'):
+--     6 pm event-local the evening before a day -> each player: "Day N is tomorrow at <course> —
+--       your group tees off at <time>" / shotgun hole / group; non-playing managers get a summary.
+--     9 am the day before settings.signupCloses -> managers (with waiting-request count) + players.
+--   _bg_event_push(): drops anyone with notif_prefs.event_pushes = false, then _league_push.
+--   bg_t2_req_info / bg_t2_req_submit honour settings.signupCloses (TREQ_SIGNUPS_CLOSED).
+--   bg_t2_req_decide / submit / reminders now push through _bg_event_push.
+-- v1858: profiles.public_events (default true); bg_event_page(p_tid, p_key) (anon) -- needs
+--   settings.pageKey (12+), returns days+groups (names), rounds (stripped), photos, sponsors;
+--   opted-out players removed everywhere.
+-- v1859: bg_tv_board also returns settings.sponsors.
