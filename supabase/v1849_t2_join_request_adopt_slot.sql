@@ -1,0 +1,5 @@
+-- v1849. ALREADY APPLIED to Supabase on 2026-10-01 (migration v1849_t2_join_request_adopt_slot).
+-- Approving a join request whose name matches an unclaimed player the commissioner already
+-- typed in ADOPTS that spot (fills a blank handicap, links the account if the requester has
+-- one) instead of inserting a second player. bg_t2_req_list returns matches_spot so the
+-- approval card can say so. New helper public._t2_name_key(text) = lower, trimmed, single spaces.
