@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1841-->
+<!--BGVER=v2026.11.1842-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -2475,7 +2475,7 @@
   }
   /* Keyboard-open (native): anchor modals to the top and shrink them to the space
      above the on-screen keyboard so input fields aren't hidden behind it. */
-  body.kb-open .modal-overlay { align-items: flex-start; top: 0; bottom: auto; height: var(--vvh, 100%); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  body.kb-open .modal-overlay { align-items: flex-start; top: 0; bottom: auto; height: var(--vvh, 100%); overflow-y: auto; -webkit-overflow-scrolling: touch; padding-top: env(safe-area-inset-top, 0px); }   /* v1842: the search box never sits under the clock */
   body.kb-open .modal { max-height: none !important; margin: 0 auto 28px; }
   /* v1673: people-search while the keyboard is up (see _bgIsSearchField). */
   .modal-overlay.bg-searching .bg-hide-searching { display: none !important; }
@@ -11743,7 +11743,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1841';
+const BG_BUILD = 'v2026.11.1842';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -22643,6 +22643,7 @@ async function _getPlayerRosterUncached() {
         migrated = true;
       }
     });
+    try { const _dd = bgDedupeRoster(roster); if (_dd.changed) { roster = _dd.roster; migrated = true; } } catch (e) {}   // v1842: same-id / same-account twins collapse here and the clean copy is saved back
     if (migrated || avatarHealed) {
       // Fire-and-forget save so we don't block reads (also heals the cloud row's
       // missing avatars back up).
@@ -22796,6 +22797,84 @@ function rosterPlayerKey(p) {
     f = parts.shift() || ''; l = parts.join(' ');
   }
   return normalizeNameSegment(f) + '\x1f' + normalizeNameSegment(l);
+}
+/* v1842 (Tyler, 10/1: "I still see Brad Woodward, woodward and Conor Hayward in the user
+   selection. I thought we cleaned these up."). The twins were in HIS roster blob, not in the
+   accounts: "Connor Hayward" and "Craig McPhee McPhee" carried the SAME player id as the real
+   entries, and two stray "Brad Woodward" rows (one of them "Brad Woodward Woodward", firstName
+   "Brad Woodward" + lastName "Woodward" — an old name-split bug). Every merge in this file keys
+   by NAME (rosterPlayerKey), so a same-id twin under a different spelling survives forever, and
+   the 9/14 canonical-name pass fixed rounds, never the roster itself.
+   Rule: a player id is unique per person and an account uid is unique per person, so two
+   entries sharing either ARE one person — collapse them, union their rounds (same rank rule as
+   mergeRosters), keep the entry that carries the account email (else the fuller history, else
+   the first). First the doubled-surname repair, so "Brad Woodward Woodward" becomes "Brad
+   Woodward" and then folds into its id-less namesake by key. Runs on every roster read and
+   at the end of every merge, so the clean copy is what gets saved back. */
+function bgDedupeRoster(roster) {
+  const out = { roster: roster, changed: false };
+  try {
+    if (!Array.isArray(roster) || roster.length < 2) return out;
+    const _nrm = s => (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').toLowerCase().trim();
+    // 1. "First Last" + "Last" → "First" + "Last"
+    roster.forEach(p => {
+      try {
+        if (!p || !p.lastName || !p.firstName) return;
+        const f = String(p.firstName).trim(), l = String(p.lastName).trim();
+        if (f.indexOf(' ') < 0) return;
+        if (_nrm(f).endsWith(' ' + _nrm(l))) {
+          p.firstName = f.slice(0, f.length - l.length).trim();
+          p.name = (p.firstName + ' ' + l).trim();
+          out.changed = true;
+        }
+      } catch (e) {}
+    });
+    // 2. group: same id, same uid, or (no id AND no uid) same name key as someone else
+    const byId = new Map(), byUid = new Map(), byName = new Map();
+    roster.forEach((p, i) => {
+      if (!p) return;
+      if (p.id) { if (!byId.has(p.id)) byId.set(p.id, []); byId.get(p.id).push(i); }
+      if (p.uid) { if (!byUid.has(p.uid)) byUid.set(p.uid, []); byUid.get(p.uid).push(i); }
+      const k = rosterPlayerKey(p); if (k && k !== '\x1f') { if (!byName.has(k)) byName.set(k, []); byName.get(k).push(i); }
+    });
+    // union-find over indexes
+    const parent = roster.map((_, i) => i);
+    const find = i => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    const join = (a, b) => { a = find(a); b = find(b); if (a !== b) parent[b] = a; };
+    byId.forEach(ix => ix.slice(1).forEach(j => join(ix[0], j)));
+    byUid.forEach(ix => ix.slice(1).forEach(j => join(ix[0], j)));
+    byName.forEach(ix => { if (ix.length < 2) return; const anchor = ix.find(i => roster[i].id || roster[i].uid); if (anchor == null) return; ix.forEach(j => { const p = roster[j]; if (!p.id && !p.uid) join(anchor, j); }); });
+    const groups = new Map();
+    roster.forEach((p, i) => { if (!p) return; const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); });
+    const drop = new Set();
+    const _rank = s => s ? (((s.complete ? 1000 : 0) + (s.holesScored || 0)) * 10 + ((typeof _bgMoneyRank === 'function') ? _bgMoneyRank(s) : 0)) : -1;
+    groups.forEach(ix => {
+      if (ix.length < 2) return;
+      const score = i => { const p = roster[i]; return (p.email ? 1e6 : 0) + (Array.isArray(p.scoreHistory) ? p.scoreHistory.length : 0) * 10 + (ix.length - ix.indexOf(i)); };
+      const keep = ix.slice().sort((a, b) => score(b) - score(a))[0];
+      const K = roster[keep];
+      if (!Array.isArray(K.scoreHistory)) K.scoreHistory = [];
+      const idx = new Map(); K.scoreHistory.forEach((s, j) => { try { idx.set(rosterRoundKey(s), j); } catch (e) {} });
+      ix.forEach(i => {
+        if (i === keep) return;
+        const p = roster[i];
+        (Array.isArray(p.scoreHistory) ? p.scoreHistory : []).forEach(s => {
+          try {
+            const k = rosterRoundKey(s); if (!k) return;
+            if (!idx.has(k)) { K.scoreHistory.push(s); idx.set(k, K.scoreHistory.length - 1); }
+            else { const j = idx.get(k); if (_rank(s) > _rank(K.scoreHistory[j])) K.scoreHistory[j] = s; }
+          } catch (e) {}
+        });
+        ['id', 'uid', 'email', 'avatar', 'phone', 'gender', 'pay', 'homeCourse'].forEach(f => { if ((K[f] == null || K[f] === '') && p[f] != null && p[f] !== '') K[f] = p[f]; });
+        if ((!K.hcp || Number(K.hcp) === 0) && p.hcp) K.hcp = p.hcp;
+        K.lastUsed = Math.max(K.lastUsed || 0, p.lastUsed || 0);
+        drop.add(i);
+      });
+    });
+    if (drop.size) { out.roster = roster.filter((_, i) => !drop.has(i)); out.changed = true; }
+    if (out.changed) { try { console.warn('[BadGolf] roster twins collapsed: ' + drop.size); } catch (e) {} }
+  } catch (e) {}
+  return out;
 }
 // v951 — the key used to REMOVE a roster entry. Prefers the entry's stable id and
 // falls back to the normalized name only for legacy id-less entries — exactly the rule
@@ -23111,6 +23190,7 @@ function mergeRosters(base, incoming, removals) {
     if (rmP && rmP.size) result = result.filter(p => !rmP.has(rosterRemovalKey(p)) && !((p && p.id) ? false : rmP.has(rosterPlayerKey(p))));
     if (rmR && rmR.size) result.forEach(p => { const set = rmR.get(rosterRemovalKey(p)) || ((p && p.id) ? null : rmR.get(rosterPlayerKey(p))); if (set && set.size && Array.isArray(p.scoreHistory)) p.scoreHistory = p.scoreHistory.filter(s => !set.has(rosterRoundKey(s))); });
   }
+  try { result = bgDedupeRoster(result).roster; } catch (e) {}   // v1842: a save can never re-introduce a twin
   return result;
 }
 
@@ -121969,15 +122049,35 @@ function _bgKbReveal(el) {
     });
     // Reset the lift once no text field holds focus (keyboard dismissed) or
     // the keyboard signals it's gone.
+    /* v1842 (Tyler, 10/1 screenshot: the player picker stuck at the top of the screen, cut
+       off at mid-height, keyboard long gone). keyboardWillShow had anchored + shrunk the
+       modal (body.kb-open / --vvh) and the matching hide signal never arrived — the search
+       box kept focus while the list was scrolled, so neither focusout nor the plugin fired.
+       Self-heal: (a) when focus leaves every text field, clear the WHOLE keyboard state, not
+       just the transform; (b) a tap anywhere that is not a text field blurs the field, which
+       closes the keyboard and runs (a). Tapping a result row to add a player is exactly that. */
+    const _kbClearAll = () => {
+      try { _kbClearShift(); } catch (e) {}
+      try { document.body.classList.remove('kb-open'); document.documentElement.style.setProperty('--kb-height', '0px'); document.documentElement.style.setProperty('--vvh', ''); } catch (e) {}
+    };
     document.addEventListener('focusout', () => {
       setTimeout(() => {
         try {
           const a = document.activeElement;
           const editing = a && a.matches && a.matches('input, textarea, select');
-          if (!editing) _kbClearShift();
+          if (!editing) _kbClearAll();
         } catch (e) {}
       }, 150);
     });
+    document.addEventListener('pointerdown', (e) => {
+      try {
+        const a = document.activeElement;
+        if (!(a && a.matches && a.matches('input, textarea'))) return;
+        const t = e.target;
+        if (t && t.closest && t.closest('input, textarea, select, label, [contenteditable]')) return;
+        setTimeout(() => { try { if (document.activeElement === a) a.blur(); } catch (e2) {} }, 40);
+      } catch (e3) {}
+    }, true);
     try {
       const KB2 = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Keyboard;
       if (KB2 && KB2.addListener) KB2.addListener('keyboardWillHide', _kbClearShift);
