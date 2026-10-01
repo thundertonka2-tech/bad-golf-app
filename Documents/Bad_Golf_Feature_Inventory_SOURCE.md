@@ -1679,6 +1679,14 @@ A plain card at the **top of the Profile tab** with three buttons: **System · L
 
 *The Edit profile and Settings buttons were removed from the Home handicap card — both are one tap away here instead.*
 
+### 🌐 Language
+
+**Profile → 🌐 Language** switches the whole app between **English, Español, 한국어 (Korean), 日本語 (Japanese) and 中文 (Chinese)**, or **Automatic (phone)** to follow your phone's language.
+
+- **The switch is instant** — no restart. Pick Español and every screen changes right there, on iPhone, Android and the web.
+- New players are asked which language they want the first time they open the app.
+- **Game names stay in English** (Skins, Nassau, Wolf, Low Net…) so everyone in a group calls them the same thing. Names you type — players, courses, events — are never translated.
+
 ### 🔔 Push Notifications
 
 One card covers everything Bad Golf pushes, split into what goes out and what comes in. Turn any of them on or off at any time. *(On iPhone you also need to allow notifications for Bad Golf in your phone's Settings — see below. In-app alerts always show while the app is open.)*
@@ -1750,6 +1758,14 @@ The **"Compare to a friend"** dropdown on Stats (and its twin on Friends) is a p
 
 **Automatic recalculation:** your handicap recalculates every time you finish a round or add a past round. The differential for each saved round is re-derived from that course's current tee rating/slope, so correcting a course's rating updates your index next time a round is saved.
 
+### 📈 Handicap History
+
+A chart on Stats showing how your index has moved **round by round** — every round counts, **nine-hole rounds included**, all from Bad Golf's own handicap math (no GHIN needed).
+
+- **Range chips:** **20 rounds**, **1 year** or **All time**.
+- The line is labelled with your **First index**, **Lowest** and **Current**, so you can see at a glance where you started and your best.
+- It redraws whenever your index changes — finish a round or enter a past one and the new point is there.
+
 ### Missing Rounds Fix Themselves — and "🔄 Resync my stats"
 
 **The symptom this cures:** a round shows up in your **Rounds** list but is missing from your handicap box, your **Lifetime Games** and your game history — because stats are only written by the phone that taps **Finish round**. If somebody else kept the card and closed it out, your phone could sit for hours with the round missing from every tile.
@@ -1778,6 +1794,8 @@ The **"Compare to a friend"** dropdown on Stats (and its twin on Friends) is a p
 **"🗑️ Remove this round from my stats"** on a round card works on iPhone (it used to silently do nothing).
 
 ### ⛳ Enter a Past Round — Entering Rounds You Already Played
+
+**Two ways in:** the **⛳ Enter a Past Round** button on Stats, and the same button on the **Rounds** tab, under Scheduled Rounds. From the Rounds tab it always enters the round for **you**.
 
 The Stats tab's old single-round **"Add a past round"** button is now **"⛳ Enter a Past Round"**, and it opens a bulk entry tool. The point is a golfer arriving from another app: post several rounds at once and get a real Handicap Index straight away instead of waiting out the 54-hole minimum.
 
@@ -1890,7 +1908,7 @@ The Rounds tab holds open rounds, scheduled rounds, your saved round history and
 
 The tab is laid out top to bottom as:
 
-1. **Scheduled Rounds** card — tee times and scheduled rounds you're in (unchanged)
+1. **Scheduled Rounds** card — tee times and scheduled rounds you're in (unchanged), then the **⛳ Enter a Past Round** button — the same one Stats has, here so it's easy to find
 2. **Saved rounds** heading + card — a **"Search course or player…"** box, then **Live & Unfinished** (only when there is one) and **Completed Rounds**
 3. **Completed Tournament Rounds** heading + card — every cart round you played inside a tournament
 4. **Completed League Rounds** heading + card — every week you played in a league
@@ -1995,9 +2013,35 @@ Any tournament day or league week that you **run or play in** appears on the cal
 
 **More → 🏆 Tourney.** A tournament is a group event for more than one cart — one field, several groups, one leaderboard — over one or several days. Everything about it lives here: building it, starting each day, the Event Leaderboard, awards and standings. Its cart rounds also show under **Completed Tournament Rounds** on the Rounds tab, and its days appear on the **Times** calendar with your group's tee time.
 
-### Creating a Tournament
+### Creating a Tournament — Five Quick Questions
 
-Tap **"+ New tournament"**. The create screen asks for a name, the **tournament type** (above Days / Players), the number of days and players, and the start date, which fills Day 1.
+Tap **"+ New tournament"**. Setup is five simple questions, one per screen, with a progress bar and **‹ Back** on every step:
+
+1. **What kind of tournament?** — **Everyone for themselves** (one leaderboard for the whole field), **Two teams** (Ryder Cup style), **2-man teams** or **Teams of 4** (scramble by default). *Bracket or another format? Use the full setup* opens the full create screen (see below).
+2. **What's it called?** — the name players see on the leaderboard and their invite. Add a logo later.
+3. **How many days?** — tap 1 to 5, then the date. On a multi-day event the other days follow on, one a day.
+4. **Where are you playing?** — search the course list; **Same course every day** on a multi-day event. You can skip this and pick it later.
+5. **How will players get in?** — **I'll type the names**, **Send a join link**, or **Both**, plus *about how many players* (4, 8, 12, 16, 20+) and **I'm playing too** (on by default — off runs the event without you in the field).
+
+**Create tournament** builds it and takes you straight to the setup checklist. Whoever creates the tournament is its **commissioner**.
+
+### The Setup Checklist
+
+After the questions you land on one list of settings — tap a row to set it, and it gets a **green ✓** when it's done.
+
+- **A progress bar** at the top counts what's needed: *"5 of 8 needed"*.
+- **Needed** (yellow tag): the **name**, **players** (at least 2), each day's **date** and **course**, and **Day 1's groups and games**. That's all **Start tournament** needs.
+- **Everything else is optional** — flights, handicap rules, tees, tee times, shotgun, scorekeepers, side games, prize pools, who's paid, trip, admins, printables. Tees default to the course's tee until you set them.
+- **One section per day** on a multi-day event. Later days' groups and games show **"Before Day 2"** — they don't block Start.
+- **Start tournament** stays dimmed until everything needed is done, and says exactly what's left: *"Still needed: Players, Groups (Day 1), Games (Day 1)"*.
+- **The join link opens after you Save.** Until you tap **💾 Save** (or Start) the Join link row reads **After Save** and invites stay closed. If you picked *Send a join link* or *Both*, the first Save asks **"Send the join link now?"**
+- Finish a screen (course, groups, games) and you're back on the list with the checks updated.
+
+*Tournaments created before this keep the older step-by-step setup below.*
+
+### The Full Setup (Brackets and Older Events)
+
+Brackets, and tournaments created before the quick setup, use the full create screen and the step-by-step setup. The create screen asks for a name, the **tournament type** (above Days / Players), the number of days and players, and the start date, which fills Day 1.
 
 | Type | What it is |
 |------|-----------|
@@ -2007,9 +2051,9 @@ Tap **"+ New tournament"**. The create screen asks for a name, the **tournament 
 
 **"Commissioner is a player"** is on by default. Switch it off to run the event without being in the field — you keep every control and never appear in a pool or the standings. Every on/off switch in the app is iPhone-style: white knob, green when on.
 
-Whoever creates the tournament is its **commissioner**. The form starts empty every time, the create button disables itself while it works, and two commissioners tapping **Start Day 1** at once can't produce two sets of rounds.
+The form starts empty every time, the create button disables itself while it works, and two commissioners tapping **Start Day 1** at once can't produce two sets of rounds.
 
-### The Setup Wizard
+#### The step-by-step setup
 
 Setup runs one step at a time and **saves as it goes** — a green *"✓ Everything is saved"* line sits on the Review step, and the Close button reads **💾 Save tournament** (it returns you to the Tourney tab with *"‹name›" saved ✓*). Every step has a working **Back**.
 
@@ -2037,9 +2081,67 @@ Two clearly separate ideas:
 
 Configure Day starts clean for every new event and every new day — no carried-over ticks, hole chips or units — and keeps your work until you tap **Save Day**. The CTP hole picker shows par 3s only.
 
+### Flights
+
+**Settings → 🏳️ Flights** splits the field by handicap so each flight plays for its own prizes. **One flight (everyone together) is the default.**
+
+- Pick how many flights, then **⚖️ Split by handicap (even groups)** — Flight 1 is the lowest handicaps. Tap a number beside anyone to move them.
+- **One switch for every prize pool:** **Per flight** or **Whole field**. It covers Skins, Low Net, Most GIRs, Fewest Putts, Long Putt, Closest to the Pin, the Birdie pool, Nassau and the points pools.
+- **Long Drive** gets a winner per flight when flights are on.
+- The Event Leaderboard gets a **🏳️ Standings by flight** button, and pool rows name the flight (*"Skins — Flight 2"*).
+
+### Shotgun Starts
+
+**Settings → 📣 Shotgun start** (per day) sends every group off at once, each from its own hole. **Auto-assign** spreads the groups around the course, or tap to set each group's hole.
+
+- Each group's scorecard and GPS open **on its starting hole**, and the card wraps from 18 back to 1.
+- Games score as normal; **the final settle waits until every hole is in**.
+- A player joining a shotgun round is told which hole they start on.
+
+### Join Requests and Who's Paid
+
+- **🙋 Join link** — one link anyone can open to **ask to join**: no account needed, just first name, last name and handicap. You **approve or decline** each request. Approved players are asked to sign in so their spot ties to their account. If someone asks under a name you already typed onto the roster, approving **links them to that spot** (*"✓ Already on your roster — approving links them"*) — no duplicates to clean up.
+- **💵 Who's paid** — a tick per player (*"6 of 10 paid"*). It's a **reminder only**: it never blocks starting a day or a pool, and nothing moves money.
+
+### 🧳 Trip — Lodging, Rooms & Itinerary
+
+**Settings → 🧳 Trip** turns a multi-day event into a trip: **where you're staying** (name, address, check-in/out), **rooms** — each room number and who's in it — the **itinerary** (date, time, what) and **notes** (gate codes and the like). Players get a **🧳 Trip** button on the event, with **Your room** shown at the top.
+
+### 📸 Photos
+
+Every tournament has a shared **📸 Photos** album (leagues too — see Leagues).
+
+- **Add photos** from the album (pick several at once) or tap **📷** beside GPS on the scorecard — that photo is tagged with the hole.
+- Everyone in the event sees photos as they come in. Tap one to view it full screen, swipe between them, and **⬆︎ Share** it.
+- **Up to 100 photos per tournament.** Photos are shrunk on your phone before upload.
+- **🗑️ Delete** (two taps) — the person who added it or the commissioner.
+- Multi-day events filter by **Day**.
+
+### 📺 TV Leaderboard
+
+**Event Leaderboard → 📺 TV board** fills the screen with a big, auto-updating leaderboard for a TV in the clubhouse: place (T for ties), name, **total net to par**, **today** on multi-day events, and **thru** (holes or F). Flights get a column each; a big field splits into two columns and long lists scroll themselves. It refreshes every 30 seconds and keeps the screen awake.
+
+- **🔗 TV link** (commissioner) makes a private link — open it in any TV or smart-display browser and the board shows with **no login**. It shows scores and names only.
+- **🚫 Turn off TV link** (two taps) kills that link; any TV using it stops within 30 seconds. Tap TV link again for a fresh one.
+
+### 🖨️ Printables
+
+**Settings → 🖨️ Printables** makes **letter-size PDFs with the Bad Golf logo** that you save, share or print from your phone. Pick the day on a multi-day event.
+
+- **📝 Scorecards** — **one page per group**: par, stroke index, each player's playing handicap and **dots on the holes where they get strokes**, boxes to write scores, Out / In / Total / Net.
+- **🛺 Cart signs** — two per page: **Group N**, the **tee time** (or **starting hole** on a shotgun day) and every name, big.
+- **📋 Pairings & tee times** — the day's tee sheet: every group, its time or hole, players with handicaps (and team and tee).
+- **🏆 Results** — the event leaderboard: net to par, gross and thru, by flight when flights are on.
+
+*Names in Korean, Japanese or Chinese characters don't print yet — the PDF font covers Western European letters.*
+
+### Ties — the Card-Off
+
+When players tie for **Low Net** in a tournament, the prize goes to a **USGA card-off**: lowest **back 9**, then **back 6**, then **back 3**, then the **18th hole** — handicap-adjusted for net. Nine-hole events use the last 6, last 3 and last hole. Only a tie that survives all of that splits. Rounds played before this change keep their old result.
+
 ### Invites
 
-Invites are sent from the **Review & start** step. The first time you reach it with every step done, the app asks once: *"Your event is set. Send the invites now? Players with the app get a notification; everyone else gets the link by text."* → **📨 Send invites** / Later. **✉️ Personal invites** on the Review step resends any single one; the invite icon is 📨 everywhere. There are no phone numbers to type — the text invite opens your own Messages app, and it says what you're playing (*"We're playing Skins and Low Net Pool"*).
+**Quick-setup events:** invites and the join link open after your first **💾 Save** (see the checklist above). **Full-setup events:** invites are sent from the **Review & start** step. The first time you reach it with every step done, the app asks once: *"Your event is set. Send the invites now? Players with the app get a notification; everyone else gets the link by text."* → **📨 Send invites** / Later. **✉️ Personal invites** on the Review step resends any single one; the invite icon is 📨 everywhere. There are no phone numbers to type — the text invite opens your own Messages app, and it says what you're playing (*"We're playing Skins and Low Net Pool"*).
 
 A guest added by name sees an **"Is this you?"** card the moment they sign in and takes their own spot. Invites for a finished event retire themselves.
 
@@ -2133,6 +2235,10 @@ Two ways a week's score reaches your league card:
 - In a **head-to-head league**, if your opponent has an account, you both need to have been in the round together — or they approve your card — for it to settle. If your opponent has no account, that match has to run from **"Start this week's round"** so one phone can score both sides.
 - If the league requires rounds be played in the app, the commissioner **cannot** hand-key a missing score; the week screen simply reads **"not played"**. Turning self-scheduled rounds on for that week restores the manual **Enter card** option.
 
+### 📸 League Photos
+
+Every league has a **📸 Photos** button on its card — **one album for the season**, filtered **by week**, with up to **100 photos per week**. Add from the album or with **📷** on the scorecard during a league round (tagged with the week and the hole). The uploader or the commissioner can delete.
+
 ### Self-Scheduled Rounds
 
 A league setting, **off by default**, that lets a round you played on your own count as that week's card.
@@ -2212,6 +2318,8 @@ If a player can't make a week, the seat is filled directly — there's no invite
 | **Closest to the Pin** | claimed on the round card, one row per hole |
 | **Longest Putt** | claimed on the round card |
 | **Longest Drive** | the commissioner picks the winner by hand |
+
+**Ties for the week's lowest net go to a card-off** (back 9, back 6, back 3, then the 18th hole, handicap-adjusted) — only a tie that survives all of that splits. Weeks finalized before this change keep their old result.
 
 **Most GIRs** and **Fewest Putts** are the two newest. Like the other computed pools they tie-split evenly, and **only players whose card can actually be ranked are charged into them** — if your card has no putts recorded, you're not in the putts pool and you don't pay for it.
 
