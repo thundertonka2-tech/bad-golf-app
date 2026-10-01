@@ -74,6 +74,8 @@ public class BGMeasurePlugin extends Plugin {
             if (!ok) { call.reject("AR_UNSUPPORTED"); return; }
             Intent i = new Intent(getContext(), MeasureActivity.class);
             i.putExtra(MeasureActivity.EXTRA_TITLE, call.getString("title", "Measure"));
+            // v1840 languages: the web app's translations of every label on the AR screen.
+            try { com.getcapacitor.JSObject s = call.getObject("strings"); if (s != null) i.putExtra(MeasureActivity.EXTRA_STRINGS, s.toString()); } catch (Exception ignored) { }
             startActivityForResult(call, i, "onMeasureResult");
         });
     }

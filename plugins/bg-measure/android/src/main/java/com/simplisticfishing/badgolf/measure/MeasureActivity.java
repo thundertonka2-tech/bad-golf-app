@@ -67,6 +67,15 @@ import javax.microedition.khronos.opengles.GL10;
 public class MeasureActivity extends Activity implements GLSurfaceView.Renderer {
 
     public static final String EXTRA_TITLE = "title";
+    public static final String EXTRA_STRINGS = "strings";   // v1840: JSON {English: translation}
+    private org.json.JSONObject i18n;
+    /** v1840: the label in the player's language (English when not supplied). */
+    private String L(String s) {
+        try {
+            if (i18n == null) { String j = getIntent().getStringExtra(EXTRA_STRINGS); i18n = new org.json.JSONObject(j == null ? "{}" : j); }
+            return i18n.has(s) ? i18n.getString(s) : s;
+        } catch (Exception e) { return s; }
+    }
     public static final String EXTRA_INCHES = "inches";
     public static final String EXTRA_ERROR = "error";
 
@@ -454,7 +463,7 @@ public class MeasureActivity extends Activity implements GLSurfaceView.Renderer 
         if (anchors.size() == 1) {
             runOnUiThread(() -> {
                 buzz(20);
-                markButton.setText("Mark hole");
+                markButton.setText(L("Mark hole"));
                 undoButton.setVisibility(View.VISIBLE);
                 setInfo("Now aim the crosshair at the centre of the hole and tap Mark hole.");
             });
@@ -467,7 +476,7 @@ public class MeasureActivity extends Activity implements GLSurfaceView.Renderer 
                 buzz(20);
                 distLabel.setText(fmt(d));
                 markButton.setVisibility(View.GONE);
-                useButton.setText("Use " + fmt(d));
+                useButton.setText(L("Use") + " " + fmt(d));
                 useButton.setVisibility(View.VISIBLE);
                 setInfo("Measured. Tap Use to fill it in, or Undo to mark the hole again.");
             });
@@ -486,11 +495,11 @@ public class MeasureActivity extends Activity implements GLSurfaceView.Renderer 
             markButton.setVisibility(View.VISIBLE);
             if (none) {
                 distLabel.setText("");
-                markButton.setText("Mark ball");
+                markButton.setText(L("Mark ball"));
                 undoButton.setVisibility(View.INVISIBLE);
                 setInfo("Point at the ball and tap Mark ball.");
             } else {
-                markButton.setText("Mark hole");
+                markButton.setText(L("Mark hole"));
                 setInfo("Aim the crosshair at the centre of the hole and tap Mark hole.");
             }
         });
@@ -609,7 +618,7 @@ public class MeasureActivity extends Activity implements GLSurfaceView.Renderer 
     // ── helpers ────────────────────────────────────────────────────────────────────────
 
     private void setInfo(String s) {
-        infoLabel.setText(s);
+        infoLabel.setText(L(s));
     }
 
     private int displayRotation() {
@@ -632,7 +641,7 @@ public class MeasureActivity extends Activity implements GLSurfaceView.Renderer 
 
     private Button button(String text, boolean primary) {
         Button b = new Button(this);
-        b.setText(text);
+        b.setText(L(text));
         b.setAllCaps(false);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         b.setTypeface(Typeface.DEFAULT_BOLD);

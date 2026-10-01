@@ -12,6 +12,7 @@ import { SITE } from './lib/layout.mjs';
 import { home, features, download, getRedirect, notFound } from './lib/pages-static.mjs';
 import { gameList, gamePage, gamesIndex, leaguesPage, tournamentsPage, handicapsPage } from './lib/pages-games.mjs';
 import { coursePage, statePage, coursesIndex, coursePath, stateSlug, searchJs, STATES } from './lib/pages-courses.mjs';
+import { SITE_LANGS, translatePage, alternatesFor, switcherHtml, extractStrings } from './lib/i18n-site.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -72,6 +73,62 @@ for (const st of Object.keys(byState)) {
     write(coursePath(c) + 'index.html', coursePage(c, nearby));
     su.push({ loc: coursePath(c), priority: 0.6, changefreq: 'monthly' });
   }
+}
+
+// ---- v1840 languages: /es/ /ko/ /ja/ /zh/ copies of the marketing pages -------------
+// English pages are built above; each one in I18N_PAGES is re-written per language from
+// site/i18n/<lang>.json. Support + the legal pages are static files in the repo root
+// (present when --out is the repo root, as on Pages); they're included when found.
+// `--extract-i18n <file>` writes every English string on those pages (for translators).
+{
+  const I18N_PAGES = ['/', '/features/', '/download/', '/games/', ...games.map(g => `/games/${g.slug}/`), '/leagues/', '/tournaments/', '/handicaps/', '/courses/', '/support.html', '/terms.html', '/privacy.html', '/delete-account.html'];
+  const fileOf = p => p === '/' ? 'index.html' : (p.endsWith('/') ? p.slice(1) + 'index.html' : p.slice(1));
+  const srcOf = p => { const f = path.join(OUT, fileOf(p)); if (fs.existsSync(f)) return f; const r = path.join(here, '..', fileOf(p)); return fs.existsSync(r) ? r : null; };
+  const pages = I18N_PAGES.filter(p => srcOf(p));
+  const local = new Set(pages);
+  const LEGAL = new Set(['/terms.html', '/privacy.html']);
+  const ext = opt('--extract-i18n', null);
+  if (ext) {
+    const all = new Set();
+    for (const p of pages) extractStrings(fs.readFileSync(srcOf(p), 'utf8')).forEach(s => all.add(s));
+    fs.writeFileSync(ext, JSON.stringify([...all], null, 1));
+    console.log(`extracted ${all.size} strings from ${pages.length} pages -> ${ext}`);
+  }
+  const NOTE = {
+    es: 'Traducción de cortesía. Si hay alguna diferencia, la versión en inglés es la que rige.',
+    ko: '편의를 위한 번역본입니다. 내용이 다를 경우 영어 원문이 우선합니다.',
+    ja: '参考のための翻訳です。内容に相違がある場合は英語版が優先されます。',
+    zh: '本译文仅供参考。如有出入，以英文版本为准。'
+  };
+  const englishLink = { es: 'Ver en inglés', ko: '영어 원문 보기', ja: '英語版を見る', zh: '查看英文原文' };
+  let built = 0, missTotal = 0;
+  for (const L of SITE_LANGS) {
+    const dp = path.join(here, 'i18n', L.code + '.json');
+    if (!fs.existsSync(dp)) continue;
+    const dict = JSON.parse(fs.readFileSync(dp, 'utf8'));
+    const misses = new Set();
+    for (const p of pages) {
+      const html = fs.readFileSync(srcOf(p), 'utf8');
+      const r = translatePage(html, { dict, lang: L.code, pathMap: h => { const b = h.split('#')[0]; return local.has(b) ? '/' + L.code + h : null; }, alternates: alternatesFor(p, SITE) });
+      r.misses.forEach(m => misses.add(m));
+      let out = r.html.replace('<div class="fine">', switcherHtml(p, L.code) + '<div class="fine">');
+      if (LEGAL.has(p)) out = out.replace(/<body([^>]*)>/, `<body$1><div class="i18n-legal-note" style="background:#fff7d6;color:#3d3200;padding:10px 16px;font:14px/1.45 system-ui,sans-serif;text-align:center">${NOTE[L.code]} <a href="${p}">${englishLink[L.code]}</a></div>`);
+      write(L.code + '/' + fileOf(p), out); built++;
+      if (!LEGAL.has(p) && p !== '/delete-account.html') add('/' + L.code + p, 0.6);
+    }
+    missTotal += misses.size;
+    if (misses.size && process.env.I18N_DEBUG) fs.writeFileSync(`i18n-site-misses-${L.code}.txt`, [...misses].join('\n'));   // names that stay English are normal here
+  }
+  // English twins get the same hreflang links + switcher (only the generated pages).
+  for (const p of pages) {
+    const f = path.join(OUT, fileOf(p));
+    if (!fs.existsSync(f) || !f.startsWith(OUT)) continue;
+    let html = fs.readFileSync(f, 'utf8');
+    if (html.includes('hreflang="x-default"')) continue;
+    html = html.replace('</head>', alternatesFor(p, SITE) + '</head>').replace('<div class="fine">', switcherHtml(p, 'en') + '<div class="fine">');
+    fs.writeFileSync(f, html);
+  }
+  if (built) console.log(`languages: ${built} localized pages (${missTotal} strings left in English - game names/brand stay English on purpose)`);
 }
 
 // ---- robots + sitemaps (index + one per state so no file gets huge)

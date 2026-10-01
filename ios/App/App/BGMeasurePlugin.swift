@@ -36,6 +36,12 @@ public class BGMeasurePlugin: CAPPlugin {
             return
         }
         let title = call.getString("title") ?? "Measure"
+        // v1840 languages: the web app hands over its own translations of every
+        // label on this screen (English key -> translated text). Missing = English.
+        var strings: [String: String] = [:]
+        if let obj = call.getObject("strings") {
+            for (k, v) in obj { if let t = v as? String { strings[k] = t } }
+        }
         DispatchQueue.main.async { [weak self] in
             guard let presenter = self?.bridge?.viewController else {
                 call.reject("NO_VIEW")
@@ -43,6 +49,7 @@ public class BGMeasurePlugin: CAPPlugin {
             }
             let vc = BGMeasureViewController()
             vc.titleText = title
+            vc.strings = strings
             vc.onFinish = { inches in
                 if let inches = inches {
                     let total = Int(inches.rounded())
@@ -66,6 +73,8 @@ final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
 
     var onFinish: ((Double?) -> Void)?
     var titleText: String = "Measure"
+    var strings: [String: String] = [:]          // v1840: English -> player's language
+    func L(_ s: String) -> String { return strings[s] ?? s }
 
     private let sceneView = ARSCNView(frame: .zero)
     private let reticle = UIView(frame: .zero)
@@ -229,7 +238,7 @@ final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
 
     private func style(_ b: UIButton, title: String, primary: Bool) {
         b.translatesAutoresizingMaskIntoConstraints = false
-        b.setTitle(title, for: .normal)
+        b.setTitle(L(title), for: .normal)
         b.titleLabel?.font = UIFont.systemFont(ofSize: 18, weight: .heavy)
         b.layer.cornerRadius = 14
         if primary {
@@ -244,7 +253,7 @@ final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
     }
 
     private func setInfo(_ text: String) {
-        infoLabel.text = "  " + text + "  "
+        infoLabel.text = "  " + L(text) + "  "
     }
 
     private func fmt(_ inches: Double) -> String {
@@ -322,7 +331,7 @@ final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
         if points.isEmpty {
             points.append(p)
             addMarker(at: p, color: .white)
-            markButton.setTitle("Mark hole", for: .normal)
+            markButton.setTitle(L("Mark hole"), for: .normal)
             undoButton.isHidden = false
             setInfo("Now aim the crosshair at the centre of the hole and tap Mark hole.")
         } else if points.count == 1 {
@@ -335,7 +344,7 @@ final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
             distLabel.text = fmt(d)
             markButton.isHidden = true
             useButton.isHidden = false
-            useButton.setTitle("Use " + fmt(d), for: .normal)
+            useButton.setTitle(L("Use") + " " + fmt(d), for: .normal)
             setInfo("Measured. Tap Use to fill it in, or Undo to mark the hole again.")
         }
     }
@@ -352,11 +361,11 @@ final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
             lineNode?.removeFromParentNode()
             lineNode = nil
             distLabel.text = ""
-            markButton.setTitle("Mark ball", for: .normal)
+            markButton.setTitle(L("Mark ball"), for: .normal)
             undoButton.isHidden = true
             setInfo("Point at the ball and tap Mark ball.")
         } else {
-            markButton.setTitle("Mark hole", for: .normal)
+            markButton.setTitle(L("Mark hole"), for: .normal)
             setInfo("Aim the crosshair at the centre of the hole and tap Mark hole.")
         }
     }
@@ -399,7 +408,8 @@ final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
 
     func session(_ session: ARSession, didFailWithError error: Error) {
         DispatchQueue.main.async { [weak self] in
-            self?.setInfo("Camera problem: \(error.localizedDescription). Check Settings > Bad Golf > Camera.")
+            guard let me = self else { return }
+            me.setInfo(me.L("Camera problem:") + " " + error.localizedDescription + ". " + me.L("Check Settings > Bad Golf > Camera."))
         }
     }
 }
