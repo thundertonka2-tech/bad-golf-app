@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1849-->
+<!--BGVER=v2026.11.1850-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11764,7 +11764,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1849';
+const BG_BUILD = 'v2026.11.1850';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -78431,6 +78431,7 @@ async function renderT2SettingsHub(t) {
   // nothing anywhere reads "Tee Times". Row restored, wired to that same screen,
   // which was still complete and working. Optional: it never gates Start.
   h += b('teetimes|' + day, '&#9201;&#65039;', 'Tee Times' + dtag, 'Each group&rsquo;s start time &middot; auto-stagger');
+  h += b('shotgun|' + day, '&#128227;', 'Shotgun start' + dtag, bgShotgunSummary(t, day));   // v1850
   h += b('games|' + day, '&#127919;', 'Games' + dtag, 'Tournament games &mdash; whole field');
   h += b('sidebets|' + day, '&#128176;', 'Side Games' + dtag, 'Tournament side games &mdash; whole field');
   h += b('hcprules', '&#128202;', 'Handicap rules', (bgEventHcpRules(t) ? esc(bgHcpRulesSummary(t.settings.hcpRules)) : 'Not set yet &mdash; defaults apply') + ' &mdash; every day');   // v1536
@@ -78500,6 +78501,7 @@ async function renderT2SettingsHub(t) {
       if (act === 'players') { return openT2HcpEditor(t); }
       if (act === 'tees') { if (!_cid) { showToast('Pick the course for this day first'); return; } return t2AssignDayTees(d, _cid); }
       if (act === 'teetimes') { return openT2TeeTimes(d, _dayId); }   // v1057 — stacks above the hub (z 100062 > 100050)
+      if (act === 'shotgun') { if (!_dayId) { showToast('Set the date first so the day is saved'); return; } return openT2Shotgun(t, d, _dayId, () => { try { renderT2SettingsHub(_t2Current || t); } catch (e) {} }); }   // v1850
       if (act === 'scorer') { return openT2ScorekeepersEditor(d); }
       if (act === 'potplayers') { return openT2PotPlayersPicker(); }   // v1322
       if (act === 'admins') { return openT2AdminPicker(); }
@@ -83951,6 +83953,14 @@ async function t2LaunchDayRounds(courseId) {
     // stamped, so tournament rounds had no putt/GIR steppers — which also feeds
     // the new field-wide GIR / Fewest-Putt side prize pools).
     const _dTrk = (t.settings && t.settings.dayTracking && t.settings.dayTracking[ctx.dayNumber]) || {};
+    // v1850 (gap list #8): shotgun start -- this group's starting hole for the day.
+    let _sgStart;
+    try {
+      const _sg = t.settings && t.settings.shotgun && t.settings.shotgun[ctx.dayNumber];
+      const _h = (_sg && _sg.on && _sg.holes) ? Number(_sg.holes[grp.id]) : 0;
+      const _nH = (Array.isArray(pars) ? pars.filter(x => x != null).length : 18) || 18;
+      if (!_bkNine && _h >= 1 && _h <= _nH) _sgStart = _h;
+    } catch (e) {}
     const game = {
       code: code,
       course: courseName,
@@ -83970,6 +83980,7 @@ async function t2LaunchDayRounds(courseId) {
       wolfData: { holes: {} },
       hammerData: { holes: {} },
       junkData: {},
+      startHole: _sgStart || undefined,   // v1850: shotgun start -- the round opens here and plays round to the hole before it
       tourneyId: null,
       t2: { tournamentId: t.id, dayId: ctx.dayId, groupId: grp.id, format: fmt, group: grp.group_number, name: t.name, day: ctx.dayNumber, dayGameKeys: Object.keys(games || {}), managerIds: [t.commissioner_id].concat((t.settings && Array.isArray(t.settings.admins)) ? t.settings.admins : []).filter(Boolean) },
       createdAt: Date.now(),
@@ -84122,6 +84133,7 @@ async function openT2Round(code) {
   // hole and NEVER show the "Active round in progress" chooser (Tyler).
   state._scoreResumeAsked = true;
   state.currentHole = (!g.finishedAt && g.startHole >= 1 && g.startHole <= 18) ? g.startHole : 1;
+  try { if (!g.finishedAt && g.t2 && g.startHole > 1) setTimeout(() => { try { showToast(bgT('Shotgun start') + ' \u2014 ' + bgT('your group starts on hole') + ' ' + g.startHole, 5000); } catch (e) {} }, 900); } catch (e) {}   // v1850
   try { await safeSet(KEY_LAST, code, false); } catch (e) {}
   try { await addToRecent(g); } catch (e) {}
   enableGameTabs(true);
@@ -90856,6 +90868,117 @@ function t2ComputeFieldBirdiePool(rows) {
       totalsByKey: totalsByName
     };
   } catch (e) { return null; }
+}
+
+/* ============================================================
+   v1850 (gap list #8, Tyler 10/1): SHOTGUN STARTS.
+   "just like it normally would but wait to send final calc until the end and all
+    holes are complete."
+   tournaments.settings.shotgun = { <day number>: { on, holes: { <group id>: hole } } }
+   At launch each cart's round gets startHole = its hole. Everything after that is the
+   round engine's existing start-hole support: the round opens on that hole, Next
+   wraps 18 -> 1, lastHoleOfRound is the hole before the start, and the round only
+   counts as finished (allHolesScored -> final settle, field pools) once EVERY hole
+   has its score. Nassau's front / back stay holes 1-9 / 10-18 as usual.
+   Rounds already launched keep the hole they started on.
+   ============================================================ */
+function bgShotgunOf(t, day) {
+  try { const s = t && t.settings && t.settings.shotgun && t.settings.shotgun[day]; return (s && s.on) ? s : null; } catch (e) { return null; }
+}
+function bgShotgunSummary(t, day) {
+  const s = bgShotgunOf(t, day);
+  if (!s) return 'Off &mdash; every group starts on the first hole';
+  const holes = Object.values(s.holes || {}).map(Number).filter(h => h >= 1);
+  return holes.length ? ('<span>On</span> &middot; <span>' + holes.length + ' groups</span>') : '<span>On</span>';
+}
+function bgShotgunAuto(groups, nHoles) {
+  const out = {}; const n = nHoles || 18;
+  groups.slice().sort((a, b) => (a.group_number || 0) - (b.group_number || 0)).forEach((g, i) => { out[g.id] = (i % n) + 1; });
+  return out;
+}
+async function openT2Shotgun(t, day, dayId, after) {
+  try {
+    if (!t || !t.id || !dayId) return;
+    if (typeof t2CanManage === 'function' && !t2CanManage(t)) { showToast('Only the commissioner can change this'); return; }
+    try { const fresh = await t2Get(t.id); if (fresh && fresh.settings) t.settings = fresh.settings; } catch (e) {}
+    let groups = []; try { groups = await t2GetGroups(dayId); } catch (e) {}
+    let players = []; try { players = await t2GetPlayers(t.id); } catch (e) {}
+    const pName = {}; players.forEach(p => { if (p) pName[p.id] = p.display_name || ''; });
+    const memb = {};
+    await Promise.all(groups.map(async g => { try { memb[g.id] = (await t2GetGroupMembers(g.id)).map(m => pName[m.tournament_player_id] || '').filter(Boolean); } catch (e) { memb[g.id] = []; } }));
+    const dc = (t.settings && t.settings.dayCourses && t.settings.dayCourses[day]) || null;
+    const nH = (dc && Number(dc.holes) === 9) ? 9 : 18;
+    const cur = (t.settings && t.settings.shotgun && t.settings.shotgun[day]) || {};
+    const st = { on: !!cur.on, holes: Object.assign({}, cur.holes || {}) };
+    if (st.on && !groups.some(g => st.holes[g.id] >= 1)) st.holes = bgShotgunAuto(groups, nH);
+    const old = document.getElementById('t2-sg-ov'); if (old) old.remove();
+    const ov = document.createElement('div');
+    ov.id = 't2-sg-ov'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100070';
+    ov.innerHTML = '<div class="modal" style="max-width:460px;width:94%;max-height:90vh;display:flex;flex-direction:column;padding:0">'
+      + '<div style="padding:16px 18px 6px;flex:0 0 auto"><h2 style="margin:0;font-size:19px">📣 <span>Shotgun start</span>' + (t.num_days > 1 ? ' <span class="small-text" style="font-weight:400;color:var(--text-muted)">&middot; <span>Day ' + day + '</span></span>' : '') + '</h2>'
+      + '<p class="help-text" style="margin:2px 0 0">Every group tees off at the same time from its own hole. Games score as usual; the final numbers settle once every hole is in.</p></div>'
+      + '<div id="t2sg-body" style="flex:1;overflow-y:auto;padding:0 18px 12px"></div>'
+      + '<div style="flex:0 0 auto;display:flex;gap:8px;padding:12px 18px;border-top:1px solid var(--border);background:var(--surface)">'
+      + '<button type="button" class="bg-btn bg-btn--ghost" id="t2sg-cancel" style="flex:1">Cancel</button>'
+      + '<button type="button" class="bg-btn bg-btn--primary primary" id="t2sg-save" style="flex:1.4">💾 Save</button></div></div>';
+    document.body.appendChild(ov);
+    const body = ov.querySelector('#t2sg-body');
+    const sorted = groups.slice().sort((a, b) => (a.group_number || 0) - (b.group_number || 0));
+    const render = () => {
+      let h = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px">'
+        + '<button type="button" class="bg-btn bg-btn--chip t2sg-on" data-v="0" aria-pressed="' + (st.on ? 'false' : 'true') + '">Regular tee times</button>'
+        + '<button type="button" class="bg-btn bg-btn--chip t2sg-on" data-v="1" aria-pressed="' + (st.on ? 'true' : 'false') + '">Shotgun</button></div>';
+      if (st.on) {
+        if (!sorted.length) h += '<p class="help-text" style="margin-top:12px">Build this day’s carts first (Cart Configuration), then give each one its hole.</p>';
+        else {
+          h += '<button type="button" class="bg-btn bg-btn--full full" id="t2sg-auto" style="margin-top:12px">🔢 Number them in order</button>';
+          const count = {}; sorted.forEach(g => { const x = Number(st.holes[g.id]) || 0; if (x) count[x] = (count[x] || 0) + 1; });
+          sorted.forEach(g => {
+            const cur = Number(st.holes[g.id]) || 0;
+            let opts = '<option value="0"' + (cur ? '' : ' selected') + '>—</option>';
+            for (let x = 1; x <= nH; x++) opts += '<option value="' + x + '"' + (x === cur ? ' selected' : '') + '>' + x + '</option>';
+            const started = !!g.game_code;
+            h += '<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--border)">'
+              + '<div style="flex:1;min-width:0"><div style="font-weight:700"><span>Group ' + (g.group_number || '?') + '</span>' + (started ? ' <span class="small-text" style="color:var(--accent);font-weight:600">&middot; <span>started</span></span>' : '') + '</div>'
+              + '<div class="small-text" style="color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" data-noi18n>' + t2esc((memb[g.id] || []).map(n => _bgTripShortName(n)).join(', ') || '—') + '</div></div>'
+              + '<label class="small-text" style="flex:0 0 auto;color:var(--text-muted)"><span>Hole</span> <select class="t2sg-h" data-gid="' + t2esc(g.id) + '" aria-label="Starting hole" style="min-width:64px"' + (started ? ' disabled' : '') + '>' + opts + '</select></label></div>';
+          });
+          const dup = Object.keys(count).filter(x => count[x] > 1);
+          if (dup.length) h += '<div class="small-text" style="margin-top:8px;color:var(--text-muted)">ℹ️ <span>Two groups on the same hole is fine for a big field — one hits first, the other waits.</span></div>';
+          const missing = sorted.filter(g => !(Number(st.holes[g.id]) >= 1)).length;
+          if (missing) h += '<div class="small-text" style="margin-top:6px;color:var(--danger-text)">' + missing + ' groups have no hole yet — they start on hole 1.</div>';
+          if (sorted.some(g => g.game_code)) h += '<div class="small-text" style="margin-top:6px;color:var(--text-muted)">Groups already playing keep the hole they started on.</div>';
+        }
+      } else {
+        h += '<p class="help-text" style="margin-top:12px">Every group starts on the first hole at its own tee time.</p>';
+      }
+      body.innerHTML = h;
+      body.querySelectorAll('.t2sg-on').forEach(b => b.onclick = () => {
+        st.on = b.dataset.v === '1';
+        if (st.on && !sorted.some(g => st.holes[g.id] >= 1)) st.holes = bgShotgunAuto(sorted, nH);
+        render();
+      });
+      { const a = body.querySelector('#t2sg-auto'); if (a) a.onclick = () => { const keep = {}; sorted.forEach(g => { if (g.game_code && st.holes[g.id]) keep[g.id] = st.holes[g.id]; }); st.holes = Object.assign(bgShotgunAuto(sorted, nH), keep); render(); }; }
+      body.querySelectorAll('.t2sg-h').forEach(s => s.onchange = () => { const v = Number(s.value) || 0; if (v) st.holes[s.dataset.gid] = v; else delete st.holes[s.dataset.gid]; render(); });
+    };
+    render();
+    const close = () => { try { ov.remove(); } catch (e) {} };
+    ov.onclick = (e) => { if (e.target === ov) close(); };
+    ov.querySelector('#t2sg-cancel').onclick = () => { close(); if (typeof after === 'function') { try { after(); } catch (e) {} } };
+    let busy = false;
+    ov.querySelector('#t2sg-save').onclick = async () => {
+      if (busy) return; busy = true;
+      const holes = {}; sorted.forEach(g => { const v = Number(st.holes[g.id]); if (v >= 1 && v <= nH) holes[g.id] = v; });
+      const val = { on: st.on, holes: holes };
+      const ok = await t2MergeSettings(t.id, s => { const m = (s.shotgun && typeof s.shotgun === 'object') ? s.shotgun : {}; m[day] = val; s.shotgun = m; });
+      busy = false;
+      if (!ok) { showToast('Could not save that — try again'); return; }
+      t.settings = Object.assign({}, t.settings || {}); t.settings.shotgun = Object.assign({}, t.settings.shotgun || {}); t.settings.shotgun[day] = val;
+      if (_t2Current && _t2Current.id === t.id && _t2Current.settings) { _t2Current.settings.shotgun = t.settings.shotgun; }
+      close(); showToast(st.on ? 'Shotgun start saved ✓' : 'Regular tee times ✓');
+      if (typeof after === 'function') { try { after(); } catch (e) {} }
+    };
+  } catch (e) { try { console.warn('openT2Shotgun', e); } catch (_) {} showToast('Could not open that'); }
 }
 
 /* ============================================================
