@@ -103,6 +103,26 @@
             })();
             return;
           }
+          // v1859: tournament pushes (tee time tomorrow, sign-ups closing, join requests,
+          // approvals) land on the event; a join request opens the requests sheet.
+          if (data.tournament_id && (data.kind === 'event' || /^t2_|^event_/.test(type))) {
+            var _tid = data.tournament_id, _tt = 0;
+            (function _goT() {
+              try {
+                if (typeof window.openT2Home === 'function') {
+                  try { if (typeof window.switchTab === 'function') window.switchTab('tourneys'); } catch (e) {}
+                  window.openT2Home(_tid);
+                  if (type === 't2_join_request' && typeof window.openT2JoinRequests === 'function' && typeof window.t2Get === 'function') {
+                    setTimeout(function () { try { window.t2Get(_tid).then(function (t) { if (t) window.openT2JoinRequests(t); }); } catch (e) {} }, 900);
+                  }
+                  return;
+                }
+              } catch (e) {}
+              if (++_tt > 30) { try { if (typeof window.switchTab === 'function') window.switchTab('home'); } catch (e) {} return; }
+              setTimeout(_goT, 500);
+            })();
+            return;
+          }
           // Default (round_start / legacy / unknown) -> open that round if we have
           // a code, otherwise land on Home. Never a no-op: a tapped notification
           // that goes nowhere reads as a broken app.
