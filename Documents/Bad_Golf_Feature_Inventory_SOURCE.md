@@ -1,6 +1,6 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1836
-**Documentation Date:** September 2026
+**Build Version:** v2026.11.1871
+**Documentation Date:** October 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
 ---
@@ -1121,14 +1121,14 @@ From **Home** → the **Live now** card, tap **👀 Spectate** on a friend's rou
 
 ### Drive Distance Estimate *(PRO)*
 
-**Automatic (if the toggle is on in setup):** GPS logs your location at address and compares to the ball location after the shot.
+**Automatic:** GPS logs your location at address and compares to the ball location after the shot. The **Est. Drive** bubble is controlled by **Profile → Additional settings → 📏 Est. drive distance** (on by default) — switch it off and the bubble never shows.
 
 **Two accuracy fixes worth knowing:**
 - The start point can no longer be set more than 15 yards **behind** the mapped tee, and it falls back to the mapped tee if a bad fix slips through. A 168-yard approach used to read **365 y** on a 462-yard par 4
 - The app doesn't lock a reading while you're still rolling up to the tee — the start point follows you inside the tee area, and only a genuinely parked position locks a drive. It used to show a ~84-yard drive before you'd hit
 - The reading is scaled to **your own tee's** yardage rather than the tips, so a player on the blues sees ~260 y instead of 294 y
 
-**Manual (Track Shot button):** tap **"Track Shot"** below the Score button, confirm the estimate or type a custom yardage, then **"📤 Share it"** to post the drive to your crew.
+**Manual (Track Shot button):** tap **"Track Shot"** below the Score button, confirm the estimate or type a custom yardage, then **"📤 Share it"** to post the drive to your crew. Don't use it? **Profile → Additional settings → ⛳ Track Shot button** hides the button from the GPS map (on by default).
 
 ### Shot Tracking & My Shots Log *(PRO)*
 
@@ -1140,6 +1140,7 @@ Tracked shots are saved in **Stats tab → My Shots** — a searchable log with 
 - **Pick the right club** in the save dialog — that's how the miss is filed
 - Five of these per club turn that club's **miss zone** on the map into your real miss (see *Distance Arcs & Miss Zone*)
 - Obvious junk is left out automatically — a target under 30 yards away, a shot under 20 yards, or a finish nowhere near the line
+- **No shot is ever saved under 5 or over 500 yards.** Anything outside that range is a GPS glitch, and the app says so: *"That read as 640 yards — a GPS glitch, so the shot wasn't saved."*
 
 ### Club Suggester & My Clubs / Bag *(PRO)*
 
@@ -1559,6 +1560,15 @@ Just-for-fun sip trackers that ride along with any round — **no units change h
 - **Already-finished rounds are never retroactively changed.**
 - **⚠️ Re-check your per-hole winners after editing a live round's games** — re-saving the games has been seen to clear already-logged Greenie (and potentially junk / CTP / long-putt) entries.
 
+### Changing the Course Mid-Round
+
+Started on the East course when you meant the West? **Edit settings** on a live round now has **📋 Change course**.
+
+- **Who:** the person who started the round (or an admin), on **regular rounds** — not tournament or league rounds.
+- **Tees carry over by name.** A player whose tee doesn't exist on the new course shows **"— pick tee —"** and the app asks you to pick one for everyone before it switches.
+- **You confirm first:** *"Switch this round from A to B? The 6 holes already scored stay on the same hole numbers. Pars, stroke holes, tees, handicaps, the GPS and every game result will use B from here on."* → **Switch course** / **Keep current course**.
+- Scores stay where they are; handicaps recompute from the new tee. The new course must have a scorecard and the same number of holes — otherwise start a new round there.
+
 ### Removing a Player Mid-Round
 
 Ten team games (Team match, Team low ball, High & Low, Umbrella, Ryder Cup, Scramble, Vegas, 6's, Team Quota, Hammer) correctly refuse to settle when the teams no longer match the player list. They used to do it **silently at 0 units**; the round flags the calculation error so you know why.
@@ -1808,7 +1818,7 @@ The Stats tab's old single-round **"Add a past round"** button is now **"⛳ Ent
 
 **Filling it in:**
 
-- **Single / Daily / Weekly / Monthly** tabs across the top guess dates for a batch of rounds; one tap re-guesses them all. Dates only affect sort order
+- **Single game / Many games** tabs across the top: one round, or a batch of rows. A batch fills in dates a week apart to start with — change any of them. Dates only affect sort order
 - Score entry uses **quick-tap chips centred on your average**, plus your device's number keypad
 - The link at the bottom — **"Enter one round in full detail"** — opens the old hole-by-hole screen for anyone who wants full stat tracking on a past round
 
@@ -1876,7 +1886,11 @@ When a commissioner deletes a tournament, the rounds played in it used to keep t
 
 **Stats visibility** — **Everyone** · **Friends only** · **Just me**. *(When two accounts share a name the app keeps the more restrictive setting of the two. A change that doesn't reach the server now says so — this is a privacy setting and it used to confirm silently either way.)*
 
-**Drive distance estimate** — auto-log drive distances from GPS.
+**📏 Est. drive distance** — shows the **Est. Drive** bubble on the GPS map after your tee shot on par 4s and 5s. On by default.
+
+**⛳ Track Shot button** — shows the **Track Shot** button on the GPS map. On by default; switch it off if you never track shots and want a cleaner map.
+
+**📐 Distance units** — **Yards** or **Meters** for what the GPS map shows: Front/Mid/Back, plays-like, arcs and tracked shots. Your bag and saved shots stay in yards.
 
 **🎯 Distance arcs & miss zone** — **off** by default. Turn it on to get the **ARCS** button on the GPS map (yardage arcs, club arcs, To green preview and the miss zone — see the GPS section). Underneath, pick the miss zone width you start with: **±10y · ±15y · ±20y · ±30y**. It's a setting on **this phone**.
 
@@ -2023,7 +2037,7 @@ Tap **"+ New tournament"**. Setup is five simple questions, one per screen, with
 2. **What's it called?** — the name players see on the leaderboard and their invite. Add a logo later.
 3. **How many days?** — tap 1 to 5, then the date. On a multi-day event the other days follow on, one a day.
 4. **Where are you playing?** — search the course list; **Same course every day** on a multi-day event. You can skip this and pick it later.
-5. **How will players get in?** — **I'll type the names**, **Send a join link**, or **Both**, plus *about how many players* (4, 8, 12, 16, 20+) and **I'm playing too** (on by default — off runs the event without you in the field).
+5. **How will players get in?** — **Select the players** (pick from your friends and roster, or add guests) or **Send a join link**, plus *about how many players* (4, 8, 12, 16, 20+) and **I'm playing too** (on by default — off runs the event without you in the field).
 
 **Create tournament** builds it and takes you straight to the setup checklist. Whoever creates the tournament is its **commissioner**.
 
@@ -2033,10 +2047,15 @@ After the questions you land on one list of settings — tap a row to set it, an
 
 - **A progress bar** at the top counts what's needed: *"5 of 8 needed"*.
 - **Needed** (yellow tag): the **name**, **players** (at least 2), each day's **date** and **course**, and **Day 1's groups and games**. That's all **Start tournament** needs.
-- **Everything else is optional** — flights, handicap rules, tees, tee times, shotgun, scorekeepers, side games, prize pools, who's paid, trip, admins, printables. Tees default to the course's tee until you set them.
+- **Everything else is optional** — flights, handicap rules, tees, tee times, shotgun, scorekeepers, who's paid, trip, admins, printables. Side games and prize pools are set on each day's **Games** row. Tees default to the course's tee until you set them.
+- **Players:** with fewer than 2 players, tapping **Players** goes straight to the picker. **Every tick saves on the spot** — tick to add, untick to take someone off. Players already in the event show ticked, a **👥 N players** count sits top right, and the only buttons are **+ Guest** and **Done**.
+- **Groups:** each group is a card with its time. Tap a player to make them the **scorekeeper** (green check and a *SCOREKEEPER* label). Fill the groups **By handicap**, **Random** or **One group**.
+- **Tee times** gets its green check once every group has a time, and the row shows when the first group goes off.
+- **Team names** only appear on team events. A one-group event doesn't ask — it plays as **"Bad Golfers"**.
+- **Flights** only appears once the field is **more than 8 players**.
 - **One section per day** on a multi-day event. Later days' groups and games show **"Before Day 2"** — they don't block Start.
 - **Start tournament** stays dimmed until everything needed is done, and says exactly what's left: *"Still needed: Players, Groups (Day 1), Games (Day 1)"*.
-- **The join link opens after you Save.** Until you tap **💾 Save** (or Start) the Join link row reads **After Save** and invites stay closed. If you picked *Send a join link* or *Both*, the first Save asks **"Send the join link now?"**
+- **The join link opens after you Save.** Until you tap **💾 Save** (or Start) the Join link row reads **After Save** and invites stay closed. If you picked *Send a join link*, the first Save asks **"Send the join link now?"**
 - Finish a screen (course, groups, games) and you're back on the list with the checks updated.
 
 *Tournaments created before this keep the older step-by-step setup below.*
@@ -2074,7 +2093,7 @@ Setup runs one step at a time and **saves as it goes** — a green *"✓ Everyth
 
 Two clearly separate ideas:
 
-- **Tournament games** are set by the commissioner on **Configure games** and settle across the **whole field**. The main format — **Stroke play, Stableford, Quota, Match play, Team match play (2v2), Team Quota, Team low ball, Shamble, Scramble** or **Ryder Cup** — is **one at a time**: ticking one greys the others with *"Already playing ‹X› — one format at a time."* Team formats offer **2-man teams (2 v 2 in each cart)** or **4-man teams (each cart is a team)**. Individual and Bracket events hide the team formats.
+- **Tournament games** are set by the commissioner on **Configure games** and settle across the **whole field**. The main format — **Stroke play, Stableford, Quota, Match play, Team match play (2v2), Team Quota, Team low ball, Shamble, Scramble** or **Ryder Cup** — is **one at a time**: ticking one greys the others with *"Already playing ‹X› — one format at a time."* Team formats offer **2-man teams (2 v 2 in each cart)** or **4-man teams (each cart is a team)**. Individual and Bracket events hide the team formats. **A bracket sets the format for you:** whatever you picked for *Matches are* (Match play or Stroke play) is ticked on Configure games, and the other formats are greyed out with *"Set by the bracket — Match play."*
 - **The field prize pools** — **Tournament Skins, Low Net, Most GIRs, Fewest Putts, Long Putt, Closest to the Pin, Long Drive** — sit under **Extras**. With Ryder Cup or Scramble on, the individual pools grey out: *"Ryder Cup plays a shared ball — no individual scores or stats to pay this on."* Stroke play and the Low Net pool grey each other out — *"Stroke play already runs the Low Net prize pool."*
 - **Main formats carry no units of their own** — they're paid from the tournament fee; the pools and extras keep units.
 - **Group games** are each cart's own action — Nassau, Banker, Wolf, junk and the rest — set on the cart's round exactly like an ordinary round and settled inside that cart. A pool switched on for the whole event is what pays; the same game inside a cart is suppressed so nothing settles twice. A cart's group games never pre-tick Long Putt when the event runs the Long Putt pool.
@@ -2085,7 +2104,7 @@ Configure Day starts clean for every new event and every new day — no carried-
 
 ### Flights
 
-**Settings → 🏳️ Flights** splits the field by handicap so each flight plays for its own prizes. **One flight (everyone together) is the default.**
+**Settings → 🏳️ Flights** splits the field by handicap so each flight plays for its own prizes. **One flight (everyone together) is the default**, and the row only appears once the field is **more than 8 players**. It gets a green check once flights are saved.
 
 - Pick how many flights, then **⚖️ Split by handicap (even groups)** — Flight 1 is the lowest handicaps. Tap a number beside anyone to move them.
 - **One switch for every prize pool:** **Per flight** or **Whole field**. It covers Skins, Low Net, Most GIRs, Fewest Putts, Long Putt, Closest to the Pin, the Birdie pool, Nassau and the points pools.
@@ -2130,7 +2149,7 @@ Every tournament has a shared **📸 Photos** album (leagues too — see Leagues
 
 **Settings → 🖨️ Printables** makes **letter-size PDFs with the Bad Golf logo** that you save, share or print from your phone. Pick the day on a multi-day event.
 
-- **📝 Scorecards** — **one page per group**: par, stroke index, each player's playing handicap and **dots on the holes where they get strokes**, boxes to write scores, Out / In / Total / Net.
+- **📝 Scorecards** — **one page per group**: par, stroke index, each player's playing handicap and **dots on the holes where they get strokes**, boxes to write scores, Out / In / Total / Net. When the day has **Closest to the Pin, Long Drive or Long Putt**, the card adds **write-in boxes** for each one — the hole, who has it and how far.
 - **🛺 Cart signs** — two per page: **Group N**, the **tee time** (or **starting hole** on a shotgun day) and every name, big.
 - **📋 Pairings & tee times** — the day's tee sheet: every group, its time or hole, players with handicaps (and team and tee).
 - **🏆 Results** — the event leaderboard: net to par, gross and thru, by flight when flights are on.
@@ -2145,6 +2164,8 @@ Every tournament has a shared **📸 Photos** album (leagues too — see Leagues
 - **Full names.** A player who switches off **Profile → 🌐 Show me on public event pages** doesn't appear anywhere on it — not in the tee times, not on the leaderboard, not in photos they added.
 - **🔗 Share the page link**, **👀 Open the page** (preview it yourself), **🚫 Turn off the link** (two taps — the old link stops working; make a new one any time).
 - On a quick-setup event the page link opens after your first **💾 Save**, like the join link.
+- **Right on the event card:** every event card shows **Event web page · No app needed** with two buttons — **Open** (opens the page in your browser) and **Share**. A commissioner whose event has no page yet gets **Make the web link** there instead. Players only see it once a link exists.
+- **🧳 Trip** also has a **🌐 Event page** button, so the trip and the event page are one tap apart.
 
 ### 🤝 Sponsors
 
@@ -2153,6 +2174,7 @@ Every tournament has a shared **📸 Photos** album (leagues too — see Leagues
 - Logos show on the **event page**, along the bottom of the **📺 TV board**, and on every **printable** (*"Thank you to our sponsors"*).
 - A **sponsored hole** shows *"Sponsored by Acme Golf"* under the hole number on every scorecard in the event, and the printed scorecard lists the hole sponsors.
 - A hole belongs to one sponsor — picking a hole another sponsor has moves it.
+- **Your work is safe while you type.** Tapping outside the Sponsors window no longer closes it — only **Done**, **Cancel** or **Save** do. **Cancel** with unsaved changes asks *"Discard this sponsor?"* (**Discard** / **Keep editing**). And if you do get kicked out, reopening Sponsors brings back the sponsor you were working on: *"Restored your unsaved sponsor — tap Save to keep it."*
 
 ### 📅 Event Reminders
 
@@ -2161,7 +2183,19 @@ Pushes that go to **everyone in the event** (commissioner included):
 - **Tee time tomorrow** — about 6 pm the evening before each day: *"Day 2 is tomorrow at Waterview Golf Club — your group tees off at 8:10 AM."* (or your starting hole on a shotgun day).
 - **Sign-ups close tomorrow** — set an optional **Sign-ups close** date on the **🙋 Join requests** sheet. The day before, players get a nudge to pass the link on and the commissioner hears how many requests are waiting. After that date the link stops taking requests.
 - **Join requests and approvals** — the commissioner hears when someone asks to join; the player hears when they're approved.
+- **Tapping a tournament push opens that event** (a join request opens the Join requests sheet).
 - Turn them all off with **Profile → 🔔 Push notifications → 📅 Event pushes**.
+
+### 🤖 Ask the Commissioner *(trial)*
+
+**Settings → 🤖 Ask the commissioner** (top row, commissioners only) lets you make changes by typing — or saying — them in plain English.
+
+- **Examples:** *"swap Mike and Steve on day 2"* · *"Dave subs for Tom (12)"* · *"Kevin's handicap is 12.4"* · *"move group 3 to 8:40"* · *"group 2 starts on hole 10"* · *"add Jane Smith 14"* · *"Tom paid"* · *"skins 5 units"* · *"2 flights"* · *"Kevin keeps score for group 1"* · *"90% handicaps"*. Several at once on separate lines.
+- **Questions work too:** *"who hasn't paid?"*, *"who isn't in a group?"*, *"show day 1 groups"*.
+- **Nothing changes until you confirm.** You see a preview — *Will change ✓ …* and any problems — then **Confirm N changes**.
+- **Guard rails:** a group whose round has started is never changed; prize pools, flights and the handicap allowance lock once the event starts; groups max out at 5; a name that matches two players asks for the full name.
+- **🎤 Talk** works in a web browser. In the iPhone and Android apps, use the microphone on your keyboard.
+- *This is a trial — it may change or go away.*
 
 ### Ties — the Card-Off
 
@@ -2171,7 +2205,16 @@ When players tie for **Low Net** in a tournament, the prize goes to a **USGA car
 
 **Quick-setup events:** invites and the join link open after your first **💾 Save** (see the checklist above). **Full-setup events:** invites are sent from the **Review & start** step. The first time you reach it with every step done, the app asks once: *"Your event is set. Send the invites now? Players with the app get a notification; everyone else gets the link by text."* → **📨 Send invites** / Later. **✉️ Personal invites** on the Review step resends any single one; the invite icon is 📨 everywhere. There are no phone numbers to type — the text invite opens your own Messages app, and it says what you're playing (*"We're playing Skins and Low Net Pool"*).
 
+**📨 Invite all players** on the event card (commissioner) sends one message with two clear ways in:
+
+- **To PLAY** — tap to join the game in the app (iPhone and Android links).
+- **To FOLLOW ALONG** — tap the event web page link, no app needed. If the event has no web page yet, one is made for you.
+
 A guest added by name sees an **"Is this you?"** card the moment they sign in and takes their own spot. Invites for a finished event retire themselves.
+
+### The Event Card
+
+Each event on the Tourney tab is one card: the name, date and tee time, then a strip of **Details · Board · Chat** (plus **Edit · Delete** for the commissioner). **Edit** opens the event's settings — the old full-width *Edit settings* button is gone to save space. Below that: **📨 Invite all players** (commissioner), the **Event web page** box with **Open** and **Share**, and the groups.
 
 ### Starting and Playing a Day
 
@@ -2509,6 +2552,10 @@ Open a player's card → **Player stats** (this also works from the leaderboard 
 ### Find a Course
 
 Search any course in the library (this moved here from Play) and open its **Course Preview**: **GPS Preview** (every hole's map and yardages), **Scorecard**, and **Start / Schedule Round**. A course's website and maps links open in a **new page** rather than replacing the app — on the phone, an in-app browser sheet with **Done**.
+
+### Canada
+
+**Ontario is in the course library** — over 600 courses, most with full GPS, scorecards, tees and ratings, shown with the province name (*Ontario*) in the pickers. More provinces are coming. A handful of Ontario courses near the Quebec border are listed under Quebec.
 
 ### Live Holes Across America
 
@@ -2957,6 +3004,8 @@ Anything that fails goes to the code-review queue **with its actual reason** rat
 Four admin tools are complete in code but deliberately have **no buttons**: **Re-Map Hole**, **admin delete-a-player**, the **roster-cleanup/merge entry buttons**, and **reset-all-stats**. This is a deliberate decision, written into the source as a named block so audits stop re-filing them.
 
 ### Newer Admin Work Worth Knowing
+
+**Canada — Ontario imported (2026-10-02).** 627 new library entries (622 Ontario, 5 Quebec border courses), 451 of them complete and verified. The other **176 are in the Code Review Queue** with *Submitted by: Cowork Canada import 2026-10-02* and a reason on each — mostly no GPS layout found (105), three-nine facilities that need per-nine wiring (34) and combo pages (14). The state pickers and Live Holes now show all 13 Canadian provinces and territories by name.
 
 **The multi-nine editor is reachable again.** The editor for a 27- or 36-hole facility existed for a long time with **no button anywhere in the app**. Two were added:
 
