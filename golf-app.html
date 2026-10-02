@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1860-->
+<!--BGVER=v2026.11.1861-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11786,7 +11786,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1860';
+const BG_BUILD = 'v2026.11.1861';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -78446,6 +78446,7 @@ async function renderT2SettingsHub(t) {
   }
   h += '</div>';
   h += '<div id="t2sh-scroll" style="flex:1;overflow-y:auto;padding:2px 18px 10px">';
+  h += b('aicommish', '&#129302;', 'Ask the commissioner', 'Type or say a change &mdash; swaps, subs, handicaps, tee times');   // v1861 (trial)
   if (_qs) { h += _qs.html; } else {   // v1855: quick-setup events get the checklist
   h += b('identity', '&#127991;&#65039;', 'Name &amp; logo', esc(t.name || 'Tournament'));   // v1756
   h += b('trip', '&#129523;', 'Trip', bgTripSummary(t));   // v1846: lodging, rooms, itinerary
@@ -78550,6 +78551,7 @@ async function renderT2SettingsHub(t) {
       if (act === 'trip') { return openT2TripEditor(t, () => { try { renderT2SettingsHub(_t2Current || t); } catch (e) {} }); }   // v1846
       if (act === 'joinreq') { return openT2JoinRequests(t); }   // v1848
       if (act === 'printables') { return openT2Printables(t); }   // v1856
+      if (act === 'aicommish') { return openT2AiCommissioner(t); }   // v1861
       if (act === 'evpage') { return openT2EventPage(t); }   // v1858
       if (act === 'sponsors') { return openT2Sponsors(t, () => { try { renderT2SettingsHub(_t2Current || t); } catch (e) {} }); }   // v1859
       if (act === 'paid') { return openT2PaidSheet(t, () => { try { renderT2SettingsHub(_t2Current || t); } catch (e) {} }); }   // v1848
@@ -92591,6 +92593,476 @@ function _bgPdfSponsorRow(doc, imgs, y, maxH) {
     else { doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(75, 85, 99); doc.text(_bgPdfTxt(it.s.name), x + it.w / 2, y + mh / 2 + 3, { align: 'center' }); }
     x += it.w + gap;
   });
+}
+
+/* ============================================================
+   v1861 (Tyler 10/2): THE AI COMMISSIONER (trial build — "I'll test it to see if I like it").
+   Settings -> 🤖 Ask the commissioner. Type (or dictate with the keyboard mic) plain English:
+     "swap Tyler and Kevin on day 2" · "John Smith subs for Matt on day 1" · "Kevin's handicap is 12.4"
+     "move group 3 to 8:40" · "group 2 starts on hole 10" · "add Mike Jones 14" · "Mike paid"
+     "who hasn't paid?" · "who isn't in a group?" · "show day 2 groups"
+   Flow: text -> a list of ACTIONS (never free-form) -> plain-English preview -> Confirm -> each
+   action runs through the same writers the screens use (same permissions / checks).
+   Brains: the ai-commissioner edge function (Claude) when the server has an Anthropic key;
+   otherwise -- or if it fails -- the built-in phrase parser below. Both produce the same actions.
+   Guard rails: managers only; a group whose round has started is never changed; team events
+   only swap teammates (unless the day is stroke/quota, same rule as the Groups screen);
+   every applied command is logged to settings.aiLog (last 50).
+   ============================================================ */
+let _bgAiState = null;
+let _bgAiServerOk = null;   // null = untried, false = no key / unavailable this session
+function _bgAiSpeech() { try { return window.SpeechRecognition || window.webkitSpeechRecognition || null; } catch (e) { return null; } }
+function _bgAiNorm(s) { return String(s || '').toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9' .-]/g, ' ').replace(/\s+/g, ' ').trim(); }
+// Everything the commissioner might talk about, in one small object.
+async function _bgAiContext(t) {
+  const [days, players] = await Promise.all([t2GetDays(t.id), t2GetPlayers(t.id)]);
+  const s = t.settings || {};
+  const paid = s.paid || {};
+  const ps = (players || []).filter(p => !(typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p)))
+    .map(p => ({ id: p.id, name: p.display_name || '', hcp: (p.handicap == null ? null : Number(p.handicap)), team: p.team || null, paid: !!paid[p.id], uid: p.user_id || null }));
+  const byId = {}; ps.forEach(p => { byId[p.id] = p; });
+  const dayList = [];
+  for (const d of (days || []).slice().sort((a, b) => a.day_number - b.day_number)) {
+    let gs = []; try { gs = (await t2GetGroups(d.id)) || []; } catch (e) {}
+    const groups = [];
+    for (const g of gs.slice().sort((a, b) => (a.group_number || 0) - (b.group_number || 0))) {
+      let ms = []; try { ms = (await t2GetGroupMembers(g.id)) || []; } catch (e) {}
+      groups.push({ id: g.id, n: g.group_number, time: g.tee_time || '', started: !!g.game_code,
+        hole: (s.shotgun && s.shotgun[d.day_number] && s.shotgun[d.day_number].holes) ? (s.shotgun[d.day_number].holes[g.id] || null) : null,
+        members: ms.map(m => ({ mid: m.id, pid: m.tournament_player_id, team: m.team || null, slot: m.slot || 0, name: (byId[m.tournament_player_id] || {}).name || '?' })) });
+    }
+    dayList.push({ id: d.id, n: d.day_number, date: d.play_date || '', format: d.format || '', course: (s.dayCourses && s.dayCourses[d.day_number] && s.dayCourses[d.day_number].name) || '',
+      shotgun: !!(s.shotgun && s.shotgun[d.day_number] && s.shotgun[d.day_number].on), groups: groups });
+  }
+  return { id: t.id, name: t.name || '', type: s.type || 'team', numDays: t.num_days || 1,
+    teams: { A: t.team_a_name || 'Team A', B: t.team_b_name || 'Team B' }, players: ps, days: dayList };
+}
+// Find a player by what someone said: full name, first name, last name, or a unique start.
+function _bgAiFindPlayer(ctx, said) {
+  const q = _bgAiNorm(said).replace(/'s$/, '');
+  if (!q) return { err: 'Who?' };
+  const ps = ctx.players;
+  const full = ps.filter(p => _bgAiNorm(p.name) === q);
+  if (full.length === 1) return { p: full[0] };
+  const parts = (p) => _bgAiNorm(p.name).split(' ');
+  let hits = ps.filter(p => parts(p)[0] === q || parts(p)[parts(p).length - 1] === q);
+  if (!hits.length) hits = ps.filter(p => _bgAiNorm(p.name).indexOf(q) === 0 || parts(p).some(w => w.indexOf(q) === 0));
+  if (hits.length === 1) return { p: hits[0] };
+  if (hits.length > 1) return { err: 'More than one player matches "' + said + '": ' + hits.map(p => p.name).join(', ') + '. Use the full name.' };
+  if (/s$/.test(q) && q.length > 3) { const r2 = _bgAiFindPlayer(ctx, q.slice(0, -1)); if (r2.p) return r2; }   // "Kevins handicap"
+  return { err: 'No player called "' + said + '" in this event.', missing: true };
+}
+function _bgAiDayOf(ctx, n) {
+  if (n != null && n !== '') return ctx.days.find(d => d.n === Number(n)) || null;
+  if (ctx.days.length === 1) return ctx.days[0];
+  // no day named on a multi-day event: the first day that hasn't started
+  return ctx.days.find(d => !d.groups.some(g => g.started)) || null;
+}
+function _bgAiMemberOn(day, pid) {
+  for (const g of day.groups) { const m = g.members.find(x => x.pid === pid); if (m) return { g: g, m: m }; }
+  return null;
+}
+function _bgAiClock(s) {
+  const m = String(s || '').trim().match(/^(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10); const mi = m[2] ? parseInt(m[2], 10) : 0;
+  let ap = (m[3] || '').toLowerCase().replace(/\./g, '');
+  if (h > 23 || mi > 59) return null;
+  if (!ap) ap = (h >= 12 || h <= 5) ? 'pm' : 'am';   // golf: 6-11 is morning, 12-5 afternoon
+  if (h > 12) { h -= 12; ap = 'pm'; }
+  if (h === 0) h = 12;
+  return h + ':' + String(mi).padStart(2, '0') + ' ' + ap.toUpperCase();
+}
+function _bgAiDate(s) {
+  const str = String(s || '').trim().replace(/(\d)(st|nd|rd|th)\b/i, '$1');
+  let m = str.match(/^(\d{4})-(\d{2})-(\d{2})$/); if (m) return str;
+  m = str.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  const now = new Date();
+  const mk = (y, mo, d) => { const dt = new Date(y, mo - 1, d, 12); if (isNaN(dt) || dt.getMonth() !== mo - 1) return null; return dt.getFullYear() + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0'); };
+  if (m) { let y = m[3] ? Number(m[3]) : now.getFullYear(); if (y < 100) y += 2000; return mk(y, Number(m[1]), Number(m[2])); }
+  const MON = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  m = str.toLowerCase().match(/^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,? )?([a-z]{3})[a-z]*\.? (\d{1,2})(?:,? (\d{4}))?$/);
+  if (m && MON.indexOf(m[1]) >= 0) { let y = m[3] ? Number(m[3]) : now.getFullYear(); const r = mk(y, MON.indexOf(m[1]) + 1, Number(m[2])); if (r && !m[3] && new Date(r) < new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30)) return mk(y + 1, MON.indexOf(m[1]) + 1, Number(m[2])); return r; }
+  return null;
+}
+// ---- the built-in phrase parser (no AI needed) ----
+function bgAiParse(text, ctx) {
+  const out = [];
+  const chunks = String(text || '').split(/\n|;|\.\s+(?=[A-Za-z])|\band then\b|\bthen\b/i).map(x => x.trim().replace(/[.?!]+$/, '')).filter(Boolean);
+  for (const raw of chunks) {
+    const c = raw.replace(/\s+/g, ' ');
+    let m, dayN = null;
+    const dm = c.match(/\b(?:on |for )?day (\d+)\b/i); if (dm) dayN = Number(dm[1]);
+    const cc = c.replace(/\b(?:on |for )?day \d+\b/i, '').replace(/\s+/g, ' ').trim();
+    // questions first, so "who hasn't paid" is never read as "<name> paid"
+    if (/^who\b.*(?:hasn't|has not|didn't|did not|still needs to|owes).*(?:paid|pay)?|^who owes|^(?:who is|who's|anyone) unpaid/i.test(cc) && /pa(?:id|y)|owe|unpaid/i.test(cc)) { out.push({ type: 'ask', q: 'unpaid' }); continue; }
+    if (/(?:who(?:'s| is)? not|who isn't|who is not|anyone not|who's missing).*group|not in a group|ungrouped/i.test(cc)) { out.push({ type: 'ask', q: 'ungrouped', day: dayN }); continue; }
+    if (/^(?:show|list|what are|what's|whats|who's in|who is in|see)\b.*(?:groups|pairings|tee times|tee sheet)|^(?:groups|pairings|tee times|tee sheet)$/i.test(cc)) { out.push({ type: 'ask', q: 'groups', day: dayN }); continue; }
+    if (/^(?:show|list|what are|what's|whats)\b.*handicaps?$/i.test(cc)) { out.push({ type: 'ask', q: 'hcps' }); continue; }
+    if ((m = cc.match(/^(?:please )?swap (.+?) (?:and|with|&|for) (.+)$/i))) { out.push({ type: 'swap', day: dayN, a: m[1], b: m[2] }); continue; }
+    if ((m = cc.match(/^(?:please )?(?:replace|swap out) (.+?) with (.+?)(?:,? (?:hcp|handicap) ?(-?\d+(?:\.\d)?)| \((-?\d+(?:\.\d)?)\))?$/i))) { out.push({ type: 'sub', day: dayN, out: m[1], in: m[2], hcp: m[3] || m[4] || null }); continue; }
+    if ((m = cc.match(/^(?:put )?(.+?)(?: \((-?\d+(?:\.\d)?)\))? (?:subs?|is subbing|is in|plays|goes in|in) for (.+)$/i))) { out.push({ type: 'sub', day: dayN, out: m[3], in: m[1], hcp: m[2] || null }); continue; }
+    if ((m = cc.match(/^(?:move|put) group (\d+) (?:to|at) (.+)$/i)) && _bgAiClock(m[2])) { out.push({ type: 'set_tee_time', day: dayN, group: Number(m[1]), time: _bgAiClock(m[2]) }); continue; }
+    if ((m = cc.match(/^group (\d+) (?:tee time is|tees off at|tee time|at|goes off at) (.+)$/i)) && _bgAiClock(m[2])) { out.push({ type: 'set_tee_time', day: dayN, group: Number(m[1]), time: _bgAiClock(m[2]) }); continue; }
+    if ((m = cc.match(/^group (\d+) (?:starts on|starts at|on|to|goes to|off) hole (\d+)$/i)) || (m = cc.match(/^(?:put|start) group (\d+) on hole (\d+)$/i))) { out.push({ type: 'set_shotgun_hole', day: dayN, group: Number(m[1]), hole: Number(m[2]) }); continue; }
+    if ((m = cc.match(/^(?:move|put) (.+?) (?:to|in|into) group (\d+)$/i))) { out.push({ type: 'move', day: dayN, player: m[1], group: Number(m[2]) }); continue; }
+    if ((m = cc.match(/^(?:set )?(.+?)(?:'s)? (?:handicap|hcp|index)(?: is| to| =|:)? ?(-?\d+(?:\.\d)?)$/i)) || (m = cc.match(/^(.+?) is (?:a|an) (-?\d+(?:\.\d)?)(?: handicap)?$/i))) { out.push({ type: 'set_hcp', player: m[1], hcp: Number(m[2]) }); continue; }
+    if ((m = cc.match(/^add (.+?)(?:,? (?:hcp|handicap) ?(-?\d+(?:\.\d)?)| \((-?\d+(?:\.\d)?)\)| (-?\d+(?:\.\d)?))?(?: (?:to|on) team ([a-l]))?$/i))) { out.push({ type: 'add_player', name: m[1], hcp: m[2] || m[3] || m[4] || null, team: m[5] ? m[5].toUpperCase() : null }); continue; }
+    if ((m = cc.match(/^(?:put |move )?(.+?) (?:on|to) team ([a-l])$/i))) { out.push({ type: 'set_team', player: m[1], team: m[2].toUpperCase() }); continue; }
+    if ((m = cc.match(/^(.+?) (?:has )?paid$/i)) || (m = cc.match(/^mark (.+?) (?:as )?paid$/i))) { out.push({ type: 'set_paid', player: m[1], paid: true }); continue; }
+    if ((m = cc.match(/^(.+?) (?:hasn't|has not|didn't|did not) pay$/i)) || (m = cc.match(/^mark (.+?) (?:as )?(?:unpaid|not paid)$/i))) { out.push({ type: 'set_paid', player: m[1], paid: false }); continue; }
+    // v1861b ("include it all"): pools, flights, scorekeepers, dates, names, allowance
+    const POOLS = { 'skins': 'skins', 'tournament skins': 'skins', 'low net': 'low_net', 'low net pool': 'low_net', 'net pool': 'low_net', 'gir': 'girs', 'girs': 'girs', 'gir pool': 'girs', 'most girs': 'girs', 'putts': 'putts', 'putt pool': 'putts', 'fewest putts': 'putts', 'long putt': 'long_putt' };
+    const poolRe = '(tournament skins|skins|low net pool|low net|net pool|gir pool|most girs|girs|gir|fewest putts|putt pool|putts|long putt)';
+    if ((m = cc.match(new RegExp('^(?:turn |switch )?(?:off|stop|no|remove|drop) (?:the )?' + poolRe + '(?: pool)?$', 'i'))) || (m = cc.match(new RegExp('^(?:turn |switch )?(?:the )?' + poolRe + '(?: pool)? off$', 'i')))) { out.push({ type: 'set_pool', pool: POOLS[m[1].toLowerCase()], on: false }); continue; }
+    if ((m = cc.match(new RegExp('^(?:turn on |add |start |play |set )?(?:the )?' + poolRe + '(?: pool)?(?: on)?(?: (?:for|at|to|is))? (\\d+(?:\\.\\d+)?)(?: units?)?(?: (?:a|per) (?:player|man|guy))?$', 'i')))) { out.push({ type: 'set_pool', pool: POOLS[m[1].toLowerCase()], on: true, units: Number(m[2]) }); continue; }
+    if ((m = cc.match(new RegExp('^(?:turn on |add |start |play )(?:the )?' + poolRe + '(?: pool)?$', 'i')))) { out.push({ type: 'set_pool', pool: POOLS[m[1].toLowerCase()], on: true }); continue; }
+    if ((m = cc.match(/^(?:split (?:the field |it |them )?into |make it |use |set )?(\d) flights?(?: by handicap)?$/i))) { out.push({ type: 'set_flights', n: Number(m[1]) }); continue; }
+    if (/^(?:no|turn off|remove|drop) flights$|^one flight$|^everyone together$/i.test(cc)) { out.push({ type: 'set_flights', n: 1 }); continue; }
+    if ((m = cc.match(/^(.+?) (?:keeps score|is (?:the )?scorekeeper|scores|is keeping score) (?:for|in) group (\d+)$/i)) || (m = cc.match(/^(?:make |set )?(.+?) (?:the )?scorekeeper (?:for|of|in) group (\d+)$/i))) { out.push({ type: 'set_scorekeeper', day: dayN, player: m[1], group: Number(m[2]) }); continue; }
+    if ((m = c.match(/^day (\d+) (?:is|on|will be|moves to|date is) (.+)$/i)) && _bgAiDate(m[2])) { out.push({ type: 'set_date', day: Number(m[1]), date: _bgAiDate(m[2]) }); continue; }
+    if ((m = cc.match(/^(?:rename (?:the )?(?:event|tournament|it) (?:to )?|call (?:the )?(?:event|tournament|it) )(.+)$/i))) { out.push({ type: 'rename_event', name: m[1].replace(/^["']|["']$/g, '') }); continue; }
+    if ((m = cc.match(/^(?:name |rename )?team ([ab]) (?:is |to |as )?(?:called |named )?(.+)$/i))) { out.push({ type: 'set_team_name', team: m[1].toUpperCase(), name: m[2].replace(/^["']|["']$/g, '') }); continue; }
+    if ((m = cc.match(/^(?:play |use |set )?(?:handicaps? (?:at|to) )?(\d{1,3}) ?%(?: (?:of )?handicaps?| allowance)?$/i)) || (m = cc.match(/^(?:handicap )?allowance (?:is |to |at )?(\d{1,3}) ?%?$/i))) { out.push({ type: 'set_hcp_allowance', pct: Number(m[1]) }); continue; }
+    out.push({ type: 'unknown', text: raw });
+  }
+  return out;
+}
+// ---- turn raw actions into checked, ready-to-run steps (or problems) ----
+function bgAiResolve(actions, ctx) {
+  const steps = [];
+  const nm = (p) => p.name;
+  for (const a of (actions || [])) {
+    const st = { a: a, ok: false, text: '', why: '' };
+    try {
+      if (a.type === 'answer') { st.info = true; st.text = String(a.text || ''); steps.push(st); continue; }
+      if (a.type === 'ask') {
+        st.info = true;
+        if (a.q === 'unpaid') { const u = ctx.players.filter(p => !p.paid); st.text = u.length ? ('Not paid yet (' + u.length + '): ' + u.map(nm).join(', ')) : 'Everyone has paid ✓'; }
+        else if (a.q === 'hcps') { st.text = ctx.players.map(p => p.name + ' ' + (p.hcp == null ? '—' : p.hcp)).join(' · '); }
+        else {
+          const d = _bgAiDayOf(ctx, a.day); if (!d) { st.text = 'Which day?'; steps.push(st); continue; }
+          if (a.q === 'ungrouped') { const inG = new Set(); d.groups.forEach(g => g.members.forEach(m => inG.add(m.pid))); const u = ctx.players.filter(p => !inG.has(p.id)); st.text = 'Day ' + d.n + ': ' + (u.length ? ('not in a group — ' + u.map(nm).join(', ')) : 'everyone is in a group ✓'); }
+          else st.text = 'Day ' + d.n + (d.groups.length ? (': ' + d.groups.map(g => 'Group ' + g.n + (d.shotgun && g.hole ? ' (hole ' + g.hole + ')' : (g.time ? ' (' + g.time + ')' : '')) + ' — ' + g.members.map(m => m.name).join(', ')).join(' · ')) : ': no groups yet');
+        }
+        steps.push(st); continue;
+      }
+      if (a.type === 'unknown') { st.why = 'I didn’t understand "' + a.text + '". Try: swap Tyler and Kevin on day 2 · John subs for Matt · Kevin’s handicap is 12.4 · move group 3 to 8:40.'; steps.push(st); continue; }
+      const needDay = ['swap', 'move', 'sub', 'set_tee_time', 'set_shotgun_hole'].indexOf(a.type) >= 0;
+      const d = needDay ? _bgAiDayOf(ctx, a.day) : null;
+      if (needDay && !d) { st.why = (a.day ? ('There is no Day ' + a.day + '.') : 'Which day? Add "on day 2".'); steps.push(st); continue; }
+      const dtag = (d && ctx.numDays > 1) ? (' on Day ' + d.n) : '';
+      if (a.type === 'swap') {
+        const A = _bgAiFindPlayer(ctx, a.a), B = _bgAiFindPlayer(ctx, a.b);
+        if (A.err || B.err) { st.why = A.err || B.err; steps.push(st); continue; }
+        const ma = _bgAiMemberOn(d, A.p.id), mb = _bgAiMemberOn(d, B.p.id);
+        if (!ma || !mb) { st.why = (!ma ? A.p.name : B.p.name) + ' isn’t in a group' + dtag + '.'; steps.push(st); continue; }
+        if (ma.g.id === mb.g.id) { st.why = A.p.name + ' and ' + B.p.name + ' are already in the same group.'; steps.push(st); continue; }
+        if (ma.g.started || mb.g.started) { st.why = 'Group ' + (ma.g.started ? ma.g.n : mb.g.n) + dtag + ' has already started — change it on the scorecard.'; steps.push(st); continue; }
+        const mixed = /stroke|quota/i.test(d.format || '') || ctx.type !== 'team';
+        if (!mixed && ma.m.team && mb.m.team && ma.m.team !== mb.m.team) { st.why = 'Only teammates can swap on a team day (' + A.p.name + ' and ' + B.p.name + ' are on different teams).'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'swap', ma: ma, mb: mb };
+        st.text = 'Swap ' + A.p.name + ' (Group ' + ma.g.n + ') ↔ ' + B.p.name + ' (Group ' + mb.g.n + ')' + dtag;
+      } else if (a.type === 'move') {
+        const P = _bgAiFindPlayer(ctx, a.player); if (P.err) { st.why = P.err; steps.push(st); continue; }
+        const g = d.groups.find(x => x.n === Number(a.group)); if (!g) { st.why = 'There is no Group ' + a.group + dtag + '.'; steps.push(st); continue; }
+        const cur = _bgAiMemberOn(d, P.p.id);
+        if (cur && cur.g.id === g.id) { st.why = P.p.name + ' is already in Group ' + g.n + '.'; steps.push(st); continue; }
+        if (g.started || (cur && cur.g.started)) { st.why = 'Group ' + (g.started ? g.n : cur.g.n) + dtag + ' has already started — change it on the scorecard.'; steps.push(st); continue; }
+        if (g.members.length >= 5) { st.why = 'Group ' + g.n + ' is full (5 max).'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'move', cur: cur, g: g, p: P.p };
+        st.text = 'Move ' + P.p.name + (cur ? (' from Group ' + cur.g.n) : '') + ' to Group ' + g.n + dtag;
+      } else if (a.type === 'sub') {
+        { const _hm = String(a.out || '').match(/^(.*?)\s*\((-?\d+(?:\.\d)?)\)\s*$/); if (_hm) { a.out = _hm[1]; if (a.hcp == null || a.hcp === '') a.hcp = _hm[2]; } }
+        const O = _bgAiFindPlayer(ctx, a.out); if (O.err) { st.why = O.err; steps.push(st); continue; }
+        const mo = _bgAiMemberOn(d, O.p.id); if (!mo) { st.why = O.p.name + ' isn’t in a group' + dtag + '.'; steps.push(st); continue; }
+        if (mo.g.started) { st.why = 'Group ' + mo.g.n + dtag + ' has already started — change it on the scorecard.'; steps.push(st); continue; }
+        const I = _bgAiFindPlayer(ctx, a.in);
+        if (I.p && _bgAiMemberOn(d, I.p.id)) { st.why = I.p.name + ' is already playing' + dtag + ' — use swap instead.'; steps.push(st); continue; }
+        if (I.err && !I.missing) { st.why = I.err; steps.push(st); continue; }
+        const newName = I.p ? null : String(a.in || '').replace(/\s+/g, ' ').trim().split(' ').map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+        if (!I.p && (!newName || newName.split(' ').length < 2)) { st.why = '"' + a.in + '" isn’t in this event — give a first and last name to add them as a guest.'; steps.push(st); continue; }
+        const hcp = (a.hcp != null && a.hcp !== '') ? Number(a.hcp) : null;
+        st.ok = true; st.run = { kind: 'sub', mo: mo, inP: I.p || null, newName: newName, hcp: hcp, outP: O.p };
+        st.text = (I.p ? I.p.name : (newName + ' (new guest' + (hcp != null ? ', HCP ' + hcp : '') + ')')) + ' plays for ' + O.p.name + ' in Group ' + mo.g.n + dtag;
+      } else if (a.type === 'set_hcp') {
+        const P = _bgAiFindPlayer(ctx, a.player); if (P.err) { st.why = P.err; steps.push(st); continue; }
+        const h = Number(a.hcp); if (!isFinite(h) || h < -9 || h > 54) { st.why = 'Handicaps run −9 to 54.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'hcp', p: P.p, h: Math.round(h * 10) / 10 };
+        st.text = P.p.name + '’s handicap: ' + (P.p.hcp == null ? '—' : P.p.hcp) + ' → ' + (Math.round(h * 10) / 10);
+      } else if (a.type === 'set_tee_time') {
+        const g = d.groups.find(x => x.n === Number(a.group)); if (!g) { st.why = 'There is no Group ' + a.group + dtag + '.'; steps.push(st); continue; }
+        const tm = _bgAiClock(a.time); if (!tm) { st.why = 'I couldn’t read the time "' + a.time + '".'; steps.push(st); continue; }
+        if (g.started) { st.why = 'Group ' + g.n + dtag + ' has already started.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'time', g: g, tm: tm };
+        st.text = 'Group ' + g.n + dtag + ' tee time: ' + (g.time || '—') + ' → ' + tm;
+      } else if (a.type === 'set_shotgun_hole') {
+        const g = d.groups.find(x => x.n === Number(a.group)); if (!g) { st.why = 'There is no Group ' + a.group + dtag + '.'; steps.push(st); continue; }
+        const h = Number(a.hole); if (!(h >= 1 && h <= 18)) { st.why = 'Pick a hole from 1 to 18.'; steps.push(st); continue; }
+        if (g.started) { st.why = 'Group ' + g.n + dtag + ' has already started.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'hole', d: d, g: g, h: h };
+        st.text = 'Shotgun' + dtag + ': Group ' + g.n + ' starts on hole ' + h + (d.shotgun ? '' : ' (turns shotgun on for the day)');
+      } else if (a.type === 'add_player') {
+        const name = String(a.name || '').replace(/\s+/g, ' ').trim().split(' ').map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+        if (!name || name.split(' ').length < 2) { st.why = 'Give a first and last name to add a player.'; steps.push(st); continue; }
+        const ex = ctx.players.find(p => _bgAiNorm(p.name) === _bgAiNorm(name)); if (ex) { st.why = name + ' is already in this event.'; steps.push(st); continue; }
+        const hcp = (a.hcp != null && a.hcp !== '') ? Number(a.hcp) : null;
+        st.ok = true; st.run = { kind: 'add', name: name, hcp: hcp, team: a.team || null };
+        st.text = 'Add ' + name + (hcp != null ? (' (HCP ' + hcp + ')') : '') + (a.team ? (' to Team ' + a.team) : '');
+      } else if (a.type === 'set_team') {
+        const P = _bgAiFindPlayer(ctx, a.player); if (P.err) { st.why = P.err; steps.push(st); continue; }
+        if (ctx.type !== 'team') { st.why = 'This event has no teams.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'team', p: P.p, team: String(a.team || '').toUpperCase() };
+        st.text = 'Put ' + P.p.name + ' on ' + (st.run.team === 'A' ? ctx.teams.A : st.run.team === 'B' ? ctx.teams.B : ('Team ' + st.run.team));
+      } else if (a.type === 'set_paid') {
+        const P = _bgAiFindPlayer(ctx, a.player); if (P.err) { st.why = P.err; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'paid', p: P.p, paid: a.paid !== false };
+        st.text = 'Mark ' + P.p.name + (a.paid !== false ? ' as paid' : ' as not paid');
+      } else if (a.type === 'set_pool') {
+        const P = { skins: ['Tournament Skins', 'tourneySkins'], low_net: ['Low Net pool', 'lowNet'], girs: ['Most GIRs pool', 'girs'], putts: ['Fewest Putts pool', 'putts'], long_putt: ['Long Putt pool', 'tourneyLongPutt'] }[a.pool];
+        if (!P) { st.why = 'I can set Skins, Low Net, Most GIRs, Fewest Putts and Long Putt here — use Prize pools for the rest.'; steps.push(st); continue; }
+        if (ctx.days.some(d => d.groups.some(g => g.started))) { st.why = 'The event has started — change prize pools on the Prize pools screen.'; steps.push(st); continue; }
+        const u = (a.units != null && a.units !== '') ? Number(a.units) : null;
+        if (a.on !== false && u != null && !(u >= 0 && u <= 10000)) { st.why = 'That entry doesn’t look right.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'pool', pool: a.pool, key: P[1], on: a.on !== false, units: u };
+        st.text = (a.on !== false ? ('Turn on ' + P[0] + (u != null ? (' — ' + u + ' units a player') : '')) : ('Turn off ' + P[0]));
+      } else if (a.type === 'set_flights') {
+        const n = Math.round(Number(a.n));
+        if (!(n >= 1 && n <= 4)) { st.why = 'Flights run 1 to 4.'; steps.push(st); continue; }
+        if (ctx.days.some(d => d.groups.some(g => g.started))) { st.why = 'The event has started — change flights on the Flights screen.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'flights', n: n, per: (a.per_flight == null ? null : !!a.per_flight) };
+        st.text = n === 1 ? 'One flight — everyone together' : ('Split the field into ' + n + ' flights by handicap' + (a.per_flight === false ? ' (prize pools stay whole field)' : ''));
+      } else if (a.type === 'set_scorekeeper') {
+        const d2 = _bgAiDayOf(ctx, a.day); if (!d2) { st.why = 'Which day? Add "on day 2".'; steps.push(st); continue; }
+        const P = _bgAiFindPlayer(ctx, a.player); if (P.err) { st.why = P.err; steps.push(st); continue; }
+        const g = d2.groups.find(x => x.n === Number(a.group)); if (!g) { st.why = 'There is no Group ' + a.group + (ctx.numDays > 1 ? (' on Day ' + d2.n) : '') + '.'; steps.push(st); continue; }
+        if (g.started) { st.why = 'Group ' + g.n + ' has already started.'; steps.push(st); continue; }
+        if (!g.members.some(m => m.pid === P.p.id)) { st.why = P.p.name + ' isn’t in Group ' + g.n + ' — move them there first.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'captain', g: g, p: P.p };
+        st.text = P.p.name + ' keeps score for Group ' + g.n + (ctx.numDays > 1 ? (' on Day ' + d2.n) : '');
+      } else if (a.type === 'set_date') {
+        const d2 = ctx.days.find(x => x.n === Number(a.day)) || (ctx.days.length === 1 ? ctx.days[0] : null); if (!d2) { st.why = 'Which day?'; steps.push(st); continue; }
+        const dt = _bgAiDate(a.date); if (!dt) { st.why = 'I couldn’t read the date "' + a.date + '".'; steps.push(st); continue; }
+        if (d2.groups.some(g => g.started)) { st.why = 'Day ' + d2.n + ' has already started.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'date', d: d2, date: dt };
+        st.text = (ctx.numDays > 1 ? ('Day ' + d2.n + ' date: ') : 'Date: ') + (d2.date || '—') + ' → ' + dt;
+      } else if (a.type === 'rename_event') {
+        const nmv = String(a.name || '').trim().slice(0, 80); if (!nmv) { st.why = 'What should it be called?'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'rename', name: nmv }; st.text = 'Rename the event: ' + ctx.name + ' → ' + nmv;
+      } else if (a.type === 'set_team_name') {
+        const k = String(a.team || '').toUpperCase(); const nmv = String(a.name || '').trim().slice(0, 40);
+        if (ctx.type !== 'team' || (k !== 'A' && k !== 'B')) { st.why = 'I can rename Team A or Team B on a team event.'; steps.push(st); continue; }
+        if (!nmv) { st.why = 'What should the team be called?'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'teamname', k: k, name: nmv }; st.text = 'Team ' + k + ': ' + ctx.teams[k] + ' → ' + nmv;
+      } else if (a.type === 'set_hcp_allowance') {
+        const pct = Math.round(Number(a.pct)); if (!(pct >= 0 && pct <= 100)) { st.why = 'The allowance runs 0–100%.'; steps.push(st); continue; }
+        if (ctx.days.some(d => d.groups.some(g => g.started))) { st.why = 'The event has started — change the handicap rules on their screen.'; steps.push(st); continue; }
+        st.ok = true; st.run = { kind: 'allow', pct: pct }; st.text = 'Handicap allowance for every day: ' + pct + '%';
+      } else { st.why = 'I can’t do that one yet.'; }
+    } catch (e) { st.ok = false; st.why = 'Something went wrong reading that.'; }
+    steps.push(st);
+  }
+  return steps;
+}
+// ---- run the confirmed steps ----
+async function bgAiApply(t, steps) {
+  const done = [], failed = [];
+  const settingsPatch = [];   // settings changes batched into one write
+  for (const st of steps) {
+    if (!st.ok || !st.run) continue;
+    const r = st.run; let ok = false;
+    try {
+      if (r.kind === 'swap') {
+        ok = _bgWrote(await supa.from('tournament_group_members').update({ group_id: r.mb.g.id, slot: r.mb.m.slot || null }).eq('id', r.ma.m.mid).select('id'));
+        if (ok) {
+          ok = _bgWrote(await supa.from('tournament_group_members').update({ group_id: r.ma.g.id, slot: r.ma.m.slot || null }).eq('id', r.mb.m.mid).select('id'));
+          if (!ok) { try { await supa.from('tournament_group_members').update({ group_id: r.ma.g.id, slot: r.ma.m.slot || null }).eq('id', r.ma.m.mid); } catch (e) {} }
+        }
+      } else if (r.kind === 'move') {
+        const slot = Math.max(0, ...r.g.members.map(m => m.slot || 0)) + 1;
+        if (r.cur) ok = _bgWrote(await supa.from('tournament_group_members').update({ group_id: r.g.id, slot: slot }).eq('id', r.cur.m.mid).select('id'));
+        else ok = await t2AddGroupMember(r.g.id, r.p.id, r.p.team || null, slot);
+      } else if (r.kind === 'sub') {
+        let inP = r.inP;
+        if (!inP) {
+          const row = await t2AddPlayer(t.id, { displayName: r.newName, handicap: r.hcp, team: r.outP.team || null });
+          if (row && row.id) inP = { id: row.id, name: r.newName };
+        } else if (r.hcp != null) { try { await t2SetPlayerHcp(inP.id, r.hcp); } catch (e) {} }
+        if (inP && inP.id) ok = _bgWrote(await supa.from('tournament_group_members').update({ tournament_player_id: inP.id }).eq('id', r.mo.m.mid).select('id'));
+      } else if (r.kind === 'hcp') {
+        ok = await t2SetPlayerHcp(r.p.id, r.h);
+      } else if (r.kind === 'time') {
+        ok = await t2SetGroupTeeTime(r.g.id, r.tm);
+      } else if (r.kind === 'hole') {
+        settingsPatch.push(s => { s.shotgun = s.shotgun || {}; const k = String(r.d.n); s.shotgun[k] = s.shotgun[k] || { on: true, holes: {} }; s.shotgun[k].on = true; s.shotgun[k].holes = s.shotgun[k].holes || {}; s.shotgun[k].holes[r.g.id] = r.h; });
+        ok = true;
+      } else if (r.kind === 'add') {
+        const row = await t2AddPlayer(t.id, { displayName: r.name, handicap: r.hcp, team: r.team });
+        ok = !!(row && row.id);
+      } else if (r.kind === 'team') {
+        ok = await t2SetPlayerTeam(r.p.id, r.team);
+      } else if (r.kind === 'pool') {
+        settingsPatch.push(s => {
+          if (r.key === 'tourneySkins') { s.tourneySkins = Object.assign({ mode: 'player', hcpPct: 100 }, s.tourneySkins || {}, { on: r.on }); if (r.on && r.units != null) s.tourneySkins.value = r.units; }
+          else if (r.key === 'tourneyLongPutt') { s.tourneyLongPutt = Object.assign({}, s.tourneyLongPutt || {}, { on: r.on }); if (r.on && r.units != null) s.tourneyLongPutt.value = r.units; }
+          else { s.tourneySidePots = s.tourneySidePots || {}; s.tourneySidePots[r.key] = Object.assign({}, s.tourneySidePots[r.key] || {}, { on: r.on }); if (r.on && r.units != null) s.tourneySidePots[r.key].value = r.units; }
+        });
+        ok = true;
+      } else if (r.kind === 'flights') {
+        let raw = []; try { raw = (await t2GetPlayers(t.id)).filter(p => p && !t2IsOpenSlot(p)); } catch (e) {}
+        const assign = {}, names = {};
+        if (r.n > 1) { const a2 = bgFlightsAutoAssign(raw, r.n); raw.forEach(p => { if (a2[p.id]) { assign[p.id] = a2[p.id]; names[normalizeNameSegment(String(p.display_name || ''))] = a2[p.id]; } }); }
+        settingsPatch.push(s => { const prevAll = !!(s.flights && s.flights.per && (s.flights.per.all || Object.keys(s.flights.per).some(k => s.flights.per[k]))); s.flights = { n: r.n, assign: assign, names: names, per: { all: r.per == null ? (r.n > 1 ? (prevAll || true) : false) : r.per }, at: new Date().toISOString() }; });
+        ok = true;
+      } else if (r.kind === 'captain') {
+        ok = await t2SetGroupCaptain(r.g.id, r.p.name);
+      } else if (r.kind === 'date') {
+        let ds = []; try { ds = await t2GetDays(t.id); } catch (e) {}
+        const arr = (ds || []).map(x => ({ dayNumber: x.day_number, format: x.format || 'stroke', playDate: x.day_number === r.d.n ? r.date : (x.play_date || null) }));
+        const e2 = await t2SetDays(t.id, arr); ok = !e2;
+      } else if (r.kind === 'rename') {
+        ok = await t2Update(t.id, { name: r.name });
+      } else if (r.kind === 'teamname') {
+        ok = await t2Update(t.id, r.k === 'A' ? { team_a_name: r.name } : { team_b_name: r.name });
+      } else if (r.kind === 'allow') {
+        settingsPatch.push(s => { s.hcpRules = Object.assign({ basis: 'full', pct: 100, noPar3Strokes: false, noHandicaps: false }, s.hcpRules || {}, { pct: r.pct }); });
+        ok = true;
+      } else if (r.kind === 'paid') {
+        settingsPatch.push(s => { s.paid = s.paid || {}; if (r.paid) s.paid[r.p.id] = true; else delete s.paid[r.p.id]; });
+        ok = true;
+      }
+    } catch (e) { ok = false; }
+    (ok ? done : failed).push(st.text);
+  }
+  const log = { at: new Date().toISOString(), by: (typeof _authUser !== 'undefined' && _authUser && _authUser.id) || null, text: (_bgAiState && _bgAiState.text) || '', did: done, failed: failed, via: (_bgAiState && _bgAiState.via) || 'parser' };
+  const okS = await t2MergeSettings(t.id, s => { settingsPatch.forEach(f => { try { f(s); } catch (e) {} }); s.aiLog = (Array.isArray(s.aiLog) ? s.aiLog : []).concat([log]).slice(-50); });
+  if (!okS && settingsPatch.length) { failed.push('Saving the event settings'); }
+  try { const f = await t2Get(t.id); if (f) bgFlightsRegister(f); } catch (e) {}
+  try { if (typeof _t2BoardMoneyCache !== 'undefined') _t2BoardMoneyCache.tid = null; } catch (e) {}
+  return { done: done, failed: failed };
+}
+// ---- ask the server (Claude) first; fall back to the parser ----
+async function _bgAiPlan(text, ctx) {
+  if (_bgAiServerOk !== false) {
+    try {
+      if (!supaReady) await initSupabase();
+      const slim = { name: ctx.name, type: ctx.type, numDays: ctx.numDays, teams: ctx.teams,
+        players: ctx.players.map(p => ({ name: p.name, hcp: p.hcp, team: p.team, paid: p.paid })),
+        days: ctx.days.map(d => ({ n: d.n, date: d.date, course: d.course, format: d.format, shotgun: d.shotgun, groups: d.groups.map(g => ({ n: g.n, time: g.time, hole: g.hole, started: g.started, players: g.members.map(m => m.name) })) })) };
+      const r = await Promise.race([
+        supa.functions.invoke('ai-commissioner', { body: { text: text, ctx: slim } }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000))
+      ]);
+      const data = r && r.data;
+      if (data && Array.isArray(data.actions)) { _bgAiServerOk = true; return { actions: data.actions, via: 'ai' }; }
+      if (data && data.error === 'no_key') _bgAiServerOk = false;
+    } catch (e) { /* fall through to the parser */ }
+  }
+  return { actions: bgAiParse(text, ctx), via: 'parser' };
+}
+// ---- the sheet ----
+async function openT2AiCommissioner(t) {
+  try {
+    t = t || _t2Current; if (!t || !t.id) return;
+    if (typeof t2CanManage === 'function' && !t2CanManage(t)) { showToast('Only the commissioner can use this'); return; }
+    try { const fresh = await t2Get(t.id); if (fresh) t = fresh; } catch (e) {}
+    const old = document.getElementById('t2-ai-ov'); if (old) old.remove();
+    const ov = document.createElement('div');
+    ov.id = 't2-ai-ov'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100070';
+    _bgAiState = { t: t, text: '', steps: null, busy: false, via: '', result: null };
+    const esc = t2esc;
+    const examples = ['Swap Tyler and Kevin on day 2', 'John Smith subs for Matt', 'Kevin’s handicap is 12.4', 'Move group 3 to 8:40', 'Skins 5 units', '2 flights', 'Who hasn’t paid?', 'Who isn’t in a group?'];
+    const paint = () => {
+      const S = _bgAiState; if (!S) return;
+      let h = '<div class="modal" style="max-width:480px;width:94%;max-height:88vh;display:flex;flex-direction:column">';
+      h += '<h2 style="margin:0 0 4px;font-size:19px"><span aria-hidden="true">🤖</span> <span>Ask the commissioner</span></h2>';
+      h += '<p class="help-text" style="margin:0 0 10px">Say what you want changed — swaps, subs, handicaps, tee times. You’ll see exactly what will change before anything does. ' + (_bgAiSpeech() ? 'Tap 🎤 Talk to say it.' : 'Tap the 🎤 on your keyboard to say it.') + '</p>';
+      h += '<div style="flex:1;overflow-y:auto">';
+      h += '<textarea id="t2ai-text" rows="3" data-no-draft style="width:100%;box-sizing:border-box;font-size:16px" placeholder="' + esc(bgT('e.g. Swap Tyler and Kevin on day 2')) + '">' + esc(S.text) + '</textarea>';
+      if (_bgAiSpeech()) h += '<button type="button" class="bg-btn bg-btn--full full" id="t2ai-mic" style="margin-top:8px"' + (S.listening ? ' aria-pressed="true"' : '') + '>' + (S.listening ? '<span>🔴 Listening… tap to stop</span>' : '<span>🎤 Talk</span>') + '</button>';
+      if (!S.steps && !S.result) {
+        h += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">' + examples.map(x => '<button type="button" class="bg-btn bg-btn--chip bg-btn--sm" data-aiex="' + esc(x) + '">' + esc(x) + '</button>').join('') + '</div>';
+      }
+      if (S.steps) {
+        const acts = S.steps.filter(x => x.ok), infos = S.steps.filter(x => x.info), bad = S.steps.filter(x => !x.ok && !x.info);
+        h += '<div style="margin-top:12px">';
+        infos.forEach(x => { h += '<div style="padding:10px 12px;border-radius:10px;background:var(--surface-2);margin-bottom:8px;line-height:1.45" data-noi18n>' + esc(x.text) + '</div>'; });
+        if (acts.length) {
+          h += '<div class="small-text" style="font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin:4px 0 6px">Will change</div>';
+          acts.forEach(x => { h += '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--border)"><span style="flex:0 0 auto;color:var(--bg-success);font-weight:900">✓</span><span data-noi18n>' + esc(x.text) + '</span></div>'; });
+        }
+        bad.forEach(x => { h += '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--border)"><span style="flex:0 0 auto;color:#d97706;font-weight:900">!</span><span data-noi18n>' + esc(x.why) + '</span></div>'; });
+        if (S.via) h += '<div class="small-text" style="color:var(--text-muted);margin-top:8px">' + (S.via === 'ai' ? 'Understood by AI' : 'Understood by the built-in reader') + '</div>';
+        h += '</div>';
+      }
+      if (S.result) {
+        h += '<div style="margin-top:12px">';
+        S.result.done.forEach(x => { h += '<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)"><span style="color:var(--bg-success);font-weight:900">✓</span><span data-noi18n>' + esc(x) + '</span></div>'; });
+        S.result.failed.forEach(x => { h += '<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)"><span style="color:#dc2626;font-weight:900">✕</span><span><span>Didn’t save:</span> <span data-noi18n>' + esc(x) + '</span></span></div>'; });
+        h += '</div>';
+      }
+      h += '</div>';
+      const nAct = S.steps ? S.steps.filter(x => x.ok).length : 0;
+      h += '<div class="actions" style="margin-top:12px;gap:8px">';
+      if (S.steps && nAct) {
+        h += '<button type="button" class="bg-btn bg-btn--ghost" id="t2ai-cancel" style="flex:1">Cancel</button>';
+        h += '<button type="button" class="bg-btn bg-btn--primary primary" id="t2ai-go" style="flex:1.5"' + (S.busy ? ' disabled' : '') + '>' + (S.busy ? 'Saving…' : (nAct === 1 ? 'Confirm 1 change' : ('Confirm ' + nAct + ' changes'))) + '</button>';
+      } else {
+        h += '<button type="button" class="bg-btn bg-btn--ghost" id="t2ai-close" style="flex:1">Close</button>';
+        h += '<button type="button" class="bg-btn bg-btn--primary primary" id="t2ai-ask" style="flex:1.5"' + (S.busy ? ' disabled' : '') + '>' + (S.busy ? 'Thinking…' : (S.steps || S.result ? 'Ask again' : 'Ask')) + '</button>';
+      }
+      h += '</div></div>';
+      ov.innerHTML = h;
+      const ta = ov.querySelector('#t2ai-text');
+      if (ta) ta.oninput = () => { S.text = ta.value; };
+      const mic = ov.querySelector('#t2ai-mic');
+      if (mic) mic.onclick = () => {
+        if (S.listening && S.rec) { try { S.rec.stop(); } catch (e) {} return; }
+        const SR = _bgAiSpeech(); if (!SR) return;
+        try {
+          const rec = new SR(); S.rec = rec;
+          rec.lang = (function () { try { const L = (typeof BG_I18N !== 'undefined' && BG_I18N.lang) || (navigator.language || 'en-US'); return /^es/.test(L) ? 'es-US' : /^ko/.test(L) ? 'ko-KR' : /^ja/.test(L) ? 'ja-JP' : /^zh/.test(L) ? 'zh-CN' : (navigator.language || 'en-US'); } catch (e) { return 'en-US'; } })();
+          rec.interimResults = true; rec.continuous = false;
+          const base = S.text ? (S.text.replace(/\s+$/, '') + ' ') : '';
+          rec.onresult = (ev) => { let tx = ''; for (let i = 0; i < ev.results.length; i++) tx += ev.results[i][0].transcript; S.text = base + tx; const x = ov.querySelector('#t2ai-text'); if (x) x.value = S.text; };
+          rec.onerror = (ev) => { S.listening = false; paint(); if (ev && /not-allowed|service-not-allowed/.test(ev.error || '')) showToast('Allow the microphone to talk — or use the 🎤 on your keyboard'); };
+          rec.onend = () => { S.listening = false; S.rec = null; paint(); };
+          S.listening = true; paint(); rec.start();
+        } catch (e) { S.listening = false; paint(); showToast('Voice isn’t available here — use the 🎤 on your keyboard'); }
+      };
+      ov.querySelectorAll('[data-aiex]').forEach(b => b.onclick = () => { S.text = b.dataset.aiex; paint(); const x = ov.querySelector('#t2ai-text'); if (x) x.focus(); });
+      const cl = ov.querySelector('#t2ai-close'); if (cl) cl.onclick = () => { ov.remove(); _bgAiState = null; try { if (document.getElementById('t2-settings-hub')) renderT2SettingsHub(_t2Current || t); } catch (e) {} };
+      const ca = ov.querySelector('#t2ai-cancel'); if (ca) ca.onclick = () => { S.steps = null; paint(); };
+      const ask = ov.querySelector('#t2ai-ask');
+      if (ask) ask.onclick = async () => {
+        S.text = (ov.querySelector('#t2ai-text') || {}).value || S.text;
+        if (!String(S.text || '').trim()) { showToast('Type what you want changed'); return; }
+        S.busy = true; S.result = null; S.steps = null; paint();
+        try {
+          const ctx = await _bgAiContext(S.t);
+          const plan = await _bgAiPlan(S.text, ctx);
+          S.via = plan.via; S.steps = bgAiResolve(plan.actions, ctx);
+          if (!S.steps.length) S.steps = [{ ok: false, why: 'I didn’t catch a change in that. Try one of the examples.' }];
+        } catch (e) { S.steps = [{ ok: false, why: 'Couldn’t read the event — check your connection.' }]; }
+        S.busy = false; paint();
+      };
+      const go = ov.querySelector('#t2ai-go');
+      if (go) go.onclick = async () => {
+        if (S.busy) return;
+        S.busy = true; paint();
+        let res = { done: [], failed: [] };
+        try { res = await bgAiApply(S.t, S.steps); } catch (e) { res.failed.push('Something went wrong'); }
+        S.busy = false; S.steps = null; S.result = res; S.text = '';
+        try { const fresh = await t2Get(S.t.id); if (fresh) { S.t = fresh; if (_t2Current && _t2Current.id === fresh.id) _t2Current = fresh; } } catch (e) {}
+        showToast(res.failed.length ? 'Some changes didn’t save' : (res.done.length === 1 ? 'Done ✓' : (res.done.length + ' changes done ✓')));
+        paint();
+      };
+    };
+    ov.onclick = (e) => { if (e.target === ov) { ov.remove(); _bgAiState = null; } };
+    document.body.appendChild(ov);
+    paint();
+    setTimeout(() => { try { const x = ov.querySelector('#t2ai-text'); if (x) x.focus(); } catch (e) {} }, 80);
+  } catch (e) { console.warn('openT2AiCommissioner', e); }
 }
 
 /* ============================================================
