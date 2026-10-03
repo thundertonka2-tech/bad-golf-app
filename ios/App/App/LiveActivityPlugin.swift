@@ -4,7 +4,7 @@
 //                                          playsLikeYds, suggestedClub, fromTeeYds, toGreenYds })
 //   Capacitor.Plugins.LiveActivity.update({ hole, par, toPar, playsLikeYds,
 //                                           suggestedClub, fromTeeYds, toGreenYds })
-//   Capacitor.Plugins.LiveActivity.end()
+//   Capacitor.Plugins.LiveActivity.end({ dismissAt? })   // epoch ms; omit = remove now
 // Silently no-ops on iOS < 16.1 (ActivityKit unavailable) and when the user has
 // Live Activities disabled in Settings — the JS side is written to tolerate that.
 // Registered explicitly in MainViewController.capacitorDidLoad (see
@@ -87,12 +87,25 @@ public class LiveActivityPlugin: CAPPlugin {
         call.resolve(["ok": false])
     }
 
+    // v1872: optional `dismissAt` (epoch ms). The web app passes it when the phone locks
+    // mid-round: the card stays on the Lock Screen until then and iOS removes it on its
+    // own (1 hr after the player's last score / GPS move). Without it, or when the time
+    // has already passed, the card is removed immediately (round finished/deleted/left).
+    // iOS caps an ended card at 4 hours on the Lock Screen regardless.
     @objc func end(_ call: CAPPluginCall) {
         #if canImport(ActivityKit)
         if #available(iOS 16.1, *) {
+            // `let`, not `var`: a captured var inside Task {} is a compile error.
+            let policy: ActivityUIDismissalPolicy = {
+                if let ms = call.getDouble("dismissAt") {
+                    let when = Date(timeIntervalSince1970: ms / 1000.0)
+                    if when.timeIntervalSinceNow > 5 { return .after(when) }
+                }
+                return .immediate
+            }()
             Task {
                 for activity in Activity<BadGolfRoundAttributes>.activities {
-                    await activity.end(dismissalPolicy: .immediate)
+                    await activity.end(dismissalPolicy: policy)
                 }
                 call.resolve(["ok": true])
             }
