@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1876-->
+<!--BGVER=v2026.11.1877-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11918,7 +11918,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1876';
+const BG_BUILD = 'v2026.11.1877';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -22026,6 +22026,7 @@ function _bgSaveInFlightDone(code) { try { if (code && _bgSaveInFlight[code] > 0
 function _bgScheduleSave(g) {
   try {
     if (!g || !g.code) return;
+    if (bgIsThrowawayRound(g)) return;   // v1877
     const code = g.code, p = _bgPendingSave[code];
     if (p) clearTimeout(p.t);
     _bgPendingSave[code] = { g: g, t: setTimeout(function () { try { flushPendingSave(code); } catch (e) {} }, 400) };
@@ -22045,7 +22046,25 @@ try {
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flushAllPendingSaves(); });
   window.addEventListener('pagehide', flushAllPendingSaves);
 } catch (e) {}
+/* v1877 (Kevin: "When I fix courses in admin mode ... the app is putting them in my active
+   Rounds"). The admin mapper, fairway-center pass, green tracer and Course Preview all drive
+   the GPS map with a THROWAWAY in-memory round (code MAP-/FWC-/GRN-/PREVIEW-, _mapOnly).
+   Moving between holes ran the normal hole-complete save, which wrote that throwaway to the
+   cloud, made it the last-opened round and put it on the Rounds list as SCHEDULED. Mapping
+   must never create a round: these never save, never list, and old copies are purged. */
+function bgIsThrowawayCode(code) { try { return /^(MAP|FWC|GRN|PREVIEW)-/.test(String(code || '')); } catch (e) { return false; } }
+function bgIsThrowawayRound(g) { try { return !!(g && (g._mapOnly || g._preview || bgIsThrowawayCode(g.code))); } catch (e) { return false; } }
+async function bgPurgeThrowawayRounds() {
+  try {
+    try { Object.keys(localStorage).forEach(function (k) { if (/^game:(MAP|FWC|GRN|PREVIEW)-/.test(k)) { try { localStorage.removeItem(k); } catch (e) {} } }); } catch (e) {}
+    try { const _l = localStorage.getItem(KEY_LAST); if (_l && bgIsThrowawayCode(_l)) localStorage.removeItem(KEY_LAST); } catch (e) {}
+    try { await _bgRecentMutate(function (list) { return list.some(function (r) { return r && bgIsThrowawayCode(r.code); }) ? list.filter(function (r) { return !(r && bgIsThrowawayCode(r.code)); }) : null; }); } catch (e) {}
+    try { if (typeof supa !== 'undefined' && supa && _authUser && _authUser.id) await supa.from('games').delete().eq('owner_uid', _authUser.id).or('code.like.MAP-%,code.like.FWC-%,code.like.GRN-%,code.like.PREVIEW-%'); } catch (e) {}
+  } catch (e) {}
+}
+try { setTimeout(function () { try { bgPurgeThrowawayRounds(); } catch (e) {} }, 9000); } catch (e) {}
 async function saveGame(game, opts) {
+  if (bgIsThrowawayRound(game)) return true;   // v1877: a mapping / preview session is never a round
   // v1802: a pending debounced save for this code is superseded by this one (same object), or
   // landed first when it holds a different object, so writes stay in order.
   try {
@@ -22139,6 +22158,7 @@ async function _bgRecentMutate(mutate) {
   return p;
 }
 async function addToRecent(game) {
+  if (bgIsThrowawayRound(game)) return;   // v1877: never list a mapping / preview session
   // Per-player gross for the Rounds list description (e.g. "Tyler 79 · Steve 82").
   // First names only so it fits a mobile row; players with no holes entered yet
   // are skipped. Falls back to the names string for older records without this.
@@ -22180,6 +22200,7 @@ async function getRecent() {
   let arr = [];
   try { arr = JSON.parse(v); } catch (e) { return []; }
   if (!Array.isArray(arr)) return [];
+  try { arr = arr.filter(r => !(r && bgIsThrowawayCode(r.code))); } catch (e) {}   // v1877: old mapping sessions
   // v961: drop rounds that were DELETED (shared tombstone) but physically linger in the
   // stored blob — a stale cloud write can leave a deleted round in the list, so a round
   // deleted on ANY device never shows on any. Fail-safe: on a failed tombstone read we
@@ -37415,7 +37436,7 @@ async function applyDefaultTees() {
       if (!first) return;
       const nm = combineName(first, li ? li.value.trim() : '');
       // v1183: a tee already saved BY NAME (restored config / live edit) beats any default.
-      try { const _saved = nm && state.playerTees && state.playerTees[nm]; if (_saved && tees.find(t => t.label === _saved)) { sel.value = _saved; try { shadeTeeSelect(sel, tees); } catch (e) {} autofillHcpForRow(row); return; } } catch (e) {}
+      try { const _saved = nm && state.playerTees && state.playerTees[nm]; if (_saved && tees.find(t => t.label === _saved)) { sel.value = _saved; try { shadeTeeSelect(sel, tees); } catch (e) {} autofillHcpForRow(row); try { bgRefreshPlayerSummary(row); } catch (e) {} return; } } catch (e) {}
       let pick = null;
       const fN = normalizeNameSegment(first);
       const lN = normalizeNameSegment(li ? li.value : '');
@@ -37433,8 +37454,13 @@ async function applyDefaultTees() {
       if (!pick && blue) pick = blue.label;
       if (!pick) return;
       sel.value = pick;
+      // v1877 (Tyler: "Why is the tee box not turning blue for Chris?"): a default pick set the
+      // value only - no tee color on the box and no "· Blue" on the row's summary line, so it
+      // looked unpicked. Paint it exactly like a hand pick.
+      try { shadeTeeSelect(sel, tees); } catch (e) {}
       if (nm) state.playerTees[nm] = pick;
       autofillHcpForRow(row); // tee changes the course handicap
+      try { bgRefreshPlayerSummary(row); } catch (e) {}
     });
   } catch (e) { /* non-fatal — user can always pick by hand */ }
 }
@@ -48454,7 +48480,7 @@ async function handleScoreChange(pid, action) {
   // v1802 PERF: local copy now, cloud save coalesced (see _bgScheduleSave above saveGame).
   // updatedAt is stamped here so the poll/realtime newest-wins checks see this tap as newest.
   g.updatedAt = Date.now();
-  try { bgLsSet('game:' + g.code, JSON.stringify(g)); } catch (e) {}
+  if (!bgIsThrowawayRound(g)) { try { bgLsSet('game:' + g.code, JSON.stringify(g)); } catch (e) {} }   // v1877
   _bgScheduleSave(g);
 
   // Show auto-advance buttons if all scored on this hole
@@ -48694,6 +48720,7 @@ function maybeAnnounceGroupHole(leaving) {
         if (_pos(state.currentHole) < _pos(_cur)) _bgSkipMarker = true;
       }
     } catch (e) { _bgSkipMarker = false; }
+    if (g.reopenedAt) _bgSkipMarker = true;   // v1877: backfilling a reopened round is not the group moving
     if (!_bgSkipMarker) g.groupHole = { hole: state.currentHole, at: Date.now() };
     try { saveGame(g); } catch (e) {}
   } catch (e) { console.warn('group-hole announce failed:', e); }
@@ -48709,6 +48736,7 @@ var _lastGroupHoleAt = 0;
 // Now the target is held and applied on the next tick (realtime event, the 12s poll, or
 // the focusout hook below) instead of being thrown away.
 var _pendingGroupHole = null;
+var BG_SCORE_TAP_GRACE_MS = 8000;   // v1877: a group move waits this long after the last score-card tap
 function _bgFieldFocused() {
   try { const f = document.activeElement; return !!(f && (f.tagName === 'INPUT' || f.tagName === 'SELECT' || f.tagName === 'TEXTAREA')); } catch (e) { return false; }
 }
@@ -48729,6 +48757,14 @@ function reactToGroupHole() {
       if (Date.now() - a.at <= 90000) _pendingGroupHole = a.hole;
     }
     if (!_pendingGroupHole) return;
+    /* v1877 (Tyler 10/3: went back into the morning round to add players and games; "the screen
+       would jump holes on me when I was trying to enter in score for Chris"). Another phone in
+       the group broadcast hole 18 and this phone followed the instant hole 3 had everyone's
+       score - while Tyler was still entering Chris's putts. Two rules:
+         - a REOPENED round is a correction session, not live play: never follow the group;
+         - someone tapping the score card right now keeps the move pending until they stop. */
+    if (g.reopenedAt && !state.viewOnlyMode) { _pendingGroupHole = null; return; }
+    try { if (!state.viewOnlyMode && (Date.now() - (window._bgLastScoreTapAt || 0)) < BG_SCORE_TAP_GRACE_MS) { clearTimeout(window._bgGroupHoleRetry); window._bgGroupHoleRetry = setTimeout(function () { try { reactToGroupHole(); } catch (e) {} }, BG_SCORE_TAP_GRACE_MS + 300); return; } } catch (e) {}
     const target = _pendingGroupHole;
     if (!target || target === state.currentHole) { _pendingGroupHole = null; return; } // already here (incl. the scorer)
     // NEVER pull a player BACKWARD. The group broadcast should only ever nudge an
@@ -115596,6 +115632,9 @@ async function init() {
   try { document.querySelectorAll('button[data-aa]').forEach(b => { b.onclick = () => bgSetAutoAdvanceMode(b.dataset.aa); }); } catch (e) {}
   try { bgSimBoot(); } catch (e) {}   // v1832 Sim Games
   try { const _sp = document.getElementById('panel-score'); if (_sp) _sp.addEventListener('pointerdown', bgAutoAdvanceTouch, true); } catch (e) {}
+  // v1877: when the player last touched a score card (Score tab or the GPS scorecard sheet) -
+  // reactToGroupHole holds a group move while they are mid-entry.
+  try { ['panel-score', 'gps-scorecard-panel'].forEach(function (id) { const _el = document.getElementById(id); if (_el) _el.addEventListener('pointerdown', function () { window._bgLastScoreTapAt = Date.now(); }, true); }); } catch (e) {}
   try { bgPaintAutoAdvanceMode(); } catch (e) {}
 
   // v1189: btn-refresh removed from the Score tab (Tyler) — handler deleted with
