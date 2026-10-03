@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1882-->
+<!--BGVER=v2026.11.1883-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11920,7 +11920,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1882';
+const BG_BUILD = 'v2026.11.1883';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -12863,6 +12863,68 @@ function currentUserEmail() { return (_authUser && _authUser.email) ? _authUser.
 // account and reuse a result for 30 s; a different account, a sign-out ('guest') or an older
 // result reads again, so the admin tools' re-checks still see a promotion.
 let _bgRoleP = null, _bgRoleUid = null, _bgRoleAt = 0;
+/* v1883 (Tyler: "I turned off auto advance in my profile but when I logged back in it went back
+   to on. Same for track shots, it should keep my setting always not lose them.") The GPS /
+   scoring switches in Settings were device-only (localStorage), so a reinstall, a cleared
+   browser, a new phone or the web app all started from the defaults. They now ride the
+   account: profiles.app_prefs {key: value, _at}. Any change saves up (debounced 1.5 s);
+   every sign-in pulls them down and repaints Settings. Language already syncs (profiles.lang). */
+const BG_SYNC_PREFS = ['golf:auto-advance', 'bg_track_shot', 'bg_gps_arcs', 'bg_gps_disp_yds', 'bg_units',
+  'bg_watch_playsas', 'bg_start_alert', 'bg_finish_alert', 'bg_popups_enabled', 'bg_drive_yardage',
+  'bg_ca_enabled', 'golf:gps-show-hazards', 'bg_green_view', 'bg_green_slope', 'bg_green_pin'];
+var _bgPrefsApplying = false, _bgPrefsT = null, _bgPrefsPulledFor = null;
+try {
+  (function () {
+    var _set = Storage.prototype.setItem, _rm = Storage.prototype.removeItem;
+    Storage.prototype.setItem = function (k, v) {
+      _set.call(this, k, v);
+      try { if (this === window.localStorage && !_bgPrefsApplying && BG_SYNC_PREFS.indexOf(k) >= 0) bgPrefsSchedulePush(); } catch (e) {}
+    };
+    Storage.prototype.removeItem = function (k) {
+      _rm.call(this, k);
+      try { if (this === window.localStorage && !_bgPrefsApplying && BG_SYNC_PREFS.indexOf(k) >= 0) bgPrefsSchedulePush(); } catch (e) {}
+    };
+  })();
+} catch (e) {}
+function bgPrefsSnapshot() { const o = {}; BG_SYNC_PREFS.forEach(function (k) { try { const v = localStorage.getItem(k); if (v != null) o[k] = v; } catch (e) {} }); return o; }
+function bgPrefsSchedulePush() { try { clearTimeout(_bgPrefsT); _bgPrefsT = setTimeout(function () { bgPrefsPush(); }, 1500); } catch (e) {} }
+async function bgPrefsPush() {
+  try {
+    if (typeof supa === 'undefined' || !supa || !_authUser || !_authUser.id) return;
+    if (_bgPrefsPulledFor !== _authUser.id) return;   // never push device defaults over the account before its prefs have been read
+    const p = bgPrefsSnapshot(); p._at = Date.now();
+    await supa.from('profiles').update({ app_prefs: p }).eq('id', _authUser.id);
+  } catch (e) {}
+}
+function bgPrefsRepaint() {
+  try { if (typeof bgApplyTrackShotPref === 'function') bgApplyTrackShotPref(); } catch (e) {}
+  try { if (typeof bgPaintArcPrefs === 'function') bgPaintArcPrefs(); } catch (e) {}
+  try { if (typeof bgPaintUnitsPref === 'function') bgPaintUnitsPref(); } catch (e) {}
+  try { if (typeof bgPaintAutoAdvanceMode === 'function') bgPaintAutoAdvanceMode(); } catch (e) {}
+  try { const ts = document.getElementById('pref-track-shot'); if (ts) ts.checked = trackShotEnabled(); } catch (e) {}
+  try { ['view', 'slope', 'pin'].forEach(function (s) { const cb = document.getElementById('pref-green-' + s); if (cb) cb.checked = bgGreenPref('bg_green_' + s); }); } catch (e) {}
+  try { const sa = document.getElementById('pref-start-alert'); if (sa && typeof startAlertEnabled === 'function') sa.checked = startAlertEnabled(); } catch (e) {}
+  try { const fa = document.getElementById('pref-finish-alert'); if (fa && typeof finishAlertEnabled === 'function') fa.checked = finishAlertEnabled(); } catch (e) {}
+  try { if (window.__gpsArcsPrefChanged) window.__gpsArcsPrefChanged(); } catch (e) {}
+  try { if (window.__gpsGreenPrefChanged) window.__gpsGreenPrefChanged(); } catch (e) {}
+  try { if (window.__gpsUnitsChanged) window.__gpsUnitsChanged(); } catch (e) {}
+}
+async function bgPrefsPull() {
+  try {
+    if (typeof supa === 'undefined' || !supa || !_authUser || !_authUser.id) return;
+    const uid = _authUser.id;
+    if (_bgPrefsPulledFor === uid) return;
+    const r = await supa.from('profiles').select('app_prefs').eq('id', uid).maybeSingle();
+    if (r && r.error) return;   // column missing / offline: leave the device as it is, try again next sign-in
+    _bgPrefsPulledFor = uid;
+    const p = r && r.data && r.data.app_prefs;
+    if (!p || typeof p !== 'object') { bgPrefsPush(); return; }   // first time: this device's settings become the account's
+    _bgPrefsApplying = true;
+    try { BG_SYNC_PREFS.forEach(function (k) { if (typeof p[k] === 'string') { try { localStorage.setItem(k, p[k]); } catch (e) {} } }); }
+    finally { _bgPrefsApplying = false; }
+    bgPrefsRepaint();
+  } catch (e) {}
+}
 async function fetchMyRole() {
   if (!_authUser || !supa) { _authRole = 'guest'; _bgRoleUid = null; _bgRoleAt = 0; return; }
   const uid = _authUser.id;
@@ -12876,6 +12938,7 @@ async function fetchMyRole() {
       _authRole = (!error && data && data.role) ? data.role : 'user';
     } catch (e) { _authRole = 'user'; }
     _bgRoleAt = Date.now();
+    try { bgPrefsPull(); } catch (e) {}   // v1883: this account's Settings switches
   })();
   try { await _bgRoleP; } finally { _bgRoleP = null; }
 }
@@ -117226,7 +117289,7 @@ const gpsView = (() => {
       }
     }
     cx.restore();
-    return cv.toDataURL('image/png');
+    return cv;   // v1883: the canvas itself (a canvas source) - toDataURL is scrambled by anti-fingerprint extensions
   }
   function gvSlope() {
     try {
@@ -117239,15 +117302,18 @@ const gpsView = (() => {
       const key = courseId + '|' + hole + '|' + (g.updated_at || '') + '|' + (pin ? pin.join(',') : '');
       const src = map.getSource('gps-green-slope');
       if (key !== _gv.imgKey || !src) {
-        const url = gvSlopeImage(g, pin); if (!url) return;
+        /* v1883 (Tyler's desktop Chrome showed no colours, incognito did): an anti-fingerprint
+           extension scrambles canvas.toDataURL, so the PNG we handed MapLibre would not decode
+           ("The source image could not be decoded") and the green layers never drew. The map
+           now reads the canvas directly (a canvas source), rebuilt whenever the picture changes. */
+        const cv = gvSlopeImage(g, pin); if (!cv) return;
         const b = e.bbox, coords = [[b[0], b[3]], [b[2], b[3]], [b[2], b[1]], [b[0], b[1]]];
-        if (src) src.updateImage({ url: url, coordinates: coords });
-        else {
-          map.addSource('gps-green-slope', { type: 'image', url: url, coordinates: coords });
-          map.addLayer({ id: 'gps-green-slope', type: 'raster', source: 'gps-green-slope', minzoom: 16.3,
-            paint: { 'raster-opacity': 0.7, 'raster-fade-duration': 0, 'raster-resampling': 'linear' } },
-            map.getLayer('gps-green-line') ? 'gps-green-line' : gvBeforeId());
-        }
+        try { if (map.getLayer('gps-green-slope')) map.removeLayer('gps-green-slope'); } catch (er) {}
+        try { if (map.getSource('gps-green-slope')) map.removeSource('gps-green-slope'); } catch (er) {}
+        map.addSource('gps-green-slope', { type: 'canvas', canvas: cv, coordinates: coords, animate: false });
+        map.addLayer({ id: 'gps-green-slope', type: 'raster', source: 'gps-green-slope', minzoom: 16.3,
+          paint: { 'raster-opacity': 0.7, 'raster-fade-duration': 0, 'raster-resampling': 'linear' } },
+          map.getLayer('gps-green-line') ? 'gps-green-line' : gvBeforeId());
         _gv.imgKey = key;
       }
       map.setLayoutProperty('gps-green-slope', 'visibility', 'visible');
