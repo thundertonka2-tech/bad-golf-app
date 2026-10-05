@@ -11,6 +11,16 @@ delete from public.identity_backfill_review r
         or u.email ~ '^thundertonka2\+bgtest(0[1-9]|1[0-5])@gmail\.com$'
         or u.email = 'cowork-canada-import-20261002@simplisticfishing.invalid');
 
+-- 0b. The audit test account wrote 2 audit-log lines; keep the lines, drop the link to the
+--     account (actor_id has no ON DELETE rule, so it would block the delete).
+update public.audit_log a
+   set actor_id = null
+  from auth.users u
+ where u.id = a.actor_id
+   and (u.id = '68eba340-7154-436a-84b5-c7f54528d651'
+        or u.email ~ '^thundertonka2\+bgtest(0[1-9]|1[0-5])@gmail\.com$'
+        or u.email = 'cowork-canada-import-20261002@simplisticfishing.invalid');
+
 -- A. Throwaway audit account (thundertonka2+bgaudit1005@gmail.com) and its test round.
 delete from public.games
  where code in ('HOOK29',
