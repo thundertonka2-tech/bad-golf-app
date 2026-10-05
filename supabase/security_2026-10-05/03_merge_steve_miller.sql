@@ -50,6 +50,8 @@ delete from public.games where code in ('recent:2ea0ac2c-dc83-4fb2-a0a9-e2394719
                                         'badges:2ea0ac2c-dc83-4fb2-a0a9-e23947190565',
                                         'mytomb:2ea0ac2c-dc83-4fb2-a0a9-e23947190565',
                                         'myptomb:2ea0ac2c-dc83-4fb2-a0a9-e23947190565');
+-- old identity-backfill note (7/25) points at the profile and would block the delete
+delete from public.identity_backfill_review where account_id = '2ea0ac2c-dc83-4fb2-a0a9-e23947190565';
 delete from auth.users where id = '2ea0ac2c-dc83-4fb2-a0a9-e23947190565' and email = 'stevenbrettmiller@gmail.com';
 
 commit;

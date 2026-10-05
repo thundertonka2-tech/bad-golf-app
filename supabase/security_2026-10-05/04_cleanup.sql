@@ -3,6 +3,14 @@
 -- ============================================================================
 begin;
 
+-- 0. Old identity-backfill notes (7/25) point at profiles and would block the account deletes below.
+delete from public.identity_backfill_review r
+ using auth.users u
+ where u.id = r.account_id
+   and (u.id = '68eba340-7154-436a-84b5-c7f54528d651'
+        or u.email ~ '^thundertonka2\+bgtest(0[1-9]|1[0-5])@gmail\.com$'
+        or u.email = 'cowork-canada-import-20261002@simplisticfishing.invalid');
+
 -- A. Throwaway audit account (thundertonka2+bgaudit1005@gmail.com) and its test round.
 delete from public.games
  where code in ('HOOK29',
