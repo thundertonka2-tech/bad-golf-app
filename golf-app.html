@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1886-->
+<!--BGVER=v2026.11.1887-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11921,7 +11921,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1886';
+const BG_BUILD = 'v2026.11.1887';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -20637,10 +20637,47 @@ function bgWhenNotTouching(fn, key) {
     }, 60);
   } catch (e) { try { fn(); } catch (e2) {} }
 }
+/* v1887 (Tyler, 10/4, round PINE84): "We started off on the back nine then went to the
+   front... Chris left after, you will see where Frank left as well."
+   The round was created as a normal 18 (startHole 1, nineMode all18) and the group simply
+   teed off on 10 without switching setup to "Back nine first". Every play-order helper
+   below read startHole = 1, so holes 10-18 counted as coming AFTER hole 1 and hole 4:
+   (a) Leave wiped Frank's back-nine scores as "entered after he left";
+   (b) CTP and the Birdie pool skipped both leavers on the back nine, so Frank collected
+       on his two front-nine birdies but paid nothing for the four back-nine birdies or
+       the two back-nine CTPs (+81.67 instead of +31.67).
+   An 18-hole round whose FIRST score ever entered (earliest cellAt stamp) is on hole 10
+   is a back-nine start, whatever setup said. Read-time only: nothing is written back,
+   an explicit startHole (b9first, shotgun carts) always wins, and a round with no cell
+   stamps keeps startHole exactly as before. */
+const _bgStartMemo = (typeof WeakMap === 'function') ? new WeakMap() : null;
+function bgEffectiveStartHole(g) {
+  const s = (g && Number(g.startHole)) || 1;
+  try {
+    if (!g || s !== 1) return s;
+    if (g.nineMode && g.nineMode !== 'all18') return s;
+    if (((typeof roundHoles === 'function') ? roundHoles(g) : 18) !== 18) return s;
+    const k = Number(g.firstScoreAt) || 0;
+    if (_bgStartMemo) { const m = _bgStartMemo.get(g); if (m && m.k === k) return m.v; }
+    let v = 1;
+    const ca = g.cellAt && g.cellAt.scores;
+    if (ca && typeof ca === 'object') {
+      let best = Infinity, bestIdx = -1;
+      Object.keys(ca).forEach(function (pid) {
+        const arr = ca[pid]; if (!Array.isArray(arr)) return;
+        for (let i = 0; i < arr.length; i++) { const t = Number(arr[i]); if (t > 0 && t < best) { best = t; bestIdx = i; } }
+      });
+      if (bestIdx === 9) v = 10;
+    }
+    if (_bgStartMemo) _bgStartMemo.set(g, { k: k, v: v });
+    return v;
+  } catch (e) { return s; }
+}
+try { window.bgEffectiveStartHole = bgEffectiveStartHole; } catch (e) {}
 function bgPlayIdx(g, hole) {
   try {
     const rh = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
-    const start = (g && Number(g.startHole)) || 1;
+    const start = bgEffectiveStartHole(g);
     return ((((Number(hole) || 1) - start) % rh) + rh) % rh;
   } catch (e) { return (Number(hole) || 1) - 1; }
 }
@@ -20739,9 +20776,14 @@ async function bgMarkPlayerLeft(pid) {
     const n = bgLeaveHoleFor(g, pid, state.currentHole);
     if (!n) { showToast(displayFirst(p) + ' has no score yet — remove them from the round instead', 'warn'); return; }
     if (bgPlayIdx(g, n) >= rh - 1) { showToast(displayFirst(p) + ' has finished the round', 'warn'); return; }
+    // v1887: a score whose cell stamp is OLDER than his leave-hole score was entered before
+    // that hole -- he really played it, whatever play order says. Never "stray", never cleared.
+    const _caS = (g.cellAt && g.cellAt.scores && Array.isArray(g.cellAt.scores[pid])) ? g.cellAt.scores[pid] : null;
+    const _leaveAt = _caS ? (Number(_caS[n - 1]) || 0) : 0;
+    const _playedBefore = h => { try { const t = _caS ? Number(_caS[h - 1]) : 0; return !!(_leaveAt && t > 0 && t < _leaveAt); } catch (e) { return false; } };
     // scores sitting past N would settle money on holes he never played (the par trap)
     let stray = 0;
-    try { for (let h = 1; h <= rh; h++) { if (bgPlayIdx(g, h) > bgPlayIdx(g, n) && g.scores[pid] && g.scores[pid][h - 1] != null) stray++; } } catch (e) {}
+    try { for (let h = 1; h <= rh; h++) { if (bgPlayIdx(g, h) > bgPlayIdx(g, n) && !_playedBefore(h) && g.scores[pid] && g.scores[pid][h - 1] != null) stray++; } } catch (e) {}
     const nextH = ((n % rh) + 1);
     const msg = displayFirst(p) + ' is leaving after hole ' + n + '.\n\nEvery game settles through hole ' + n + ' with ' + displayFirst(p) +
       ' in it. From hole ' + nextH + ' on ' + displayFirst(p) + ' is out of every game — not charged, not paid — and the rest of you carry on as normal.' +
@@ -20757,6 +20799,7 @@ async function bgMarkPlayerLeft(pid) {
     try {
       for (let h = 1; h <= rh; h++) {
         if (bgPlayIdx(g, h) <= bgPlayIdx(g, n)) continue;
+        if (_playedBefore(h)) continue;   // v1887: already played before he left -- keep it
         ['scores', 'puttsData', 'fairwaysData', 'penaltiesData', 'sandData', 'mulliganData'].forEach(f => {
           try { if (g[f] && g[f][pid] && g[f][pid][h - 1] != null) { g[f][pid][h - 1] = null; _markScoreTouched(f, pid, h - 1); } } catch (e) {}
         });
@@ -54541,8 +54584,20 @@ function _bgSettlePool(g, cfg, kind, label, statOf, lowWins, eligible) {
       const _mx = Math.max.apply(null, stats.map(s => s.scored));
       if (_mn > 0 && _mn === _mx) { done = true; stats.forEach(s => { s.holes = _mn; }); }
     }
+    /* v1887 (Tyler, 10/4, PINE84): a player who LEAVES (marked via Leave) still owes his
+       buy-in but can never win a whole-round pool. The equal-holes fallback above voids
+       the pool the moment anyone leaves (1 / 4 / 18 holes), so the $50 Low Net pot was
+       silently never formed. On a finished round where every short card belongs to a
+       marked leaver, settle over the full cards: everyone in the pool pays, only a
+       player with every hole scored can win. */
+    let _lvScoped = false;
+    if (!done && g && g.finishedAt && stats.length && typeof bgHasLeavers === 'function' && bgHasLeavers(g)) {
+      const _full = stats.filter(s => s.scored >= s.holes);
+      const _short = stats.filter(s => s.scored < s.holes);
+      if (_full.length >= 1 && _short.every(s => bgLeftAfter(g, s.id) != null)) { done = true; _lvScoped = true; }
+    }
     if (!done) return null;
-    const elig = stats.filter(eligible);
+    const elig = stats.filter(s => eligible(s) && (!_lvScoped || (s.scored >= s.holes && bgLeftAfter(g, s.id) == null)));
     if (!elig.length) return null;                        // no qualifier -> prize pool void
     const sorted = elig.slice().sort((a, b) => lowWins ? (statOf(a) - statOf(b)) : (statOf(b) - statOf(a)));
     const best = statOf(sorted[0]);
