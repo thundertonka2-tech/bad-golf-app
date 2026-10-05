@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1893-->
+<!--BGVER=v2026.11.1894-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11924,7 +11924,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1893';
+const BG_BUILD = 'v2026.11.1894';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -20452,6 +20452,7 @@ const BG_MERGE_RULES = {
   games: 'cloudWins', hcpRules: 'cloudWins', pars: 'cloudWins', sis: 'cloudWins',
   tees: 'cloudWins', teeYards: 'cloudWins', teePars: 'cloudWins', teeSis: 'cloudWins',
   unranked: 'cloudWins', nineMode: 'cloudWins', startHole: 'cloudWins',
+  lbKey: 'cloudWins',   // v1894: follow-along leaderboard key - the first phone to mint one wins, so every share carries the same link
   supersededBy: 'cloudWins', supersededAt: 'cloudWins',   // v1834: closed out by a newer round at the same course
   trackPutts: 'cloudWins', trackGirs: 'cloudWins', trackFairways: 'cloudWins',
   trackPenalties: 'cloudWins', trackSands: 'cloudWins', trackMulligans: 'cloudWins', mulliganCap: 'cloudWins', naturalBoost: 'cloudWins',
@@ -71766,11 +71767,22 @@ async function renderCrewLeaderboard() {
     if (_aZero && _bZero) return b.s.rounds - a.s.rounds;   // among the 0s, most rounds first
     return b.s.money - a.s.money; // default: totals
   });
+  // v1894 (Tyler, 10/5): "when showing unit totals here, if the user is zero hide them --
+  // for both the Friends tab and the Everyone tab. Only hide them for the units view to
+  // keep it clean. They need to be visible for the other filters." Same rounded test as
+  // the sort above, so a "+0" row never shows on the Units chip; Rounds / Scoring avg /
+  // Handicap still list everyone (the directory you add friends from).
+  let shown = list;
+  if (sortBy === 'money') { try { shown = list.filter(r => Math.round(r.s.money) !== 0); } catch (e) { shown = list; } }
   if (list.length === 0) {
     el.innerHTML = '<div class="help-text">No friends yet — use <strong>Friend requests</strong> at the top of this tab to search for players and send one.</div>';
     return;
   }
-  el.innerHTML = list.map((r, i) => {
+  if (shown.length === 0) {
+    el.innerHTML = '<div class="help-text">Nobody here has units on the board yet. Tap <strong>Rounds</strong> or <strong>Scoring avg</strong> to see everyone.</div>';
+    return;
+  }
+  el.innerHTML = shown.map((r, i) => {
     const s = r.s;
     const metric = sortBy === 'rounds' ? (s.rounds + ' rds')
       : sortBy === 'avg' ? (s.avg != null ? s.avg.toFixed(1) : '—')
@@ -88042,6 +88054,13 @@ async function handleTournamentJoinLink() {
     const _q = new URLSearchParams(location.search || '');
     const _tv = _q.get('tv'), _k = _q.get('k');
     if (_tv && _k) { bgTvOpen({ tid: String(_tv).trim(), key: String(_k).trim() }); }
+    // v1894 (Tyler 10/5): ?lb=<round code>&k=<key> -- the follow-along round leaderboard. No account.
+    // A link tapped in the native app before boot is parked by _bgRouteDeepLink and picked up here.
+    try {
+      let _lb = _q.get('lb'), _lk = _k;
+      if (!_lb) { const _p = localStorage.getItem('golf:pending-lb'); if (_p) { localStorage.removeItem('golf:pending-lb'); const _o = JSON.parse(_p); _lb = _o && _o.code; _lk = _o && _o.key; } }
+      if (_lb && _lk) { bgLbOpen({ code: String(_lb).trim(), key: String(_lk).trim() }); }
+    } catch (e) {}
     const _ev = _q.get('ev');   // v1858: ?ev=<tournament id>&k=<key> -- the public event page
     if (_ev && _k) { bgEventPageOpen({ tid: String(_ev).trim(), key: String(_k).trim() }); }
   } catch (e) {}
@@ -91525,6 +91544,114 @@ function _t2FieldBirdieAll(rows) {
       totalsByKey: totalsByName
     };
   } catch (e) { return null; }
+}
+
+/* ============================================================
+   v1894 (Tyler, 10/5): FOLLOW-ALONG ROUND LEADERBOARD.
+   "include a link to the web page leaderboard so if they don't want to join they can
+   just follow along." officialbadgolf.com/app/?lb=<round code>&k=<key>. Nobody signs
+   in; bg_round_board returns the one round whose data.lbKey matches, with every
+   player's contact fields stripped. The page shows EVERYTHING the players see on their
+   own settle-up screen -- standings, units, every game, the scorecard -- because it IS
+   buildRoundSummary(), the same builder, fed the fetched round. Refreshes every 30 s
+   while the round is open. The key is minted by shareGameInvite the first time the
+   round is shared and lives on the round (saveGame), so every later share reuses it.
+   ============================================================ */
+let _bgLb = null;
+function bgLbMintKey() {
+  const a = new Uint8Array(12); (window.crypto || window.msCrypto).getRandomValues(a);
+  return Array.from(a).map(x => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[x % 32]).join('');
+}
+function bgLbLink(code, key) { return BG_PUBLIC_URL + '?lb=' + encodeURIComponent(code) + '&k=' + encodeURIComponent(key); }
+function _bgLbCss() {
+  if (document.getElementById('bglb-css')) return;
+  const st = document.createElement('style'); st.id = 'bglb-css';
+  st.textContent = '#bglb{position:fixed;inset:0;z-index:2147483000;background:var(--bg,#0b1826);color:var(--text,#f3f6fa);display:flex;flex-direction:column;font-family:inherit;overflow:hidden}'
+    + '#bglb .bglb-top{flex:0 0 auto;display:flex;align-items:center;gap:12px;padding:calc(12px + env(safe-area-inset-top,0px)) 16px 10px;border-bottom:1px solid #1c3350;background:#0d1d31;color:#f3f6fa}'
+    + '#bglb .bglb-logo{width:44px;height:44px;border-radius:10px;object-fit:cover;flex:0 0 auto}'
+    + '#bglb .bglb-title{flex:1;min-width:0}'
+    + '#bglb .bglb-ev{font-size:18px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.01em}'
+    + '#bglb .bglb-sub{font-size:12px;color:#9db4cc;margin-top:2px}'
+    + '#bglb .bglb-live{font-size:11px;color:#9db4cc;text-align:right;white-space:nowrap;line-height:1.35}'
+    + '#bglb .bglb-live b{color:#4ade80}#bglb .bglb-live b.done{color:#f2b600}'
+    + '#bglb .bglb-body{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 16px 24px}'
+    + '#bglb .bglb-body h3{font-size:15px}'
+    + '#bglb .bglb-foot{flex:0 0 auto;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;padding:10px 16px calc(12px + env(safe-area-inset-bottom,0px));border-top:1px solid #1c3350;background:#0d1d31;color:#9db4cc;font-size:13px}'
+    + '#bglb .bglb-foot a{color:#4ade80;font-weight:700;text-decoration:none}'
+    + '#bglb .bglb-msg{margin:auto;text-align:center;font-size:16px;color:var(--text-muted,#9db4cc);max-width:80vw;padding:24px}';
+  document.head.appendChild(st);
+}
+async function _bgLbLoad(opts) {
+  try { if (!supaReady) await initSupabase(); } catch (e) {}
+  if (!supa) return null;
+  const r = await supa.rpc('bg_round_board', { p_code: opts.code, p_key: opts.key });
+  if (r.error) return null;
+  if (!r.data) return { revoked: true };
+  return r.data;
+}
+async function bgLbOpen(opts) {
+  try {
+    _bgLbCss();
+    bgLbClose();
+    const el = document.createElement('div');
+    el.id = 'bglb';
+    el.innerHTML = '<div class="bglb-msg">Loading the leaderboard…</div>';
+    document.body.appendChild(el);
+    _bgLb = { opts: opts, el: el, timer: null, stamp: null, loaded: false };
+    await _bgLbRender();
+    _bgLb.timer = setInterval(() => { try { _bgLbRender(); } catch (e) {} }, 30000);
+  } catch (e) { try { console.warn('bgLbOpen', e); } catch (_) {} }
+}
+function bgLbClose() {
+  try {
+    if (!_bgLb) return;
+    clearInterval(_bgLb.timer);
+    try { _bgLb.el.remove(); } catch (e) {}
+    _bgLb = null;
+    try { const u = new URL(location.href); if (u.searchParams.has('lb')) { u.searchParams.delete('lb'); u.searchParams.delete('k'); history.replaceState({}, '', u.pathname + (u.search || '') + u.hash); } } catch (e) {}
+  } catch (e) {}
+}
+function _bgLbFallbackHtml(g) {
+  // only if buildRoundSummary throws: names, gross/net and units, nothing fancy
+  let totals = {}, money = {};
+  try { totals = calcTotals(g) || {}; } catch (e) {}
+  try { money = (computeAllGameMoney(g) || {}).combined || {}; } catch (e) {}
+  const rows = (g.players || []).slice().sort((a, b) => (money[b.id] || 0) - (money[a.id] || 0));
+  return '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">' + rows.map((p, i) => {
+    const t = totals[p.id] || {}; const m = money[p.id] || 0;
+    return '<div style="display:flex;justify-content:space-between;padding:9px 12px;' + (i ? 'border-top:1px solid var(--border)' : '') + '"><div><strong>' + t2esc(p.name || '') + '</strong><div class="small-text">Gross ' + (t.count ? t.gross : '—') + ' · Net ' + (t.count ? t.net : '—') + '</div></div><div style="font-weight:600">' + (typeof fmt === 'function' ? fmt(m) : m) + '</div></div>';
+  }).join('') + '</div>';
+}
+async function _bgLbRender() {
+  if (!_bgLb) return;
+  const S = _bgLb, el = S.el;
+  let g = null; try { g = await _bgLbLoad(S.opts); } catch (e) { g = null; }
+  if (!_bgLb || _bgLb !== S) return;
+  if (g && g.revoked) { el.innerHTML = '<div class="bglb-msg">This leaderboard link isn’t working. Ask whoever sent it for a new one.</div>'; S.loaded = false; return; }
+  if (!g) { if (!S.loaded) el.innerHTML = '<div class="bglb-msg">Couldn’t load the leaderboard — check your connection.</div>'; return; }
+  // nothing changed since the last paint -> keep the reader's scroll position
+  const stamp = String(g.serverUpdatedAt || g.updatedAt || '') + ':' + String(g.finishedAt || '');
+  if (S.loaded && stamp === S.stamp) return;
+  S.stamp = stamp; S.loaded = true;
+  try { migrateLegacyData(g); } catch (e) {}
+  try { if (typeof roundHoles === 'function') roundHoles(g); } catch (e) {}
+  let body = '';
+  try { body = buildRoundSummary(g); } catch (e) { try { console.warn('bgLb summary', e); } catch (_) {} body = ''; }
+  if (!body) { try { body = _bgLbFallbackHtml(g); } catch (e) { body = '<div class="help-text">No scores yet.</div>'; } }
+  // thru: holes with any score
+  let nH = 18; try { nH = roundHoles(g) || 18; } catch (e) {}
+  let thru = 0; try { for (let h = 0; h < nH; h++) { if ((g.players || []).some(p => g.scores && g.scores[p.id] && g.scores[p.id][h] != null)) thru++; } } catch (e) {}
+  const done = !!g.finishedAt;
+  const when = g.createdAt ? new Date(Number(g.createdAt)) : null;
+  const now = new Date();
+  el.innerHTML = '<div class="bglb-top"><img class="bglb-logo" src="BadGolfIcon.jpg" alt="" onerror="this.style.visibility=\'hidden\'">'
+    + '<div class="bglb-title"><div class="bglb-ev" data-noi18n>' + t2esc(g.course || 'Bad Golf round') + '</div>'
+    + '<div class="bglb-sub">' + (when ? t2esc(when.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })) + ' · ' : '') + (g.players || []).length + ' players' + (done ? ' · Final' : (thru ? ' · thru ' + thru : ' · not started')) + '</div></div>'
+    + '<div class="bglb-live"><b' + (done ? ' class="done"' : '') + '>●</b> ' + (done ? 'Final' : 'Live') + '<br>Updated ' + t2esc(now.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })) + '</div></div>'
+    + '<div class="bglb-body">' + body + '</div>'
+    + '<div class="bglb-foot"><span>Want to play next time?</span> <a href="' + BG_APPSTORE_URL + '" target="_blank" rel="noopener">Get Bad Golf for iPhone</a> <span>·</span> <a href="' + BG_PLAYSTORE_URL + '" target="_blank" rel="noopener">Android</a>'
+    + (typeof isSignedIn === 'function' && isSignedIn() ? ' <span role="button" tabindex="0" class="bg-btn" id="bglb-x" style="margin-left:8px">Close</span>' : '') + '</div>';
+  { const x = el.querySelector('#bglb-x'); if (x) x.onclick = (e) => { e.stopPropagation(); bgLbClose(); }; }
 }
 
 /* ============================================================
@@ -124562,6 +124689,20 @@ async function shareGameInvite(name) {
      stay alone at line start (the v1048 SMS-linkification rule). */
   let _gamesLine = '';
   try { _gamesLine = bgGamesPlayingText(); } catch (e) { _gamesLine = ''; }
+  /* v1894 (Tyler, 10/5): "make sure it includes a link to the web page leaderboard so if
+     they don't want to join they can just follow along." The round gets a secret lbKey
+     the first time anyone shares it; bg_round_board only answers to that key, so the
+     link shows this one round to whoever holds it and nothing else. Link alone on its
+     own line (the v1048 SMS-linkification rule). Tournament rounds share the event link
+     above and never reach here. */
+  let _lbLink = '';
+  try {
+    const _g = state.game;
+    if (_g && code && _g.code === code && !bgIsThrowawayRound(_g)) {
+      if (!_g.lbKey || String(_g.lbKey).length < 12) { _g.lbKey = bgLbMintKey(); try { await saveGame(_g); } catch (e) {} }
+      _lbLink = bgLbLink(code, _g.lbKey);
+    }
+  } catch (e) { _lbLink = ''; }
   const text = (me ? me.split(/\s+/)[0] : 'Your buddy') + ' added you to a golf round' +
     (course ? ' at ' + course : '') + ' on Bad Golf!' +
     (_gamesLine ? '\n\nToday we\u2019re playing ' + _gamesLine + '.' : '') +
@@ -124575,7 +124716,8 @@ async function shareGameInvite(name) {
        in, and the round finds them. It was four lines of message explaining a number
        with nowhere to type it. `code` is still read above, for buildJoinLink and the
        outbound_invites log; only the text stopped mentioning it. */
-    '\n\nJoin on iPhone: ' + BG_APPSTORE_URL + '\nJoin on Android: ' + BG_PLAYSTORE_URL;
+    '\n\nJoin on iPhone: ' + BG_APPSTORE_URL + '\nJoin on Android: ' + BG_PLAYSTORE_URL +
+    (_lbLink ? '\n\nNot playing? Follow the live leaderboard here:\n' + _lbLink : '');   // v1894
   // best-effort log (table optional — runs fine without it)
   try {
     if (!supaReady) await initSupabase();
@@ -125261,6 +125403,8 @@ function _bgRouteDeepLink(url, stashOnly) {
         // only ever fixed on the web path.
         let tj = null, tc = null;
         try { const u = new URL(url); tj = u.searchParams.get('tjoin'); tc = u.searchParams.get('tclaim'); } catch (e) {}
+        // v1894: ?lb=<round code>&k=<key> -- follow-along leaderboard. Works signed out; opens straight away.
+        try { const _lu = new URL(url); const _lb = _lu.searchParams.get('lb'), _lk = _lu.searchParams.get('k'); if (_lb && _lk) { if (!stashOnly) { try { bgLbOpen({ code: String(_lb).trim(), key: String(_lk).trim() }); } catch (e) {} } else { try { localStorage.setItem('golf:pending-lb', JSON.stringify({ code: String(_lb).trim(), key: String(_lk).trim() })); } catch (e) {} } return; } } catch (e) {}
         // v1848: ?treq=<tournament id> -- request to join. Works signed out, so no stash/auth dance.
         try { const _tr = new URL(url).searchParams.get('treq'); if (_tr) { if (!stashOnly) { try { openT2RequestScreen(String(_tr).trim()); } catch (e) {} } else { try { localStorage.setItem('golf:pending-treq', String(_tr).trim()); } catch (e) {} } return; } } catch (e) {}
         if (tj || tc) {

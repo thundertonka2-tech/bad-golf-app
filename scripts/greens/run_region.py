@@ -34,7 +34,7 @@ def sb(path, params=None):
 def existing_rows(cids):
     out = {}
     for i in range(0, len(cids), 40):
-        chunk = ','.join('"%s"' % c for c in cids[i:i + 40])
+        chunk = ','.join('"%s"' % c.replace('"', '') for c in cids[i:i + 40])
         for r in sb('course_greens', {'select': 'course_id,hole,status,ring,source,elev', 'course_id': f'in.({chunk})', 'limit': 5000}):
             r['has_elev'] = r.pop('elev') is not None
             out.setdefault(r['course_id'], {})[r['hole']] = r
