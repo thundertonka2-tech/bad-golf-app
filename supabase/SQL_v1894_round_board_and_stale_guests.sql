@@ -4,10 +4,10 @@
 -- 1. bg_round_board(p_code, p_key) — public read of ONE round for the follow-along leaderboard
 --    (?lb=CODE&k=KEY). Answers only when data.lbKey matches (12+ chars); strips chat/shots/photos
 --    and every player's email/phone/uid. Granted to anon + authenticated. Same pattern as bg_tv_board.
--- 2. bg_purge_stale_guests(p_days=30, p_dry_run=true) — removes guest NAMES (no account, no email,
---    lastUsed older than 30 days, not in any round in 30 days) from every roster and writes global
+-- 2. bg_purge_stale_guests(p_days=120, p_dry_run=true) — removes guest NAMES (no account, no email,
+--    lastUsed older than 120 days, not in any round in 120 days; Tyler changed 30→120 on 10/6) from every roster and writes global
 --    roster tombstones. History untouched. service_role only.
 --    Dry run:  select * from bg_purge_stale_guests();
---    Live:     select * from bg_purge_stale_guests(30, false);
+--    Live:     select * from bg_purge_stale_guests(120, false);
 -- 3. cron job 'purge-stale-guests' — nightly 09:10 UTC (4:10am Central), live mode.
 -- Function bodies: see supabase migrations list (list_migrations) or the project's HANDOFF_v1894 doc.
