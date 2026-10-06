@@ -19,8 +19,9 @@ do $$ declare n int; begin select count(*) into n from del_users; if n <> 4 then
 -- things that would block or orphan
 delete from public.identity_backfill_review r using del_users d where r.account_id = d.id;
 update public.audit_log a set actor_id = null from del_users d where a.actor_id = d.id;
-delete from public.friendships f using del_users d where f.user_id = d.id or f.friend_id = d.id;
-delete from public.game_invites i using del_users d where i.inviter_id = d.id or i.invitee_id = d.id;
+delete from public.friendships f using del_users d where f.requester = d.id or f.addressee = d.id;
+delete from public.game_invites i using del_users d where i.from_user = d.id or i.to_user = d.id;
+delete from public.notif_prefs n using del_users d where n.user_id = d.id;
 delete from public.push_tokens t using del_users d where t.user_id = d.id;
 delete from public.games g using del_users d
  where g.code in ('badges:'||d.id, 'roster:'||d.id, 'recent:'||d.id, 'mytomb:'||d.id, 'myptomb:'||d.id, 'backup:'||d.id);
