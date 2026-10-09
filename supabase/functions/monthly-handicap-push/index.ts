@@ -18,8 +18,19 @@ function fmt(n: number): string {
   return v < 0 ? `+${Math.abs(v).toFixed(1)}` : v.toFixed(1);
 }
 
-Deno.serve(async (_req) => {
+// v1903 (audit #2 #1): service-role callers only (cron) - the anon key could fire it at will.
+function callerRole(req: Request): string {
   try {
+    const tok = (req.headers.get("authorization") || "").replace(/^bearer\s+/i, "").trim();
+    const part = tok.split(".")[1] || "";
+    const c = JSON.parse(atob(part.replace(/-/g, "+").replace(/_/g, "/").padEnd(part.length + (4 - part.length % 4) % 4, "=")));
+    return String(c.role || "");
+  } catch (_) { return ""; }
+}
+
+Deno.serve(async (req) => {
+  try {
+    if (callerRole(req) !== "service_role") return new Response("forbidden", { status: 403 });
     const supa = createClient(SUPABASE_URL, SERVICE_KEY);
     // Pull recent snapshots; group by user, newest month first.
     const { data: snaps } = await supa

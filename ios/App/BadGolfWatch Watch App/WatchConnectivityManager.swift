@@ -94,6 +94,10 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
         for (hole, s) in scores {
             var d: [String: Any] = ["strokes": s.strokes]
             if let p = s.putts { d["putts"] = p }
+            // v1903 (audit #2 #31): when the wearer tapped this score (ms). The phone's
+            // __onWatchScore compares it with its own cell stamp so a queued wrist tap
+            // never overrides a LATER phone edit (the v1899 rule needed this to work).
+            d["at"] = Int(s.updatedAt.timeIntervalSince1970 * 1000)
             obj[String(hole)] = d
         }
         let update: [String: Any] = ["scoreUpdate": ["roundId": roundId, "scores": obj]]

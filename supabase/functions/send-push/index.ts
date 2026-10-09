@@ -235,14 +235,65 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+// v1903 (audit #2 #1): WHO is calling. The gateway's verify_jwt only proves the token is one
+// Supabase minted - and the public anon key is one of those, so anyone with the app's anon key
+// could push any text to every user. The signature is already verified upstream; here we
+// read the claims: anon is refused, a signed-in user is allowed (that is how the app sends
+// its own invites/round pushes) but rate-limited and kept off the admin-only types, and the
+// service role (pg_net callers such as _league_push) passes untouched.
+function callerClaims(req: Request): { role: string; sub: string } {
+  try {
+    const h = req.headers.get("authorization") || "";
+    const tok = h.replace(/^bearer\s+/i, "").trim();
+    const part = tok.split(".")[1] || "";
+    const json = atob(part.replace(/-/g, "+").replace(/_/g, "/").padEnd(part.length + (4 - part.length % 4) % 4, "="));
+    const c = JSON.parse(json);
+    return { role: String(c.role || ""), sub: String(c.sub || "") };
+  } catch (_) { return { role: "", sub: "" }; }
+}
+const ADMIN_ONLY_TYPES = new Set(["handicap", "remap", "admin", "broadcast"]);
+const USER_MAX_RECIPIENTS = 100;       // a friends list / a tournament field
+const USER_MAX_PER_HOUR   = 120;       // pushes one account may trigger per hour
+const USER_MAX_RCPT_HOUR  = 600;       // recipients one account may reach per hour
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS_HEADERS });
   try {
+    const who = callerClaims(req);
+    if (who.role !== "service_role" && who.role !== "authenticated") {
+      console.log(`send-push REFUSED role=${who.role || "none"}`);
+      return new Response("forbidden", { status: 403, headers: CORS_HEADERS });
+    }
     const body = await req.json();
-    const user_ids: string[] = Array.isArray(body.user_ids)
+    let user_ids: string[] = Array.isArray(body.user_ids)
       ? body.user_ids
       : (body.user_id ? [body.user_id] : (body.to_user ? [body.to_user] : []));
+    user_ids = user_ids.filter((x) => typeof x === "string" && /^[0-9a-f-]{36}$/i.test(x));
     if (!user_ids.length) return new Response("missing user_ids", { status: 400, headers: CORS_HEADERS });
+    if (who.role === "authenticated") {
+      if (!who.sub) return new Response("forbidden", { status: 403, headers: CORS_HEADERS });
+      const ntype = String((body.data && body.data.type) || "");
+      const supaSvc = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+      if (ADMIN_ONLY_TYPES.has(ntype)) {
+        let isAdmin = false;
+        try { const { data: pr } = await supaSvc.from("profiles").select("role").eq("id", who.sub).maybeSingle(); isAdmin = !!pr && (pr as any).role === "admin"; } catch (_) {}
+        if (!isAdmin) { console.log(`send-push REFUSED admin-type=${ntype} caller=${who.sub}`); return new Response("forbidden", { status: 403, headers: CORS_HEADERS }); }
+      }
+      if (user_ids.length > USER_MAX_RECIPIENTS) user_ids = user_ids.slice(0, USER_MAX_RECIPIENTS);
+      body.title = String(body.title || "Bad Golf").slice(0, 80);
+      body.body  = String(body.body || "").slice(0, 300);
+      // Per-caller budget (public.push_audit, service-role only).
+      try {
+        const since = new Date(Date.now() - 3600 * 1000).toISOString();
+        const { data: rows } = await supaSvc.from("push_audit").select("n").eq("caller", who.sub).gte("at", since);
+        const calls = (rows || []).length, rcpts = (rows || []).reduce((s: number, r: any) => s + (Number(r.n) || 0), 0);
+        if (calls >= USER_MAX_PER_HOUR || rcpts >= USER_MAX_RCPT_HOUR) {
+          console.log(`send-push RATE-LIMITED caller=${who.sub} calls=${calls} rcpts=${rcpts}`);
+          return new Response("rate limited", { status: 429, headers: CORS_HEADERS });
+        }
+        await supaSvc.from("push_audit").insert({ caller: who.sub, n: user_ids.length, ntype });
+      } catch (e) { console.log("send-push audit skipped: " + e); }
+    }
     const out = await sendPushCore({
       user_ids,
       title: body.title,

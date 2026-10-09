@@ -160,6 +160,25 @@ Deno.serve(async (req) => {
     report["games"] = "FAILED: " + (e as Error).message;
   }
 
+  // 1b) v1903 (audit #2 #40): the personal rows and the identity inside shared round blobs
+  //     that the auth cascade never reached (bg_scrub_player_identity rewrites players[] in SQL).
+  try {
+    const { data: n, error: sErr } = await admin.rpc("bg_scrub_player_identity", { p_uid: uid });
+    report["round_blobs"] = sErr ? "FAILED: " + sErr.message : ("scrubbed " + (n ?? 0) + " round(s)");
+  } catch (e) { report["round_blobs"] = "FAILED: " + (e as Error).message; }
+  try {
+    const own = ["roster:", "recent:", "mytomb:", "myptomb:", "badges:"].map((p) => p + uid);
+    const { error: rErr } = await admin.from("games").delete().in("code", own);
+    const { error: bErr } = await admin.from("games").delete().like("code", "backup:" + uid + "%");
+    report["own_rows"] = (rErr || bErr) ? "FAILED: " + ((rErr || bErr) as any).message : "removed";
+  } catch (e) { report["own_rows"] = "FAILED: " + (e as Error).message; }
+  for (const [table, col] of [["reactions", "author_id"], ["sim_sessions", "owner_uid"], ["event_photos", "uploaded_by"]] as const) {
+    try {
+      const { error } = await admin.from(table).delete().eq(col, uid);
+      report[table] = error ? "FAILED: " + error.message : "removed";
+    } catch (e) { report[table] = "FAILED: " + (e as Error).message; }
+  }
+
   // 2) Revoke the Apple token if the user used Sign in with Apple.
   const usedApple = (user.identities || []).some((i) => i.provider === "apple");
   if (usedApple) {

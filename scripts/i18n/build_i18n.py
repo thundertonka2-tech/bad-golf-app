@@ -40,13 +40,14 @@ def write_json(path, obj):
 
 def app_dicts():
     m = load('source_app.json')
-    for k, v in load('overrides.json').items():
+    ov = load('overrides.json')
+    for k, v in ov.items():
         m.setdefault(k, {}).update(v)
     for L in LANGS:
         x, p = {}, []
         for k, v in m.items():
             t = v.get(L)
-            if not t or t == k:
+            if not t or (t == k and k not in ov):   # v1903 (audit #2 #34): an override pinned to English (a game name) stays in the dictionary so no pattern can rewrite it
                 continue
             (p.append([k, t]) if PH.search(k) else x.__setitem__(k, t))
         p.sort(key=lambda a: -len(PH.sub('', a[0])))

@@ -265,7 +265,8 @@ async function blueGolfScorecard(url: string): Promise<{ pars: number[] | null; 
   try {
     const ms = url.match(/course\/course\/([^\/]+)/);
     if (ms) url = "https://course.bluegolf.com/bluegolf/course/course/" + ms[1] + "/detailedscorecard.htm";
-    if (!/(^|\.)bluegolf\.com\//.test(url)) return { pars: null, sis: null };
+    let host = ""; try { host = new URL(url).hostname.toLowerCase(); } catch (_) { return { pars: null, sis: null }; }
+    if (!(host === "bluegolf.com" || host.endsWith(".bluegolf.com"))) return { pars: null, sis: null };   // v1903: host check, not a substring
     const raw = await fetch(url, { headers: { ...CH } }).then((r) => r.text());
     const pars = bgStrip18(bgRowVals(raw, "Par"));
     const hcp = bgRowVals(raw, "Hcp");
@@ -294,9 +295,34 @@ function pick(cands: Cand[], name: string, state: string) {
   return best;
 }
 
+// v1903 (audit #2 #41): this used to run with no JWT at all - an open scraper proxy anyone on the
+// internet could point at USGA (and get the project's egress IP banned by Akamai). The app only
+// ever calls it from signed-in ADMIN screens via supa.functions.invoke, which sends the user's
+// JWT - so: verify_jwt ON at the gateway, and the caller must be an admin (profiles.role).
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+function callerClaims(req: Request): { role: string; sub: string } {
+  try {
+    const tok = (req.headers.get("authorization") || "").replace(/^bearer\s+/i, "").trim();
+    const part = tok.split(".")[1] || "";
+    const c = JSON.parse(atob(part.replace(/-/g, "+").replace(/_/g, "/").padEnd(part.length + (4 - part.length % 4) % 4, "=")));
+    return { role: String(c.role || ""), sub: String(c.sub || "") };
+  } catch (_) { return { role: "", sub: "" }; }
+}
+async function callerIsAdmin(req: Request): Promise<boolean> {
+  const who = callerClaims(req);
+  if (who.role === "service_role") return true;
+  if (who.role !== "authenticated" || !who.sub) return false;
+  try {
+    const supa = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const { data } = await supa.from("profiles").select("role").eq("id", who.sub).maybeSingle();
+    return !!data && ((data as any).role === "admin" || (data as any).role === "commissioner");
+  } catch (_) { return false; }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
+    if (!(await callerIsAdmin(req))) return json({ ok: false, error: "forbidden" }, 403);
     const body = await req.json().catch(() => ({}));
     const name = String(body.name || "").trim();
     const city = String(body.city || "").trim();

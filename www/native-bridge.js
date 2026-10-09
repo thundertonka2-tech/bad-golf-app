@@ -134,7 +134,10 @@
 
     // Keys worth protecting from eviction. Supabase keeps the real session
     // server-side; these are client hints that make cold start smooth.
-    var CRITICAL = ['bg_last_course', 'bg_unit', 'bg_player_id', 'bg_display_name'];
+    // v1903 (audit #2 P2): the old four keys were never written by the app. These are the real
+    // cold-start hints + the unsynced-work indexes (an evicted golf:dirty-games dropped a queued round).
+    var CRITICAL = ['golf:has-signed-in', 'golf:me-name', 'golf:last-game', 'golf:auth-uid-last', 'golf:prefs-owner',
+                    'bg_units', 'golf:dirty-games', 'golf:dirty-singletons'];
 
     // On launch: if localStorage is empty but Preferences has a value, restore.
     CRITICAL.forEach(function (k) {
@@ -146,7 +149,11 @@
     });
 
     // Mirror writes to those keys into Preferences too.
-    var origSet = localStorage.setItem.bind(localStorage);
+    // v1903 (audit #2 #8): resolve the Storage method at CALL time instead of binding the one that
+    // existed at load. The app patches Storage.prototype.setItem later (that hook is what syncs the
+    // Settings switches to the account); a bound copy of the original bypassed it, so on the phone no
+    // switch ever synced and bgPrefsPull reverted it on the next launch.
+    var origSet = function (k, v) { return Storage.prototype.setItem.call(localStorage, k, v); };
     localStorage.setItem = function (k, v) {
       origSet(k, v);
       if (CRITICAL.indexOf(k) !== -1) { try { Prefs.set({ key: k, value: String(v) }); } catch (e) {} }
@@ -242,52 +249,19 @@
     else document.addEventListener('DOMContentLoaded', hideSplash);
     setTimeout(hideSplash, 6000); // hard safety net
 
-    // Make the iOS hardware/edge back behave: if a modal/overlay is open,
-    // close it; otherwise let the app handle it. Apps with no history would
-    // otherwise close instantly on a back-swipe.
-    if (App) {
-      App.addListener('backButton', function () {
-        var closer = document.querySelector('.modal.open .modal-close, .overlay.open .close, [data-back-close]');
-        if (closer) { closer.click(); }
-      });
-    }
-    console.log('[native-bridge] Chrome (status bar/splash/back) active.');
+    // v1903 (audit #2 P2): the backButton listener that lived here matched nothing (.modal.open /
+    // .overlay.open / [data-back-close] do not exist in the app) - the app's bgWireHardwareBack owns
+    // Android back. Removed so one press is handled once.
+    console.log('[native-bridge] Chrome (status bar/splash) active.');
   })();
 
   /* ------------------------------------------------------------------
-     6. UNIVERSAL LINKS  (invite link opens the app, else the web version)
-     When the app is opened via a https://…/golf-app.html?join=CODE (or ?tjoin=)
-     link, iOS hands us the URL here. The WKWebView loads the BUNDLED index, so
-     location.search won't contain it — we must parse the delivered URL and route
-     it into the app's existing join flow.
+     6. UNIVERSAL LINKS — v1903 (audit #2 #32): REMOVED. The app script's
+     wireDeepLinks / _bgRouteDeepLink owns every link (appUrlOpen + the
+     cold-launch getLaunchUrl, with the signed-out stash). The copy that
+     lived here routed each link a SECOND time: two joinRoundByCode calls
+     (duplicate confirms) when signed in, and a spurious join + "That round
+     isn't live yet" toast under the sign-in gate when signed out.
   ------------------------------------------------------------------ */
-  (function universalLinks() {
-    var App = P.App;
-    if (!App) return;
-    function routeUrl(url) {
-      if (!url) return;
-      try {
-        var qi = url.indexOf('?');
-        if (qi < 0) return;
-        var params = new URLSearchParams(url.slice(qi + 1));
-        var tjoin = params.get('tjoin');
-        var join = params.get('join');
-        if (tjoin) {
-          try { localStorage.setItem('golf:pending-tjoin', tjoin); } catch (e) {}
-          var goT = function () { try { if (typeof window.handleTournamentJoinLink === 'function') window.handleTournamentJoinLink(); } catch (e) {} };
-          if (document.readyState === 'complete') setTimeout(goT, 500); else window.addEventListener('load', function () { setTimeout(goT, 700); });
-        }
-        if (join) {
-          var goJ = function () { try { if (typeof window.joinRoundByCode === 'function') window.joinRoundByCode(join); } catch (e) {} };
-          if (document.readyState === 'complete') setTimeout(goJ, 500); else window.addEventListener('load', function () { setTimeout(goJ, 700); });
-        }
-      } catch (e) {}
-    }
-    // Warm app: link tapped while the app is already running.
-    try { App.addListener('appUrlOpen', function (data) { routeUrl(data && data.url); }); } catch (e) {}
-    // Cold launch: app was opened FROM the link.
-    try { App.getLaunchUrl().then(function (r) { if (r && r.url) routeUrl(r.url); }).catch(function () {}); } catch (e) {}
-    console.log('[native-bridge] Universal Links active.');
-  })();
 
 })();

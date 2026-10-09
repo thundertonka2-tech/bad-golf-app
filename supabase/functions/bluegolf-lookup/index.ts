@@ -14,6 +14,10 @@
 //   "bluegolf-lookup" → paste this file → Deploy. (No CLI needed.)
 // ----------------------------------------------------------------------------
 
+// v1903 (audit #2 #41): verify_jwt ON + admin callers only (it was an open fetch proxy), and
+//   the bluegolf.com check is on the parsed hostname, not a substring of the URL.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
 const UA = "Mozilla/5.0 (compatible; BadGolf/1.0)";
 const BASE = "https://course.bluegolf.com/bluegolf/course/course/";
 
@@ -28,6 +32,25 @@ function json(obj: unknown, status = 200): Response {
     status,
     headers: { ...CORS, "Content-Type": "application/json" },
   });
+}
+
+function callerClaims(req: Request): { role: string; sub: string } {
+  try {
+    const tok = (req.headers.get("authorization") || "").replace(/^bearer\s+/i, "").trim();
+    const part = tok.split(".")[1] || "";
+    const c = JSON.parse(atob(part.replace(/-/g, "+").replace(/_/g, "/").padEnd(part.length + (4 - part.length % 4) % 4, "=")));
+    return { role: String(c.role || ""), sub: String(c.sub || "") };
+  } catch (_) { return { role: "", sub: "" }; }
+}
+async function callerIsAdmin(req: Request): Promise<boolean> {
+  const who = callerClaims(req);
+  if (who.role === "service_role") return true;
+  if (who.role !== "authenticated" || !who.sub) return false;
+  try {
+    const supa = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const { data } = await supa.from("profiles").select("role").eq("id", who.sub).maybeSingle();
+    return !!data && ((data as any).role === "admin" || (data as any).role === "commissioner");
+  } catch (_) { return false; }
 }
 
 function detailedUrl(slug: string): string {
@@ -116,6 +139,7 @@ function parseBlueGolf(raw: string) {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
+    if (!(await callerIsAdmin(req))) return json({ ok: false, error: "forbidden" }, 403);
     const body = await req.json().catch(() => ({}));
     let url = String(body.url || "").trim();
     const slug = String(body.slug || "").trim();
@@ -134,7 +158,8 @@ Deno.serve(async (req: Request) => {
     // Normalise ANY bluegolf course URL to its detailed scorecard page.
     const ms = url.match(/course\/course\/([^\/]+)/);
     if (ms) url = detailedUrl(ms[1]);
-    if (!/(^|\.)bluegolf\.com\//.test(url)) return json({ ok: false, error: "Only bluegolf.com course URLs are allowed." });
+    let host = ""; try { host = new URL(url).hostname.toLowerCase(); } catch (_) { host = ""; }
+    if (!(host === "bluegolf.com" || host.endsWith(".bluegolf.com"))) return json({ ok: false, error: "Only bluegolf.com course URLs are allowed." });
     const usedSlug = (url.match(/course\/course\/([^\/]+)/) || [])[1] || "";
 
     const raw = await fetch(url, { headers: { "User-Agent": UA } }).then((r) => r.text());

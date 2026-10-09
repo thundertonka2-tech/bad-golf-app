@@ -636,9 +636,10 @@ section('Quota');
   // manual quota
   const gm = mkRound({ players: pl(ids2, [10, 0]), scores: { p1: parRow(PARS), p2: parRow(PARS) }, games: { quota: { mode: 'perpoint', basis: 'manual', quotas: { p1: 30, p2: 30 }, value: 1, participants: ids2 } } });
   check('manual quota 30/30: tie -> 0', money(E.calcQuota(gm), ids2), { p1: 0, p2: 0 });
-  // 9-hole: quota 18 - round(hcp/2): hcp 10 -> 13 ; hcp 0 -> 18
+  // 9-hole (v1898 convention): on a casual nine p.hcp is ALREADY the 9-hole course handicap, so quota = 18 - hcp:
+  // hcp 10 -> 8 ; hcp 0 -> 18. Only an event round (hcpRules.hcp18) still halves inside the engine.
   const g9 = mkRound({ pars: P9, sis: S9, players: pl(ids2, [10, 0]), scores: { p1: parRow(P9), p2: parRow(P9) }, games: g.games });
-  check('9-hole quota 13/18', E.calcQuota(g9).quotas, { p1: 13, p2: 18 });
+  check('9-hole quota 8/18 (v1898: casual nine carries the 9-hole handicap)', E.calcQuota(g9).quotas, { p1: 8, p2: 18 });
   // pool winner buyin 10 finished: A +10
   const gp = mkRound({ players: pl(ids2, [10, 0]), scores: { p1: parRow(PARS), p2: parRow(PARS) }, games: { quota: { mode: 'pool', basis: 'auto', buyin: 10, payout: 'winner', participants: ids2 } } });
   check('quota pool: A +10', money(E.calcQuota(gp), ids2), { p1: 10, p2: -10 });
@@ -1197,13 +1198,14 @@ section('Probes: more skins / vegas / banker / pools');
 section('Long Drive from the GPS (v1829)');
 {
   const g = mkRound({ players: pl(ids4), scores: parAll(ids4), finished: false });
-  check('no Long Drive game -> no hole', E.bgLongDriveHoleFor(g), null);
+  // v1903: bgLongDriveHoleFor was removed in v1902; the live path is bgLongDriveHolesFor(g) -> hole list.
+  check('no Long Drive game -> no holes', E.bgLongDriveHolesFor(g), []);
   g.games = { longDrive: { value: 5, hole: 7 } };
-  check('round side game -> its hole', E.bgLongDriveHoleFor(g), 7);
+  check('round side game -> its hole', E.bgLongDriveHolesFor(g), [7]);
   g.games = { longDrive: { value: 0, hole: 12, fieldOnly: true } };
-  check('league pot stamp -> its hole', E.bgLongDriveHoleFor(g), 12);
+  check('league pot stamp -> its hole', E.bgLongDriveHolesFor(g), [12]);
   g.games = { longDrive: { value: 5, hole: null } };
-  check('game on but no hole picked -> no button', E.bgLongDriveHoleFor(g), null);
+  check('game on but no hole picked -> no button', E.bgLongDriveHolesFor(g), []);
   const r1 = E.bgLongDriveApply(null, { pid: 'p1', yds: 260, via: 'gps' });
   check('first drive leads', r1.lead && r1.leader.pid, 'p1');
   const r2 = E.bgLongDriveApply(r1.leader, { pid: 'p2', yds: 250, via: 'gps' });
@@ -1218,8 +1220,10 @@ section('Long Drive from the GPS (v1829)');
   const r6 = E.bgLongDriveApply({ pid: 'p4', yds: 300 }, { pid: 'p1', yds: 240, via: 'gps' });
   check('a hand pick WITH yards holds against a shorter drive', r6.lead, false);
   const src = require('fs').readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  check('tap asks "In the fairway?" before recording', /title: 'In the fairway\?'/.test(src), true);
-  check('league launch stamps the pot hole into games.longDrive', /_g\.longDrive = \{ value: 0, hole: Number\(_wk\.longest_drive\.hole\), fieldOnly: true \}/.test(src), true);
+  // v1903: the "In the fairway?" prompt is gone by owner rule (no fairway question on Long Drive); the league
+  // launcher has stamped { value: 0, hole: _lh[0], holes: _lh, any, fieldOnly: true } since v1833.
+  check('tap never asks "In the fairway?"', /title: 'In the fairway\?'/.test(src), false);
+  check('league launch stamps the pot hole(s) into games.longDrive', /_g\.longDrive = \{ value: 0, hole: _lh\.length \? _lh\[0\] : null, holes: _lh, any: !!_wk\.longest_drive\.any, fieldOnly: true \}/.test(src), true);
 }
 
 // v1826 (Hoon / Tyler): auto-advance only when every input the hole asks for is in.
