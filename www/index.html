@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1900-->
+<!--BGVER=v2026.11.1901-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11937,7 +11937,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1900';
+const BG_BUILD = 'v2026.11.1901';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -20283,7 +20283,7 @@ function subscribeToGame(code) {
         if (!payload || payload.pid == null) return;
         if (!window._livePos) window._livePos = {};
         const bag = (window._livePos[code] = window._livePos[code] || {});
-        const rec = { lng: payload.lng, lat: payload.lat, hole: payload.hole, at: payload.at || Date.now(), share: payload.share !== false };
+        const rec = { lng: payload.lng, lat: payload.lat, hole: payload.hole, at: payload.at || Date.now(), share: payload.share !== false && isFinite(Number(payload.lng)) && isFinite(Number(payload.lat)) };   // v1901: no coordinates = not shared
         bag[payload.pid] = rec;
         // Stable-name alias so a spectator whose player-id differs still finds the dot. (v258)
         if (payload.pname) bag['name:' + payload.pname] = rec;
@@ -22009,8 +22009,7 @@ function freshWatchPos() {
 let _lastPosSentAt = 0;
 function broadcastMyPosition(lng, lat, hole) {
   try {
-    // Position is ALWAYS broadcast (so an admin can follow anyone), but it carries
-    // the player's share consent. Non-admins only ever SEE the dot when share=true.
+    // v1901: the player's share switch decides whether coordinates are sent at all.
     let share = true; try { share = localStorage.getItem('golf:share-location') !== '0'; } catch (e) {}
     const g = state.game;
     if (!g || !g.code || g.finishedAt || state.viewOnlyMode) return;     // only real players broadcast
@@ -22028,7 +22027,10 @@ function broadcastMyPosition(lng, lat, hole) {
     // watch is actively sending it through the native bridge.
     try { const _w = freshWatchPos(); if (_w) { lng = _w.lng; lat = _w.lat; } } catch (e) {}
     _lastPosSentAt = now;
-    activeRealtimeSub.send({ type: 'broadcast', event: 'pos', payload: { pid, pname, lng, lat, hole: hole || null, at: now, share: !!share } });
+    /* v1901 (Tyler, 10/9: "honor the switch for real"): with sharing off only the hole goes out
+       (so the group's "thru" still works) - no coordinates, for anyone, admins included. */
+    if (!share) { activeRealtimeSub.send({ type: 'broadcast', event: 'pos', payload: { pid, pname, hole: hole || null, at: now, share: false } }); return; }
+    activeRealtimeSub.send({ type: 'broadcast', event: 'pos', payload: { pid, pname, lng, lat, hole: hole || null, at: now, share: true } });
   } catch (e) {}
 }
 window.broadcastMyPosition = broadcastMyPosition;
@@ -53017,10 +53019,18 @@ function calcStableford(g) {
   // group average. Zero-sum (the deviations sum to 0) and your units tracks your
   // points directly. Consistent with Split 6's "vs the average" settlement.
   if (mode === 'perpoint') {
-    const n = participants.length;
-    const total = participants.reduce((s, p) => s + (points[p.id] || 0), 0);
-    const avg = n ? total / n : 0;
-    participants.forEach(p => { money[p.id] = (points[p.id] - avg) * (cfg.value || 0); });
+    /* v1901 (Tyler, 10/9: "score on only the holes played"): settled HOLE BY HOLE among the
+       players who scored that hole - (your points - that hole's average) x value. On a full
+       card this sums to exactly the old (total - group average) x value; a player who left
+       after 9 is compared on those 9 only and never pays for holes he didn't play. */
+    const _v = cfg.value || 0;
+    holePoints.forEach(hr => {
+      if (!hr) return;
+      const ids = participants.map(p => p.id).filter(id => hr[id] != null);
+      if (ids.length < 2) return;
+      const avg = ids.reduce((s, id) => s + hr[id], 0) / ids.length;
+      ids.forEach(id => { money[id] += (hr[id] - avg) * _v; });
+    });
     return { points, money, holePoints, mode: 'perpoint' };
   }
 
@@ -53168,12 +53178,20 @@ function calcQuota(g) {
   }
 
   if (mode === 'perpoint') {
-    // (your result − field-average result) × value, where result = points − quota.
-    // Matches Stableford / Split 6's "vs the average" settlement. Zero-sum.
-    const n = participants.length;
-    const totalRes = participants.reduce((s, p) => s + (result[p.id] || 0), 0);
-    const avgRes = n ? totalRes / n : 0;
-    participants.forEach(p => { money[p.id] = (result[p.id] - avgRes) * (cfg.value || 0); });
+    /* v1901 (Tyler, 10/9): hole by hole among the players who scored the hole. Each player's
+       quota is spread evenly over the round's holes, so a hole's result is (points - quota/H);
+       settle (result - that hole's average result) x value. Full cards: identical to the old
+       (result - average result) x value. A leaver is compared on his holes only. */
+    const _v = cfg.value || 0;
+    const _H = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
+    holePoints.forEach(hr => {
+      if (!hr) return;
+      const ids = participants.map(p => p.id).filter(id => hr[id] != null);
+      if (ids.length < 2) return;
+      const res = {}; ids.forEach(id => { res[id] = hr[id] - (quotas[id] || 0) / _H; });
+      const avg = ids.reduce((s, id) => s + res[id], 0) / ids.length;
+      ids.forEach(id => { money[id] += (res[id] - avg) * _v; });
+    });
     return { points, quotas, result, holePoints, money, mode: 'perpoint' };
   }
 
@@ -73216,7 +73234,7 @@ async function openSpectateGps(code) {
   let pid = null;
   try {
     const bag = (window._livePos && window._livePos[code]) || {};
-    const _lpFind = (g.players || []).find(p => { const lp = _livePosFor(code, p); return lp && (lp.share !== false || (typeof isAdmin === 'function' && isAdmin())) && (Date.now() - (lp.at || 0) < 60000); });
+    const _lpFind = (g.players || []).find(p => { const lp = _livePosFor(code, p); return lp && lp.share !== false && (Date.now() - (lp.at || 0) < 60000); });
     pid = (_lpFind ? _lpFind.id : null) || ((g.players && g.players[0]) ? g.players[0].id : null);
   } catch (e) { pid = (g.players && g.players[0]) ? g.players[0].id : null; }
   if (!pid) { openCrewRound(code); return; }
@@ -120293,7 +120311,7 @@ const gpsView = (() => {
     const _spl = (g.players || []).find(p => p.id === spectate.pid);
     const pos = _livePosFor(g.code, _spl) || bag[spectate.pid];
     // Non-admins only see a player who's sharing; admins can follow anyone.
-    const canSee = !!pos && (pos.share !== false || (typeof isAdmin === 'function' && isAdmin()));
+    const canSee = !!pos && pos.share !== false;   // v1901: admins no longer see a non-sharer (nothing is sent)
     // v1818: a position older than 10 minutes is not "where they are" any more.
     const _fresh = !!pos && (!pos.at || (Date.now() - pos.at) < 10 * 60000);
     // v1818: the hole comes from the ping only if it isn't behind the group's scores.
@@ -120320,7 +120338,7 @@ const gpsView = (() => {
     const bag = (window._livePos && g && g.code) ? (window._livePos[g.code] || {}) : {};
     bar.innerHTML = '<span class="gps-spectate-lbl">👀</span>' + players.map(p => {
       const _lp = _livePosFor(g.code, p);
-      const live = _lp && (_lp.share !== false || (typeof isAdmin === 'function' && isAdmin())) && (Date.now() - (_lp.at || 0) < 60000);
+      const live = _lp && _lp.share !== false && (Date.now() - (_lp.at || 0) < 60000);   // v1901
       const on = p.id === spectate.pid;
       return '<button class="bg-btn gps-spectate-chip' + (on ? ' on' : '') + '" data-pid="' + p.id + '">' + (live ? '🟢 ' : '') + (typeof displayFirst === 'function' ? displayFirst(p) : (p.name || '?')) + '</button>';
     }).join('');
