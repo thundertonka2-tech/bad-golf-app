@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1904-->
+<!--BGVER=v2026.11.1905-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11954,7 +11954,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1904';
+const BG_BUILD = 'v2026.11.1905';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -84408,6 +84408,188 @@ async function t2ResyncLaunchedGroupsForDay(t, dayId, dayNumber, kind, onlyGroup
   return result;
 }
 
+/* v1905 (Tyler, 10/11 - Sr. Sunday at Buffalo Creek): "often times we have to make last
+   minute changes." Gregory (the commissioner) needed Chris out of Birdie Bump mid-round and
+   could not find a way: the day's side-game player lists were only reachable from Configure
+   Day / the setup hub, and both lock once the event is live, so a live event had no in/out
+   control at all. This sheet is that control, on the live event.
+   - Who: the commissioner and any event admin (t2CanManage) - the same people managerIds
+     already lets fix scores.
+   - What: the field-settled SIDE games only - Birdie Bump, Closest to the Pin / Par 3 Greenie,
+     Long Putt and the Low Net / GIRs / Putts pools. Main games and Skins are not offered
+     (Tyler: side games only).
+   - Holes: a change counts for ALL 18, as if it had been set up that way - the field engines
+     read the opt-in list against the whole card, so nothing here is hole-aware on purpose.
+   Storage is exactly what setup writes (v1319/v1322): participantNames on the day game,
+   players on an event prize pool, fieldNames + participants on every launched round of the
+   day. Every round of the day is patched - finished ones included - because the field
+   engines take the opt-in list from whichever round they read first, and a stale list on
+   one card would split the field. A day that is already complete is refused: its prize
+   pools have settled. Cloud wins for g.games in _mergeGameInto, so a phone mid-round adopts
+   the new list on its next save instead of writing the old one back. */
+function _t2InOutGames(t, day) {
+  const out = [];
+  try {
+    const s = (t && t.settings) || {};
+    const dg = (s.dayGames && s.dayGames[day]) || {};
+    if (dg.birdiePool) out.push({ id: 'birdiePool', label: '\u{1F426} Birdie Bump', src: 'day', key: 'birdiePool', rk: 'birdiePool', cfg: dg.birdiePool });
+    const _isTeamDay = (typeof _t2DayCfgIsTeam === 'function') ? _t2DayCfgIsTeam(dg) : false;
+    if (dg.p3greenie && !_isTeamDay) out.push({ id: 'p3greenie', label: '⛳ Par 3 Greenie', src: 'day', key: 'p3greenie', rk: 'ctp', cfg: dg.p3greenie });
+    else if (dg.ctp && Array.isArray(dg.ctp.holes) && dg.ctp.holes.length) out.push({ id: 'ctp', label: '\u{1F3AF} Closest to the Pin', src: 'day', key: 'ctp', rk: 'ctp', cfg: dg.ctp });
+    const tlp = s.tourneyLongPutt;
+    if (tlp && tlp.on && Number(tlp.value) > 0) out.push({ id: 'tourneyLongPutt', label: '\u{1F4CF} Long Putt', src: 'pot', key: 'tourneyLongPutt', rk: 'longPutt', cfg: tlp });
+    else if (dg.longPutt) out.push({ id: 'longPutt', label: '\u{1F4CF} Long Putt', src: 'day', key: 'longPutt', rk: 'longPutt', cfg: dg.longPutt });
+    const sp = s.tourneySidePots || {};
+    [['lowNet', '\u{1F3CC} Low Net'], ['girs', '\u{1F6A9} Most GIRs'], ['putts', '\u{1F3D2} Fewest Putts']].forEach(function (a) {
+      const c = sp[a[0]];
+      if (c && c.on && Number(c.value) > 0) out.push({ id: 'side:' + a[0], label: a[1], src: 'side', key: a[0], rk: null, cfg: c });
+    });
+  } catch (e) {}
+  return out;
+}
+function _t2InOutCurrent(g) {
+  try {
+    const c = g.cfg || {};
+    const l = (g.src === 'day') ? c.participantNames : c.players;
+    return (Array.isArray(l) && l.length) ? l : null;
+  } catch (e) { return null; }
+}
+// Write one new opt-in list (names, or null = everyone) onto a launched round's copy of the game.
+function _t2InOutPatchRound(g, game, names, dayCfg) {
+  try {
+    if (!g || !g.games || !game.rk) return false;
+    let rc = g.games[game.rk];
+    if (!rc) {
+      // The day has this game but the round never got it (launched before it was added).
+      if (game.key === 'birdiePool') { rc = JSON.parse(JSON.stringify(game.cfg)); rc.fieldOnly = true; }
+      else if (game.rk === 'ctp' && typeof _t2FieldCtpFromDayCfg === 'function') rc = _t2FieldCtpFromDayCfg(dayCfg);
+      if (!rc) return false;
+      g.games[game.rk] = rc;
+      try { g.t2 = g.t2 || {}; const k = Array.isArray(g.t2.dayGameKeys) ? g.t2.dayGameKeys : []; if (k.indexOf(game.rk) < 0) g.t2.dayGameKeys = k.concat([game.rk]); } catch (e) {}
+    }
+    // The event Long Putt pool rides on a value-0 stub; only touch that stub, never a group's own game.
+    if (game.src === 'pot' && !(rc.fieldOnly && !rc.value)) return false;
+    const nk = s => normalizeNameSegment(String(s || ''));
+    const inSet = names ? new Set(names.map(nk)) : null;
+    const gp = (Array.isArray(g.players) ? g.players : []).filter(p => p && p.name && (!inSet || inSet.has(nk(p.name))));
+    if (names) rc.fieldNames = names.slice(); else delete rc.fieldNames;
+    rc.participants = gp.map(p => p.id);
+    rc.participantNames = gp.map(p => p.name);
+    return true;
+  } catch (e) { return false; }
+}
+async function openT2SideGamesInOut(t, day, onDone) {
+  try {
+    if (!t || !t.id) return;
+    if (!t2CanManage(t)) { showToast('Only the commissioner or an event admin can change who is in'); return; }
+    let fresh = null; try { fresh = await t2Get(t.id); } catch (e) {}
+    if (fresh && fresh.settings) { t = fresh; try { if (_t2Current && _t2Current.id === t.id) _t2Current.settings = fresh.settings; } catch (e) {} }
+    let days = []; try { days = await t2GetDays(t.id); } catch (e) {}
+    // Default to the day that is being played: an active day, else the last day that started.
+    if (!day) {
+      const act = (days || []).find(d => d && d.status === 'active');
+      day = act ? act.day_number : 1;
+    }
+    const dRec = (days || []).find(d => d && d.day_number === day) || null;
+    if (dRec && /complete/.test(String(dRec.status || ''))) { showToast('Day ' + day + ' is final — its games have already settled'); return; }
+    const games = _t2InOutGames(t, day);
+    if (!games.length) { showToast('No side games are set up for day ' + day); return; }
+    let players = []; try { players = await t2GetPlayers(t.id); } catch (e) {}
+    const roster = (players || []).filter(p => p && p.display_name && !(typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p))).map(p => p.display_name);
+    if (!roster.length) { showToast('Add players to the event first'); return; }
+    const nk = s => normalizeNameSegment(String(s || ''));
+    const sel = {};
+    games.forEach(g => { const cur = _t2InOutCurrent(g); sel[g.id] = new Set((cur || roster).map(nk)); });
+    const ov = document.createElement('div');
+    ov.className = 'modal-overlay show';
+    ov.style.cssText = 'z-index:100070;align-items:flex-start;overflow-y:auto;padding-top:calc(16px + env(safe-area-inset-top,0px))';
+    const body = games.map(g =>
+      '<div style="margin-top:14px"><div style="display:flex;align-items:baseline;gap:8px">'
+        + '<div style="font-weight:800;font-size:15px;flex:1">' + g.label + '</div>'
+        + '<button class="bg-btn bg-btn--sm small t2io-all" data-k="' + t2esc(g.id) + '" style="flex:0 0 auto">All in</button></div>'
+      + roster.map(n => '<label style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border)">'
+          + '<input type="checkbox" class="t2io bg-ck" data-k="' + t2esc(g.id) + '" data-n="' + t2esc(n) + '"' + (sel[g.id].has(nk(n)) ? ' checked' : '') + ' style="flex:0 0 auto">'
+          + '<span>' + t2esc(n) + '</span></label>').join('')
+      + '</div>').join('');
+    ov.innerHTML = '<div class="modal" style="max-width:460px;width:96%;margin:12px auto">'
+      + '<h2 style="margin-bottom:4px">\u{1F64B} Who’s in the side games</h2>'
+      + '<p class="help-text" style="margin-bottom:2px">Day ' + day + '. Untick anyone sitting a game out. Changes count for all 18 holes, and every group’s round updates right away.</p>'
+      + body
+      + '<div class="actions" style="margin-top:14px"><button class="bg-btn bg-btn--ghost" id="t2io-cancel" style="flex:1">Cancel</button><button class="bg-btn bg-btn--primary primary" id="t2io-save" style="flex:1">Save</button></div></div>';
+    document.body.appendChild(ov);
+    const close = () => { try { ov.remove(); } catch (e) {} };
+    ov.onclick = (e) => { if (e.target === ov) close(); };
+    ov.querySelector('#t2io-cancel').onclick = close;
+    ov.querySelectorAll('.t2io-all').forEach(b => b.onclick = () => {
+      ov.querySelectorAll('.t2io').forEach(c => { if (c.dataset.k === b.dataset.k) c.checked = true; });
+    });
+    const saveBtn = ov.querySelector('#t2io-save');
+    saveBtn.onclick = async () => {
+      if (saveBtn.disabled) return;
+      const lists = {};
+      games.forEach(g => {
+        const names = Array.from(ov.querySelectorAll('.t2io')).filter(c => c.dataset.k === g.id && c.checked).map(c => c.dataset.n);
+        lists[g.id] = (names.length >= roster.length) ? null : names;   // everyone ticked = no list = whole field
+      });
+      if (games.some(g => lists[g.id] && !lists[g.id].length)) { showToast('Leave at least one player in each game, or turn the game off in setup'); return; }
+      saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+      const ok = await t2MergeSettings(t.id, st => {
+        games.forEach(g => {
+          const names = lists[g.id];
+          if (g.src === 'day') {
+            const c = st.dayGames && st.dayGames[day] && st.dayGames[day][g.key];
+            if (!c) return;
+            // Keep each kept player's original picker id so Configure Day reopens cleanly.
+            const idByName = {};
+            try { (c.participantNames || []).forEach((n, i) => { if (c.participants && c.participants[i]) idByName[nk(n)] = c.participants[i]; }); } catch (e) {}
+            const full = names || roster;
+            const stamp = Date.now();
+            c.participantNames = full.slice();
+            c.participants = full.map((n, i) => idByName[nk(n)] || ('p' + i + '-' + stamp + '-io' + i));
+          } else if (g.src === 'pot') {
+            const c = st.tourneyLongPutt; if (!c) return;
+            if (names) c.players = names.slice(); else delete c.players;
+          } else {
+            const c = st.tourneySidePots && st.tourneySidePots[g.key]; if (!c) return;
+            if (names) c.players = names.slice(); else delete c.players;
+          }
+        });
+      });
+      if (!ok) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; showToast('Could not save — try again'); return; }
+      let updated = 0, failed = 0;
+      try {
+        let t2 = null; try { t2 = await t2Get(t.id); } catch (e) {}
+        const dayCfg = (t2 && t2.settings && t2.settings.dayGames && t2.settings.dayGames[day]) || null;
+        if (dRec && dRec.id) {
+          let groups = []; try { groups = await t2GetGroups(dRec.id); } catch (e) {}
+          for (const grp of (groups || [])) {
+            if (!grp || !grp.game_code) continue;
+            let rg = null; try { rg = await loadGame(grp.game_code); } catch (e) { rg = null; }
+            if (!rg || !Array.isArray(rg.players)) continue;
+            let changed = false;
+            games.forEach(g => {
+              if (!g.rk) return;
+              // The round's copy follows the stored day list: an explicit list only when someone is out.
+              if (_t2InOutPatchRound(rg, g, lists[g.id], dayCfg)) changed = true;
+            });
+            if (changed) {
+              rg.updatedAt = Date.now();
+              let sv = false; try { sv = await saveGame(rg); } catch (e) { sv = false; }
+              if (sv) updated++; else failed++;
+              try { if (state.game && state.game.code === rg.code && state.game.games) state.game.games = rg.games; } catch (e) {}
+            }
+          }
+        }
+      } catch (e) { failed++; }
+      close();
+      // Two shapes only, so the translators have whole sentences to work with.
+      showToast(failed ? ('Saved ✓ — ' + updated + ' of ' + (updated + failed) + ' rounds updated; the rest update when they reconnect')
+                       : (updated ? 'Saved ✓ — every group’s round is updated' : 'Saved ✓'));
+      try { if (typeof onDone === 'function') onDone(); } catch (e) {}
+    };
+  } catch (e) { console.warn('openT2SideGamesInOut', e); showToast('Could not open the side games'); }
+}
+
 // v864 (Tyler): "let's fix this right instead of hoping it fixes itself" — Long
 // Putt / CTP add-buttons showed on one scorekeeper's screen and not another's in
 // the SAME tournament. Root cause: these two field-wide prize pools need a per-group
@@ -87738,6 +87920,8 @@ async function renderT2Home() {
         if (i > 1 && gs.length && _dcI) html += '<button class="bg-btn bg-btn--primary bg-btn--full full t2-start-day" data-dayid="' + d.id + '" data-day="' + i + '" style="margin:6px 0 0;border-color:var(--accent)">Start day ' + i + '</button>';
       } else if (started) {
         html += '<div class="small-text" style="color:var(--accent);margin:2px 0">✓ Day started — groups tap ▶ Open to score. Side games: open the round, then Setup → add any games.</div>';
+        // v1905: late in/out on the event's side games, right where the director looks.
+        if (amCommish && !/complete/.test(String(d.status || ''))) html += '<div style="margin:6px 0 0"><button class="bg-btn bg-btn--full full t2-inout-btn" data-day="' + i + '">\u{1F64B} Who\u2019s in the side games</button></div>';
       }
     }
   }
@@ -87878,6 +88062,7 @@ async function renderT2Home() {
       try { await t2SetDays(t.id, arr); await renderT2Home(); } catch (e) {}   // re-render so dateDone unlocks the next step (was leaving the director stuck after picking the date)
     }));
     document.querySelectorAll('.t2-day-config-btn').forEach(b => b.onclick = () => openT2DayConfig(parseInt(b.dataset.day, 10)));
+    document.querySelectorAll('.t2-inout-btn').forEach(b => b.onclick = () => openT2SideGamesInOut(_t2Current || t, parseInt(b.dataset.day, 10), () => { try { renderT2Home(); } catch (e) {} }));   // v1905
     const del = document.getElementById('t2-delete');
     if (del) del.onclick = async () => {
       if (!(await uiConfirm('Delete "' + t.name + '"? This removes the tournament AND the rounds it launched (scores and games) for everyone.', { title: 'Delete tournament?', okLabel: 'Delete', cancelLabel: 'Cancel', danger: true }))) return;
@@ -98304,6 +98489,7 @@ async function openEventLeaderboard(t, opts) {
     body.querySelectorAll('.evlb-skins-cfg').forEach(b => b.onclick = () => openTourneySkinsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-nassau-cfg').forEach(b => b.onclick = () => openTourneyNassauConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     body.querySelectorAll('.evlb-lp-cfg').forEach(b => b.onclick = () => openTourneyLongPuttConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
+    body.querySelectorAll('.evlb-inout').forEach(b => b.onclick = () => openT2SideGamesInOut(t, 0, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));   // v1905
     body.querySelectorAll('.evlb-sp-cfg').forEach(b => b.onclick = () => openTourneySidePotsConfig(t, () => { try { ov.remove(); } catch (e) {} openEventLeaderboard(t); }));
     // v1107 (Build A): both award buttons now navigate to the real Board
     // (Results) with the scope preset, the way Group award already did. The
@@ -98497,6 +98683,8 @@ async function openEventLeaderboard(t, opts) {
     // Each day is the normal combined-payout engine run on that day's rounds only
     // (_t2DayOnly filter in _t2FetchFieldRounds) — no new units math.
     html += (await _t2MoneyByDayHtml(t, _combinedPay)) || '';   // v1336: shared with the Games sheet
+    // v1905: a playing commissioner lives on this screen during the round - put the late in/out here too.
+    try { if (t2CanManage(t) && (_t2InOutGames(t, 1).length || (t.num_days || 1) > 1)) html += '<div style="margin:10px 0 2px"><button class="bg-btn bg-btn--full full evlb-inout">\u{1F64B} Who\u2019s in the side games</button></div>'; } catch (e) {}
     // Long Drive — ONE field-wide individual winner per day, set by the commissioner.
     const _amCommish = t2CanManage(t);
     const _ldDays = [];
