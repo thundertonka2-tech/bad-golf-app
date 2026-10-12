@@ -18,11 +18,11 @@
    - `green_pipeline` for the chunk's course ids: how many `live`, `trace`, `off`, and each off reason.
    - No JSON-null slope rows: `select count(*) from course_greens where elev = 'null'::jsonb` must be 0.
    - Outlier scan: courses with average green slope > 6% or 3+ greens over 8% → list them.
-6. **Judgment calls** (Tyler): courses that opened after the lidar flight (new builds — slope is of the dirt) get slope withheld; outlier courses from the auto-tracer go to Kevin as `missing` so he retraces them in the app.
+6. **Judgment calls** (Tyler): courses that opened, or rebuilt their greens, after the lidar flight (slope is of the old ground) get slope withheld — keep the outline, null the slope, note starts `Slope withheld:` (a research agent sweeps the chunk's course list for openings / green rebuilds / closures since the flight year). Courses closed for a rebuild are withheld too, and get re-run after they reopen. A re-run batch must leave out every `Slope withheld:` course, or run_region adds the old slope back; outlier courses from the auto-tracer go to Kevin as `missing` so he retraces them in the app.
 7. **Kevin's list**: courses in `trace` stage (1–3 greens missing) show in his Green mapping queue automatically. Anything with no pin for a hole stays `missing` until the GPS is mapped.
 8. **Report + tick the box**: Claude writes the chunk line here (date, live / trace / off counts, flagged courses) and a short handoff note if anything unusual happened.
 
-**Sources used by the pipeline:** OpenStreetMap `golf=green` outlines (most greens), pins-and-lidar auto-trace for the rest, USGS 3DEP 1 m lidar for slope, TxGIO StratMap as the Texas fallback. States with no 1 m lidar coverage show as `off` with "no lidar slope"; Canada and Ireland have no slope source wired yet (see the warnings in the list).
+**Sources used by the pipeline:** OpenStreetMap `golf=green` outlines (most greens), pins-and-lidar auto-trace for the rest, USGS 3DEP 1 m lidar for slope, TxGIO StratMap as the Texas fallback, and regional DEMs listed in `dem.py` EXTRA_DEMS (first one: NOAA Digital Coast SWFWMD 2017 for Hillsborough County / Tampa, which has no USGS 1 m product). States with no 1 m lidar coverage show as `off` with "no lidar slope"; Canada and Ireland have no slope source wired yet (see the warnings in the list).
 
 **Rules that never change:** a hand-traced green (`source='manual'`) is never overwritten; a green that already has slope is never downgraded; the whole course goes live only when every hole has outline + slope.
 
@@ -33,12 +33,12 @@
 Legend: ☐ to do · ✅ done. Chunk ids are in `scripts/greens/chunks.json` (with the course ids), so a chunk is reproducible.
 
 **Florida** (US) — 778 courses
-- ☐ `001-florida-west-palm-beach-fort-lauderdale` — West Palm Beach / Fort Lauderdale (26.6, -80.2) — 220 courses / 3797 holes
-- ☐ `002-florida-daytona-beach-ocala` — Daytona Beach / Ocala (29.1, -81.6) — 199 courses / 3438 holes
-- ☐ `003-florida-fort-myers-naples` — Fort Myers / Naples (26.4, -81.8) — 160 courses / 2720 holes
-- ☐ `004-florida-tampa-lakeland` — Tampa / Lakeland (27.8, -82.3) — 154 courses / 2601 holes (live now: 1)
-- ☐ `005-florida-pensacola-panama-city` — Pensacola / Panama City (30.5, -86.5) — 32 courses / 567 holes
-- ☐ `006-florida-tallahassee-panama-city` — Tallahassee / Panama City (30.4, -84.4) — 13 courses / 216 holes
+- ✅ `001-florida-west-palm-beach-fort-lauderdale` — West Palm Beach / Fort Lauderdale (26.6, -80.2) — 220 courses / 3797 holes — done 2026-10-05: 217 live, Seagate + Quail Ridge South to Kevin (3 greens each), Loblolly off (6)
+- ✅ `002-florida-daytona-beach-ocala` — Daytona Beach / Ocala (29.1, -81.6) — 199 courses / 3438 holes — done 2026-10-12: 195 live, St Johns GC + Ventura CC to Kevin (3 greens each), Glen Kernan off (4). Deerwood CC withheld (closed for a redesign Oct 2026–Oct 2027) — re-run after it reopens
+- ✅ `003-florida-fort-myers-naples` — Fort Myers / Naples (26.4, -81.8) — 160 courses / 2720 holes — done 2026-10-12: 146 live; Stonebridge CC, Eastwood GC, Boca Royale to Kevin (3 greens each); 11 withheld (new/rebuilt after the 2018 lidar)
+- ✅ `004-florida-tampa-lakeland` — Tampa / Lakeland (27.8, -82.3) — 154 courses / 2601 holes — done 2026-10-12: 144 live; 10 withheld (new/rebuilt after the lidar). Tampa/Hillsborough uses the NOAA SWFWMD 2017 fallback
+- ✅ `005-florida-pensacola-panama-city` — Pensacola / Panama City (30.5, -86.5) — 32 courses / 567 holes — done 2026-10-12: 28 live; Blackstone, Eagle Springs, Blackwater, Gator Lakes off (no 1 m lidar)
+- ✅ `006-florida-tallahassee-panama-city` — Tallahassee / Panama City (30.4, -84.4) — 13 courses / 216 holes — done 2026-10-12: 11 live; Seminole Legacy + Killearn withheld (rebuilt after the 2020 lidar)
 
 **Michigan** (US) — 741 courses
 - ☐ `007-michigan-detroit-ann-arbor` — Detroit / Ann Arbor (42.6, -83.3) — 250 courses / 4095 holes (live now: 1)
@@ -64,7 +64,7 @@ Legend: ☐ to do · ✅ done. Chunk ids are in `scripts/greens/chunks.json` (wi
 - ☐ `023-new-york-long-island-new-york-city` — Long Island / New York City (40.9, -72.8) — 55 courses / 954 holes
 
 **Texas** (US) — 534 courses
-- ☐ `024-texas-dallas-fort-worth` — Dallas / Fort Worth (32.8, -96.7) — 194 courses / 3332 holes (live now: 189)
+- ✅ `024-texas-dallas-fort-worth` — Dallas / Fort Worth (32.8, -96.7) — 194 courses / 3332 holes — done 2026-10-05 (ticked 2026-10-12): 189 live; Fields Ranch E/W withheld (built after the lidar), Vaquero with Kevin (17 greens); 2 chunk ids no longer in the app
 - ✅ `025-texas-san-antonio-austin` — San Antonio / Austin (29.5, -98.2) — 141 courses / 2475 holes
 - ✅ `026-texas-houston-austin` — Houston / Austin (29.9, -95.5) — 132 courses / 2187 holes
 - ✅ `027-texas-lubbock-fort-worth` — Lubbock / Fort Worth (34.2, -101.2) — 37 courses / 648 holes
@@ -281,3 +281,9 @@ Legend: ☐ to do · ✅ done. Chunk ids are in `scripts/greens/chunks.json` (wi
 | 2026-10-04 | Texas — DFW (first pass) | 80 | 0 | 56 | OSM + USGS only; Collin County had no usable lidar |
 | 2026-10-05 | Texas — DFW off list, Houston, Austin/SA, rest of state | 527 | 0 | 7 | TxGIO fallback + auto-trace added. Fields Ranch E/W withheld (built after the lidar). Vaquero to Kevin (auto-trace outliers). |
 | 2026-10-05 | Played courses (34 across US + IE) | 31 | 0 | 3 | Ireland has no lidar source |
+| 2026-10-05 | 001 Florida — West Palm Beach / Fort Lauderdale | 217 | 2 (Seagate CC, Quail Ridge South — 3 greens each) | 1 (Loblolly, 6 greens) | 2,369 greens from OSM, 1,427 auto-traced; one USGS timeout retried. Flagged greens were ellipse-fallback auto-traces reading 8–16% on heavily mounded courses. 50 min. |
+| 2026-10-12 | 002 Florida — Daytona Beach / Ocala | 196 | 2 (St Johns GC, Ventura CC — 3 greens each) | 1 (Glen Kernan, 4 greens) | 2,395 greens from OSM, 911 lidar auto-trace, 132 ellipse fallback; FL lidar 2017–18, no timeouts. All 10 flagged greens were ellipse fallbacks reading 8–15%. New-build check: none withheld; Jax Beach GC rebuilt 2018 before the lidar flight (OK); Deerwood CC closes for a full redesign Oct 2026–Oct 2027 — re-run after reopening. 33 min. |
+| 2026-10-12 | 003 Florida — Fort Myers / Naples | 146 | 3 (Stonebridge CC — OSM outlines, Eastwood GC, Boca Royale — 3 greens each) | 11 withheld | Withheld: Babcock National (2020), Wellen Park (2023), Aileron (2023), TPC Treviso Bay, Vineyards, Countryside, Naples Lakes, Fiddlesticks, Gasparilla, Crown Colony (rebuilding 2026), Naples Beach Hotel (torn down). Greens expanded but not confirmed rebuilt, left live: Gulf Harbour, Grey Oaks, Bonita Bay, Collier's Reserve, Lemon Bay. Moorings renovating 2027 — re-check. 26 min. |
+| 2026-10-12 | 004 Florida — Tampa / Lakeland | 144 | 0 | 10 withheld | 30 Hillsborough courses had no USGS 1 m lidar -> added NOAA DC 9457 (SWFWMD 2017, 2.5 ft) as a fallback in dem.py and re-ran them: all live, normal slopes. Withheld: Cabot Citrus Karoo + Roost (2025), Esplanade at Azario (2020), Bobby Jones (2023), Dunedin (2024-25), Belleair (2022), Pelican Club (2018), Sarasota National (rebuilding 2026), Lakewood Ranch Cypress Links (2024) + King's Dunes (2025-26). 21 min + 6 min re-run. |
+| 2026-10-12 | 005 + 006 Florida Panhandle / Tallahassee | 39 | 0 | 4 off + 2 withheld | Bay/Leon/Gulf use the 2020 post-Hurricane-Michael USGS lidar; Okaloosa/Escambia/Santa Rosa use 2017. Off (no 1 m lidar): Blackstone, Eagle Springs, Blackwater, Gator Lakes. Withheld: Seminole Legacy (FSU, 2020 rebuild), Killearn (2023-24). Run was restarted once (background job died mid-005). |
+| 2026-10-12 | Deerwood CC (002) | — | — | withheld | Changed from live to withheld: closed Oct 2026 – Oct 2027 for a full redesign; re-run after it reopens. |

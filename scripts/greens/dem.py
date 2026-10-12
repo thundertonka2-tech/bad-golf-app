@@ -54,6 +54,19 @@ def sample(ds, lons, lats, zscale=1.0):
     return v * zscale
 
 
+# Regional DEMs for areas USGS 3DEP 1 m does not cover (2026-10-12, Florida run).
+# (title, (minx, miny, maxx, maxy) WGS84, GDAL path, z scale to metres). Read in place as COGs.
+EXTRA_DEMS = [
+    # Hillsborough County (Tampa): no USGS 1 m product. SWFWMD 2017, 2.5 ft grid, NAVD88 feet.
+    ('NOAA DC 9457 SWFWMD Hillsborough 2017', (-82.656, 27.633, -82.049, 28.186),
+     '/vsicurl/https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/FL_Hills_DEM_2017_9457/Hillsborough_2017.tif', 0.3048006096),
+]
+
+
+def extra_for(minx, miny, maxx, maxy):
+    return [(t, p, zs) for t, (a, b, c, d), p, zs in EXTRA_DEMS if minx < c and maxx > a and miny < d and maxy > b]
+
+
 class Dem:
     def __init__(self, stratmap=None):
         self._ds = {}
@@ -107,6 +120,8 @@ class Dem:
         self.fill(z, LX, LY, self.usgs_for(minx, miny, maxx, maxy), used)
         if np.isfinite(z).mean() < min_cover and self.sm is not None:
             self.fill(z, LX, LY, self.sm.tifs_for(minx, miny, maxx, maxy), used)
+        if np.isfinite(z).mean() < min_cover:
+            self.fill(z, LX, LY, extra_for(minx, miny, maxx, maxy), used)
         if np.isfinite(z).mean() < min_cover:
             return None, ' + '.join(used)
         return z.reshape(h, w), ' + '.join(used)
