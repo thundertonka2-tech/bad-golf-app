@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1910-->
+<!--BGVER=v2026.11.1911-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11963,7 +11963,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1910';
+const BG_BUILD = 'v2026.11.1911';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -36740,6 +36740,7 @@ window.BadGolfWatchSync = async function () {
         holes: holes
       },
       clubs: Array.isArray(window._myClubs) ? window._myClubs : [],
+      gps: bgWatchGpsExtras(g, myPid),   // v1911: Phase 2 - map / greens / pins / arcs / shots / group dots
       playsAs: (typeof watchPlaysAsEnabled === 'function') ? watchPlaysAsEnabled() : true
     };
     await Capacitor.Plugins.WatchBridge.syncSession({
@@ -36975,7 +36976,15 @@ function bgWatchStandings(g, fresh) {
       const u = {}; Object.keys(b.money || {}).forEach(k => { u[k] = r2(b.money[k]); });
       return { key: String(b.key || ''), label: String(b.label || b.key || ''), units: u };
     });
-    const val = { at: Date.now(), thru: bgWatchThru(g), units: units, games: games };
+    // v1911: the GPS screen's match chips ("vs KW 2 UP"), from the same engine pass.
+    let chips = [];
+    try {
+      const _me = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null;
+      if (_me && typeof gpsMyStatuses === 'function') {
+        chips = (gpsMyStatuses(g, m, _me) || []).slice(0, 6).map(c => ({ label: String((c && c.label) || ''), text: String((c && c.text) || ''), cls: String((c && c.cls) || '') }));
+      }
+    } catch (e) {}
+    const val = { at: Date.now(), thru: bgWatchThru(g), units: units, games: games, chips: chips };
     window._bgWatchStCache = { code: g.code, sig: sig, at: Date.now(), val: val };
     return val;
   } catch (e) { return null; }
@@ -37096,6 +37105,148 @@ async function bgApplyWatchCells(g, cells, myPid) {
   return changed;
 }
 
+// ===== v1911: Apple Watch Phase 2 — the GPS screen on the wrist ===============
+// Where this course's green rows live — the same rule as the GPS view's gvSourceFor:
+// a three-nine combo reads "<base>#<front>" (holes 1-9) and "<base>#<back>" (+9); a
+// ":x2" round mirrors the base's 1-9 onto 10-18; anything else is the plain id. The
+// watch reads course_greens itself (anyone may read it), so ~90 KB of outlines and
+// slope grids never ride the phone link.
+function bgWatchGreensSource(courseId) {
+  try {
+    if (!courseId) return null;
+    const cs = (typeof comboSpecFromId === 'function') ? comboSpecFromId(courseId) : null;
+    if (cs) {
+      if (cs.single || !cs.back) return { parts: [{ id: cs.base + '#' + cs.front, off: 0 }], mirror: false };
+      return { parts: [{ id: cs.base + '#' + cs.front, off: 0 }, { id: cs.base + '#' + cs.back, off: 9 }], mirror: false };
+    }
+    const x2 = (typeof nineDoubleSpecFromId === 'function') ? nineDoubleSpecFromId(courseId) : null;
+    if (x2) return { parts: [{ id: x2.base, off: 0 }], mirror: true };
+    return { parts: [{ id: courseId, off: 0 }], mirror: false };
+  } catch (e) { return null; }
+}
+
+// Everything else the wrist GPS needs from the phone: the player's own GPS settings,
+// today's group pins, measured club distances, and where the rest of the group is.
+function bgWatchGpsExtras(g, myPid) {
+  const out = {};
+  try {
+    out.trackShot = (typeof trackShotEnabled === 'function') ? trackShotEnabled() : true;
+    out.estDrive = (typeof driveYardageEnabled === 'function') ? driveYardageEnabled() : true;
+    out.arcs = (typeof gpsArcsEnabled === 'function') ? gpsArcsEnabled() : false;
+    out.dispYds = (typeof gpsDispYds === 'function') ? gpsDispYds() : 15;
+    const gp = (k) => (typeof bgGreenPref === 'function') ? bgGreenPref(k) : true;
+    out.greenView = gp('bg_green_view'); out.greenSlope = gp('bg_green_slope'); out.greenPin = gp('bg_green_pin');
+    out.greens = bgWatchGreensSource(g.courseId);
+    const pins = {};
+    Object.keys(g.greenPins || {}).forEach(k => {
+      const v = g.greenPins[k];
+      if (v && Array.isArray(v.ll) && v.ll.length === 2 && isFinite(v.ll[0]) && isFinite(v.ll[1])) pins[k] = { ll: [Number(v.ll[0]), Number(v.ll[1])], at: Number(v.at) || 0 };
+    });
+    out.pins = pins;
+    const measured = {};
+    (Array.isArray(window._myClubs) ? window._myClubs : []).forEach(c => {
+      try { const st = (typeof clubShotStats === 'function') ? clubShotStats(c && c.label) : null; if (st && st.n >= 5 && isFinite(st.med)) measured[c.label] = Math.round(st.med); } catch (e) {}
+    });
+    out.measured = measured;
+    const grp = [];
+    (g.players || []).forEach(p => {
+      if (!p || !p.id || p.id === myPid) return;
+      const r = (typeof _livePosFor === 'function') ? _livePosFor(g.code, p) : null;
+      if (r && r.share !== false && typeof r.lng === 'number' && typeof r.lat === 'number' && (Date.now() - (Number(r.at) || 0)) < 120000) {
+        // ~1 m and 30 s granularity: an unchanged group doesn't re-send the hand-off every tick
+        grp.push({ pid: p.id, name: (typeof displayFirst === 'function') ? displayFirst(p) : (p.name || ''),
+          ll: [Math.round(r.lng * 1e5) / 1e5, Math.round(r.lat * 1e5) / 1e5], at: Math.floor((Number(r.at) || 0) / 30000) * 30000 });
+      }
+    });
+    out.group = grp;
+  } catch (e) {}
+  return out;
+}
+
+// A retained watch action can arrive before a cold-launched phone has restored the
+// round (the v1277 boot race). Wait for it - up to 30s - rather than dropping it.
+async function _bgWatchRoundFor(roundId) {
+  const _wait = (ms) => new Promise(r => setTimeout(r, ms));
+  const _cur = () => (typeof state !== 'undefined' && state) ? state.game : null;
+  for (let i = 0; i < 30 && roundId && !(_cur() && _cur().code === roundId); i++) await _wait(1000);
+  const g = _cur();
+  return (g && (!roundId || g.code === roundId)) ? g : null;
+}
+
+// Today's pin from the wrist. Same rules as moving it on the phone (gvSetPin): a live
+// round you are scoring in, the pin setting on, and within 45 m of the green's centre.
+// Newest stamp wins across the group (greenPins merge).
+async function bgWatchSetPin(g, h, ll) {
+  try {
+    if (!g || g.finishedAt || state.viewOnlyMode || g._mapOnly) return false;
+    if (typeof bgGreenPref === 'function' && !bgGreenPref('bg_green_pin')) return false;
+    // a player on this card (gvSetPin's spectator gate)
+    if (typeof gpsResolveMyId === 'function' && !gpsResolveMyId(g)) return false;
+    const hole = parseInt(h, 10);
+    if (!(hole >= 1 && hole <= 18) || !Array.isArray(ll) || ll.length !== 2) return false;
+    const lng = Number(ll[0]), lat = Number(ll[1]);
+    if (!isFinite(lng) || !isFinite(lat)) return false;
+    let holes = (window._bgWatchGreens && window._bgWatchGreens.id === g.courseId) ? window._bgWatchGreens.holes : null;
+    if (!holes || !Object.keys(holes).length) holes = await bgWatchCourseHoles(g.courseId);
+    const played = (typeof bgHolesByPlayedHole === 'function') ? bgHolesByPlayedHole(g, holes || {}) : (holes || {});
+    const hd = played && played[String(hole)];
+    const mid = hd && Array.isArray(hd.mid) ? hd.mid : null;
+    if (!mid) return false;
+    const R = 6371000, toR = Math.PI / 180;
+    const dLat = (lat - mid[1]) * toR, dLng = (lng - mid[0]) * toR;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(mid[1] * toR) * Math.cos(lat * toR) * Math.sin(dLng / 2) ** 2;
+    if (2 * R * Math.asin(Math.sqrt(a)) > 45) return false;
+    if (!g.greenPins || typeof g.greenPins !== 'object') g.greenPins = {};
+    g.greenPins[String(hole)] = { ll: [Math.round(lng * 1e7) / 1e7, Math.round(lat * 1e7) / 1e7], at: Date.now() };
+    try { _markScoreTouched('greenPins'); } catch (e) {}   // as gvSetPin does
+    await saveGame(g);
+    return true;
+  } catch (e) { return false; }
+}
+
+// A tracked shot from the wrist, saved to My shots exactly like the phone's Save
+// (5-500 yd rule; aim data kept only within the phone's bounds). 200y+ also goes on
+// the round's big shots, like a phone-tracked bomb.
+async function bgWatchSaveShot(g, u) {
+  try {
+    const yds = Math.round(Number(u.yards));
+    if (!(yds >= 5 && yds <= 500)) return false;
+    const club = String(u.club || '').slice(0, 40);
+    const aim = Number(u.aimYds), latY = Number(u.latY), longY = Number(u.longY);
+    const aimOk = isFinite(aim) && aim >= 30 && yds >= 20 && isFinite(latY) && Math.abs(latY) <= 80 && isFinite(longY) && Math.abs(longY) <= 120;
+    const dirFrom = Number(u.windDirFrom);
+    // The watch re-sends a message it couldn't confirm, so a shot carries its own id
+    // and is saved once.
+    const sid = String(u.sid || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40);
+    const id = sid ? ('sw' + sid) : ('sh' + Date.now());
+    if (sid) {
+      let have = Array.isArray(window._myShots) ? window._myShots : null;
+      if (!have) { try { have = await loadMyShots(); } catch (e) { have = []; } }
+      if ((have || []).some(s => s && s.id === id)) return true;
+    }
+    const shot = {
+      id: id, date: new Date().toISOString(), yards: yds, club: club,
+      windMph: isFinite(Number(u.windMph)) ? Math.round(Number(u.windMph)) : null,
+      windDir: isFinite(dirFrom) ? ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round((((dirFrom % 360) + 360) % 360) / 22.5) % 16] : '',
+      tempF: isFinite(Number(u.tempF)) ? Math.round(Number(u.tempF)) : null,
+      course: (g && g.course) || '',
+      ...(aimOk ? { aimYds: Math.round(aim), latY: Math.round(latY), longY: Math.round(longY) } : {})
+    };
+    await addMyShot(shot);
+    if (yds >= 200 && g && g.code && !g.finishedAt && !state.viewOnlyMode) {
+      try {
+        const me = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null;
+        const p = me && (g.players || []).find(x => x && x.id === me);
+        if (!Array.isArray(g.bigShots)) g.bigShots = [];
+        g.bigShots.push({ n: (p && p.name) || 'Someone', y: yds, h: parseInt(u.h, 10) || 0, at: Date.now() });
+        if (g.bigShots.length > 20) g.bigShots = g.bigShots.slice(-20);
+        await saveGame(g);
+      } catch (e) {}
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
 // Actions from the wrist. 'finish' runs the phone's own Finish flow — the same
 // questions (missing Wolf picks, blank holes) are asked HERE, on the phone, because the
 // watch can't answer them. A phone in a pocket picks this up the moment it is opened
@@ -37121,6 +37272,20 @@ window.__onWatchAction = async function (u) {
       if (g.t2 && (g.t2.tournamentId || g.t2.groupId) && !(await bgWatchCanScoreOthers(g))) { try { showToast('\u231A Only someone scoring this round can finish it', 6000); } catch (e) {} return; }
       try { showToast('\u231A Finishing the round from your watch'); } catch (e) {}
       if (typeof bgFinishRoundFlow === 'function') await bgFinishRoundFlow();
+      try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
+    } else if (u.action === 'pin') {
+      // v1911: today's pin moved (and confirmed) on the watch
+      const g = await _bgWatchRoundFor(u.roundId);
+      if (!g) return;
+      const ok = await bgWatchSetPin(g, u.h, u.ll);
+      if (!ok) { try { showToast('\u231A Pin not moved \u2014 it has to be on the green, in a live round', 6000); } catch (e) {} }
+      try { if (window.__gpsGreenPrefChanged) window.__gpsGreenPrefChanged(); } catch (e) {}
+      try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
+    } else if (u.action === 'shot') {
+      // v1911: a shot tracked on the watch
+      const g = await _bgWatchRoundFor(u.roundId);
+      const ok = await bgWatchSaveShot(g, u);
+      try { showToast(ok ? '\u231A Shot saved to My shots \u2713' : '\u231A Shot not saved \u2014 shots are kept from 5 to 500 yards', ok ? 3000 : 6000); } catch (e) {}
       try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
     }
   } catch (e) {}

@@ -103,8 +103,9 @@ final class PhoneWCSession: NSObject, WCSessionDelegate {
     // its own Finish flow — any question it needs answered is asked on the phone.
     private func forwardAction(_ message: [String: Any]) {
         guard let act = message["watchAction"] as? [String: Any] else { return }
-        NotificationCenter.default.post(name: .badGolfWatchAction, object: nil,
-                                        userInfo: ["action": act["action"] ?? "", "roundId": act["roundId"] ?? ""])
+        // v1911: pass the whole action through (pin: h + ll; shot: yards, club, aim…).
+        // The web app validates every field.
+        NotificationCenter.default.post(name: .badGolfWatchAction, object: nil, userInfo: act)
     }
 
     // v891: guaranteed-delivery fallback for score updates queued while the

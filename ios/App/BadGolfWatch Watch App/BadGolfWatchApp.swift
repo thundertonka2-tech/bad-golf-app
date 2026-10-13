@@ -3,12 +3,16 @@
 // When a round is active it opens on Distance; otherwise the picker/empty state.
 
 import SwiftUI
+import Combine
+import CoreLocation
 
 @main
 struct BadGolfWatchApp: App {
     @StateObject private var store = RoundStore()
     @StateObject private var loc = LocationManager()
     @StateObject private var weather = WeatherService()
+    @StateObject private var greens = GreenStore()     // v1911: green outlines + slope for the map
+    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()   // v1911: one shared 1 s tick
     @State private var page = 0
     // v829 (Tyler/Kevin): "it takes forever to sync but once it does, it's
     // correct." scenePhase tells us every time the watch is raised/woken —
@@ -40,9 +44,20 @@ struct BadGolfWatchApp: App {
                 .environmentObject(store)
                 .environmentObject(loc)
                 .environmentObject(weather)
+                .environmentObject(greens)
+                .onChange(of: store.round?.gps?.greens) { _, _ in greens.ensure(round: store.round) }   // v1911
+                .onChange(of: store.round?.id) { _, _ in greens.ensure(round: store.round) }
+                // v1911: Est. Drive + green download retries, once a second during a round
+                .onReceive(tick) { _ in
+                    guard store.round != nil else { return }
+                    let p = loc.location.map { GeoPoint(lng: $0.coordinate.longitude, lat: $0.coordinate.latitude) }
+                    store.feedDrive(p, now: Date().timeIntervalSince1970)
+                    greens.ensure(round: store.round)
+                }
                 .onAppear {
                     WatchConnectivityManager.shared.store = store
                     loc.requestPermission()
+                    greens.ensure(round: store.round)   // v1911: cached greens show at once
                     if store.round != nil {
                         loc.startUpdating()
                         // v891: an active workout session is what keeps this app
@@ -112,14 +127,17 @@ struct RootView: View {
             }
         } else {
             // v1910: Distance · Scoring (the whole group, with stats) · Units.
+            // v1911: + the hole map between Distance and Scoring.
             TabView(selection: $page) {
-                DistanceView(goToScoring: { withAnimation { page = 1 } })
+                DistanceView(goToScoring: { withAnimation { page = 2 } })
                     .tag(0)
-                NavigationStack { GroupScoringView() }
+                HoleMapView()
                     .tag(1)
+                NavigationStack { GroupScoringView() }
+                    .tag(2)
                 if store.round?.standings != nil {
                     NavigationStack { UnitsView() }
-                        .tag(2)
+                        .tag(3)
                 }
             }
             .tabViewStyle(.verticalPage)

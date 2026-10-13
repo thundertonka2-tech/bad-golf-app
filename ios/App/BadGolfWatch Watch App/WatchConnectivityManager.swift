@@ -133,8 +133,13 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
     /// v1910: an action for the phone to run (today: "finish"). completion(true) only
     /// when the phone acknowledged it; otherwise it is queued for guaranteed delivery
     /// and the phone runs it when it is next reachable / opened.
-    func sendAction(_ action: String, roundId: String, completion: @escaping (Bool) -> Void) {
-        let msg: [String: Any] = ["watchAction": ["action": action, "roundId": roundId]]
+    func sendAction(_ action: String, roundId: String, extra: [String: Any] = [:], completion: @escaping (Bool) -> Void) {
+        // v1911: pin (h, ll) and shot (yards, club, aim…) carry extra fields — all
+        // property-list types (String / Int / Double / arrays of Double).
+        var body: [String: Any] = extra
+        body["action"] = action
+        body["roundId"] = roundId
+        let msg: [String: Any] = ["watchAction": body]
         guard WCSession.default.activationState == .activated else { completion(false); return }
         if WCSession.default.isReachable {
             WCSession.default.sendMessage(msg, replyHandler: { _ in completion(true) },

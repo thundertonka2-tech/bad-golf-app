@@ -34,9 +34,9 @@ public class WatchBridgePlugin: CAPPlugin {
         actionObserver = NotificationCenter.default.addObserver(
             forName: .badGolfWatchAction, object: nil, queue: .main
         ) { [weak self] note in
+            // v1911: every field of the action (pin: h + ll; shot: yards, club, aim…)
             var data: [String: Any] = [:]
-            if let a = note.userInfo?["action"] as? String { data["action"] = a }
-            if let rid = note.userInfo?["roundId"] as? String { data["roundId"] = rid }
+            for (k, v) in note.userInfo ?? [:] { if let key = k as? String { data[key] = v } }
             self?.notifyListeners("watchAction", data: data, retainUntilConsumed: true)
         }
     }

@@ -337,6 +337,19 @@ struct UnitsView: View {
     var body: some View {
         if let st = store.round?.standings, !st.games.isEmpty {
             List {
+                // v1911: the GPS screen's match chips ("vs KW · 2 UP")
+                if let chips = st.chips, !chips.isEmpty {
+                    Section("Matches") {
+                        ForEach(Array(chips.enumerated()), id: \.offset) { _, c in
+                            HStack {
+                                Text(c.label).font(.system(size: 13)).lineLimit(1)
+                                Spacer(minLength: 4)
+                                Text(c.text).font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(c.cls == "pos" ? Color.green : (c.cls == "neg" ? Color.orange : Color.white))
+                            }
+                        }
+                    }
+                }
                 Section {
                     ForEach(board(st)) { row in
                         HStack {

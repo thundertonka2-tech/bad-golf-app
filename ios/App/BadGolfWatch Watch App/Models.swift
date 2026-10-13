@@ -40,6 +40,11 @@ struct Hole: Identifiable, Equatable {
         return .none
     }
     var verified: Bool = false   // verified vs. community
+    // v1911 (Phase 2 map): the tee, the fairway target ("light green dot") and the
+    // par-5 lay-up, straight from course_gps.holes. Optional; nil when not mapped.
+    var tee: GeoPoint? = nil
+    var fwc: GeoPoint? = nil
+    var layup: GeoPoint? = nil
 }
 
 // A course with its mapped holes.
@@ -91,6 +96,7 @@ struct Round: Codable, Equatable {
     var isEvent: Bool? = nil            // tournament / event round
     var scorer: Bool? = nil             // this watch may score the other players
     var pars: [Int: Int]? = nil         // played hole -> par (the round's card)
+    var gps: GpsInfo? = nil             // v1911: the wrist map's settings, pins, group dots
 
     func total() -> Int { scores.values.reduce(0) { $0 + $1.strokes } }
 }
@@ -157,6 +163,34 @@ struct Standings: Codable, Equatable {
     var thru: Int
     var units: [String: Double]   // player id -> total units
     var games: [GameUnits]
+    var chips: [MatchChip]? = nil // v1911: the GPS screen's match chips ("vs KW · 2 UP")
+}
+struct MatchChip: Codable, Equatable, Identifiable {
+    var label: String
+    var text: String
+    var cls: String               // "pos" / "neg" / "even"
+    var id: String { label + "|" + text }
+}
+
+// v1911: what the wrist map needs from the phone besides the course itself.
+struct GroupDot: Codable, Equatable, Identifiable {
+    var id: String                // player id
+    var name: String
+    var at: GeoPoint
+    var stamp: Double             // ms
+}
+struct GpsInfo: Codable, Equatable {
+    var trackShot: Bool
+    var estDrive: Bool
+    var arcs: Bool
+    var dispYds: Int
+    var greenView: Bool
+    var greenSlope: Bool
+    var greenPin: Bool
+    var greens: GreenSource?
+    var pins: [Int: GeoPoint]     // played hole -> today's pin (the group's)
+    var measured: [String: Int]   // club -> measured median yards (5+ tracked shots)
+    var group: [GroupDot]
 }
 
 // v1910: the final card shown on the wrist when the round finishes.

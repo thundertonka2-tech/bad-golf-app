@@ -25,7 +25,7 @@ final class SupabaseService {
     }
 
     private func request(_ path: String, method: String = "GET",
-                         query: [String: String] = [:], body: Data? = nil) -> URLRequest? {
+                         query: [String: String] = [:], body: Data? = nil, anonOnly: Bool = false) -> URLRequest? {
         var comps = URLComponents(string: Supabase.url + "/rest/v1/" + path)
         if !query.isEmpty {
             comps?.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
@@ -34,7 +34,9 @@ final class SupabaseService {
         var req = URLRequest(url: u)
         req.httpMethod = method
         req.setValue(Supabase.anonKey, forHTTPHeaderField: "apikey")
-        let token = accessToken ?? Supabase.anonKey
+        // v1911: public tables (course_greens) read with the anon key, so an expired
+        // session token can't 401 the green download.
+        let token = anonOnly ? Supabase.anonKey : (accessToken ?? Supabase.anonKey)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if method == "PATCH" || method == "POST" {
@@ -45,6 +47,20 @@ final class SupabaseService {
     }
 
     // MARK: Reads
+
+    /// v1911: green outlines + slope grids for these course_greens ids (anyone may
+    /// read the table). Rows come back raw; GreenMapper parses and re-keys them.
+    func fetchGreens(ids: [String]) async -> [[String: Any]]? {
+        guard !ids.isEmpty else { return nil }
+        let list = ids.map { "\"" + $0.replacingOccurrences(of: "\"", with: "") + "\"" }.joined(separator: ",")
+        guard let req = request("course_greens", query: [
+            "course_id": "in.(\(list))",
+            "select": "course_id,hole,status,ring,elev"
+        ], anonOnly: true) else { return nil }
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+    }
 
     /// Fetch a course's greens (course_gps.holes) and parse into a Course.
     ///
@@ -196,7 +212,10 @@ enum CourseParser {
                     front: GeoPoint(array: doubles(h["front"])),
                     mid: GeoPoint(array: doubles(h["mid"])),
                     back: GeoPoint(array: doubles(h["back"])),
-                    verified: (h["verified"] as? Bool) ?? false
+                    verified: (h["verified"] as? Bool) ?? false,
+                    tee: GeoPoint(array: doubles(h["tee"])),        // v1911
+                    fwc: GeoPoint(array: doubles(h["fwc"])),
+                    layup: GeoPoint(array: doubles(h["layup"]))
                 )
             }
         }
@@ -224,8 +243,9 @@ enum CourseParser {
         var out: [Int: Hole] = [:]
         for played in 1...18 {
             if let src = c.holes[physicalHole(played, nineMode: m)] {
-                out[played] = Hole(id: played, par: src.par, front: src.front,
-                                   mid: src.mid, back: src.back, verified: src.verified)
+                var h = src          // v1911: keep tee / fairway target / lay-up too
+                h.id = played
+                out[played] = h
             }
         }
         return Course(id: c.id, name: c.name, city: c.city, holes: out)
@@ -329,10 +349,49 @@ enum RoundParser {
                       label: (gd["label"] as? String) ?? "",
                       units: unitsMap(gd["units"]))
         }
+        let chips: [MatchChip]? = (d["chips"] as? [[String: Any]]).map { arr in
+            arr.map { (c: [String: Any]) -> MatchChip in
+                MatchChip(label: (c["label"] as? String) ?? "", text: (c["text"] as? String) ?? "", cls: (c["cls"] as? String) ?? "")
+            }
+        }
         return Standings(at: (d["at"] as? NSNumber)?.doubleValue ?? 0,
                          thru: (d["thru"] as? NSNumber)?.intValue ?? 0,
                          units: unitsMap(d["units"]),
-                         games: games)
+                         games: games,
+                         chips: chips)
+    }
+
+    /// v1911: the hand-off's `gps` block.
+    static func gps(_ d: [String: Any]) -> GpsInfo {
+        var pins: [Int: GeoPoint] = [:]
+        if let pm = d["pins"] as? [String: Any] {
+            for (k, v) in pm {
+                if let h = Int(k), let o = v as? [String: Any], let p = GeoPoint(array: (o["ll"] as? [Any])?.compactMap { ($0 as? NSNumber)?.doubleValue }) { pins[h] = p }
+            }
+        }
+        var measured: [String: Int] = [:]
+        if let mm = d["measured"] as? [String: Any] { for (k, v) in mm { if let n = (v as? NSNumber)?.intValue { measured[k] = n } } }
+        let group: [GroupDot] = ((d["group"] as? [[String: Any]]) ?? []).compactMap { (g: [String: Any]) -> GroupDot? in
+            guard let pid = g["pid"] as? String,
+                  let p = GeoPoint(array: (g["ll"] as? [Any])?.compactMap { ($0 as? NSNumber)?.doubleValue }) else { return nil }
+            return GroupDot(id: pid, name: (g["name"] as? String) ?? "", at: p, stamp: (g["at"] as? NSNumber)?.doubleValue ?? 0)
+        }
+        var source: GreenSource? = nil
+        if let gs = d["greens"] as? [String: Any], let parts = gs["parts"] as? [[String: Any]] {
+            let ps = parts.compactMap { (p: [String: Any]) -> GreenSource.Part? in
+                guard let id = p["id"] as? String, !id.isEmpty else { return nil }
+                return GreenSource.Part(id: id, off: (p["off"] as? NSNumber)?.intValue ?? 0)
+            }
+            if !ps.isEmpty { source = GreenSource(parts: ps, mirror: (gs["mirror"] as? Bool) ?? false) }
+        }
+        return GpsInfo(trackShot: (d["trackShot"] as? Bool) ?? true,
+                       estDrive: (d["estDrive"] as? Bool) ?? true,
+                       arcs: (d["arcs"] as? Bool) ?? false,
+                       dispYds: (d["dispYds"] as? NSNumber)?.intValue ?? 15,
+                       greenView: (d["greenView"] as? Bool) ?? true,
+                       greenSlope: (d["greenSlope"] as? Bool) ?? true,
+                       greenPin: (d["greenPin"] as? Bool) ?? true,
+                       greens: source, pins: pins, measured: measured, group: group)
     }
     /// v1910: the final card that rides on the phone's roundEnded message.
     static func summary(_ d: [String: Any]) -> RoundSummary? {

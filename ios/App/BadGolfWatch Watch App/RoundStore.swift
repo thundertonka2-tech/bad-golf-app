@@ -20,6 +20,7 @@ final class RoundStore: ObservableObject {
     @Published var watchPlaysAs: Bool = true   // show plays-as vs plain GPS yardage
     @Published var summary: RoundSummary?      // v1910: final card after the round finishes
     @Published var finishNote: String?         // v1910: what happened to a Finish from the wrist
+    @Published private(set) var driveYds: Int? // v1911: Est. Drive for the hole being played
 
     enum SyncState: Equatable { case idle, queued(Int), syncing, synced, error(String) }
 
@@ -289,6 +290,54 @@ final class RoundStore: ObservableObject {
         }
     }
 
+    // MARK: v1911 — the wrist map
+
+    /// Est. Drive. Fed once a second from the app (the last fix is re-fed, because a
+    /// player standing still on the tee gets no new fixes with a 5 m distance filter),
+    /// so it works whichever page is showing.
+    private var drive = DriveTracker()
+    private var driveHole = 0
+    func feedDrive(_ p: GeoPoint?, now: Double) {
+        guard let p = p, round?.gps?.estDrive ?? true, let h = hole, let tee = h.tee, let mid = h.mid else {
+            if driveYds != nil { driveYds = nil }
+            return
+        }
+        if driveHole != currentHole { drive.reset(); driveHole = currentHole }
+        let v = drive.update(p, t: now, tee: tee, green: mid, par: parFor(hole: currentHole) ?? h.par)
+        if v != driveYds { driveYds = v }
+    }
+
+    /// A pin set on this watch, shown at once while the phone saves it for the group.
+    private var localPins: [Int: (pin: GeoPoint, at: Date)] = [:]
+
+    /// Today's pin for a played hole: my own just-set pin for a minute, else the
+    /// group's (from the phone), else nil (the map then uses the green's centre).
+    func pin(for h: Int) -> GeoPoint? {
+        if let lp = localPins[h], Date().timeIntervalSince(lp.at) < 60 { return lp.pin }
+        return round?.gps?.pins[h]
+    }
+
+    /// Confirmed on the watch: send today's pin to the phone, which saves it for the group.
+    func setPin(hole h: Int, at p: GeoPoint) {
+        guard let r = round else { return }
+        localPins[h] = (p, Date())
+        objectWillChange.send()
+        WatchConnectivityManager.shared.sendAction("pin", roundId: r.id,
+                                                   extra: ["h": h, "ll": [p.lng, p.lat]]) { _ in }
+    }
+
+    /// A shot tracked on the watch → the phone saves it to My shots.
+    func sendShot(_ s: ShotResult, club: String, hole h: Int, windMph: Double?, windDirFrom: Double?, tempF: Double?) {
+        guard ShotMath.keep(s.yards) else { return }
+        // sid: a message re-sent after a lost reply must not save the shot twice
+        var extra: [String: Any] = ["yards": s.yards, "club": club, "h": h, "sid": UUID().uuidString]
+        if let a = s.aimYds, let la = s.latY, let lo = s.longY { extra["aimYds"] = a; extra["latY"] = la; extra["longY"] = lo }
+        if let w = windMph { extra["windMph"] = w }
+        if let d = windDirFrom { extra["windDirFrom"] = d }
+        if let t = tempF { extra["tempF"] = t }
+        WatchConnectivityManager.shared.sendAction("shot", roundId: round?.id ?? "", extra: extra) { _ in }
+    }
+
     func dismissSummary() {
         dismissedSummaryCode = summary?.code
         summary = nil
@@ -379,6 +428,9 @@ final class RoundStore: ObservableObject {
                 lastPhoneHole = -1
             }
             summary = nil                         // v1910: a live round replaces any final card
+            // v1911: the map's settings / pins / group dots ride beside the round
+            if let gd = payload["gps"] as? [String: Any] { merged.gps = RoundParser.gps(gd) }
+            else if let cur = self.round, cur.id == merged.id { merged.gps = cur.gps }
             self.round = merged
             lastActivityAt = Date()               // v926: live handoff = activity
             // v890: only JUMP the watch's hole when the PHONE's hole actually
@@ -460,6 +512,7 @@ final class RoundStore: ObservableObject {
             if r.myPlayerId == nil { r.myPlayerId = cur.myPlayerId }
             // v1910: a direct row read carries no group / stats / standings — keep the
             // phone's last hand-off rather than dropping back to the solo screen.
+            if r.gps == nil { r.gps = cur.gps }   // v1911
             if r.players == nil {
                 r.players = cur.players; r.track = cur.track; r.standings = cur.standings
                 r.isEvent = cur.isEvent; r.scorer = cur.scorer; r.pars = cur.pars
@@ -578,7 +631,8 @@ enum CourseCache {
     }
     struct Flat: Codable {
         var id: String; var name: String; var city: String?
-        struct H: Codable { var id: Int; var par: Int?; var f: [Double]?; var m: [Double]?; var b: [Double]?; var v: Bool }
+        struct H: Codable { var id: Int; var par: Int?; var f: [Double]?; var m: [Double]?; var b: [Double]?; var v: Bool
+                            var t: [Double]? = nil; var fw: [Double]? = nil; var lu: [Double]? = nil }   // v1911: tee / fairway target / lay-up
         var holes: [H]
     }
     static func save(_ c: Course) {
@@ -587,7 +641,10 @@ enum CourseCache {
                 Flat.H(id: h.id, par: h.par,
                        f: h.front.map { [$0.lng, $0.lat] },
                        m: h.mid.map { [$0.lng, $0.lat] },
-                       b: h.back.map { [$0.lng, $0.lat] }, v: h.verified)
+                       b: h.back.map { [$0.lng, $0.lat] }, v: h.verified,
+                       t: h.tee.map { [$0.lng, $0.lat] },
+                       fw: h.fwc.map { [$0.lng, $0.lat] },
+                       lu: h.layup.map { [$0.lng, $0.lat] })
             })
         if let d = try? JSONEncoder().encode(flat) { try? d.write(to: url) }
     }
@@ -598,7 +655,8 @@ enum CourseCache {
         for h in f.holes {
             holes[h.id] = Hole(id: h.id, par: h.par,
                 front: GeoPoint(array: h.f), mid: GeoPoint(array: h.m),
-                back: GeoPoint(array: h.b), verified: h.v)
+                back: GeoPoint(array: h.b), verified: h.v,
+                tee: GeoPoint(array: h.t), fwc: GeoPoint(array: h.fw), layup: GeoPoint(array: h.lu))
         }
         return Course(id: f.id, name: f.name, city: f.city, holes: holes)
     }
