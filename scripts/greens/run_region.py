@@ -217,7 +217,14 @@ def main():
     summary = {}
     with ProcessPoolExecutor(workers) as ex:
         for cid, rows, report in ex.map(lidar_course, jobs):
-            n = 0 if dry else write_rows(rows)
+            # A failed write must not kill the run: keep the rows on disk (retry with
+            # write_pending.py) and carry on with the next course. (2026-10-12)
+            try:
+                n = 0 if dry else write_rows(rows)
+            except Exception as e:
+                n = -1
+                json.dump(rows, open(os.path.join(out_dir, cid + '.pending.json'), 'w'))
+                print(cid, 'WRITE FAILED', e, '-- rows kept in', cid + '.pending.json', file=sys.stderr, flush=True)
             json.dump({'rows': len(rows), 'written': n, 'report': report}, open(os.path.join(out_dir, cid + '.json'), 'w'), indent=1)
             done = sum(1 for r in rows if r.get('elev'))
             summary[cid] = {'rows': len(rows), 'with_slope': done, 'written': n}
