@@ -262,11 +262,97 @@ enum RoundParser {
                 }
             }
         }
-        return Round(id: id, courseId: courseId, courseName: courseName,
-                     playerId: playerId, currentHole: current, scores: scores,
-                     holeCount: (row["hole_count"] as? Int) ?? 18,
-                     nineMode: row["nine_mode"] as? String,
-                     myPlayerId: row["my_player_id"] as? String)
+        var r = Round(id: id, courseId: courseId, courseName: courseName,
+                      playerId: playerId, currentHole: current, scores: scores,
+                      holeCount: (row["hole_count"] as? Int) ?? 18,
+                      nineMode: row["nine_mode"] as? String,
+                      myPlayerId: row["my_player_id"] as? String)
+        // v1910: the group, stat tracking, standings and scorer flag. Each is only
+        // present from a v1910+ phone; an older phone leaves them nil and the watch
+        // falls back to the single-player scoring screen.
+        if let ps = row["players"] as? [[String: Any]] {
+            r.players = ps.compactMap { (d: [String: Any]) -> GroupPlayer? in
+                guard let pid = d["id"] as? String, !pid.isEmpty else { return nil }
+                let me = (d["me"] as? Bool) ?? false
+                return GroupPlayer(id: pid,
+                                   name: (d["name"] as? String) ?? "",
+                                   me: me,
+                                   canScore: (d["canScore"] as? Bool) ?? me,
+                                   scores: intArr(d["scores"]),
+                                   putts: intArr(d["putts"]),
+                                   fw: strArr(d["fw"]),
+                                   pen: intArr(d["pen"]),
+                                   gir: boolArr(d["gir"]))
+            }
+        }
+        if let t = row["track"] as? [String: Any] {
+            r.track = StatTracking(putts: (t["putts"] as? Bool) ?? false,
+                                   fairways: (t["fairways"] as? Bool) ?? false,
+                                   penalties: (t["penalties"] as? Bool) ?? false,
+                                   gir: (t["gir"] as? Bool) ?? false)
+        }
+        if let pm = row["pars"] as? [String: Any] {
+            var pars: [Int: Int] = [:]
+            for (k, v) in pm { if let h = Int(k), let n = (v as? NSNumber)?.intValue { pars[h] = n } }
+            if !pars.isEmpty { r.pars = pars }
+        }
+        r.standings = standings(row["standings"])
+        r.isEvent = row["event"] as? Bool
+        r.scorer = row["scorer"] as? Bool
+        return r
+    }
+
+    // MARK: v1910 tolerant helpers (JSONSerialization gives NSNumber / NSNull)
+    static func intArr(_ v: Any?) -> [Int?] {
+        guard let a = v as? [Any] else { return [] }
+        return a.map { (x: Any) -> Int? in (x is NSNull) ? nil : (x as? NSNumber)?.intValue }
+    }
+    static func strArr(_ v: Any?) -> [String?] {
+        guard let a = v as? [Any] else { return [] }
+        return a.map { (x: Any) -> String? in x as? String }
+    }
+    static func boolArr(_ v: Any?) -> [Bool?] {
+        guard let a = v as? [Any] else { return [] }
+        return a.map { (x: Any) -> Bool? in (x is NSNull) ? nil : (x as? Bool) }
+    }
+    static func unitsMap(_ v: Any?) -> [String: Double] {
+        var out: [String: Double] = [:]
+        if let m = v as? [String: Any] {
+            for (k, x) in m { if let n = x as? NSNumber { out[k] = n.doubleValue } }
+        }
+        return out
+    }
+    static func standings(_ v: Any?) -> Standings? {
+        guard let d = v as? [String: Any] else { return nil }
+        let games: [GameUnits] = ((d["games"] as? [[String: Any]]) ?? []).map { (gd: [String: Any]) -> GameUnits in
+            GameUnits(key: (gd["key"] as? String) ?? "",
+                      label: (gd["label"] as? String) ?? "",
+                      units: unitsMap(gd["units"]))
+        }
+        return Standings(at: (d["at"] as? NSNumber)?.doubleValue ?? 0,
+                         thru: (d["thru"] as? NSNumber)?.intValue ?? 0,
+                         units: unitsMap(d["units"]),
+                         games: games)
+    }
+    /// v1910: the final card that rides on the phone's roundEnded message.
+    static func summary(_ d: [String: Any]) -> RoundSummary? {
+        guard let code = d["code"] as? String, !code.isEmpty else { return nil }
+        let board: [BoardRow] = ((d["board"] as? [[String: Any]]) ?? []).compactMap { (b: [String: Any]) -> BoardRow? in
+            guard let bid = b["id"] as? String else { return nil }
+            return BoardRow(id: bid, name: (b["name"] as? String) ?? "",
+                            units: (b["units"] as? NSNumber)?.doubleValue ?? 0,
+                            me: (b["me"] as? Bool) ?? false)
+        }
+        return RoundSummary(code: code,
+                            course: (d["course"] as? String) ?? "",
+                            strokes: (d["strokes"] as? NSNumber)?.intValue ?? 0,
+                            toPar: (d["toPar"] as? NSNumber)?.intValue ?? 0,
+                            holes: (d["holes"] as? NSNumber)?.intValue ?? 0,
+                            putts: (d["putts"] as? NSNumber)?.intValue,
+                            fairways: d["fairways"] as? String,
+                            girs: d["girs"] as? String,
+                            units: (d["units"] as? NSNumber)?.doubleValue,
+                            board: board)
     }
 
     /// v1146: parse a raw `games` row — `code` + `data` (the whole round as

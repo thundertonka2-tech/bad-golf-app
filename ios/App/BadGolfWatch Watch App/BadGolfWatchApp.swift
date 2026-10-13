@@ -1,5 +1,5 @@
 // Bad Golf Watch — App entry
-// A 2-page swipe stack: Distance (primary) and Scoring.
+// A swipe stack: Distance (primary), Scoring, and (v1910) Units.
 // When a round is active it opens on Distance; otherwise the picker/empty state.
 
 import SwiftUI
@@ -104,13 +104,23 @@ struct RootView: View {
 
     var body: some View {
         if store.round == nil {
-            RoundPickerView()
+            // v1910: the final card stays up after the round finishes until Done.
+            if let s = store.summary {
+                SummaryView(summary: s)
+            } else {
+                RoundPickerView()
+            }
         } else {
+            // v1910: Distance · Scoring (the whole group, with stats) · Units.
             TabView(selection: $page) {
                 DistanceView(goToScoring: { withAnimation { page = 1 } })
                     .tag(0)
-                ScoringView()
+                NavigationStack { GroupScoringView() }
                     .tag(1)
+                if store.round?.standings != nil {
+                    NavigationStack { UnitsView() }
+                        .tag(2)
+                }
             }
             .tabViewStyle(.verticalPage)
         }

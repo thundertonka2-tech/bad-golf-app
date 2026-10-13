@@ -89,7 +89,7 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
     /// writes — those targeted columns that don't exist on `games`, so they
     /// 400'd on every attempt and watch scores NEVER synced. completion(true)
     /// only when the phone acknowledged receipt.
-    func sendScores(roundId: String, scores: [Int: HoleScore], completion: @escaping (Bool) -> Void) {
+    func sendScores(roundId: String, scores: [Int: HoleScore], cells: [CellEdit] = [], completion: @escaping (Bool) -> Void) {
         var obj: [String: Any] = [:]
         for (hole, s) in scores {
             var d: [String: Any] = ["strokes": s.strokes]
@@ -100,7 +100,19 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
             d["at"] = Int(s.updatedAt.timeIntervalSince1970 * 1000)
             obj[String(hole)] = d
         }
-        let update: [String: Any] = ["scoreUpdate": ["roundId": roundId, "scores": obj]]
+        // v1910: group scoring + hole stats ride beside the wearer's own strokes as
+        // cells: [{pid, h, f, v, at}]. A cleared value is sent WITHOUT "v" — WCSession
+        // payloads must be property-list types, and NSNull is not one.
+        var upd: [String: Any] = ["roundId": roundId, "scores": obj]
+        if !cells.isEmpty {
+            upd["cells"] = cells.map { e -> [String: Any] in
+                var d: [String: Any] = ["pid": e.pid, "h": e.hole, "f": e.field,
+                                        "at": Int(e.at.timeIntervalSince1970 * 1000)]
+                if let v = e.iv { d["v"] = v } else if let v = e.sv { d["v"] = v }
+                return d
+            }
+        }
+        let update: [String: Any] = ["scoreUpdate": upd]
         guard WCSession.default.activationState == .activated else { completion(false); return }
         if WCSession.default.isReachable {
             WCSession.default.sendMessage(update, replyHandler: { _ in completion(true) },
@@ -114,6 +126,24 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
             // Phone out of range: guaranteed delivery when it reconnects. Stay
             // "queued" locally so the reconnect flush re-confirms with an ack.
             WCSession.default.transferUserInfo(update)
+            completion(false)
+        }
+    }
+
+    /// v1910: an action for the phone to run (today: "finish"). completion(true) only
+    /// when the phone acknowledged it; otherwise it is queued for guaranteed delivery
+    /// and the phone runs it when it is next reachable / opened.
+    func sendAction(_ action: String, roundId: String, completion: @escaping (Bool) -> Void) {
+        let msg: [String: Any] = ["watchAction": ["action": action, "roundId": roundId]]
+        guard WCSession.default.activationState == .activated else { completion(false); return }
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(msg, replyHandler: { _ in completion(true) },
+                                          errorHandler: { _ in
+                WCSession.default.transferUserInfo(msg)
+                completion(false)
+            })
+        } else {
+            WCSession.default.transferUserInfo(msg)
             completion(false)
         }
     }

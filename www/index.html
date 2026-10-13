@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1909-->
+<!--BGVER=v2026.11.1910-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11963,7 +11963,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1909';
+const BG_BUILD = 'v2026.11.1910';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -20501,6 +20501,7 @@ const BG_MERGE_RULES = {
   // --- per-cell score/stat arrays (v1497 recency) --------------------------------
   scores: 'perCell', puttsData: 'perCell', girData: 'perCell', fairwaysData: 'perCell',
   penaltiesData: 'perCell', sandData: 'perCell', mulliganData: 'perCell',   // v1821
+  fwMissData: 'perCell',   // v1910: miss side L or R when fairwaysData is false (Apple Watch)
   // --- additive per-hole maps -----------------------------------------------------
   junkData: 'holeMap', sipManual: 'holeMap',
   ctpData: 'custom',   // v1733: EDITED, not added - per-hole newest `at` stamp wins, else local (see _bgMergeStampedHoleMap)
@@ -20568,7 +20569,7 @@ function _bgMergeKeys(rule) {
 
 const _BG_TOUCH_FIELDS = _bgMergeKeys('perCell');   // v1503: derived, was a third copy of the same list
 function _bgTouchEmpty(code) {
-  return { code: code, scores: {}, puttsData: {}, girData: {}, fairwaysData: {}, penaltiesData: {}, sandData: {}, mulliganData: {} };
+  return { code: code, scores: {}, puttsData: {}, girData: {}, fairwaysData: {}, penaltiesData: {}, sandData: {}, mulliganData: {}, fwMissData: {} };   // v1910: + fwMissData
 }
 // Restore a persisted registry for `code`, or null. Rehydrates the serialized
 // arrays back into Sets — the exact shape _isTouched(touch, field, pid, i) expects.
@@ -20656,7 +20657,7 @@ function _isTouched(s, field, pid, holeIdx) {
                                          field engines read the names.
    All three now go through bgPurgePlayerFromRound. Whatever it forgets, they all
    forget together, which is the whole point of there being one of them.        */
-const BG_PLAYER_BLOBS = ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData', 'sipManual', 'mulliganData'];   // v1821
+const BG_PLAYER_BLOBS = ['scores', 'puttsData', 'girData', 'fairwaysData', 'penaltiesData', 'sandData', 'sipManual', 'mulliganData', 'fwMissData'];   // v1821, v1910
 function _bgPurgeKey(s) {
   try { return (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(String(s || '')) : String(s || '').trim().toLowerCase(); }
   catch (e) { return String(s || '').trim().toLowerCase(); }
@@ -20915,7 +20916,7 @@ async function bgMarkPlayerLeft(pid) {
       for (let h = 1; h <= rh; h++) {
         if (bgPlayIdx(g, h) <= bgPlayIdx(g, n)) continue;
         if (_playedBefore(h)) continue;   // v1887: already played before he left -- keep it
-        ['scores', 'puttsData', 'fairwaysData', 'penaltiesData', 'sandData', 'mulliganData'].forEach(f => {
+        ['scores', 'puttsData', 'fairwaysData', 'penaltiesData', 'sandData', 'mulliganData', 'fwMissData'].forEach(f => {   // v1910: + fwMissData
           try { if (g[f] && g[f][pid] && g[f][pid][h - 1] != null) { g[f][pid][h - 1] = null; _markScoreTouched(f, pid, h - 1); } } catch (e) {}
         });
         try { if (g.girData && g.girData[pid] && g.girData[pid][h - 1] != null) { g.girData[pid][h - 1] = null; _markScoreTouched('girData', pid, h - 1); } } catch (e) {}
@@ -36598,9 +36599,14 @@ window.BadGolfWatchSync = async function () {
       const _bootAge = (typeof window._bgBootAt === 'number') ? (Date.now() - window._bgBootAt) : Infinity;
       const _SETTLE_MS = 25000;
       if (window._bgWatchSyncedCode) {
+        const _endedCode = window._bgWatchSyncedCode;
         window._bgWatchSyncedCode = null;
         window._bgWatchClearSent = true;
-        try { await Capacitor.Plugins.WatchBridge.syncSession({ token: '', playerId: '', handoff: JSON.stringify({ roundEnded: true }) }); } catch (e) {}
+        // v1910: a round that FINISHED (not one you left) goes out with its summary, so
+        // the wrist shows the final card and units before it clears.
+        const _endMsg = { roundEnded: true };
+        try { if (g && g.code === _endedCode && g.finishedAt) { const _sm = bgWatchRoundSummary(g); if (_sm) _endMsg.summary = _sm; } } catch (e) {}
+        try { await Capacitor.Plugins.WatchBridge.syncSession({ token: '', playerId: '', handoff: JSON.stringify(_endMsg) }); } catch (e) {}
       } else if (!window._bgWatchClearSent) {
         if (_bootAge >= _SETTLE_MS) {
           window._bgWatchClearSent = true;
@@ -36680,16 +36686,22 @@ window.BadGolfWatchSync = async function () {
     // With one player on a watch and another on a phone, the watch could never
     // show the group — so the two devices looked out of sync even when the round
     // was current. Small payload (names + 18 ints) and read-only on the watch.
+    // v1910 (Apple Watch Phase 1): each player also carries putts / fairway / penalties /
+    // GIR, and whether THIS watch may score them (canScore). The watch scores the whole
+    // group with the phone's own rule — in an event only the group's scorekeeper can.
+    let _canOthers = false;
+    try { _canOthers = await bgWatchCanScoreOthers(g); } catch (e) {}
     const groupScores = [];
     try {
       (g.players || []).forEach(p => {
         if (!p || !p.id) return;
-        groupScores.push({
+        groupScores.push(Object.assign({
           id: p.id,
           name: (typeof displayFirst === 'function') ? displayFirst(p) : (p.name || ''),
           me: p.id === myPid,
+          canScore: ((p.id === myPid) || _canOthers) && !(typeof bgBracketScoreGate === 'function' && bgBracketScoreGate(g, p.id)),
           scores: ((g.scores && g.scores[p.id]) || []).slice(0, 18)
-        });
+        }, bgWatchPlayerStats(g, p.id)));
       });
     } catch (e) {}
     const handoff = {
@@ -36713,7 +36725,13 @@ window.BadGolfWatchSync = async function () {
         my_player_id: myPid || '',
         nine_mode: g.nineMode || 'all18',
         hole_count: (typeof roundHoles === 'function') ? roundHoles(g) : 18,
-        updatedAt: g.updatedAt || Date.now()
+        updatedAt: g.updatedAt || Date.now(),
+        // v1910: which per-hole stats this round tracks, whether it is an event round,
+        // whether this watch may score the others, and the live units standings.
+        track: { putts: !!g.trackPutts, fairways: !!g.trackFairways, penalties: !!g.trackPenalties, gir: !!g.trackGirs },
+        event: !!(g.t2 && (g.t2.tournamentId || g.t2.groupId)),
+        scorer: _canOthers,
+        standings: bgWatchStandings(g)
       },
       course: {
         course_id: g.courseId || '',
@@ -36804,6 +36822,7 @@ window.__onWatchScore = async function (u) {
          fresh stamp, so it then won every merge. A watch can only ADD or CHANGE a score, never
          clear one; and it never overrides a phone edit stamped after the watch's own tap. */
       if (val == null) return;
+      try { if (typeof bgBracketScoreGate === 'function' && bgBracketScoreGate(g, pid)) return; } catch (e) {}   // v1910: in a bracket your opponent keeps your score
       try { const _ra = (rec && rec.at != null) ? Number(rec.at) : null; const _ca = g.cellAt && g.cellAt.scores && Array.isArray(g.cellAt.scores[pid]) ? g.cellAt.scores[pid][h - 1] : null; if (_ra && _ca && _ca > _ra) return; } catch (e) {}
       if (g.scores[pid][h - 1] === val) return;
       g.scores[pid][h - 1] = val;
@@ -36821,6 +36840,10 @@ window.__onWatchScore = async function (u) {
       try { syncChipInJunk(g, h); } catch (e) {}
       changed = true;
     });
+    // v1910: group scoring + hole stats from the watch.
+    if (Array.isArray(u.cells) && u.cells.length) {
+      try { if (await bgApplyWatchCells(g, u.cells, pid)) changed = true; } catch (e) {}
+    }
     if (!changed) return;
     await saveGame(g);
     // v972: a score tapped on the watch is now pushed to the OTHER phones the
@@ -36852,8 +36875,256 @@ window.__onWatchScore = async function (u) {
     }
     window._bgWatchScoreWired = true;
     Capacitor.Plugins.WatchBridge.addListener('watchScore', function (d) { try { window.__onWatchScore(d); } catch (e) {} });
+    // v1910: Finish (and future actions) from the wrist.
+    Capacitor.Plugins.WatchBridge.addListener('watchAction', function (d) { try { window.__onWatchAction(d); } catch (e) {} });
   } catch (e) {}
 })();
+
+// ===== v1910: Apple Watch Phase 1 — group scoring, hole stats, units ==========
+// (Tyler, 10/13: compete with 18Birdies on the watch. Plan:
+//  claude/PLAN_AppleWatch_vs_18Birdies_2026-10-13.md.)
+//
+// May the WATCH score the other players in this round? Same rule as the phone:
+//   * a casual round — anyone on the card scores anyone;
+//   * an event round — only the group's scorekeeper (tournament_groups.captain), a
+//     tournament manager, or anyone in a bracket match. No scorekeeper set = the
+//     opener scores, as on the phone;
+//   * a finished or view-only round — nobody.
+// One difference from the phone, on purpose: when the scorekeeper can't be read the
+// phone lets the opener score (with a warning toast) so a group is never stranded.
+// The watch says no instead — the wearer can still score themselves, and their phone
+// is right there. Unknown is never cached, so the next hand-off asks again.
+window._bgWatchScorerCache = window._bgWatchScorerCache || {};
+async function bgWatchCanScoreOthers(g) {
+  try {
+    if (!g || !g.code || g.finishedAt) return false;
+    if (typeof state !== 'undefined' && state && state.viewOnlyMode && state.game && state.game.code === g.code) return false;
+    const isEvent = !!(g.t2 && (g.t2.tournamentId || g.t2.groupId));
+    if (!isEvent) return true;
+    if (Array.isArray(g.bracket) && g.bracket.length) return true;
+    try { if (Array.isArray(g.t2.managerIds) && typeof _authUser !== 'undefined' && _authUser && g.t2.managerIds.includes(_authUser.id)) return true; } catch (e) {}
+    const c = window._bgWatchScorerCache[g.code];
+    if (c && (Date.now() - c.at) < (c.unknown ? 60 * 1000 : 10 * 60 * 1000)) return c.ok;
+    let ok = true;   // event round with no group record: the opener scores, as on the phone
+    if (g.t2.groupId && typeof supa !== 'undefined' && supa && typeof _bgRead === 'function') {
+      const r = await _bgRead(() => supa.from('tournament_groups').select('captain').eq('id', g.t2.groupId).maybeSingle(), 'watch:captain');
+      // Unknown: self only. Remembered for a minute, so a course with no signal doesn't
+      // hold up every 8-second hand-off waiting on the same failed read.
+      if (!r || !r.ok) { window._bgWatchScorerCache[g.code] = { ok: false, at: Date.now(), unknown: true }; return false; }
+      const cap = (r.data && r.data.captain) || '';
+      if (cap) {
+        const me = await getMeName().catch(() => null);
+        ok = !!(me && normalizeNameSegment(cap) === normalizeNameSegment(me));
+      }
+    }
+    window._bgWatchScorerCache[g.code] = { ok: ok, at: Date.now() };
+    return ok;
+  } catch (e) { return false; }
+}
+
+// Per-player stat arrays for the hand-off. Fairway is one code per hole:
+// 'H' hit, 'L' / 'R' missed left / right, 'M' missed (side not recorded), null unmarked.
+function bgWatchPlayerStats(g, pid) {
+  const out = {};
+  try {
+    const arr = (k) => { const a = g[k] && g[k][pid]; return Array.isArray(a) ? a.slice(0, 18) : []; };
+    if (g.trackPutts) out.putts = arr('puttsData');
+    if (g.trackPenalties) out.pen = arr('penaltiesData');
+    if (g.trackFairways) {
+      const fw = arr('fairwaysData'), dir = arr('fwMissData');
+      out.fw = fw.map((v, i) => v === true ? 'H' : (v === false ? ((dir[i] === 'L' || dir[i] === 'R') ? dir[i] : 'M') : null));
+    }
+    if (g.trackGirs && typeof girStatusFor === 'function') {
+      const rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
+      const gi = [];
+      for (let h = 1; h <= rh; h++) { let s = null; try { s = girStatusFor(g, pid, h); } catch (e) {} gi.push(s === true ? true : (s === false ? false : null)); }
+      out.gir = gi;
+    }
+  } catch (e) {}
+  return out;
+}
+
+// Holes with at least one score on the card.
+function bgWatchThru(g) {
+  let n = 0;
+  try {
+    const rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
+    for (let h = 1; h <= rh; h++) {
+      if ((g.players || []).some(p => p && g.scores && Array.isArray(g.scores[p.id]) && g.scores[p.id][h - 1] != null)) n++;
+    }
+  } catch (e) {}
+  return n;
+}
+
+// Live units for the wrist, from the SAME engine the Units tab runs
+// (computeAllGameMoney) — the watch never does game math of its own. Cached on the
+// round's save stamp + card + junk, and at most a minute old, because the hand-off
+// heartbeat runs every 8 seconds.
+window._bgWatchStCache = null;
+function bgWatchStandings(g, fresh) {
+  try {
+    if (!g || !Array.isArray(g.players) || typeof computeAllGameMoney !== 'function') return null;
+    const sig = String(g.updatedAt || 0) + '|' + JSON.stringify(g.scores || {}) + '|' + JSON.stringify(g.junkData || {});
+    const c = window._bgWatchStCache;
+    if (!fresh && c && c.code === g.code && c.sig === sig && (Date.now() - c.at) < 60000) return c.val;
+    const m = computeAllGameMoney(g);
+    const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+    const units = {};
+    g.players.forEach(p => { if (p && p.id) units[p.id] = r2(m && m.combined ? m.combined[p.id] : 0); });
+    const games = ((m && m.byGame) || []).filter(b => b && !b.dropped).slice(0, 16).map(b => {
+      const u = {}; Object.keys(b.money || {}).forEach(k => { u[k] = r2(b.money[k]); });
+      return { key: String(b.key || ''), label: String(b.label || b.key || ''), units: u };
+    });
+    const val = { at: Date.now(), thru: bgWatchThru(g), units: units, games: games };
+    window._bgWatchStCache = { code: g.code, sig: sig, at: Date.now(), val: val };
+    return val;
+  } catch (e) { return null; }
+}
+
+// The final card for the wrist when a round finishes.
+function bgWatchRoundSummary(g) {
+  try {
+    const me = (typeof gpsResolveMyId === 'function') ? gpsResolveMyId(g) : null;
+    if (!g || !me) return null;
+    const rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
+    const sc = (g.scores && g.scores[me]) || [];
+    const pf = (i) => { try { return (typeof parFor === 'function') ? parFor(g, me, i) : (g.pars && g.pars[i]); } catch (e) { return g.pars && g.pars[i]; } };
+    let strokes = 0, par = 0, holes = 0, putts = 0, pH = 0, fwHit = 0, fwPoss = 0, gir = 0, girPoss = 0;
+    for (let h = 1; h <= rh; h++) {
+      const s = sc[h - 1]; if (s == null) continue;
+      const hp = Number(pf(h - 1)) || 0;
+      strokes += s; par += hp; holes++;
+      if (g.trackPutts) { const pv = g.puttsData && g.puttsData[me] ? g.puttsData[me][h - 1] : null; if (pv != null) { putts += pv; pH++; } }
+      if (g.trackFairways && (hp === 4 || hp === 5)) { const fv = g.fairwaysData && g.fairwaysData[me] ? g.fairwaysData[me][h - 1] : null; if (fv != null) { fwPoss++; if (fv === true) fwHit++; } }
+      if (g.trackGirs && typeof girStatusFor === 'function') { const st = girStatusFor(g, me, h); if (st != null) { girPoss++; if (st === true) gir++; } }
+    }
+    const st = bgWatchStandings(g, true);
+    const board = (g.players || []).filter(p => p && p.id).map(p => ({
+      id: p.id,
+      name: (typeof displayFirst === 'function') ? displayFirst(p) : (p.name || ''),
+      units: st && st.units ? (st.units[p.id] || 0) : 0,
+      me: p.id === me
+    })).sort((a, b) => b.units - a.units);
+    return {
+      code: g.code, course: g.course || '', strokes: strokes, toPar: strokes - par, holes: holes,
+      putts: pH ? putts : null,
+      fairways: fwPoss ? (fwHit + '/' + fwPoss) : null,
+      girs: girPoss ? (gir + '/' + girPoss) : null,
+      units: (st && st.units && st.games && st.games.length) ? (st.units[me] || 0) : null,
+      board: (st && st.games && st.games.length) ? board : []
+    };
+  } catch (e) { return null; }
+}
+
+// Cells from the watch: [{ pid, h, f, v, at }] where f is
+//   's'   strokes      (v = 1..15; a watch never CLEARS a score — v1899 rule)
+//   'p'   putts        (v = 0..10, or null to clear)
+//   'fw'  fairway      (v = 'H' | 'L' | 'R', or null to clear; par 4s and 5s only)
+//   'pen' penalties    (v = 1..3, or 0 / null to clear)
+// Latest entry wins: a cell the phone (or anyone) changed AFTER the wrist tap is left
+// alone — the same per-cell recency stamps the phones merge on. Stats the round does not
+// track are ignored. Junk auto-fill and the putt snake rerun exactly as for a phone tap.
+// The Animals OB / water question can't be asked on a wrist, so a watch penalty marks
+// no Gorilla / Shark — the penalty count itself is saved.
+async function bgApplyWatchCells(g, cells, myPid) {
+  let changed = false, refused = 0, canOthers = null, bracketMsg = '';
+  const ids = new Set((g.players || []).map(p => p && p.id).filter(Boolean));
+  const holes = new Set();
+  const FIELD = { s: 'scores', p: 'puttsData', fw: 'fairwaysData', pen: 'penaltiesData' };
+  const stamp = (field, pid, i) => { try { _markScoreTouched(field, pid, i, g.code); } catch (e) {} try { _bgStampCell(g, field, pid, i); } catch (e) {} };
+  const ensure = (field, pid) => { if (!g[field] || typeof g[field] !== 'object') g[field] = {}; if (!Array.isArray(g[field][pid])) g[field][pid] = new Array(18).fill(null); return g[field][pid]; };
+  for (const c of (cells || [])) {
+    try {
+      if (!c) continue;
+      const pid = String(c.pid || myPid || '');
+      const h = parseInt(c.h, 10);
+      const field = FIELD[c.f];
+      if (!field || !ids.has(pid) || !(h >= 1 && h <= 18)) continue;
+      if (pid !== myPid) {
+        if (canOthers === null) canOthers = await bgWatchCanScoreOthers(g);
+        if (!canOthers) { refused++; continue; }
+      }
+      // Bracket match: you keep your OPPONENT's score only — the phone's own gate.
+      if (typeof bgBracketScoreGate === 'function') { const _bm = bgBracketScoreGate(g, pid); if (_bm) { bracketMsg = _bm; continue; } }
+      const at = (c.at != null) ? Number(c.at) : null;
+      const ca = (g.cellAt && g.cellAt[field] && Array.isArray(g.cellAt[field][pid])) ? g.cellAt[field][pid][h - 1] : null;
+      if (at && ca && ca > at) continue;   // a later edit already won
+      let val = null, dir;
+      if (field === 'scores') {
+        const raw = (c.v != null) ? parseInt(c.v, 10) : null;
+        if (raw == null || !isFinite(raw) || raw <= 0) continue;   // never clear a score from the wrist
+        val = Math.min(15, raw);
+        try { const _cap = bgMaxScoreFor(g, pid, h - 1); if (_cap != null && val > _cap) val = _cap; } catch (e) {}
+      } else if (field === 'puttsData') {
+        if (!g.trackPutts) continue;
+        if (c.v != null) { const n = parseInt(c.v, 10); if (!isFinite(n) || n < 0) continue; val = Math.min(10, n); }
+      } else if (field === 'penaltiesData') {
+        if (!g.trackPenalties) continue;
+        if (c.v != null) { const n = parseInt(c.v, 10); if (!isFinite(n) || n < 0) continue; val = n > 0 ? Math.min(3, n) : null; }
+      } else {   // fairway
+        if (!g.trackFairways) continue;
+        let par = null; try { par = (typeof parFor === 'function') ? parFor(g, pid, h - 1) : (g.pars && g.pars[h - 1]); } catch (e) { par = g.pars && g.pars[h - 1]; }
+        if (par !== 4 && par !== 5) continue;   // no fairway on a par 3, as on the phone
+        const code = (c.v == null) ? null : String(c.v).toUpperCase();
+        if (code != null && code !== 'H' && code !== 'L' && code !== 'R') continue;
+        val = (code == null) ? null : (code === 'H');
+        dir = (code === 'L' || code === 'R') ? code : null;
+      }
+      let did = false;
+      const arr = ensure(field, pid);
+      if (arr[h - 1] !== val) { arr[h - 1] = val; stamp(field, pid, h - 1); did = true; }
+      if (field === 'fairwaysData') {
+        const da = ensure('fwMissData', pid);
+        if ((da[h - 1] == null ? null : da[h - 1]) !== dir) { da[h - 1] = dir; stamp('fwMissData', pid, h - 1); did = true; }
+      }
+      if (!did) continue;
+      if (field === 'scores' && !g.firstScoreAt) g.firstScoreAt = Date.now();
+      if (field === 'puttsData') bgPuttSnakeMarks(g, pid, h, val);
+      holes.add(h);
+      changed = true;
+    } catch (e) {}
+  }
+  holes.forEach(h => {
+    try { syncGirJunk(g, h); } catch (e) {}
+    try { syncSandyJunk(g, h); } catch (e) {}
+    try { syncRoloJunk(g, h); } catch (e) {}
+    try { syncArnieJunk(g, h); } catch (e) {}
+    try { syncChipInJunk(g, h); } catch (e) {}
+  });
+  if (refused) { try { showToast('\u231A Only your group\u2019s scorekeeper can score other players from a watch', 6000); } catch (e) {} }
+  else if (bracketMsg) { try { showToast('\u231A ' + bracketMsg, 6000); } catch (e) {} }
+  return changed;
+}
+
+// Actions from the wrist. 'finish' runs the phone's own Finish flow — the same
+// questions (missing Wolf picks, blank holes) are asked HERE, on the phone, because the
+// watch can't answer them. A phone in a pocket picks this up the moment it is opened
+// (the native side retains the event).
+window.__onWatchAction = async function (u) {
+  try {
+    if (!u || !u.action) return;
+    if (u.action === 'finish') {
+      // A phone opened from the pocket delivers this retained event before the round is
+      // restored (the v1277 boot race). Wait for it - up to 30s - rather than dropping it.
+      const _wait = (ms) => new Promise(r => setTimeout(r, ms));
+      const _cur = () => (typeof state !== 'undefined' && state) ? state.game : null;
+      for (let i = 0; i < 30 && u.roundId && !(_cur() && _cur().code === u.roundId); i++) await _wait(1000);
+      // Scores sent from the watch just before Finish must land first, or the round
+      // would close with them refused as "finished".
+      for (let i = 0; i < 40 && window._bgWatchWriteBusyUntil && Date.now() < window._bgWatchWriteBusyUntil; i++) await _wait(500);
+      const g = _cur();
+      if (!g || !g.code) { try { showToast('\u231A Finish from your watch \u2014 no round open on this phone', 6000); } catch (e) {} return; }
+      if (u.roundId && u.roundId !== g.code) { try { showToast('\u231A Your watch asked to finish a different round \u2014 open that round to finish it', 6000); } catch (e) {} return; }
+      if (g.finishedAt) { try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {} return; }
+      if (state.viewOnlyMode) { try { showToast('\u231A Only someone scoring this round can finish it', 6000); } catch (e) {} return; }
+      // An event round is finished by its scorekeeper, from a watch as on the phone.
+      if (g.t2 && (g.t2.tournamentId || g.t2.groupId) && !(await bgWatchCanScoreOthers(g))) { try { showToast('\u231A Only someone scoring this round can finish it', 6000); } catch (e) {} return; }
+      try { showToast('\u231A Finishing the round from your watch'); } catch (e) {}
+      if (typeof bgFinishRoundFlow === 'function') await bgFinishRoundFlow();
+      try { if (typeof window.BadGolfWatchSync === 'function') window.BadGolfWatchSync(); } catch (e) {}
+    }
+  } catch (e) {}
+};
 
 // ============================================================
 // SETUP UI
@@ -47795,9 +48066,18 @@ async function handlePuttChange(pid, action) {
     if (_pv) _pv.textContent = (v == null ? '—' : v);
   } catch (e) {}
   syncGirJunk(g, state.currentHole); try { syncSandyJunk(g, state.currentHole); } catch (e) {} try { syncRoloJunk(g, state.currentHole); } catch (e) {} try { syncChipInJunk(g, state.currentHole); } catch (e) {}
-  // Auto-snake: when the Snake game is live and putt tracking is on, a recorded 3-putt
-  // automatically hands that player the snake for this hole (and clears it if the count
-  // is corrected back below 3). Other players' snake marks are left untouched.
+  bgPuttSnakeMarks(g, pid, h, v);   // v1910: shared with putts entered on the Apple Watch
+  try { renderScoreEntry(); } catch (e) {}   // v1735: paint first, then save (the tap no longer waits on the cloud)
+  await saveGame(g);
+  renderScoreEntry();
+}
+// v1910: the Snake / Animals-snake side of a putt count, lifted out of handlePuttChange
+// unchanged so a putt count from the Apple Watch marks (and un-marks) the snake exactly
+// like a tap on the phone does.
+// Auto-snake: when the Snake game is live and putt tracking is on, a recorded 3-putt
+// automatically hands that player the snake for this hole (and clears it if the count
+// is corrected back below 3). Other players' snake marks are left untouched.
+function bgPuttSnakeMarks(g, pid, h, v) {
   try {
     if (g.games && g.games.junk && (g.games.junk.snake || 0) > 0) {
       if (!g.junkData) g.junkData = {};
@@ -47826,9 +48106,6 @@ async function handlePuttChange(pid, action) {
       if (an.length) g.animalData[h]['snake'] = an; else delete g.animalData[h]['snake'];
     }
   } catch (e) {}
-  try { renderScoreEntry(); } catch (e) {}   // v1735: paint first, then save (the tap no longer waits on the cloud)
-  await saveGame(g);
-  renderScoreEntry();
 }
 
 // Closest to the Pin — entry section on qualifying holes. One winner chip +
@@ -48637,6 +48914,7 @@ async function handleFairwayToggle(pid) {
   const cur = g.fairwaysData[pid][h - 1];
   g.fairwaysData[pid][h - 1] = cur == null ? true : (cur === true ? false : null);
   _markScoreTouched('fairwaysData', pid, h - 1);
+  try { if (g.fairwaysData[pid][h - 1] !== false && g.fwMissData && Array.isArray(g.fwMissData[pid]) && g.fwMissData[pid][h - 1] != null) { g.fwMissData[pid][h - 1] = null; _markScoreTouched('fwMissData', pid, h - 1); } } catch (e) {}   // v1910
   try { syncArnieJunk(g, h); } catch (e) {}   // fairway is an Arnie input — recompute
   try { renderScoreEntry(); } catch (e) {}   // v1735: paint first, then save (the tap no longer waits on the cloud)
   await saveGame(g);
@@ -60501,7 +60779,7 @@ function bgTeamCardGame(g) {
     });
     out.games = {};
     out.sis = null;
-    out.puttsData = {}; out.girData = {}; out.fairwaysData = {}; out.penaltiesData = {}; out.sandData = {}; out.mulliganData = {};
+    out.puttsData = {}; out.girData = {}; out.fairwaysData = {}; out.penaltiesData = {}; out.sandData = {}; out.mulliganData = {}; out.fwMissData = {};   // v1910
     out.hcpRules = Object.assign({}, g.hcpRules || {}, { noHandicaps: true });
     out._bgTeamCard = true;
     return out;

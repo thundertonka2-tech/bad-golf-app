@@ -17,6 +17,7 @@ public class WatchBridgePlugin: CAPPlugin {
     // observer that was famously MISSING for round requests pre-v890 — wired
     // properly from day one for scores.
     private var scoreObserver: NSObjectProtocol?
+    private var actionObserver: NSObjectProtocol?   // v1910
 
     public override func load() {
         scoreObserver = NotificationCenter.default.addObserver(
@@ -25,7 +26,18 @@ public class WatchBridgePlugin: CAPPlugin {
             var data: [String: Any] = [:]
             if let rid = note.userInfo?["roundId"] as? String { data["roundId"] = rid }
             if let sc = note.userInfo?["scores"] as? [String: Any] { data["scores"] = sc }
+            if let cells = note.userInfo?["cells"] as? [[String: Any]] { data["cells"] = cells }   // v1910
             self?.notifyListeners("watchScore", data: data, retainUntilConsumed: true)
+        }
+        // v1910: Finish from the wrist. Retained like scores, so a phone in a pocket
+        // runs it the moment the app is opened.
+        actionObserver = NotificationCenter.default.addObserver(
+            forName: .badGolfWatchAction, object: nil, queue: .main
+        ) { [weak self] note in
+            var data: [String: Any] = [:]
+            if let a = note.userInfo?["action"] as? String { data["action"] = a }
+            if let rid = note.userInfo?["roundId"] as? String { data["roundId"] = rid }
+            self?.notifyListeners("watchAction", data: data, retainUntilConsumed: true)
         }
     }
 

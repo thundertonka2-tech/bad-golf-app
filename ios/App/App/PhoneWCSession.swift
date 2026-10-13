@@ -92,8 +92,19 @@ final class PhoneWCSession: NSObject, WCSessionDelegate {
     // protected merge path — never by writing the database directly.
     private func forwardScoreUpdate(_ message: [String: Any]) {
         guard let upd = message["scoreUpdate"] as? [String: Any] else { return }
-        NotificationCenter.default.post(name: .badGolfWatchScoreUpdate, object: nil,
-                                        userInfo: ["roundId": upd["roundId"] ?? "", "scores": upd["scores"] ?? [:]])
+        var info: [String: Any] = ["roundId": upd["roundId"] ?? "", "scores": upd["scores"] ?? [:]]
+        // v1910: group scoring + hole stats — [{pid, h, f, v, at}]. Passed through
+        // untouched; the web app validates every cell (permissions, tracking, recency).
+        if let cells = upd["cells"] as? [[String: Any]] { info["cells"] = cells }
+        NotificationCenter.default.post(name: .badGolfWatchScoreUpdate, object: nil, userInfo: info)
+    }
+
+    // v1910: actions from the wrist (Finish). Forwarded to the web app, which runs
+    // its own Finish flow — any question it needs answered is asked on the phone.
+    private func forwardAction(_ message: [String: Any]) {
+        guard let act = message["watchAction"] as? [String: Any] else { return }
+        NotificationCenter.default.post(name: .badGolfWatchAction, object: nil,
+                                        userInfo: ["action": act["action"] ?? "", "roundId": act["roundId"] ?? ""])
     }
 
     // v891: guaranteed-delivery fallback for score updates queued while the
@@ -101,6 +112,7 @@ final class PhoneWCSession: NSObject, WCSessionDelegate {
     // the phone side entirely.)
     func session(_ s: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
         forwardScoreUpdate(userInfo)
+        forwardAction(userInfo)   // v1910
     }
 
     // Watch asks the phone to (re)send the round — no replyHandler variant.
@@ -115,6 +127,7 @@ final class PhoneWCSession: NSObject, WCSessionDelegate {
             NotificationCenter.default.post(name: .badGolfWatchRequestedRound, object: nil)
         }
         forwardScoreUpdate(message)   // v891: watch score entry
+        forwardAction(message)        // v1910: Finish from the wrist
     }
 
     // v890: reply-handler variant — the watch now asks WITH a replyHandler, so
@@ -123,13 +136,14 @@ final class PhoneWCSession: NSObject, WCSessionDelegate {
     func session(_ s: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
         if message["request"] as? String == "round", let data = lastHandoff {
             replyHandler(["handoff": data])
-        } else if message["scoreUpdate"] != nil {
-            replyHandler(["ok": true])   // v891: ack — the watch clears its queue on this
+        } else if message["scoreUpdate"] != nil || message["watchAction"] != nil {
+            replyHandler(["ok": true])   // v891: ack — the watch clears its queue on this (v1910: + actions)
         } else {
             replyHandler([:])
         }
         NotificationCenter.default.post(name: .badGolfWatchRequestedRound, object: nil)
         forwardScoreUpdate(message)   // v891: watch score entry
+        forwardAction(message)        // v1910: Finish from the wrist
     }
 
     func session(_ s: WCSession, activationDidCompleteWith st: WCSessionActivationState, error: Error?) {}
@@ -140,4 +154,5 @@ final class PhoneWCSession: NSObject, WCSessionDelegate {
 extension Notification.Name {
     static let badGolfWatchRequestedRound = Notification.Name("badGolfWatchRequestedRound")
     static let badGolfWatchScoreUpdate = Notification.Name("badGolfWatchScoreUpdate")   // v891
+    static let badGolfWatchAction = Notification.Name("badGolfWatchAction")             // v1910
 }
