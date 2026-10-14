@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1912-->
+<!--BGVER=v2026.11.1913-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -11960,7 +11960,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1912';
+const BG_BUILD = 'v2026.11.1913';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -23088,7 +23088,19 @@ function _courseShard(id) { var s = String(id || ''), h = 0; for (var i = 0; i <
 async function _bgOverlayCourseShards(base) {
   var cache = window._bgShardCache || (window._bgShardCache = { rows: {}, at: {} });
   var from = 0, page = 200, meta = [];
-  while (true) {
+  /* v1913 PERF (Tyler 10/14, slow tee time while three phones booted at once): this list ran on
+     EVERY boot as  code LIKE $1  through PostgREST. As a parameter the LIKE cannot use the code
+     index, so the games RLS policy (a JSON path search per row) ran on all ~13.5k rows: ~2.2 s
+     of database time per boot, and the hog that stalled everyone else's requests. The RPC uses
+     the literal prefix (index, ~3 ms). Missing RPC / error -> the old query, unchanged. */
+  try {
+    if (!window._bgShardRpcDead) {
+      var sr = await supa.rpc('bg_course_shard_stamps');
+      if (sr && !sr.error && Array.isArray(sr.data)) { meta = sr.data; page = 0; }
+      else if (sr && sr.error && typeof _bgRpcMissing === 'function' && _bgRpcMissing(sr.error)) window._bgShardRpcDead = true;
+    }
+  } catch (e) {}
+  while (page > 0) {
     var mr = await supa.from('games').select('code,updated_at').like('code', 'shared:courses:%').range(from, from + page - 1);
     if (mr.error || !mr.data || !mr.data.length) break;
     meta = meta.concat(mr.data);
@@ -91221,12 +91233,30 @@ async function _t2FetchFieldRoundsRaw0(t, cols) {
      data->>tourneyId / data->t2->>tournamentId indexes (7 ms). A non-member gets a
      member:false marker and falls through to the original query, so nothing becomes
      visible that wasn't before. */
+  // v1913: a scheduled round / tee time id ("tn-...") is not a uuid, so bg_field_rounds can
+  // only error on it - skip straight to the indexed reader below.
+  const _isUuid = !!(t && t.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(t.id)));
   try {
-    if (t && t.id && supa) {
+    if (_isUuid && supa) {
       const _r = await supa.rpc('bg_field_rounds', { p_tid: t.id });
       if (!_r.error && Array.isArray(_r.data) && !(_r.data.length === 1 && _r.data[0] && _r.data[0].member === false)) {
         return { data: _r.data.filter(x => x && x.data).map(x => ({ data: x.data, updated_at: x.updated_at })), error: null };
       }
+    }
+  } catch (e) {}
+  /* v1913 PERF (Tyler 10/14): everything that fell through to the OR query below - every
+     scheduled round / tee time, and a non-member viewing an event - ran a full scan of the
+     games table under RLS: ~1.2 s each (up to 8 s), ~4,700 times. bg_rounds_by_tourney reads
+     through the tourneyId / t2 indexes and applies the same visibility rule as the RLS policy,
+     so it returns exactly the rows that query would have, in milliseconds. Missing RPC / error
+     -> the original query, unchanged. */
+  try {
+    if (t && t.id && supa && !window._bgRoundsByTidDead) {
+      const _r2 = await supa.rpc('bg_rounds_by_tourney', { p_tid: String(t.id) });
+      if (!_r2.error && Array.isArray(_r2.data)) {
+        return { data: _r2.data.filter(x => x && x.data).map(x => ({ data: x.data, updated_at: x.updated_at })), error: null };
+      }
+      if (_r2 && _r2.error && typeof _bgRpcMissing === 'function' && _bgRpcMissing(_r2.error)) window._bgRoundsByTidDead = true;
     }
   } catch (e) {}
   try {
