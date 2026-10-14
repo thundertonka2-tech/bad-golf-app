@@ -103,6 +103,17 @@
             })();
             return;
           }
+          // v1914: the day-of tee-time push ("Tap to preview the course") opens that course's
+          // map preview. The app may still be booting, so wait for the preview to exist.
+          if (type === 'teetime_preview' && data.course_id) {
+            var _pcid = String(data.course_id), _pt = 0;
+            (function _goP() {
+              try { if (typeof window.bgOpenPreviewFromPush === 'function') return window.bgOpenPreviewFromPush(_pcid); } catch (e) {}
+              if (++_pt > 30) { try { if (typeof window.switchTab === 'function') window.switchTab('home'); } catch (e) {} return; }
+              setTimeout(_goP, 500);
+            })();
+            return;
+          }
           // v1859: tournament pushes (tee time tomorrow, sign-ups closing, join requests,
           // approvals) land on the event; a join request opens the requests sheet.
           if (data.tournament_id && (data.kind === 'event' || /^t2_|^event_/.test(type))) {
