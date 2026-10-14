@@ -16,6 +16,7 @@
 // All the maths lives in GolfGeometry.swift (tested on Linux). This file only draws.
 
 import SwiftUI
+import Combine   // v1912b: TileCache is an ObservableObject with @Published — Xcode 16 needs the explicit import (Codemagic build 557)
 import CoreLocation
 #if canImport(UIKit)
 import UIKit
