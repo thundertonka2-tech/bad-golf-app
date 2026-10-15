@@ -60,6 +60,16 @@ EXTRA_DEMS = [
     # Hillsborough County (Tampa): no USGS 1 m product. SWFWMD 2017, 2.5 ft grid, NAVD88 feet.
     ('NOAA DC 9457 SWFWMD Hillsborough 2017', (-82.656, 27.633, -82.049, 28.186),
      '/vsicurl/https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/FL_Hills_DEM_2017_9457/Hillsborough_2017.tif', 0.3048006096),
+    # North Carolina (2026-10-14): USGS has no 1 m product for the central/Piedmont counties.
+    # NC Phase 3 2024 (Moore, Wake, Durham, Orange, Chatham, Guilford ...) and Phase 4 2016
+    # (Mecklenburg, Forsyth, Cabarrus ...): ~3.125 ft grids, NAVD88 feet, State Plane ftUS.
+    ('NOAA DC 15636 NC Phase 3 2024', (-80.089, 34.624, -78.421, 36.551),
+     '/vsicurl/https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NC_phase3_2024_15636/NC_phase3_2024_m15636_EPSG-6543.vrt', 0.3048006096),
+    ('NOAA DC 9445 NC Phase 4 2016', (-81.756, 34.776, -79.851, 36.597),
+     '/vsicurl/https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NC_phase4_DEM_2016_9445/NC_phase4_DEM_2016_EPSG-6543.vrt', 0.3048006096),
+    # Phase 3 2015: full Piedmont cover where the 2024 re-flight has gaps (e.g. Randolph, parts of Wake).
+    ('NOAA DC 6205 NC Phase 3 2015', (-80.163, 34.61, -78.251, 36.55),
+     '/vsicurl/https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NorthCarolina_DEM_2015P3_6205/NorthCarolina_DEM_2015P3_EPSG-6543.vrt', 0.3048006096),
 ]
 
 
