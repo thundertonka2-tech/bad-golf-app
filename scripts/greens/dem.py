@@ -73,6 +73,45 @@ EXTRA_DEMS = [
 ]
 
 
+# NOAA Digital Coast DEM index (2026-10-14): every NOAA-hosted lidar DEM with a georeferenced VRT,
+# built from s3://noaa-nos-coastal-lidar-pds/dem/ (scripts/greens/noaa_dem_index.json, newest first).
+# Used after USGS 1 m / StratMap / EXTRA_DEMS. Vertical units vary (m or ft), so each dataset is
+# calibrated once against the USGS 3DEP dynamic service (metres) before its values are trusted.
+_NOAA_S3 = 'https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/'
+try:
+    NOAA_DEMS = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'noaa_dem_index.json')))
+except Exception:
+    NOAA_DEMS = []
+_FT = 0.3048006096
+
+
+def _res_m(e):
+    return e['res'] * (_FT if 'foot' in (e.get('hunit') or '') else 1.0)
+
+
+def noaa_for(minx, miny, maxx, maxy):
+    out = []
+    for e in NOAA_DEMS:
+        a, b, c, d = e['bbox']
+        if not (minx < c and maxx > a and miny < d and maxy > b):
+            continue
+        n = e['name']
+        if 'Topobathy' in n or n.startswith('NCEI') or _res_m(e) > 2.0:
+            continue
+        out.append(('NOAA DC ' + n, '/vsicurl/' + _NOAA_S3 + e['vrt'], None))
+    return out
+
+
+def _3dep_mean(minx, miny, maxx, maxy):
+    u = ('https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/getSamples?'
+         + urllib.parse.urlencode({'geometry': json.dumps({'points': [[(minx + maxx) / 2, (miny + maxy) / 2], [minx, miny], [maxx, maxy]],
+                                   'spatialReference': {'wkid': 4326}}), 'geometryType': 'esriGeometryMultipoint',
+                                   'returnFirstValueOnly': 'true', 'f': 'json'}))
+    vals = [float(s['value']) for s in json.loads(urllib.request.urlopen(u, timeout=60).read()).get('samples', [])
+            if s.get('value') not in (None, 'NoData')]
+    return float(np.mean(vals)) if vals else None
+
+
 def extra_for(minx, miny, maxx, maxy):
     return [(t, p, zs) for t, (a, b, c, d), p, zs in EXTRA_DEMS if minx < c and maxx > a and miny < d and maxy > b]
 
@@ -106,10 +145,37 @@ class Dem:
                 self._usgs_cache[key] = []
         return self._usgs_cache[key]
 
+    def noaa_scale(self, path, LX, LY):
+        """1.0 (metres) or 0.3048 (feet) for a NOAA DEM, decided once by comparing to USGS 3DEP."""
+        if not hasattr(self, '_noaa_zs'):
+            self._noaa_zs = {}
+        if path in self._noaa_zs:
+            return self._noaa_zs[path]
+        zs = None
+        try:
+            raw = sample(self.open(path), LX.ravel(), LY.ravel(), 1.0)
+            if raw is not None and np.isfinite(raw).any():
+                ref = _3dep_mean(float(LX.min()), float(LY.min()), float(LX.max()), float(LY.max()))
+                r = float(np.nanmean(raw))
+                if ref is not None and abs(ref) > 5:
+                    zs = 1.0 if abs(r / ref - 1) < abs(r * _FT / ref - 1) else _FT
+                    if abs(r * zs - ref) > 15:      # neither unit fits: do not trust this dataset here
+                        zs = None
+                    else:
+                        self._noaa_zs[path] = zs
+                        return zs
+        except Exception as e:
+            print('noaa calibration failed', path, e, file=sys.stderr)
+        return zs
+
     def fill(self, z, LX, LY, tiles, used):
         for title, path, zs in tiles:
             if np.isfinite(z).all():
                 break
+            if zs is None:
+                zs = self.noaa_scale(path, LX, LY)
+                if zs is None:
+                    continue
             try:
                 v = sample(self.open(path), LX.ravel(), LY.ravel(), zs)
             except Exception as e:
@@ -132,6 +198,8 @@ class Dem:
             self.fill(z, LX, LY, self.sm.tifs_for(minx, miny, maxx, maxy), used)
         if np.isfinite(z).mean() < min_cover:
             self.fill(z, LX, LY, extra_for(minx, miny, maxx, maxy), used)
+        if np.isfinite(z).mean() < min_cover and os.environ.get('NOAA', '1') != '0':
+            self.fill(z, LX, LY, noaa_for(minx, miny, maxx, maxy), used)
         if np.isfinite(z).mean() < min_cover:
             return None, ' + '.join(used)
         return z.reshape(h, w), ' + '.join(used)
