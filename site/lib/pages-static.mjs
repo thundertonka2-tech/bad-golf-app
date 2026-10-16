@@ -23,7 +23,9 @@ const FAQ = [
   ['How does scoring the games work?', 'Every game is scored in units. Set the units when you create the round, play, and at the end the Unit Totals card shows where everyone finished. Bad Golf App just keeps score.'],
   ['Which golf games can Bad Golf App score?', 'More than 40, including Skins, Nassau, Wolf, Vegas, Banker, Stableford, Quota, Match play, Best ball, Scramble, Ryder Cup, Bingo Bango Bongo, Hammer and side games like greenies, sandies, snake and closest to the pin. Every game has a rules page under Games.'],
   ['How do my friends join a round?', 'Start a round, tap Invite and send the link by text. Friends with the app land straight in the round; friends without it are taken to the download page and then into the round. Everyone scores on their own phone and the card stays in sync.'],
-  ['Which courses does Bad Golf App have?', 'Bad Golf App has more than 11,000 courses across the United States with scorecards, tee ratings and slope, and GPS-mapped greens. If your course is missing you can add it inside the app in a couple of minutes.'],
+  ['Which courses does Bad Golf App have?', 'Bad Golf App has more than 11,000 courses across the United States with scorecards, tee ratings and slope, and GPS-mapped greens. Green outlines with slope colors are live on more than 10,000 of them. If your course is missing you can add it inside the app in a couple of minutes.'],
+  ['Does Bad Golf App show the slope of the greens?', 'Yes. On more than 10,000 courses the GPS screen draws the green and colors it from today\'s pin: red means the putt goes up, blue means down, green means level. Move the pin and the whole group sees it. It works on the Apple Watch too.'],
+  ['Can I look at a course before I play it?', 'Yes. Preview any course without starting a round: hole-by-hole satellite maps from the tee, a flyover, the scorecard and the greens. You can preview before you even create an account, and the app reminds you to take a look before a tee time.'],
   ['Can Bad Golf App run my golf league?', 'Yes. Create a league season, invite players, and the app builds the schedule, matchups, flights, handicaps, standings and playoffs, week by week.'],
 ];
 const faqLd = { '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: FAQ.map(([q, a]) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })) };
@@ -34,7 +36,7 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
   <div>
     <span class="kicker">Free on iPhone, iPad &amp; Android</span>
     <h1>The golf app for your regular group.</h1>
-    <p class="lead">One shared live scorecard, GPS yardages on every hole, real handicaps and all ${gameCount}+ side games you already play, scored automatically. No napkin math at the 19th hole.</p>
+    <p class="lead">One shared live scorecard, GPS yardages and green slopes on every hole, real handicaps and all <span>${gameCount}</span>+ side games you already play, scored automatically. No napkin math at the 19th hole.</p>
     <div class="actions">${storeButtons()}</div>
     <p class="try-demo"><a href="/app/?demo=1">Try a demo round in your browser &rarr;</a> <span>No sign-up. Nothing is saved.</span></p>
     <p class="fine">Bad Golf, Better Times. ${courseCount.toLocaleString()} U.S. courses mapped. No subscription.</p>
@@ -53,13 +55,14 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
   <div class="sec-head"><div class="eyebrow">What it does</div><h2>Everything your Saturday group argues about, handled.</h2><p>Bad Golf App was built for the guys and gals who play together every week and want the games, the handicaps and the bragging rights kept straight without a spreadsheet.</p></div>
   <div class="grid">
     <div class="feat"><div class="ico">📋</div><h3>One live scorecard</h3><p>Everyone scores on their own phone and the card stays in sync across the group in real time. Watch the other cart's birdie land before they brag about it.</p></div>
-    <div class="feat"><div class="ico">📍</div><h3>GPS on every hole</h3><p>Front, middle and back yardages on a satellite view, with mapped greens on ${courseCount.toLocaleString()} courses. Lay-up and carry numbers on holes that have them mapped.</p></div>
+    <div class="feat"><div class="ico">📍</div><h3>GPS on every hole</h3><p>Front, middle and back yardages on a satellite view, with mapped greens on <span>${courseCount.toLocaleString()}</span> courses and green outlines with slope colors on 10,000+ of them. Move today's pin and the whole group sees it.</p></div>
+    <div class="feat"><div class="ico">👀</div><h3>Preview any course</h3><p>Hole-by-hole maps from the tee, a flyover, the scorecard and the greens before you tee off. No round needed, no account needed. Standing at the course? It's already on your Home screen.</p></div>
     <div class="feat"><div class="ico">🐺</div><h3>${gameCount}+ games, scored automatically</h3><p>Skins, Nassau, Wolf, Vegas, Banker, Stableford, Quota, greenies, sandies, snake and more. Set them up once, the app keeps every tally and shows unit totals at the end.</p></div>
     <div class="feat"><div class="ico">📈</div><h3>Real handicaps</h3><p>A handicap index calculated from your posted rounds, applied per tee and per hole by stroke index, with a percentage option for your group's own rules.</p></div>
     <div class="feat"><div class="ico">🏅</div><h3>Leagues that run themselves</h3><p>Create a season, invite the field, and the app builds matchups, flights, weekly cards, standings and playoffs. Commissioners get their Thursdays back.</p></div>
     <div class="feat"><div class="ico">🏆</div><h3>Tournaments &amp; events</h3><p>Member-guest, buddies trip, charity scramble: multi-day events with groups, pairings, field-wide side games and a live event leaderboard.</p></div>
-    <div class="feat"><div class="ico">📊</div><h3>Stats and badges</h3><p>Fairways, greens, putts, scoring trends and 75 badges for the bad shots and the great ones. Yes, there is one for the snowman.</p></div>
-    <div class="feat dark"><div class="ico">⌚</div><h3>Apple Watch yardages</h3><p>Glance at your wrist for the number to the green and enter scores without taking out your phone.</p></div>
+    <div class="feat"><div class="ico">📊</div><h3>Stats and badges</h3><p>Fairways, greens, putts, handicap history and 75 badges for the bad shots and the great ones. Yes, there is one for the snowman.</p></div>
+    <div class="feat dark"><div class="ico">⌚</div><h3>Apple Watch caddie</h3><p>Score the whole group, see the satellite hole map, aim anywhere, read the green's slope and move the pin, all from your wrist. The phone stays in the pocket.</p></div>
   </div>
 </div></section>
 
@@ -186,14 +189,17 @@ export function features({ courseCount, gameCount }) {
   const rows = [
     ['📋', 'Shared live scorecard', 'Start a round, invite the group by text, and everyone enters scores on their own phone. The card syncs across the group in real time, including guests without an account. Track putts, fairways, greens and penalties if you want the stats, or just the score if you don\'t.'],
     ['📍', 'GPS rangefinder', `Satellite view of the hole with front, middle and back yardages to the green, plus lay-up and carry numbers on holes that have them mapped. Greens are mapped on ${courseCount.toLocaleString()} courses, and you can map a missing course yourself from the app.`],
+    ['🟢', 'Green view with slope', 'On more than 10,000 courses the green is drawn on the map and colored from today\'s pin: red putts go up, blue go down, green is level, with arrows for the fall line. Tap the flag to move the pin and everyone in your group sees it, with yardages to the new spot.'],
+    ['👀', 'Course preview and flyover', 'Look at any course without starting a round: every hole from the tee, a flyover, the scorecard and the greens. A card on Home shows the course you are standing at, a reminder arrives before your tee time, and you can preview before you create an account.'],
+    ['🔁', 'Play it your way', 'Full 18, start on the back, front or back nine only, a nine played twice, or pick any starting hole and play all 18 from there. Every game type, and every tournament day, supports every option.'],
     ['🐺', `${gameCount}+ games and side games`, 'Main games like Skins, Nassau (with Huckle presses), Wolf, Vegas, Banker, Hammer, Stableford, Quota, Match play, Team match play, Best ball, Combo Score, Ryder Cup, Scramble, Shamble, Split Sixes, Niners, Bingo Bango Bongo, Umbrella and Pot of Gold, plus junk and side pools: greenies, sandies, barkies, rolos, snake, chip-ins, closest to the pin, long putt, long drive, birdie bump and more. Each one is configurable and scored in units.'],
     ['🧾', 'Unit totals, not spreadsheets', 'At the end of the round the Board shows every game, every hole and a per-player unit total. Bad Golf App just keeps score.'],
     ['📈', 'Handicaps', 'A handicap index from your posted rounds, tee-aware course handicaps, strokes applied per hole by stroke index, and a handicap percentage setting for groups that play 80% or 90%. Temporary handicaps for new players until they have enough rounds.'],
     ['🏅', 'Leagues', 'Seasons with weekly matchups, flights, team or individual formats, scramble leagues, absences and subs, league handicaps, standings, prize pools and playoffs. The commissioner runs the week from their phone.'],
-    ['🏆', 'Tournaments and events', 'Multi-day events with pairings, cart groups, tee times, field-wide side games (closest to the pin, long drive, low net pool) and an event leaderboard that everyone can watch live.'],
-    ['📊', 'Stats and trends', 'Scoring average, best round, greens, fairways, putts per round, scoring mix and a trend line, all from the rounds you actually play.'],
+    ['🏆', 'Tournaments and events', 'Multi-day events with pairings, cart groups, tee times, field-wide side games (closest to the pin, long drive, low net pool) and an event leaderboard that everyone can watch live. Organizers can move players in or out of the side games after the event has started.'],
+    ['📊', 'Stats', 'Scoring average, best round, greens, fairways, putts per round, scoring mix and your handicap history, all from the rounds you actually play.'],
     ['🎖️', '75 badges', 'Earned for the great stuff and the bad stuff: first birdie, sandy save, hero tax, double par, snowman. A badge pops up mid-round when you earn it, if you want it to.'],
-    ['⌚', 'Apple Watch', 'Yardages and score entry on your wrist.'],
+    ['⌚', 'Apple Watch', 'A caddie and a scorecard on your wrist: score the whole group with putts, fairways and penalties, see live units and the leaderboard, a satellite hole map with tap-to-aim and distance arcs, green view with slope and a crown-moved pin, shot tracking and a drive estimate.'],
     ['😈', 'Friends & Foes', 'See who gives you the most units and who takes them, worked out from every game you have played together, then compare your stats head to head with any friend.'],
     ['👥', 'Friends and crew', 'Keep your regular group in one place, see who is playing today, and rank your friends by units, scoring average, rounds or handicap.'],
     ['🗺️', 'Course library', `${courseCount.toLocaleString()} U.S. courses with scorecards, tee ratings and slope. Missing one? Add it in the app and map the greens yourself in a few minutes.`],

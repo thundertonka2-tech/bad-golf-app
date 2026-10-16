@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1871
+**Build Version:** v2026.11.1922
 **Documentation Date:** October 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -649,6 +649,18 @@ The Score tab is live during a round — enter scores hole-by-hole and track sid
 
 **The next-hole buttons are always visible.** **"Next hole → GPS"** and **"Next hole → Scorecard"** stay on screen, greyed until every player's score for the hole is in. They used to disappear entirely on a round that started on the back nine.
 
+### Holes to Play — Every Game, Any Start *(new)*
+
+Every round setup has a **Holes to play** choice, and it works for **every game type**:
+
+- **Full 18** · **Start on the Back 9** (holes 10–18 first) · **Front 9 only** · **Back 9 only**
+- **Front 9 twice** / **Back 9 twice** — a nine played as 18, with the second loop's stroke indexes split the way the card prints them
+- **Pick a starting hole** — choose any hole 1–18 and play **all 18 in order from there**, wrapping around (like a shotgun cart). Nassau's front and back stay holes 1–9 and 10–18.
+
+A saved round template or a scheduled round remembers the start, and the start can be changed from the live round-edit screen too (same 18, new order).
+
+**Tournaments** set this **per day**: a **Holes** row on the setup checklist (after Tees) offers the same list, and every group that day plays those holes. On a nine-hole day the Shotgun sheet offers nine start holes (labelled 10–18 on a back-nine day) and spreads the groups across that nine. It locks once any group of the day has started. *(Leagues are unchanged — they pick front or back per week.)*
+
 ### Auto-Advance After the Last Score *(new)*
 
 Once the last score on a hole goes in, the app can move to the next hole for you. A small pill appears at the bottom — **"Next hole → GPS in 3…"** with a **Stay** button — and counts down three seconds. Any tap on the hole (a putt, a chip, a junk pick) restarts the clock, so you're never pulled away while you finish the hole's extras; **Stay** keeps you on the hole; the two next-hole buttons still work exactly as before.
@@ -1105,13 +1117,34 @@ Full-colour aerial photo of the hole with tee marker, green outline, fairway and
 
 **Minimize the options panel (phone):** tap **▾** to collapse the panel and see the whole map; **"⤢ Show options"** brings it back.
 
+### 🟢 Green View — Outlines, Slope Colours & Today's Pin *(new)*
+
+On courses where every green has been mapped, the GPS screen grows a **GREEN** chip (it stacks under the Arcs / To green chips). Tap it — or just **zoom in on the green** — to see:
+
+- **The green's outline** drawn on the satellite view.
+- **Slope colours**, measured from today's pin: **red = the putt goes up**, **blue = down**, **green = level** (within about 1½ inches). Small arrows every few yards show the fall line — which way a putt breaks. There are no putt lines; the colours tell the story.
+- **Today's pin** 🚩 — defaults to the centre of the green. The round's creator (or anyone in a casual round) can **tap the flag, then tap the green** to move it; **the whole group sees the new pin within seconds**, your aim line and approach yardage follow it, and the colours re-draw from the new spot. A small *"Tap the flag to move the pin"* hint shows once per round.
+
+**Where it's on:** green outlines and slope are live on **10,900+ U.S. courses** (every state) and growing. A course shows greens only when **every** hole has both an outline and slope — a course missing even one is hidden completely so you never see a half-mapped green. Players never trace or re-map greens; that is done by the Bad Golf team.
+
+**Three switches** in **Profile → Additional settings** — **Green view**, **Slope colours** and **Today's pin** — each on by default. The data comes from public lidar surveys; a green that was rebuilt after the survey is held back until newer data exists.
+
+**Clubs with more than one course** (Medinah No. 1 / 2 / 3, Bethpage and the like) ask which course you mean, in preview and in setup, so the right greens load.
+
 ### Closing a GPS Panel
 
 **Escape, or Android's back button, now closes the panel you're looking at** — Plays, Scorecard, Weather, Find, Shot or Wind — instead of closing the entire map out from under you and losing your place. The hole-mapping wizard is the one exception, because it has no natural "leave this panel" state.
 
-### Course Preview
+### 👀 Course Preview — Look Before You Play *(redesigned)*
 
-Previewing a course always shows each hole **from the mapped tee**, even if you're standing on the property. Live rounds, spectate and mapping are unchanged. Preview also doesn't raise an iPhone lock-screen Live Activity as if a round had started.
+You can look at any course without starting a round, from four places:
+
+- **The course page** — from **More → Courses → Find a course**, from round setup (**👀 Preview** beside the picked course), or from any tee time's sheet. Big **👀 Preview course** and **⛳ Start round** buttons, plus **▶ Flyover** and **🗂 Scorecard**, and a line with holes · par · tees.
+- **At the course** — a card on **Home** shows the course you're standing at (or a couple nearby) with Preview and Start round right there. It hides during a live round, once you've played there today, and for the rest of the day if you tap **Not now**.
+- **Signed out** — **👀 Preview a course** sits beside the demo round on the login screen. Every course is previewable; Start round asks you to sign in (free).
+- **Before a tee time** — about 1–2 hours before a tee time you're on, Bad Golf sends a reminder; tap it to open the preview. Turn it off under **Profile → 🔔 Notifications → "Course preview before my tee time."**
+
+**In the map preview:** every hole is shown **from the mapped tee** (never from where your phone is), with Front / Mid / Back, the hole's handicap and — where the card has them — each tee's yardage. **▶ Flyover** steps through the holes every few seconds and stops the moment you touch the map. Green outlines and slope show on courses that have them. **⛳ Start round** drops you into the normal setup with the course picked and you already added. Preview never raises a lock-screen round card.
 
 ### Spectate / Watch Another Player
 
@@ -1177,28 +1210,39 @@ One toggle above the club list — **"🏷️ Add brand / model / type"** — re
 
 ## Apple Watch App
 
-The Apple Watch companion is **live and working**. Sign in on your iPhone and the watch picks up the round automatically — it shows live rangefinder distances, the wind/slope-adjusted plays-as number, and a suggested club from your bag. No separate watch sign-in.
+The Apple Watch companion is a **full caddie and scorecard on your wrist** — the phone stays in the pocket. Sign in on your iPhone and the watch picks up the round automatically; no separate watch sign-in. It needs the phone nearby (it is a companion, not a standalone app). Supported from **Series 6 / SE 2nd gen**.
 
 *Watch changes ship through the App Store / TestFlight build, not the web build, so the watch app can be a release behind the phone.*
 
-### What It Shows
+### The Four Pages — Distance · Map · Scoring · Units
 
-- **Hole number & par** (e.g. "7 • Par 4")
-- **Distance to green** — FRONT / MID / BACK in yards, from the watch's own GPS
-- **Plays-as number** — wind/slope-adjusted yardage when the **"⌚ Plays-as distance on Apple Watch"** toggle (Stats → Round settings) is ON; turn it OFF for plain GPS yardage
-- **Suggested club** — pulled from your My Clubs bag
-- **Your score** — swipe to navigate holes
+Swipe between them. **Distance** (hole, par, FRONT / MID / BACK from the watch's own GPS, the wind/slope **plays-as** number when that toggle is on, and a suggested club from your bag) · **Map** · **Scoring** · **Units**.
 
-### Scoring From Your Wrist
+### 🗺️ Map — the Phone's GPS Screen on the Wrist *(new)*
 
-Score a hole on the watch and it **writes straight through to the phone's active round.**
+- A **satellite view of the hole**, turned tee-up like the phone, with a dashed aim line ball → target → pin and **today's pin in red**. Your dot, the fairway target dot, and orange dots for group members sharing their location. Turn the crown to zoom.
+- **Tap anywhere to aim there** — yards to the spot, plays-as, a club, and *"then N to pin."* Tap the target again (or ⊙) for the automatic aim.
+- **Arcs** button (when arcs are on in your phone profile) cycles **Yards → Clubs → off**, with your miss ring.
+- **◌ Green view** on courses with greens: slope colours from the pin (red up, blue down, green level), front/back and yards to the pin. **Move today's pin:** tap the green, turn the crown front ↔ back, tap **Set pin** — it goes to everyone in the group.
+- **⚑ Mark shot** (when Track Shot is on): tap at your ball, walk to it, tap **Done**, pick the club. The shot lands in **My shots** on the phone with the same 5–500 yard rule; shots of 200+ yards join the round's big shots.
+- **Est. Drive** box on par 4s and 5s (when it's on in your profile): stand still on the tee for 3 seconds, hit, walk — it counts the yards.
 
-- The phone shows a toast reading **"⌚ Score from your watch saved"** and the score lands on the scorecard
-- It goes through the same protected save path as a tap on the phone, so it only fills your own cells and correctly updates GIR / sandy / junk tracking
-- **Out of range?** The score queues on the watch and flushes automatically the moment it reconnects
-- Scores are ignored if there's no live round, the round is finished, you're in view-only mode, or the round doesn't match
-- Wrist-entered scores **stay put** — the phone's sync merges instead of overwriting
-- Browsing to a different hole on the watch doesn't snap you back to the phone's hole
+### Scoring From Your Wrist — the Whole Group *(expanded)*
+
+- **Scoring** lists every player in the group with you first; tap a name to score them. − / + or the crown set strokes (+ on an empty hole starts at par, − at a birdie, like the phone).
+- **Who you can score follows the phone's rules:** anyone in a casual round; **only the group's scorekeeper** in an event (others show 🔒); your opponent only in a bracket.
+- **Hole stats** appear when the round tracks them: **putts** (+ starts at 2, − on empty = chip-in), **fairway ← L · Hit · R →** on par 4s and 5s, **penalties** 0–3, and **GIR** worked out on the phone and shown read-only.
+- Scores write straight through to the phone's round (the phone toasts **"⌚ Score from your watch saved"**), go through the same protected save path as a tap, and fill junk games and the 3-putt snake exactly like the phone. **Out of range?** They queue and flush when the watch reconnects. Latest entry wins when two devices touch the same cell.
+- **Haptics:** a tap when another player's score lands; a stronger tap when you win a skin, closest-to-the-pin or a greenie, and on birdies, a new hole and the final score.
+- **Penalties on Animals rounds** still need the phone (the watch can't ask OB vs. water).
+
+### 💵 Units Page
+
+**Units · thru N** for the group (**Group units** in events); tap a game to see that game's units. A **Matches** section shows match-play status chips (*vs KW · 2 UP*). The numbers are the phone's own game math.
+
+### Finish Round & the Final Card
+
+**Finish round** shows to anyone in a casual round and only to the scorekeeper in an event. The watch first makes sure every queued score reached the phone, then the phone runs its normal Finish flow (a missing Wolf pick or blank holes are asked there). The **final card** — score, to par, putts, fairways, GIR, your units and the group board — stays until you tap Done.
 
 ### GPS Stays Warm (Workout Session)
 
@@ -1210,22 +1254,20 @@ The watch starts a **golf workout session** when a round goes live and ends it w
 
 ### "Close on Watch" — Getting Out of the App
 
-The watch app used to open by itself with no way to exit. The Scoring page (swipe down from Distance) has a dim **"Close on watch"** button with a confirmation dialog.
+The Scoring page has a dim **"Close on watch"** button with a confirmation dialog.
 
-- It clears the round from the watch and ends the workout, so the app stops appearing on every wrist raise
+- It sends any unsent scores first, clears the round from the watch and ends the workout, so the app stops appearing on every wrist raise
 - **It never ends or edits the round on your phone**
 - The watch stays closed until a new round starts or you tap **"Check again"**
 
-The watch also cleans up after itself: a round cached with no activity for 12 hours is dropped at launch rather than booting into a workout, and simply opening the phone app with no live round clears the watch.
+A round cached with no activity for 12 hours is dropped at launch, and opening the phone app with no live round clears the watch.
 
 ### Sign-In & Sync
 
 - Sign in on the iPhone and start (or open) a round — the watch signs in automatically
-- Syncs on launch, **on every wrist-raise**, and whenever it reconnects
-- **The phone answers even when it's locked in your pocket**
-- Yardages re-hand every 8 seconds during a live round
-- **Finishing the round on the phone clears the watch** — no more staring at yesterday's round
-- **"Continue on iPhone"** hands off to the full scorecard
+- Syncs on launch, **on every wrist-raise**, and whenever it reconnects; **the phone answers even when it's locked in your pocket**
+- **Finishing the round on the phone clears the watch**; **"Continue on iPhone"** hands off to the full scorecard
+- Satellite imagery on the watch is Esri World Imagery ("Powered by Esri")
 
 ---
 
@@ -1669,7 +1711,7 @@ There's also a separate **Contact us** form for course problems and general ques
 - **Appearance** — see below
 - **Account** — your email, sign-in method, and the **Edit profile / Sign out / Delete account** actions
 - **🔔 Push notifications** — see below
-- **Additional settings**
+- **Additional settings** — auto-advance, Track Shot, distance arcs, **Green view / Slope colours / Today's pin**, **Yards or meters** for the GPS readouts, badge pop-ups. **Your settings follow your account** — sign in on another phone, or sign out and back in, and they're still what you chose.
 - **🏌️ My clubs** and **📋 My shots**
 - **🏠 Home course**
 
@@ -1724,6 +1766,7 @@ One card covers everything Bad Golf pushes, split into what goes out and what co
 | **⛳ A friend starts a round** | You're told when a friend tees off |
 | **🏁 A friend completes a round** | You're told when a friend finishes |
 | **🏅 I earn a badge** | On by default; off = no mid-round badge pop-up and no toast (the badge is still awarded) |
+| **👀 Course preview before my tee time** | About 1–2 hours before a tee time you're on, a reminder you can tap to preview the course *(new)* |
 | **🗺️ Course re-map requests** | Admins only |
 
 > **The finish toggle only silences the broadcast to your friends.** The **final-summary card** that goes to the players who were actually in the round with you is a different notification and is not affected — that one is the result everybody in the group needs. Turning the finish alert off changes nothing about your round, your stats or your handicap.
@@ -1861,6 +1904,7 @@ Two more things worth knowing:
 - **Tournament prize pool unit totals count.** Event prize pools (Skins, Nassau, Long Putt, CTP, GIR pool, Fewest Putts, Stroke prize pool) were never included in lifetime units — only your group's own side games were. Every event prize pool in the app's history was missing before this, so older lifetime totals were understated
 - **Multi-day event units are counted once.** A two-day event used to record your unit totals on both days and show double; the full event net now lands on one round and the others read 0 units, and older entries repair themselves
 - A round deleted on one phone drops out of that phone's Lifetime Games immediately, while a second phone keeps counting it until the deletion syncs
+- **"Pending" in Game history** *(new)*: if your group finishes an **event** round while other groups are still out, the event's prize pools can't settle yet. Your line shows **Pending** (and is left out of the Lifetime total) until the last group is in; it then fills in by itself. The server enforces the same rule, so no phone can freeze an early figure.
 
 ### Rounds From a Deleted Tournament
 
@@ -2037,7 +2081,7 @@ Tap **"+ New tournament"**. Setup is five simple questions, one per screen, with
 2. **What's it called?** — the name players see on the leaderboard and their invite. Add a logo later.
 3. **How many days?** — tap 1 to 5, then the date. On a multi-day event the other days follow on, one a day.
 4. **Where are you playing?** — search the course list; **Same course every day** on a multi-day event. You can skip this and pick it later.
-5. **How will players get in?** — **Select the players** (pick from your friends and roster, or add guests) or **Send a join link**, plus *about how many players* (4, 8, 12, 16, 20+) and **I'm playing too** (on by default — off runs the event without you in the field).
+5. **How will players get in?** — **Select the players** (pick from your friends and roster, or add guests — the picker opens as soon as you create) or **Send a join link**, and **I'm playing too** (on by default — off runs the event without you in the field).
 
 **Create tournament** builds it and takes you straight to the setup checklist. Whoever creates the tournament is its **commissioner**.
 
@@ -2227,6 +2271,10 @@ Each event on the Tourney tab is one card: the name, date and tee time, then a s
 - **💰 Awards** on the leaderboard shows what every pool paid. **📲 Text Final Standings** and the summary share attach the **whole field's scorecard**, not just your cart's. All units figures print as whole numbers.
 - Closing a finished tournament round lands you on the Tourney tab (no leaderboard pop-up); **"🏆 Full standings & awards"** on the summary opens it on demand.
 - **Every tournament card has a "▴ Collapse" bar**; your own group's fold opens by default. The Review step shows the real game count — *"🏆 Prize pools: Skins 5 · Long Putt 1 · Low Net 1 · Most GIRs 1 · Fewest Putts 1"* and per day *"🎮 Games: CTP 1 (hole 17)"*.
+
+### 🙋 Who's In the Side Games — Late Changes on a Live Event *(new)*
+
+Plans change on the first tee. The **commissioner and event admins** can add or remove players from the day's **side games** after the event has started — **Birdie Bump, Closest to the Pin / Par-3 Greenie, Long Putt**, and the **Low Net / Most GIRs / Fewest Putts** pools — from a **"🙋 Who's in the side games"** sheet on the event home (under *Day started*) and on the **Event Leaderboard**. A change counts for **all 18 holes**, as if it had been set up that way; every group's round picks it up on its next save, finished groups included. Skins and the main games are not on this sheet, and a game can't be saved with nobody in it. Days that are already complete can't be changed.
 
 ### Brackets
 
@@ -2551,7 +2599,9 @@ Open a player's card → **Player stats** (this also works from the leaderboard 
 
 ### Find a Course
 
-Search any course in the library (this moved here from Play) and open its **Course Preview**: **GPS Preview** (every hole's map and yardages), **Scorecard**, and **Start / Schedule Round**. A course's website and maps links open in a **new page** rather than replacing the app — on the phone, an in-app browser sheet with **Done**.
+Search any course in the library and open its **course page**: **👀 Preview course**, **⛳ Start round**, **▶ Flyover** and **🗂 Scorecard**, with holes · par · tees on one line (see *Course Preview* under GPS). A club with several courses asks which one you mean. A course's website and maps links open in a **new page** rather than replacing the app — on the phone, an in-app browser sheet with **Done**.
+
+**Greens:** green outlines and slope colours are live on **10,900+ courses** across all 50 states. A course shows them only once every green is mapped with slope.
 
 ### Canada
 
@@ -2698,11 +2748,30 @@ Every review entry carries a permanent, **append-only** history.
 - Queue items carry a **proposed correction**, not just a finding, so the reviewer's job is a decision rather than an investigation
 - Categories in use include `scorecard`, `wrong-course`, `wrong-course-mapped`, `nine-hole`, `gps`, `possible-duplicate`, `duplicate` + `data-integrity` ("merge, do not delete") and `pars conflict`. Some entries carry explicit **"DO NOT DELETE"** corrections and **"WARNING: one of these two courses HAS BEEN PLAYED"** flags
 
-### 📥 Course Request Queue
+### 📥 Course Request Queue — New Courses and Re-Maps
 
-An admin queue with **Open / Resolved** tabs, an optional resolution note, and **resolve / reject / reopen**. Both dashboard tiles open it.
+Players can ask for a missing course or report one mapped wrong. Requests move through three steps, and the inbox on **Home** shows each admin only the step that is theirs:
 
-**Workflow:** view the request (course name, submitter) → **Add to library** (create the course record) or **Assign to existing** → the requester gets a notification once the course is added → **Dismiss** closes it.
+1. **NEW (open)** — Tyler maps or fixes the course, then taps **Mapped → Kevin**. Re-map requests come to the mapper too.
+2. **REVIEW (mapped)** — Kevin checks it and taps **Approve** (the golfer gets the in-app notice) or **Send back**.
+3. **DONE (resolved)** — **Email ‹name›** opens Kevin's own mail app with the thank-you written; tapping it stamps *emailed*. Apple "Hide My Email" addresses can't be emailed and say so.
+
+Each card shows the requester's name and sign-in email with a Copy button. The queue has **Open / Resolved** tabs and a resolution note on every item. Only open items and items waiting on review appear in the inbox.
+
+### ⛳ Green Mapping Queue — Tracing Greens (Kevin) *(new)*
+
+Green outlines come from map data and lidar; where a course is missing **1–3 greens** it lands in **Admin → ⛳ Green mapping queue (N)**. Tap a course and each missing hole opens straight into **Green view with the trace tool**:
+
+- **Tap around the edge of the green** (at least 5 points) → **Save green**. **Undo** steps back a point, **Cancel** drops the trace. The hole is removed from the queue as soon as it's saved and the next missing hole opens; after the last one, the app offers the **next course in the queue**.
+- **Saving a trace also fixes the hole's GPS:** the hole's green centre moves to the middle of your outline, and Front / Back become the outline's nearest and farthest points from the tee, so the yardages match what you drew. A toast says how far it moved when it mattered.
+- **🛠️ Re-map hole** (beside Trace / Re-trace) runs the tee → target → front → back taps on the current hole without leaving the tool, then brings you straight back to Green view. If the green moved, the hole opens into tracing again; if your outline still sits on it, it's kept.
+- **🚩 Mapped wrong** sends the hole to the **Re-map requests** queue (with a note) when the whole hole is wrong — tee on the wrong hole, a nine-hole course mapped as 18, a course that no longer exists.
+- Tracing and Re-map hole **write through a State Lock** — they are deliberate one-hole admin edits. Everything else the lock covers stays locked.
+- A missing green never makes a course incomplete; a course missing **4 or more** greens is simply off for greens until it's mapped.
+
+### ⛰️ Slope Needed Queue *(new)*
+
+Every traced green waits here until slope is added from lidar — **Admin → ⛰️ Slope needed queue (N)** lists the courses and holes. Ask Claude to **"pull the slope queue"**: greens get their slope grid, and a course goes live the moment every hole has an outline and slope. Greens where the lidar reads over 10% across the green (bad data) or where there is no lidar at all are marked *Slope unavailable* and that course stays off. Nothing runs by itself.
 
 ### ✍️ Feedback Inbox
 
@@ -2807,6 +2876,8 @@ Per-tee par and stroke index (the ladies'/senior par feature described in the pl
 **Admin overlays fit a phone** — the four admin overlays that had no safe-area inset (title row and **✕ Close** clipped by the notch) are fixed, the dashboard's sticky header no longer sticks under the notch, the admin grid is pinned to two columns, and there's a 360px breakpoint for the par/SI editor.
 
 **"🛰️ Open GPS admin map" works from the admin screens.** The map used to open *behind* the admin modals, so the button looked completely dead. It now stacks above every admin dialog but below toasts. Normal gameplay stacking is untouched.
+
+> **Four taps also fix a hole from the green-tracing tool** — see *Green Mapping Queue* above for **🛠️ Re-map hole**.
 
 ### Fairway Center / Target Mapping (adminFwcCourse)
 
@@ -3206,10 +3277,14 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 ## Glossary
 
-*New since the last edition: **🎯 Distance arcs & miss zone** on the GPS map (yardage arcs with plays-like labels, club arcs, the TO GREEN preview, and a miss zone that learns from your tracked shots); Track Shot remembering your aim; **Auto-advance after the last score** (the next hole opens by itself once every field on the hole is in — a setting: → GPS, → Scorecard or Off); the **Mulligans** tracker (do-over counter, per-player cap, scorecard marks, "Most mulligans", Do-Over and Breakfast Ball badges — and a mulligan round doesn't post to your handicap); **"⛳ Enter a Past Round"** (the Stats button and form were called "Add a Round"); a friend's **Game history** showing every round they played, not just the ones you were in; spectating a group keeps every player on the same hole; the Bad Golf team can reply to your Contact us messages in the app; Vegas's "Net — only natural birdies/eagles flip or double" (the previous edition's new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
+*New since the last edition: **🟢 Green view** (green outlines, slope colours and a shared today's pin on 10,900+ courses); **👀 Course Preview** front and centre (course page, flyover, the at-the-course card on Home, signed-out preview, and a tee-time reminder); **Holes to play** for every game and every tournament day, including **Pick a starting hole**; the **Apple Watch** scoring the whole group with hole stats, units, a satellite hole map, green view, arcs and shot tracking; **🙋 Who's in the side games** on a live event; **Pending** event lines in Game history; settings that follow your account; and, for admins, the **Green mapping** and **Slope needed** queues, **🛠️ Re-map hole**, **🚩 Mapped wrong** and the three-step course request flow. Earlier: **🎯 Distance arcs & miss zone** on the GPS map (yardage arcs with plays-like labels, club arcs, the TO GREEN preview, and a miss zone that learns from your tracked shots); Track Shot remembering your aim; **Auto-advance after the last score** (the next hole opens by itself once every field on the hole is in — a setting: → GPS, → Scorecard or Off); the **Mulligans** tracker (do-over counter, per-player cap, scorecard marks, "Most mulligans", Do-Over and Breakfast Ball badges — and a mulligan round doesn't post to your handicap); **"⛳ Enter a Past Round"** (the Stats button and form were called "Add a Round"); a friend's **Game history** showing every round they played, not just the ones you were in; spectating a group keeps every player on the same hole; the Bad Golf team can reply to your Contact us messages in the app; Vegas's "Net — only natural birdies/eagles flip or double" (the previous edition's new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
 
 | Term | Definition |
 |------|-----------|
+| **Green view** | The GPS screen's green outline, slope colours (red up / blue down / green level) and today's pin; shows only on a course where every green is mapped with slope |
+| **Today's pin** | The group's shared pin position on the green — tap the flag, then the green, to move it for everyone |
+| **Pick a starting hole** | A Holes-to-play option: all 18 in order from the hole you choose, wrapping around |
+| **Slope needed queue** | Admin list of hand-traced greens waiting for lidar slope before their course goes live |
 | **Handicap Index** | Your WHS rating (one decimal); based on the official USGA count of your best differentials from the last 20 rounds, capped at net double bogey |
 | **Differential** | (Score − Course Rating) × (113 ÷ Slope); measures difficulty of a specific round |
 | **Course Handicap** | Index × (Slope ÷ 113) + (Rating − Par); your handicap adjusted to a specific tee. **Skins and the prize pools measure off this, not the raw index** |
