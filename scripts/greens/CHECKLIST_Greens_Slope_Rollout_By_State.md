@@ -209,40 +209,40 @@ Legend: ☐ to do · ✅ done. Chunk ids are in `scripts/greens/chunks.json` (wi
 - ✅ `100-new-mexico-all` — whole state — 91 courses / 1557 holes (live now: 3) — done 2026-10-15: 71 live; Los Alamos withheld; 16 no lidar (Albuquerque: Tanoan x3, Sandia, Twin Warriors, Isleta x4, Arroyo del Oso x2, Towa x4, Riverview)
 
 **Mississippi** (US) — 89 courses
-- ☐ `101-mississippi-all` — whole state — 89 courses / 1494 holes
+- ✅ `101-mississippi-all` — whole state — 89 courses / 1494 holes — done 2026-10-15: 80 live; Dancing Rabbit x2 no lidar; Brookhaven off (4 greens to Kevin)
 
 **West Virginia** (US) — 87 courses
-- ☐ `102-west-virginia-all` — whole state — 87 courses / 1305 holes
+- ✅ `102-west-virginia-all` — whole state — 87 courses / 1305 holes — done 2026-10-15: 72 live; Greenbrier Old White TPC + Meadows withheld (rebuilt after 2016 flood)
 
 **Hawaii** (US) — 84 courses — USGS 1 m coverage is patchy out west; expect some 'no lidar' courses
-- ☐ `103-hawaii-all` — whole state — 84 courses / 1467 holes
+- ✅ `103-hawaii-all` — whole state — 84 courses / 1467 holes — done 2026-10-15: 62 live; 5 no lidar (Royal Hawaiian, Ko'olau, Pali, Volcano, Championship); Oahu CC, Kukio x2, Ke'olu, Hamakua off (greens to Kevin)
 
 **New Hampshire** (US) — 81 courses
-- ☐ `104-new-hampshire-all` — whole state — 81 courses / 1359 holes
+- ✅ `104-new-hampshire-all` — whole state — 81 courses / 1359 holes — done 2026-10-15: 77 live
 
 **South Dakota** (US) — 76 courses — USGS 1 m coverage is patchy out west; expect some 'no lidar' courses
-- ☐ `105-south-dakota-all` — whole state — 76 courses / 1314 holes
+- ✅ `105-south-dakota-all` — whole state — 76 courses / 1314 holes — done 2026-10-15: 69 live; 2 no lidar (Gregory, Winner); Lead CC off (5 greens to Kevin)
 
 **Wyoming** (US) — 62 courses — USGS 1 m coverage is patchy out west; expect some 'no lidar' courses
-- ☐ `106-wyoming-all` — whole state — 62 courses / 1062 holes
+- ✅ `106-wyoming-all` — whole state — 62 courses / 1062 holes — done 2026-10-15: 61 live
 
 **North Dakota** (US) — 61 courses — USGS 1 m coverage is patchy out west; expect some 'no lidar' courses
-- ☐ `107-north-dakota-all` — whole state — 61 courses / 1035 holes
+- ✅ `107-north-dakota-all` — whole state — 61 courses / 1035 holes — done 2026-10-15: 57 live; 2 no lidar (Creel Bay, Edgewater)
 
 **Rhode Island** (US) — 61 courses
-- ☐ `108-rhode-island-all` — whole state — 61 courses / 965 holes
+- ✅ `108-rhode-island-all` — whole state — 61 courses / 965 holes — done 2026-10-15: 59 live
 
 **Delaware** (US) — 40 courses
-- ☐ `109-delaware-all` — whole state — 40 courses / 711 holes
+- ✅ `109-delaware-all` — whole state — 40 courses / 711 holes — done 2026-10-15: 37 live; Old Landing off (4 greens to Kevin)
 
 **Alaska** (US) — 17 courses — USGS 1 m coverage is patchy out west; expect some 'no lidar' courses
-- ☐ `110-alaska-all` — whole state — 17 courses / 270 holes
+- ✅ `110-alaska-all` — whole state — 17 courses / 270 holes — done 2026-10-15: 5 live; 11 no lidar (Fairbanks, Kenai, Palmer, Homer, Settlers Bay...)
 
 **Maryland** (US) — 3 courses
-- ☐ `111-maryland-all` — whole state — 3 courses / 54 holes
+- ✅ `111-maryland-all` — whole state — 3 courses / 54 holes — done 2026-10-15: 3 live
 
 **Vermont** (US) — 2 courses
-- ☐ `112-vermont-all` — whole state — 2 courses / 36 holes
+- ✅ `112-vermont-all` — whole state — 2 courses / 36 holes — done 2026-10-15: 1 live
 
 **California research for the chunks not run yet (015–018), from 2026-10-13 — check each against its lidar year before withholding:** Bay Area/Monterey: Lake Merced (all greens Hanse 2022), Olympic Club Lake (2023), Sharon Heights (all greens 2024), Pasatiempo (2024 restoration), Palo Alto Hills (rebuilt 2022), Baylands Golf Links (new 2018, ex-Palo Alto Muni), Corica Park South (2018), MPCC Dunes (2016), Pebble Beach (greens 8/11/13/17 partial), Spyglass (#14 2021), Spanish Bay (closed for Hanse rebuild until Apr 2027), San Juan Oaks (2024 reimagined, uncertain), Poppy Ridge (new 18 in 2025), Montecito CC (2019, uncertain). Sacramento/Central: El Macero (green complexes 2025, uncertain), Auburn Valley (closed 2021?). Closures: Brentwood (Brentwood CA, one nine closed 2023). LA/San Diego lidar (CA_LosAngeles_B23, CA_SanDiegoCo_D24, SoCal Wildfires 2018) is recent, so older LA/SD rebuilds are already on the new ground; Coachella Valley is 2021.
 
@@ -307,3 +307,4 @@ Legend: ☐ to do · ✅ done. Chunk ids are in `scripts/greens/chunks.json` (wi
 | 2026-10-15 | 088–092 Kentucky + Oregon + Utah (all) | 334 | 19 courses (1-3 greens each) | 47 off: 4 withheld, 1 cleared, 2 with 4-5 greens to Kevin, 40 no lidar (Oregon coast + Willamette + Bend/Sunriver) | Oregon gaps are real: USGS has no 1 m there and the NOAA OR DEMs (El Nino 2016 coastal strip, OLC Deschutes forest blocks, Lane County 2015) are nodata over these courses - Oregon DOGAMI statewide lidar would fill them if we can reach it. Lidar: KY Eastern 2019, CentralEast 2023; UT FlamingGorge 2020, SaltLakeCo 2023-24, Statewide NCentral 2020; OR PortlandMetro 2024, Jackson 2022. 46 ellipse outliers (>8 percent) to Kevin. Withheld: Lexington CC (5 greens rebuilt 2023), Entrada at Snow Canyon (Kidd rebuild 2022), Black Desert (new 2023), Copper Rock (new 2020). Cleared: Wohali Eagle (new 2024). Left live: Valhalla (fairways/bunkers only), Portland GC (#15 2022, lidar 2024), Hidden Valley UT (lidar 2023-24), Jeremy Ranch (2026 grass only). Closed, left as is: Glenmary, Broadmoor (Portland), Wingpointe, Swan Lakes, Ben Lomond, Coral Cliffs. Writer token retired. |
 | 2026-10-15 | 093–096 Louisiana + Idaho + Maine + Arkansas (all) | 419 | 22 courses (1-3 greens each) | 11 off: 7 withheld, 1 with 4 greens to Kevin, 3 no lidar | Lidar: LA Greater New Orleans 2021-22, Florida Parishes 2024, Sabine River 2018; ID Southern 2018-19 / Southern Gaps 2023, North Fork Payette 2020; ME South Coastal 2020, MidCoast 2021, SouthCentral 2022; AR Eastern 2023. 39 ellipse outliers (>8 percent) to Kevin. Withheld: Southern Trace (2021-22), Mallard Cove/Mallard GC (2021 redesign), New Orleans CC (2024), Tamarack Osprey Meadows (RTJ II 2024), Valley Club Hailey North/South/West (2018-19). Left live: Metairie CC (2021, lidar 2021-22), Hillcrest Boise + Crane Creek (lidar 2023), Harbor Oaks (lidar 2023). Closed, left as is: LSU GC (closing Jun 2026), Bluffs on Thompson Creek, Pine Hills, Foxtail, Sable Oaks, Streamside, Katahdin, War Memorial, Hindman, Berksdale. Run restarted once (container restart mid-Arkansas). Writer token retired. |
 | 2026-10-15 | 097–100 Montana + Nevada + Oklahoma + New Mexico (all) | 327 | 18 courses (1-3 greens each) | 48 off: 4 withheld, 44 no lidar (28 MT, 16 NM Albuquerque area) | Lidar: MT Statewide Phase4 2022; NV Las Vegas Region 2016; OK Panhandle 2018, Statewide 2022; NM North Central FEMA 2016-17. 25 ellipse outliers (>8 percent) to Kevin. Withheld: Wynn (Fazio 2019), Amara / Bear's Best (closed 2025 for redesign), Kickingbird (new greens 2023), Los Alamos (new layout 2026). Left live: Southern Hills (Hanse 2018-19 kept existing green elevations), OKC G&CC (75 percent of contours kept), TPC Summerlin (contours kept), Jimmie Austin (4 holes 2016-17, lidar 2018), Moonlight Basin (2015, lidar 2022). Closed, left as is: Badlands, Black Mountain, Royal Links, Primm Valley x2, Desert Pines, Rosewood Lakes, Wildcreek 18. Writer token retired. |
+| 2026-10-15 | 101–112 MS, WV, HI, NH, SD, WY, ND, RI, DE, AK, MD, VT (all remaining US) | 583 | 48 courses (1-3 greens each) | 32 off: 2 withheld, 8 with 4-11 greens to Kevin, 22 no lidar (AK 11, HI 5, MS 2, SD 2, ND 2) | US ROLLOUT COMPLETE. Pipeline now: 10,789 live / 200 trace / 456 off of 11,538. 108 ellipse outliers (>8 percent) to Kevin (Oahu CC 11, Kukio 6+4, Lead CC 5...). Withheld: Greenbrier Old White TPC + Meadows (rebuilt 2017 after the 2016 flood). Left live: Kapalua Plantation (Coore & Crenshaw 2019, lidar 2020), Mossy Oak (2016, lidar 2018-19), Minot CC (2015, lidar 2022), Teton Pines / Waialae / Wannamoisett / Anchorage (partials). Closed, left as is: Wailea Old Blue, Makena, Kona Mountain, Eagleglen. Run restarted once (container restart mid-Hawaii). Writer token retired. Only Ontario (113-114) left - no USGS/NOAA lidar in Canada. |
