@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1925-->
+<!--BGVER=v2026.11.1926-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12028,7 +12028,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1925';
+const BG_BUILD = 'v2026.11.1926';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -63830,8 +63830,28 @@ function bgIsDeadEvent(id) {
 // Called wherever a t2Get for a round's event comes back EMPTY. Deliberately not
 // called on a thrown/network error -- only on a clean "no such row" -- so an
 // offline phone never mistakes a failed request for a deleted tournament.
-function bgMarkEventGone(id) {
+/* v1926 (Tyler 10/17): "I just finished a tourney today but it is not showing up in my rounds
+   ... make sure this is fixed for all users." Mike's event-player row had no account linked, so
+   the database hid the event from his phone; the round summary read that empty answer as
+   "deleted" and pushed the id to every phone, and the whole field's round vanished from Home,
+   Rounds and Tournaments. An empty read now means "deleted" only after the server confirms the
+   event is really gone (bg_events_alive is SECURITY DEFINER, so it answers even for a player the
+   event row is hidden from). If that check cannot be made, the id stays on this phone only. */
+async function _bgEventsAlive(ids) {
+  try {
+    if (!supa || !Array.isArray(ids) || !ids.length) return null;
+    const r = await supa.rpc('bg_events_alive', { p_ids: ids.map(String) });
+    if (!r || r.error || !Array.isArray(r.data)) return null;
+    return new Set(r.data.map(String));
+  } catch (e) { return null; }
+}
+async function bgMarkEventGone(id) {
   if (!id) return;
+  try { if (bgDeadEvents().has(String(id))) return; } catch (e) {}
+  let _alive = null;
+  try { _alive = await _bgEventsAlive([id]); } catch (e) { _alive = null; }
+  if (_alive && _alive.has(String(id))) return;   // v1926: still exists -- not deleted
+  const _shared = !!_alive;                       // v1926: only a confirmed delete goes to everyone
   try {
     const s = bgDeadEvents();
     if (s.has(String(id))) return;
@@ -63843,7 +63863,7 @@ function bgMarkEventGone(id) {
     // it cannot clobber another device's deletions and cannot un-delete anything.
     // Fire-and-forget on purpose: local truth is already written on the line above, and
     // the dirty-singleton queue retries a write that fails or happens offline.
-    try { if (typeof safeSet === 'function') Promise.resolve(safeSet(BG_DEAD_EVENTS_KEY, JSON.stringify([...s]), true)).catch(function () {}); } catch (e) {}
+    try { if (_shared && typeof safeSet === 'function') Promise.resolve(safeSet(BG_DEAD_EVENTS_KEY, JSON.stringify([...s]), true)).catch(function () {}); } catch (e) {}
     try { if (typeof loadRounds === 'function') loadRounds(); } catch (e) {}
   } catch (e) {}
 }
@@ -63853,14 +63873,19 @@ function bgMarkEventGone(id) {
 // only repaint when something actually arrived.
 async function bgHydrateDeadEvents() {
   try {
-    const raw = await safeGet(BG_DEAD_EVENTS_KEY, true);
-    if (!raw) return;
-    const incoming = JSON.parse(raw);
-    if (!Array.isArray(incoming) || !incoming.length) return;
+    let incoming = [];
+    try { const raw = await safeGet(BG_DEAD_EVENTS_KEY, true); const p = raw ? JSON.parse(raw) : []; if (Array.isArray(p)) incoming = p; } catch (e) {}
     const s = bgDeadEvents();
     let added = 0;
     incoming.forEach(function (x) { const k = String(x || ''); if (k && !s.has(k)) { s.add(k); added++; } });
-    if (!added) return;
+    /* v1926: the set used to only ever grow, so an event wrongly marked dead stayed hidden on every
+       phone forever. Ask the server which of these tournaments still exist and drop those. */
+    let pruned = 0;
+    try {
+      const _alive = s.size ? await _bgEventsAlive([...s]) : null;
+      if (_alive && _alive.size) _alive.forEach(function (k) { if (s.delete(k)) pruned++; });
+    } catch (e) {}
+    if (!added && !pruned) return;
     try { localStorage.setItem(BG_DEAD_EVENTS_KEY, JSON.stringify([...s])); } catch (e) {}
     try { if (typeof loadRounds === 'function') loadRounds(); } catch (e) {}
     try { if (typeof renderHome === 'function') renderHome(); } catch (e) {}

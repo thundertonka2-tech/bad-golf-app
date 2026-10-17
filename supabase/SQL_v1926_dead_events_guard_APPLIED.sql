@@ -1,0 +1,8 @@
+-- v1926 — APPLIED to project ojclesuwxhtzvrymqrwg on 2026-10-17 as migration
+-- "v1926_dead_events_guard_and_round_member_access". Kept here for the record.
+-- 1) tourney_is_member(): also true for a participant in one of the event's rounds.
+-- 2) bg_events_alive(text[]): SECURITY DEFINER; which ids are tournaments that still exist (not settings.deleted).
+-- 3) trg_bg_dead_events_guard on games (code = 'shared:dead-events'): strips any live tournament id.
+-- 4) Re-saved shared:dead-events (removed Kerbo Group 10/17, ebf84da6-...).
+-- 5) Linked tournament_players rows with no user_id to the exact-name account playing that event's rounds
+--    (Mike Davison, Brian Myers, Mitch Myers, Britt Hogland).
