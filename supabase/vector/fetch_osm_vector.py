@@ -2,7 +2,11 @@ import json, sys, urllib.request, urllib.parse, time
 # usage: fetch_osm_vector.py <course_id> <lat> <lon> <radius_m>
 cid, lat, lon, rad = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
 KEEP = {'fairway','rough','bunker','green','water_hazard','lateral_water_hazard','tee','penalty_area'}
-q = f'[out:json][timeout:90];(way["golf"](around:{rad},{lat},{lon});relation["golf"](around:{rad},{lat},{lon}););out geom;'
+q = (f'[out:json][timeout:120];(way["golf"](around:{rad},{lat},{lon});relation["golf"](around:{rad},{lat},{lon});'
+     f'way["natural"="wood"](around:{rad},{lat},{lon});relation["natural"="wood"](around:{rad},{lat},{lon});'
+     f'way["landuse"="forest"](around:{rad},{lat},{lon});relation["landuse"="forest"](around:{rad},{lat},{lon});'
+     f'way["natural"="scrub"](around:{rad},{lat},{lon});way["natural"="tree_row"](around:{rad},{lat},{lon});'
+     f'node["natural"="tree"](around:{rad},{lat},{lon}););out geom;')
 req = urllib.request.Request('https://overpass-api.de/api/interpreter', data=urllib.parse.urlencode({'data': q}).encode(),
       headers={'User-Agent':'BadGolfApp/1.0 (support@officialbadgolf.com)','Accept':'application/json'})
 for i in range(4):
@@ -17,7 +21,14 @@ def ring_of(geom):
     return r
 for e in d.get('elements', []):
     t = (e.get('tags') or {}); k = t.get('golf')
-    if k not in KEEP: continue
+    if k not in KEEP:
+        if t.get('natural') in ('wood','scrub') or t.get('landuse') == 'forest': k = 'wood'
+        elif t.get('natural') == 'tree' and e['type'] == 'node':
+            feats.append({'type':'Feature','properties':{'k':'tree','ref':''},'geometry':{'type':'Point','coordinates':[round(e['lon'],6), round(e['lat'],6)]}}); continue
+        elif t.get('natural') == 'tree_row' and e.get('geometry'):
+            for p in e['geometry']: feats.append({'type':'Feature','properties':{'k':'tree','ref':''},'geometry':{'type':'Point','coordinates':[round(p['lon'],6), round(p['lat'],6)]}})
+            continue
+        else: continue
     if k == 'lateral_water_hazard' or k == 'penalty_area': k = 'water_hazard'
     geoms = []
     if e['type'] == 'way' and e.get('geometry'):
