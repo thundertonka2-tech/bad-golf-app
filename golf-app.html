@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1926-->
+<!--BGVER=v2026.11.1927-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12028,7 +12028,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1926';
+const BG_BUILD = 'v2026.11.1927';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -69634,8 +69634,9 @@ async function bgFriendSearch(q) {
   if (!term) { paint(''); return; }
   if (!_authUser || !supa) { paint('<div class="help-text" style="padding:6px 0">Sign in to add friends.</div>'); return; }
   let profiles = [], edges = [];
-  try { [profiles, edges] = await Promise.all([fetchProfiles(), fetchFriendships()]); }
-  catch (e) { paint('<div class="help-text" style="padding:6px 0">Couldn\u2019t reach the player list \u2014 try again on a better connection.</div>'); return; }
+  paint('<div class="help-text" style="padding:6px 0">Searching\u2026</div>');
+  try { [profiles, edges] = await _bgRaceTimeout(Promise.all([fetchProfiles(), fetchFriendships()]), 12000, 'friend search'); }   // v1927: never hang
+  catch (e) { try { _bgCrewDropStuckReads(); } catch (e2) {} paint('<div class="help-text" style="padding:6px 0">Couldn\u2019t reach the player list \u2014 try again on a better connection.</div>'); return; }
   const meId = _authUser.id;
   const rel = {};
   edges.forEach(e => {
@@ -72608,17 +72609,44 @@ let _crewWired = false;
 
 // v989 (U11): run a Crew card renderer so a failure shows an inline error with a
 // retry instead of leaving the card's "Loading…" placeholder up forever.
+/* v1927 (Steve Miller, 10/17): "Friend look up is not working ... when I type in a name and hit
+   return nothing happens", with the Bad Golf Users card stuck on Loading. The search box's handler
+   was only attached at the END of renderCrewFriends, after four cloud reads with no time limit --
+   one stalled read on a weak signal and the tab had a dead search box, an empty requests card and
+   a leaderboard that said Loading for ever. Now: the search is wired the moment the tab opens, every
+   card gives up after 20 s with a Retry that drops the stuck in-flight reads, and the search itself
+   answers within 12 s one way or the other. */
+function _bgWireFriendSearch() {
+  try {
+    const sIn = document.getElementById('crew-fr-search');
+    if (!sIn || sIn._bgWired) return;
+    sIn._bgWired = true;
+    const go = () => {
+      try { if (window._bgFrSearchT) clearTimeout(window._bgFrSearchT); } catch (e2) {}
+      window._bgFrSearchT = setTimeout(() => { window._bgFrSearchT = null; try { bgFriendSearch(sIn.value); } catch (e3) {} }, 200);
+    };
+    sIn.oninput = go;
+    sIn.onkeydown = (ev) => { try { if (ev && ev.key === 'Enter') { ev.preventDefault(); go(); sIn.blur(); } } catch (e) {} };
+  } catch (e) {}
+}
+function _bgCrewDropStuckReads() {
+  try { _profilesInflight = null; } catch (e) {}
+  try { _friendshipsInflight = null; } catch (e) {}
+  try { _rosterInFlight = null; } catch (e) {}
+  try { _allStatsCacheAt = 0; } catch (e) {}
+}
 function _bgCrewCard(elId, fn) {
   let p;
   try { p = fn(); } catch (e) { p = Promise.reject(e); }
-  Promise.resolve(p).catch(err => {
+  const fail = (err, slow) => {
     try { console.warn('crew card failed:', elId, err); } catch (e) {}
     const el = document.getElementById(elId);
     if (!el) return;
-    el.innerHTML = '<div class="help-text" style="padding:10px 2px">Couldn\u2019t load this. <button type="button" class="bg-btn bg-btn--sm small" data-retry="' + escAttr(elId) + '">Retry</button></div>';
+    el.innerHTML = '<div class="help-text" style="padding:10px 2px">' + (slow ? 'This is taking longer than usual. ' : 'Couldn\u2019t load this. ') + '<button type="button" class="bg-btn bg-btn--sm small" data-retry="' + escAttr(elId) + '">Retry</button></div>';
     const b = el.querySelector('[data-retry]');
-    if (b) b.onclick = () => { el.innerHTML = '<div class="help-text">Loading\u2026</div>'; _bgCrewCard(elId, fn); };
-  });
+    if (b) b.onclick = () => { el.innerHTML = '<div class="help-text">Loading\u2026</div>'; _bgCrewDropStuckReads(); _bgCrewCard(elId, fn); };
+  };
+  _bgRaceTimeout(Promise.resolve(p), 20000, elId).catch(err => fail(err, /timed out/.test(String(err && err.message || ''))));
 }
 // v1795 (Tyler: "show who your foes and such are ... that is something really cool about our app
 // so I would like to highlight it"). DEMO ONLY: Friends & Foes as its own card at the top of the
@@ -72668,6 +72696,7 @@ async function renderCrew() {
   if (content) content.style.display = 'block';
   wireCrewControls();
   wireFriendsModals();
+  _bgWireFriendSearch();   // v1927: before any read, so typing always does something
   if (window.BG_DEMO) {
     // v1795: friend requests / search need an account -- the sample crew is already "friends".
     try { const _rq = document.getElementById('crew-requests-card'); if (_rq) _rq.style.display = 'none'; } catch (e) {}
@@ -75332,15 +75361,7 @@ async function renderCrewFriends() {
     if (card) card.style.display = 'block';
     // v1215: wire the search input. Assigned on every render (cheap, and it replaces
     // rather than stacks handlers); debounced so a burst of typing costs one query.
-    try {
-      const sIn = document.getElementById('crew-fr-search');
-      if (sIn) {
-        sIn.oninput = () => {
-          try { if (window._bgFrSearchT) clearTimeout(window._bgFrSearchT); } catch (e2) {}
-          window._bgFrSearchT = setTimeout(() => { window._bgFrSearchT = null; try { bgFriendSearch(sIn.value); } catch (e3) {} }, 200);
-        };
-      }
-    } catch (e) {}
+    try { _bgWireFriendSearch(); } catch (e) {}   // v1927: wired once, on tab open (kept here for a card rendered before the tab)
     if (!incoming.length && !outgoing.length) {
       reqEl.innerHTML = '';
     } else {
