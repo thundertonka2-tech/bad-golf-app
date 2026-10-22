@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1939-->
+<!--BGVER=v2026.11.1940-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -3670,6 +3670,8 @@
   #gps-pv-fly.on { background: rgba(31,138,59,0.96); }
   /* HCP + each tee's yardage can be longer than one tee's readout: let it wrap. */
   #gps-overlay.preview #gps-tee-yds { white-space: normal; text-align: center; max-width: 62vw; border-radius: 14px; line-height: 1.3; }
+  /* v1940: the scheduled-round line on the at-course card */
+  #home-atcourse-card .ac-when { margin: 2px 0 2px; font-weight: 600; }
   /* Home: You're at the course */
   #home-atcourse-card .ac-head { display: flex; align-items: center; gap: 8px; }
   #home-atcourse-card .ac-head h2 { margin: 0; }
@@ -12055,7 +12057,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1939';
+const BG_BUILD = 'v2026.11.1940';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -18344,19 +18346,115 @@ try {
   function _acHidden(){ try { var o = JSON.parse(localStorage.getItem('bg_atcourse_hide') || '{}'); return (o && o.d === _today() && Array.isArray(o.ids)) ? o.ids : []; } catch(e){ return []; } }
   function _acHide(id){ try { var ids = _acHidden(); if (ids.indexOf(id) < 0) ids.push(id); localStorage.setItem('bg_atcourse_hide', JSON.stringify({ d: _today(), ids: ids })); } catch(e){} }
   function _norm(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+  /* v1940 (Tyler, 10/22 at Waterview): "we see you are Waterview, start round now?" showed up
+     while his group had a round SCHEDULED there - "It confused me because I thought it was my
+     scheduled round." Tyler's rules (10/22):
+       - a scheduled round I'm in at this course with a tee time from 3 hours ago to 3 hours
+         from now -> no generic prompt; the row offers THAT round instead ("Start my round")
+       - a round at this course that's still IN PROGRESS and has me on it (whoever started it)
+         -> no prompt at all. Once it's finished the prompt may show again (a second 18).
+         This replaces v1914's "hide once you've played there today" rule.
+       - a round left "in progress" from another day never blocks it (today's rounds only).
+     Times are read on the phone's clock, which is the course's clock when you're standing on it. */
+  var AC_SCHED_MS = 3 * 60 * 60 * 1000;
   async function _playedToday(){
-    var out = { live: false, names: {} };
+    var out = { live: false, today: [] };
     try { var g = state.game; if (g && g.code && !g._preview && !g._mapOnly && !g.finishedAt && !state.viewOnlyMode) out.live = true; } catch(e){}
     try {
       var t0 = new Date(); t0.setHours(0, 0, 0, 0);
       var rec = (typeof getRecent === 'function') ? await getRecent() : [];
       (rec || []).forEach(function(r){
-        if (!r) return;
+        if (!r || !r.code) return;
         var ts = (typeof r.createdAt === 'number') ? r.createdAt : (Date.parse(r.createdAt || '') || 0);
-        if (ts >= t0.getTime()) out.names[_norm(r.course)] = true;
+        if (ts >= t0.getTime()) out.today.push({ code: String(r.code), name: _norm(r.course), finished: !!r.finishedAt });
       });
     } catch(e){}
     return out;
+  }
+  var _acSch = { at: 0, items: null, busy: null };
+  async function _acSchedItems(){
+    if (_acSch.items && (Date.now() - _acSch.at) < 60000) return _acSch.items;
+    if (_acSch.busy) return _acSch.busy;
+    _acSch.busy = (async function(){
+      try {
+        try { if (typeof _timesLoadMe === 'function') await _timesLoadMe(); } catch(e){}
+        var it = (typeof timesGetItems === 'function') ? await timesGetItems() : [];
+        return (_acSch.items = Array.isArray(it) ? it : []);
+      } catch(e){ return (_acSch.items = _acSch.items || []); }
+      finally { _acSch.at = Date.now(); _acSch.busy = null; }
+    })();
+    return _acSch.busy;
+  }
+  window.bgAtCourseSchedReset = function(){ _acSch.at = 0; _acSch.items = null; };
+  function _acNN(s){ try { return (typeof normalizeNameSegment === 'function') ? normalizeNameSegment(s || '') : _norm(s); } catch(e){ return _norm(s); } }
+  // Am I in this scheduled round? A seat (not declined), my own round, or an invite.
+  // Tournament days / league weeks only reach the calendar when I run or play in them.
+  function _acImIn(t){
+    try {
+      if (!t) return false;
+      if (t._ev) return true;
+      var uid = (typeof _timesUid === 'function') ? _timesUid() : null;
+      var me = (typeof _timesMe === 'function') ? _timesMe() : '';
+      var meN = me ? _acNN(me) : '';
+      var ps = (typeof _timesPlayers === 'function') ? _timesPlayers(t) : [];
+      var seat = ps.filter(function(p){ return (uid && p.uid && String(p.uid) === String(uid)) || (meN && _acNN(p.name) === meN); })[0];
+      if (seat) return seat.status !== 'declined';
+      if (uid && Array.isArray(t.declined) && t.declined.map(String).indexOf(String(uid)) >= 0) return false;
+      if (meN && Array.isArray(t.declinedBy) && t.declinedBy.some(function(n){ return _acNN(n) === meN; })) return false;
+      if (uid && t.createdByUid && String(t.createdByUid) === String(uid)) return true;
+      if (meN && _acNN(t.createdBy) === meN) return true;
+      if (Array.isArray(t.invited) && t.invited.some(function(x){
+        if (!x) return false;
+        if (typeof x === 'string') return !!(uid && String(x) === String(uid));
+        return !!((uid && x.id && String(x.id) === String(uid)) || (meN && _acNN(x.name) === meN));
+      })) return true;
+      return false;
+    } catch(e){ return false; }
+  }
+  function _acDone(t){ return !!(t && (t._played || t._finished || t.finishedAt || t.status === 'complete' || t.status === 'cancelled' || t._ttDeleted)); }
+  // Tee time of a scheduled round on the phone's clock. No time on the card -> it counts
+  // for the whole day it's scheduled.
+  function _acWhen(t){
+    try {
+      if (!t || !t.date) return null;
+      var p = String(t.date).slice(0, 10).split('-');
+      var d = new Date(+p[0], (+p[1]) - 1, +p[2], 0, 0, 0, 0);
+      if (isNaN(d.getTime())) return null;
+      var mins = (typeof _lgTeeMins === 'function') ? _lgTeeMins(t.time) : 1e9;
+      if (!(mins < 1e9)) return { ms: d.getTime(), noTime: true, ymd: String(t.date).slice(0, 10) };
+      return { ms: d.getTime() + mins * 60000, noTime: false, ymd: String(t.date).slice(0, 10) };
+    } catch(e){ return null; }
+  }
+  function _acInWindow(t){
+    var w = _acWhen(t); if (!w) return false;
+    if (w.noTime) return w.ymd === _today();
+    return Math.abs(w.ms - Date.now()) <= AC_SCHED_MS;
+  }
+  function _acSameCourse(t, c, lib){
+    try {
+      var tn = _norm(t && t.course); if (!tn) return false;
+      if (tn === _norm(lib && lib.name) || tn === _norm(c && c.name)) return true;
+      var tid = (t.courseId) || (t.savedConfig && t.savedConfig.courseId) || ((typeof _timesCourseId === 'function') ? _timesCourseId(t.course) : '');
+      return !!(tid && c && String(tid) === String(c.course_id));
+    } catch(e){ return false; }
+  }
+  // Which of these round codes are still unfinished? One small read (finishedAt only).
+  // A failed read answers null and the caller falls back to what the list itself says.
+  var _acFin = {};
+  async function _acUnfinished(codes){
+    var out = {};
+    try {
+      var need = codes.filter(function(cd){ var h = _acFin[cd]; return !(h && (Date.now() - h.at) < 120000); });
+      if (need.length && typeof supa !== 'undefined' && supa) {
+        var r = await supa.from('games').select('code,fin:data->>finishedAt').in('code', need);
+        if (r && r.error) return null;
+        var seen = {};
+        ((r && r.data) || []).forEach(function(row){ if (row && row.code) { seen[row.code] = 1; _acFin[row.code] = { at: Date.now(), open: !row.fin }; } });
+        need.forEach(function(cd){ if (!seen[cd]) _acFin[cd] = { at: Date.now(), open: false }; });   // no row = no round
+      }
+      codes.forEach(function(cd){ var h = _acFin[cd]; if (h && h.open) out[cd] = true; });
+      return out;
+    } catch(e){ return null; }
   }
   function _pos(){
     return new Promise(function(res){
@@ -18390,36 +18488,83 @@ try {
     try {
       if (!_signedIn()) { _acHideCard(card); return; }
       if (document.visibilityState && document.visibilityState !== 'visible') return;
+      if (force) { try { window.bgAtCourseSchedReset(); } catch(e){} }
       var list = await _near(!!force);
       var played = await _playedToday();
+      if (played.live || !(list || []).length) { _acHideCard(card); return; }
       var hidden = _acHidden();
-      var show = played.live ? [] : (list || []).filter(function(c){
+      var cand = (list || []).filter(function(c){ return hidden.indexOf(c.course_id) < 0; });
+      if (!cand.length) { _acHideCard(card); return; }
+      var items = await _acSchedItems();
+      var today = _today();
+      // Per course: my scheduled rounds in the window, and any round of mine here that may be live.
+      var per = cand.map(function(c){
         var lib = _libFor(c.course_id);
-        return !played.names[_norm((lib && lib.name) || c.name)] && hidden.indexOf(c.course_id) < 0;
+        var nm = _norm((lib && lib.name) || c.name), nm2 = _norm(c.name);
+        var mine = (items || []).filter(function(t){ return t && !_acDone(t) && _acSameCourse(t, c, lib) && _acImIn(t); });
+        var sched = mine.filter(_acInWindow).sort(function(a, b){
+          var wa = _acWhen(a), wb = _acWhen(b);
+          return Math.abs(((wa && wa.ms) || 0) - Date.now()) - Math.abs(((wb && wb.ms) || 0) - Date.now());
+        });
+        var codes = [], liveHint = false;
+        played.today.forEach(function(r){ if ((r.name === nm || r.name === nm2) && !r.finished) codes.push(r.code); });
+        mine.forEach(function(t){
+          var w = _acWhen(t); if (!w || w.ymd !== today) return;   // a round left open on another day never blocks
+          var cd = t.activeCode || (t.status === 'live' ? (t.code || t.plannedCode) : null);
+          if (cd) codes.push(String(cd));
+          if (t.status === 'live' && !cd) liveHint = true;
+        });
+        return { c: c, lib: lib, sched: sched[0] || null, codes: codes, liveHint: liveHint };
+      });
+      var all = [];
+      per.forEach(function(p){ p.codes.forEach(function(cd){ if (all.indexOf(cd) < 0) all.push(cd); }); });
+      var open = all.length ? await _acUnfinished(all) : {};
+      var show = per.filter(function(p){
+        if (p.liveHint) return false;
+        if (!p.codes.length) return true;
+        if (open === null) return false;   // couldn't check: the list says a round may be going - stay quiet
+        return !p.codes.some(function(cd){ return open[cd]; });
       });
       if (!show.length) { _acHideCard(card); return; }
-      var sig = show.map(function(c){ return c.course_id; }).join('|');
+      var sig = show.map(function(p){ return p.c.course_id + ':' + (p.sched ? p.sched.id : ''); }).join('|');
       if (card._bgSig === sig && card.style.display !== 'none') return;
       card._bgSig = sig;
       var html = '<div class="ac-head"><span class="ac-pin" aria-hidden="true">📍</span><h2>' +
         (show.length === 1 ? 'You’re at the course' : 'Courses near you') + '</h2></div>' +
         '<p class="help-text ac-sub">Walk the holes before you tee off, or jump straight into a round.</p>';
-      show.forEach(function(c){
-        var lib = _libFor(c.course_id) || { name: c.name, city: c.city };
-        html += '<div class="ac-row" data-id="' + _esc(c.course_id) + '">' +
+      show.forEach(function(p){
+        var c = p.c, lib = p.lib || { name: c.name, city: c.city }, s = p.sched;
+        var when = '';
+        if (s) {
+          var tm = '';
+          try { tm = (s.time && typeof fmtClock12 === 'function') ? fmtClock12(s.time) : ''; } catch(e){}
+          when = '📅 ' + (s._ev ? (s.evName || 'Your event') + (tm ? ' · ' + tm : ' · today') : ('Your ' + (tm ? tm + ' round' : 'round today')));
+        }
+        html += '<div class="ac-row" data-id="' + _esc(c.course_id) + '"' + (s ? ' data-sched="' + _esc(s.id) + '"' : '') + '>' +
           '<div class="ac-top"><div class="ac-name">' + _esc(lib.name || c.name || 'Course') + '</div>' +
           '<span class="ac-x" role="button" tabindex="0" aria-label="Not now">Not now</span></div>' +
           (lib.city ? '<div class="help-text ac-city">' + _esc(lib.city) + '</div>' : '') +
+          (when ? '<div class="help-text ac-when">' + _esc(when) + '</div>' : '') +
           '<div class="ac-acts"><button type="button" class="bg-btn ac-pv">👀 Preview</button>' +
-          '<button type="button" class="bg-btn bg-btn--primary ac-go">⛳ Start round</button></div></div>';
+          '<button type="button" class="bg-btn bg-btn--primary ac-go">' + (s ? (s._ev ? '⛳ Open my round' : '⛳ Start my round') : '⛳ Start round') + '</button></div></div>';
       });
       card.innerHTML = html;
       card.style.display = '';
       card.querySelectorAll('.ac-row').forEach(function(row){
-        var id = row.getAttribute('data-id');
+        var id = row.getAttribute('data-id'), sid = row.getAttribute('data-sched');
         var pv = row.querySelector('.ac-pv'), go = row.querySelector('.ac-go'), x = row.querySelector('.ac-x');
         if (pv) pv.onclick = function(){ try { window.previewCourseGps(id); } catch(e){} };
-        if (go) go.onclick = function(){ try { window.previewStartRound(id); } catch(e){} };
+        if (go) go.onclick = function(){
+          try {
+            if (sid) {
+              var t = (_acSch.items || []).filter(function(it){ return it && String(it.id) === String(sid); })[0];
+              window.bgAtCourseSchedReset(); card._bgSig = '';
+              if (t && t._ev && typeof _timesOpenEvent === 'function') { _timesOpenEvent(t); return; }
+              if (t && typeof timesStartRound === 'function') { timesStartRound(t.id); return; }
+            }
+            window.previewStartRound(id);
+          } catch(e){}
+        };
         if (x) {
           var dis = function(){ _acHide(id); card._bgSig = ''; window.bgRenderAtCourseCard(); };
           x.onclick = dis;
@@ -58793,6 +58938,7 @@ async function buildSettleUpText() {
   const nm = id => { const p = g.players.find(pp => pp.id === id); return p ? displayFull(p) : '?'; };
   const where = g.course ? (' — ' + g.course) : '';
   const lines = ['⛳ Bad Golf Final standings' + where];
+  try { bgMatchResultLines(g).forEach(l => lines.push(l)); } catch (e) {}   // v1940: the match result rides with the scorecard picture
   (await _settleUpLinesFor(settlements, nm, id => g.players.find(pp => pp.id === id))).forEach(l => lines.push(l));
   _bgAppendStoreFooter(lines);   // v1243: the settle text reaches every player incl. app-less guests
   return lines.join('\n');
@@ -59184,6 +59330,7 @@ async function buildRoundShareText() {
   let totals = {}; try { totals = (typeof calcTotals === 'function') ? calcTotals(g) : {}; } catch (e) {}
   const dateStr = new Date(g.finishedAt || g.updatedAt || Date.now()).toLocaleDateString();
   const lines = ['⛳ Bad Golf — ' + (g.course || 'Round') + ' · ' + dateStr, ''];
+  try { const _ml = bgMatchResultLines(g); if (_ml.length) { _ml.forEach(l => lines.push(l)); lines.push(''); } } catch (e) {}   // v1940
   const sorted = [...g.players].sort((a, b) => (money[b.id] || 0) - (money[a.id] || 0));
   sorted.forEach((p, i) => {
     const t = totals[p.id] || {};
@@ -59226,6 +59373,94 @@ function scNoteType(sc, par) {
 // Soft cell tints (background) and bolder ink (number + ring) per notation.
 const SC_TINT = { eagle: '#bdeecb', birdie: '#e6f7ec', par: null, bogey: '#fbe3e0', double: '#f6c3bd' };
 const SC_INK  = { eagle: '#0f6b2b', birdie: '#1f8a3b', par: '#111827', bogey: '#c0392b', double: '#9d2114', none: '#c0c6cd' };
+/* v1940 (Tyler, 10/22): "We just finished a round today where we played match play. Could you
+   also include the scorecard with the scores per hole as well in the text final even though we
+   were playing match." In match view the shared scorecard picture swapped every stroke for the
+   running status (1↑ / AS), so the final text carried no scores at all. Tyler's calls (10/22):
+     - every hole keeps each player's GROSS strokes, with the handicap-stroke dot where a pop was
+       given, and a "Won" row underneath naming who won the hole ('–' = halved)
+     - holes played after the match was decided stay on the card, shaded and labelled
+       "after match", and still count in OUT / IN / totals
+     - front / back grid (the picture - a text grid never lines up in a messaging font)
+   The text itself gets the result line ("Tyler def. Mike, 4&3").
+   1 v 1 match play and 2 v 2 team match play. A match-play scramble has no individual strokes,
+   so it keeps its v1566 match view. */
+function bgMatchHoleSummary(g) {
+  try {
+    if (!g || !g.games || !Array.isArray(g.players)) return null;
+    const seq = (typeof _bgPlaySeq === 'function') ? _bgPlaySeq(g) : Array.from({ length: (typeof roundHoles === 'function' ? roundHoles(g) : 18) }, (_, i) => i + 1);
+    const first = n => { try { return String(displayFirst(n) || '').trim(); } catch (e) { return String((n && n.name) || '').trim().split(/\s+/)[0] || ''; } };
+    const full = n => { try { return displayFull(n); } catch (e) { return (n && n.name) || '?'; } };
+    const tagOf = ps => ps.map(p => (first(p).charAt(0) || '?').toUpperCase()).join('');
+    const afterOf = closedHole => {
+      const out = {};
+      if (closedHole == null) return out;
+      const k = seq.indexOf(closedHole);
+      if (k < 0) return out;
+      seq.slice(k + 1).forEach(h => { out[h] = true; });
+      return out;
+    };
+    const res = (aPs, bPs, holes, closedHole, closedScore, complete, finalUp, played) => {
+      let aTag = tagOf(aPs), bTag = tagOf(bPs);
+      if (aTag === bTag) {
+        aTag = aPs.map(p => first(p).slice(0, 2)).join('/');
+        bTag = bPs.map(p => first(p).slice(0, 2)).join('/');
+      }
+      const won = {};
+      holes.forEach(h => { won[h.hole] = h.res === 'a' ? 'a' : (h.res === 'b' ? 'b' : 'h'); });
+      const aName = aPs.map(full).join(' & '), bName = bPs.map(full).join(' & ');
+      let result = '', short = '';
+      if (complete) {
+        if (finalUp > 0) { result = aName + ' def. ' + bName + (closedScore ? ', ' + closedScore : ''); short = aTag + ' ' + (closedScore || ''); }
+        else if (finalUp < 0) { result = bName + ' def. ' + aName + (closedScore ? ', ' + closedScore : ''); short = bTag + ' ' + (closedScore || ''); }
+        else { result = aName + ' and ' + bName + ' halved'; short = 'Halved'; }
+      } else if (played > 0) {
+        const up = Math.abs(finalUp);
+        result = finalUp === 0 ? (aName + ' and ' + bName + ' all square thru ' + played)
+          : ((finalUp > 0 ? aName : bName) + ' ' + up + ' up thru ' + played);
+        short = finalUp === 0 ? 'AS' : ((finalUp > 0 ? aTag : bTag) + ' ' + up + '↑');
+      }
+      return { aTag, bTag, won, after: afterOf(closedHole), closedHole, result: result.trim(), short: short.trim() };
+    };
+    const out = [];
+    if (g.games.match && typeof calcMatch === 'function') {
+      const cm = calcMatch(g);
+      ((cm && cm.matches) || []).forEach(m => {
+        const a = g.players.find(p => p.id === m.aId), b = g.players.find(p => p.id === m.bId);
+        if (!a || !b) return;
+        out.push(Object.assign(res([a], [b], m.holes || [], m.closedHole, m.closedScore, !!m.complete, m.finalUp || 0, m.played || 0), { kind: 'match' }));
+      });
+    }
+    if (!out.length && g.games.teamMatch && typeof calcTeamMatch === 'function') {
+      const tm = calcTeamMatch(g); const r = tm && tm.result;
+      if (r && Array.isArray(r.teamAPlayers) && Array.isArray(r.teamBPlayers) && r.teamAPlayers.length && r.teamBPlayers.length && Array.isArray(r.holes)) {
+        const holes = r.holes.filter(h => h && h.res);
+        const nH = seq.length || 18;
+        let up = 0, closedHole = null, closedScore = null;
+        const order = holes.slice().sort((x, y) => seq.indexOf(x.hole) - seq.indexOf(y.hole));
+        for (let i = 0; i < order.length; i++) {
+          const h = order[i];
+          if (h.res === 'a') up++; else if (h.res === 'b') up--;
+          const rem = nH - (seq.indexOf(h.hole) + 1);
+          if (rem > 0 && Math.abs(up) > rem) { closedHole = h.hole; closedScore = Math.abs(up) + '&' + rem; break; }
+        }
+        const counted = closedHole != null ? order.slice(0, order.findIndex(h => h.hole === closedHole) + 1) : order;
+        const fin = counted.reduce((s, h) => s + (h.res === 'a' ? 1 : (h.res === 'b' ? -1 : 0)), 0);
+        const done = closedHole != null || !!r.complete || !!g.finishedAt;
+        if (done && closedHole == null && fin !== 0) closedScore = Math.abs(fin) + ' up';
+        out.push(Object.assign(res(r.teamAPlayers, r.teamBPlayers, counted, closedHole, closedScore, done, fin, counted.length), { kind: 'teamMatch' }));
+      }
+    }
+    return out.length ? out : null;
+  } catch (e) { return null; }
+}
+function bgMatchResultLines(g) {
+  try {
+    const ms = bgMatchHoleSummary(g);
+    if (!ms) return [];
+    return ms.filter(m => m.result).map(m => (m.kind === 'teamMatch' ? 'Team match: ' : 'Match play: ') + m.result);
+  } catch (e) { return []; }
+}
 function buildScorecardCanvas(g) {
   if (!g || !Array.isArray(g.players) || !g.players.length) return null;
   try { g = bgWithBestBallPseudo(g, null); } catch (e) {}   // v1727: team best-ball line on the image too
@@ -59264,9 +59499,13 @@ function buildScorecardCanvas(g) {
   const segWidth = s => labelW + s.holes.length * cellW + subW + (s.total ? (grossW + (hasNet ? netW : 0)) : 0);
   const cssW = padX * 2 + Math.max(...segs.map(segWidth));
   // rows per seg: hole header + par + (SI?) + players; plus gaps between segs
-  const segRows = 2 + (hasSI ? 1 : 0) + g.players.length;
+  // v1940: match play keeps the strokes and adds a 'Won' row per match (bgMatchHoleSummary).
+  let _mhs = null; try { _mhs = bgMatchHoleSummary(g); } catch (e) {}
+  const _mhsTitleH = _mhs ? _mhs.filter(m => m.result).length * 20 : 0;
+  const _mhsAfter = !!(_mhs && _mhs.some(m => Object.keys(m.after).some(h => played.indexOf(Number(h) - 1) >= 0)));
+  const segRows = 2 + (hasSI ? 1 : 0) + g.players.length + (_mhs ? _mhs.length : 0);
   const segH = segRows * rowH + 14;
-  const cssH = padTop + titleH + headerNote + segs.length * (segH + 14) + legendH + 16;
+  const cssH = padTop + titleH + _mhsTitleH + headerNote + segs.length * (segH + 14) + legendH + 16;
 
   const cv = document.createElement('canvas');
   cv.width = Math.round(cssW * DPR); cv.height = Math.round(cssH * DPR);
@@ -59285,6 +59524,11 @@ function buildScorecardCanvas(g) {
   ctx.font = '500 13px ' + SC_FONT;
   const dateStr = new Date(g.finishedAt || g.updatedAt || Date.now()).toLocaleDateString();
   ctx.fillText(dateStr + '  ·  Bad Golf', padX, padTop + 40);
+  if (_mhs) {
+    let _ry = padTop + 62;
+    ctx.fillStyle = '#0e3a64'; ctx.font = '700 15px ' + SC_FONT;
+    _mhs.forEach(m => { if (!m.result) return; ctx.fillText((m.kind === 'teamMatch' ? 'Team match: ' : 'Match play: ') + m.result, padX, _ry); _ry += 20; });
+  }
 
   // Draw the score number with its notation badge centered at (cx, cy).
   function drawNote(type, cx, cy, num) {
@@ -59298,7 +59542,7 @@ function buildScorecardCanvas(g) {
     ctx.fillText(String(num), cx, cy + 1);
   }
 
-  let y = padTop + titleH + headerNote;
+  let y = padTop + titleH + _mhsTitleH + headerNote;
   segs.forEach(seg => {
     const cols = [{ key: 'label', w: labelW, txt: 'HOLE', align: 'left' }];
     seg.holes.forEach(h => cols.push({ key: 'h', h, w: cellW, txt: String(h + 1), align: 'center' }));
@@ -59356,7 +59600,7 @@ function buildScorecardCanvas(g) {
     // Player rows
     /* v1566: the shared image follows the card — in match view each hole carries the
        running status and the total column carries the result. */
-    const _mvModel = (typeof bgMatchCardModel === 'function' && typeof bgScViewMode === 'function' && bgScViewMode(g) === 'match') ? bgMatchCardModel(g) : null;
+    const _mvModel = (!_mhs && typeof bgMatchCardModel === 'function' && typeof bgScViewMode === 'function' && bgScViewMode(g) === 'match') ? bgMatchCardModel(g) : null;
     const _mvInk = { up: '#1f8a3b', dn: '#c0392b', as: '#374151', none: '#c0c6cd' };
     g.players.forEach((p, pi) => {
       const sc = (g.scores && g.scores[p.id]) || [];
@@ -59390,6 +59634,7 @@ function buildScorecardCanvas(g) {
       // Tint cells behind the notation so the colors pop.
       cols.forEach((c, i) => {
         if (c.key !== 'h') return;
+        if (_mhs && _mhs.some(m => m.after[c.h + 1])) { ctx.fillStyle = '#eceef1'; ctx.fillRect(xOf(i) + 1, y + 1, c.w - 2, rowH - 2); }   // v1940: after the match
         const tint = SC_TINT[scNoteType(sc[c.h], pars[c.h])];
         if (tint) { ctx.fillStyle = tint; ctx.fillRect(xOf(i) + 2, y + 3, c.w - 4, rowH - 6); }
       });
@@ -59421,6 +59666,28 @@ function buildScorecardCanvas(g) {
       drawTot('net', t.net);
       y += rowH;
     });
+    // v1940: who won each hole of each match ('–' halved, blank after the match / not played).
+    if (_mhs) _mhs.forEach(m => {
+      rowBase(y, '#f3f7fb');
+      ctx.fillStyle = '#0e3a64'; ctx.font = '800 14px ' + SC_FONT; ctx.textAlign = 'left';
+      ctx.fillText(_mhs.length > 1 ? ('Won ' + m.aTag + ' v ' + m.bTag) : 'Won', xOf(0) + 6, y + rowH / 2);
+      cols.forEach((c, i) => {
+        const cx = xOf(i) + c.w / 2, cy = y + rowH / 2;
+        ctx.textAlign = 'center';
+        if (c.key === 'h') {
+          if (m.after[c.h + 1]) { ctx.fillStyle = '#eceef1'; ctx.fillRect(xOf(i) + 1, y + 1, c.w - 2, rowH - 2); return; }
+          const w = m.won[c.h + 1];
+          if (!w) return;
+          ctx.fillStyle = w === 'a' ? '#1f8a3b' : (w === 'b' ? '#c0392b' : '#6b7280');
+          ctx.font = (w === 'h' ? '700 16px ' : '800 15px ') + SC_FONT;
+          ctx.fillText(w === 'a' ? m.aTag : (w === 'b' ? m.bTag : '–'), cx, cy);
+        } else if (c.key === 'gross' && m.short) {
+          ctx.fillStyle = '#0e3a64'; ctx.font = '800 12px ' + SC_FONT;
+          ctx.fillText(m.short, cx, cy);
+        }
+      });
+      y += rowH;
+    });
     y += 22; // gap before next segment
   });
 
@@ -59436,6 +59703,7 @@ function buildScorecardCanvas(g) {
   legend('Birdie', (x, yy) => { ctx.strokeStyle = SC_INK.birdie; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, yy, 9, 0, 7); ctx.stroke(); });
   legend('Eagle+', (x, yy) => { ctx.strokeStyle = SC_INK.eagle; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, yy, 9, 0, 7); ctx.stroke(); ctx.beginPath(); ctx.arc(x, yy, 5, 0, 7); ctx.stroke(); });
   legend('Bogey', (x, yy) => { ctx.strokeStyle = SC_INK.bogey; ctx.lineWidth = 2; ctx.strokeRect(x - 8, yy - 8, 16, 16); });
+  if (_mhsAfter) legend('After match', (x, yy) => { ctx.fillStyle = '#eceef1'; ctx.fillRect(x - 9, yy - 9, 18, 18); ctx.strokeStyle = '#c0c6cd'; ctx.lineWidth = 1; ctx.strokeRect(x - 9, yy - 9, 18, 18); });   // v1940
   legend('Double+', (x, yy) => { ctx.strokeStyle = SC_INK.double; ctx.lineWidth = 2; ctx.strokeRect(x - 9, yy - 9, 18, 18); ctx.strokeRect(x - 5, yy - 5, 10, 10); });
   return cv;
 }
