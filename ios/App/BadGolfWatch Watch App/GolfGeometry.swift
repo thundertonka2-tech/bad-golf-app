@@ -320,10 +320,17 @@ struct Green: Codable, Equatable {
 
 /// The phone's slope colours (gvSlopeImage): compare each spot with the PIN's height.
 /// Within 4 cm → green; the putt goes up → red; down → blue; deeper with |dz| / 45 cm.
+/// v1943: `cb` = the phone's "Color-blind friendly" setting (v1928) - orange up, light gray
+/// level, blue down, the phone's exact numbers.
 enum SlopeColor {
-    static func rgb(cellZ: Double, pinZ: Double) -> (r: Double, g: Double, b: Double) {
+    static func rgb(cellZ: Double, pinZ: Double, cb: Bool = false) -> (r: Double, g: Double, b: Double) {
         let dz = pinZ - cellZ
         let a = min(1, abs(dz) / 45)
+        if cb {
+            if abs(dz) < 4 { return (232 / 255, 232 / 255, 232 / 255) }
+            if dz > 0 { return (240 / 255, (170 - 80 * a) / 255, (40 - 40 * a) / 255) }
+            return ((40 - 40 * a) / 255, (130 - 50 * a) / 255, (200 + 40 * a) / 255)
+        }
         if abs(dz) < 4 { return (46 / 255, 184 / 255, 92 / 255) }
         if dz > 0 { return ((205 + 50 * a) / 255, (92 - 62 * a) / 255, (70 - 40 * a) / 255) }
         return ((70 - 40 * a) / 255, (120 - 60 * a) / 255, (205 + 50 * a) / 255)

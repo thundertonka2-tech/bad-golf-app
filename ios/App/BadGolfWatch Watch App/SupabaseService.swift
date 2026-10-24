@@ -391,7 +391,8 @@ enum RoundParser {
                        greenView: (d["greenView"] as? Bool) ?? true,
                        greenSlope: (d["greenSlope"] as? Bool) ?? true,
                        greenPin: (d["greenPin"] as? Bool) ?? true,
-                       greens: source, pins: pins, measured: measured, group: group)
+                       greens: source, pins: pins, measured: measured, group: group,
+                       cb: (d["cb"] as? Bool) ?? false)   // v1943
     }
     /// v1910: the final card that rides on the phone's roundEnded message.
     static func summary(_ d: [String: Any]) -> RoundSummary? {

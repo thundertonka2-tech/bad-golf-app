@@ -74,7 +74,9 @@ enum Geo {
         var adjusted = rawD
 
         // 1) Slope: elevation change from player to green, in yards (rise = longer).
-        if let pe = playerElevationM, let ge = greenElevationM {
+        // v1943 (Kevin, Cedar Crest #14: "3 · plays 0"): no slope inside 30 yards. Up close a
+        // metre of elevation error is the whole shot, and a chip doesn't play the rise anyway.
+        if rawD >= 30, let pe = playerElevationM, let ge = greenElevationM {
             let riseYards = (ge - pe) * metersToYards   // + uphill, − downhill
             adjusted += riseYards
         }
@@ -107,6 +109,6 @@ enum Geo {
             adjusted += deltaTen * (rawD / 100.0) * 0.2
         }
 
-        return Int(adjusted.rounded())
+        return max(1, Int(adjusted.rounded()))   // v1943: never below 1, like the phone (playsFactors)
     }
 }

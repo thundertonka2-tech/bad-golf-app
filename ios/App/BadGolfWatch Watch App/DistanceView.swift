@@ -62,7 +62,7 @@ struct DistanceView: View {
             center: distances?.center,
             player: playerCoord,
             green: greenCoord,
-            playerElevationM: weather.playerElevationM,
+            playerElevationM: weather.playerElevation(near: playerCoord),   // v1943: never a stale height
             greenElevationM: weather.greenElevationM,
             windMph: weather.windMph,
             windDirFromDeg: weather.windDirFrom,
@@ -102,7 +102,7 @@ struct DistanceView: View {
         .onChange(of: store.currentHole) { _, _ in refreshWeather(); cacheDistances(from: loc.location) }
         .onChange(of: greenCoord?.latitude) { _, _ in refreshWeather() }
         // Every fresh watch GPS fix updates the last-known cache for this hole.
-        .onReceive(loc.$location) { newLoc in cacheDistances(from: newLoc) }
+        .onReceive(loc.$location) { newLoc in cacheDistances(from: newLoc); weather.refreshPlayer(newLoc?.coordinate) }   // v1943
         // If the active course changes (e.g. a stale course was just swapped for
         // the round's real one), throw away any last-known yardage so we never
         // flash a cached number computed against the wrong course's green.

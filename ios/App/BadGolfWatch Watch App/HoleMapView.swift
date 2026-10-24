@@ -106,6 +106,51 @@ final class TileCache: ObservableObject {
 }
 
 private func cg(_ p: XY) -> CGPoint { CGPoint(x: p.x, y: p.y) }
+
+/// v1943: the phone shows slope on the hole map from this zoom (gps-green-slope minzoom).
+private let slopeMinZoom = 16.3
+
+/// v1943: slope colours inside a green - one painter for the Map page and green view.
+/// A green is tiny, so the projection is affine across it: project the NW corner and one
+/// cell east / south once, then every corner is o + i·u + j·v. Cells are grouped so each
+/// painted block is at least `minBlockPt` on screen and at most `maxCells` blocks are drawn
+/// (keeps a redraw light on the wrist). `ctx` should already be clipped to the green.
+private func paintSlope(_ ctx: GraphicsContext, grid: ElevGrid, pinZ: Double, frame f: MapFrame,
+                        cb: Bool, minBlockPt: Double, maxCells: Int) {
+    guard grid.w > 0, grid.h > 0, grid.bbox.count == 4 else { return }
+    let dLng = (grid.bbox[2] - grid.bbox[0]) / Double(grid.w)
+    let dLat = (grid.bbox[3] - grid.bbox[1]) / Double(grid.h)
+    let o = f.screen(GeoPoint(lng: grid.bbox[0], lat: grid.bbox[3]))
+    let e = f.screen(GeoPoint(lng: grid.bbox[0] + dLng, lat: grid.bbox[3]))
+    let s1 = f.screen(GeoPoint(lng: grid.bbox[0], lat: grid.bbox[3] - dLat))
+    let ux = e.x - o.x, uy = e.y - o.y, vx = s1.x - o.x, vy = s1.y - o.y
+    let uLen: Double = (ux * ux + uy * uy).squareRoot()
+    let vLen: Double = (vx * vx + vy * vy).squareRoot()
+    let cellPt: Double = max(0.01, min(uLen, vLen))
+    var step = max(1, Int((minBlockPt / cellPt).rounded(.up)))
+    func blocks(_ st: Int) -> Int { ((grid.w + st - 1) / st) * ((grid.h + st - 1) / st) }
+    while blocks(step) > maxCells { step += 1 }
+    func corner(_ i: Int, _ j: Int) -> CGPoint {
+        CGPoint(x: o.x + Double(i) * ux + Double(j) * vx, y: o.y + Double(i) * uy + Double(j) * vy)
+    }
+    var j = 0
+    while j < grid.h {
+        var i = 0
+        while i < grid.w {
+            // a block takes its centre-most cell's height
+            let ci = min(grid.w - 1, i + step / 2), cj = min(grid.h - 1, j + step / 2)
+            if let z = grid.zAt(ci, cj) {
+                let c = SlopeColor.rgb(cellZ: z, pinZ: pinZ, cb: cb)
+                var cell = Path()
+                cell.addLines([corner(i, j), corner(i + step, j), corner(i + step, j + step), corner(i, j + step)])
+                cell.closeSubpath()
+                ctx.fill(cell, with: .color(Color(red: c.r, green: c.g, blue: c.b)))
+            }
+            i += step
+        }
+        j += step
+    }
+}
 private func gp(_ c: CLLocation?) -> GeoPoint? { c.map { GeoPoint(lng: $0.coordinate.longitude, lat: $0.coordinate.latitude) } }
 private func buzz() {
     #if os(watchOS)
@@ -175,6 +220,7 @@ struct HoleMapView: View {
         .onChange(of: store.currentHole) { _, _ in
             manualTarget = nil; zoomAdj = 0; shotStart = nil; shotAim = nil
         }
+        .onReceive(loc.$location) { weather.refreshPlayer($0?.coordinate) }   // v1943: keep the player's height current
         .sheet(isPresented: $showGreen) { GreenDetailView() }
         .sheet(item: $pendingShot) { ps in ClubPickerView(shot: ps.result) { club in
             store.sendShot(ps.result, club: club, hole: store.currentHole,
@@ -228,10 +274,19 @@ struct HoleMapView: View {
                 tc.draw(Image(uiImage: img), in: r)
             }
         }
-        // 2) green outline
+        // 2) green outline - v1943 (Tyler + Kevin, 10/23: "this is where we expect to see it"):
+        //    plus the slope colours inside it once the map is zoomed in on the green, like the
+        //    phone's hole map. Colours only here (no fall-line arrows - too busy at this size);
+        //    the arrows stay in green view.
         if greensOn, let g = greens.greens[m.holeNo], g.ring.count >= 3 {
             var p = Path()
             p.addLines(g.ring.map { cg(f.screen($0)) }); p.closeSubpath()
+            if (gps?.greenSlope ?? true), f.zoom >= slopeMinZoom, let grid = g.grid {
+                var inner = ctx
+                inner.clip(to: p)
+                let pinZ = grid.z(at: m.pin) ?? Double(grid.relief) / 2
+                paintSlope(inner, grid: grid, pinZ: pinZ, frame: f, cb: gps?.cb == true, minBlockPt: 3, maxCells: 400)
+            }
             ctx.stroke(p, with: .color(.white.opacity(0.9)), lineWidth: 1.2)
         }
         // 3) arcs + miss ring
@@ -433,7 +488,7 @@ struct HoleMapView: View {
         return Geo.playsLike(center: yards,
                       player: CLLocationCoordinate2D(latitude: m.ball.lat, longitude: m.ball.lng),
                       green: CLLocationCoordinate2D(latitude: m.target.lat, longitude: m.target.lng),
-                      playerElevationM: atGreen ? weather.playerElevationM : nil,
+                      playerElevationM: atGreen ? weather.playerElevation(near: CLLocationCoordinate2D(latitude: m.ball.lat, longitude: m.ball.lng)) : nil,   // v1943
                       greenElevationM: atGreen ? weather.greenElevationM : nil,
                       windMph: weather.windMph, windDirFromDeg: weather.windDirFrom, tempF: weather.tempF)
     }
@@ -522,35 +577,8 @@ struct GreenDetailView: View {
         inner.clip(to: ring)
         if (gps?.greenSlope ?? true), let grid = g.grid, let p = pin {
             let pinZ = grid.z(at: p) ?? Double(grid.relief) / 2
-            let step = (grid.w * grid.h > 900) ? 2 : 1          // keep it light on the wrist
-            // A green is tiny, so the projection is affine across it: project the NW
-            // corner and one cell east / south once, then every corner is o + i·u + j·v.
-            let dLng = (grid.bbox[2] - grid.bbox[0]) / Double(grid.w)
-            let dLat = (grid.bbox[3] - grid.bbox[1]) / Double(grid.h)
-            let o = f.screen(GeoPoint(lng: grid.bbox[0], lat: grid.bbox[3]))
-            let e = f.screen(GeoPoint(lng: grid.bbox[0] + dLng, lat: grid.bbox[3]))
-            let s1 = f.screen(GeoPoint(lng: grid.bbox[0], lat: grid.bbox[3] - dLat))
-            let ux = e.x - o.x, uy = e.y - o.y, vx = s1.x - o.x, vy = s1.y - o.y
-            func corner(_ i: Int, _ j: Int) -> CGPoint {
-                CGPoint(x: o.x + Double(i) * ux + Double(j) * vx, y: o.y + Double(i) * uy + Double(j) * vy)
-            }
-            var j = 0
-            while j < grid.h {
-                var i = 0
-                while i < grid.w {
-                    // a 2x2 block takes its centre-most cell's height
-                    let ci = min(grid.w - 1, i + step / 2), cj = min(grid.h - 1, j + step / 2)
-                    if let z = grid.zAt(ci, cj) {
-                        let c = SlopeColor.rgb(cellZ: z, pinZ: pinZ)
-                        var cell = Path()
-                        cell.addLines([corner(i, j), corner(i + step, j), corner(i + step, j + step), corner(i, j + step)])
-                        cell.closeSubpath()
-                        inner.fill(cell, with: .color(Color(red: c.r, green: c.g, blue: c.b)))
-                    }
-                    i += step
-                }
-                j += step
-            }
+            // v1943: shared painter (same blocks as before: full cells, 2x2 past 900) + palette
+            paintSlope(inner, grid: grid, pinZ: pinZ, frame: f, cb: gps?.cb == true, minBlockPt: 0, maxCells: 900)
             // downhill arrows every 3 m
             var j2 = 1
             while j2 < grid.h - 1 {

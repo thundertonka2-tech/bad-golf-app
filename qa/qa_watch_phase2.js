@@ -64,6 +64,10 @@ function makeGame(extra) {
   eq(ex.dispYds, 20, 'miss width setting');
   eq(ex.greenPin, false, 'green pin setting');
   eq(ex.greenView, true, 'green view default on');
+  eq(ex.cb, false, 'v1943: colour-blind palette off by default');
+  LS.setItem('bg_colorblind', '1');
+  eq(fn('bgWatchGpsExtras')(g, 'p0-t').cb, true, 'v1943: colour-blind setting rides to the watch');
+  LS.removeItem('bg_colorblind');
   eq(ex.pins, { '3': { ll: [-96.8001, 32.9001], at: 123 } }, 'pins: only well-formed ones');
   eq(ex.measured, { '7 Iron': 155 }, 'measured 7 iron (6 shots, median)');
   ok(ex.group.length === 1 && ex.group[0].pid === 'p1-k' && ex.group[0].name, 'group dots: fresh only, not me');

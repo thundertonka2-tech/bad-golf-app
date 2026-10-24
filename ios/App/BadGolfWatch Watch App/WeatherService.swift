@@ -17,6 +17,11 @@ final class WeatherService: ObservableObject {
     // Elevations in meters above sea level.
     @Published var greenElevationM: Double?
     @Published var playerElevationM: Double?
+    /// v1943: WHERE playerElevationM was measured. It used to be fetched only on a hole change,
+    /// so mid-hole it was the height of wherever you stood then (often the last green) - Kevin
+    /// stood 3 yds from the pin on Cedar Crest #14 and the watch said "plays 0".
+    private(set) var playerElevationAt: CLLocationCoordinate2D?
+    private var lastPlayerFetch: Date = .distantPast
 
     private var lastFetch: Date = .distantPast
     private var lastKey: String = ""        // rounded green coord we fetched for
@@ -63,7 +68,30 @@ final class WeatherService: ObservableObject {
         // Green
         if let e = await elevation(g) { self.greenElevationM = e }
         // Player (if available and meaningfully different from the green)
-        if let p = p { if let e = await elevation(p) { self.playerElevationM = e } }
+        if let p = p { if let e = await elevation(p) { self.playerElevationM = e; self.playerElevationAt = p; self.lastPlayerFetch = Date() } }
+    }
+
+    /// v1943: re-measure the player's height as they walk - once they are 25 m from where it was
+    /// last measured, at most every 20 s (one tiny request, a dozen or so per hole).
+    func refreshPlayer(_ p: CLLocationCoordinate2D?) {
+        guard let p = p else { return }
+        if let at = playerElevationAt, Self.meters(at, p) < 25 { return }
+        guard Date().timeIntervalSince(lastPlayerFetch) >= 20 else { return }
+        lastPlayerFetch = Date()
+        Task {
+            if let e = await elevation(p) { self.playerElevationM = e; self.playerElevationAt = p }
+        }
+    }
+
+    /// v1943: the player's height only if it was measured within 30 m of where they stand now;
+    /// otherwise nil, so plays-as leaves slope out rather than use a stale height.
+    func playerElevation(near p: CLLocationCoordinate2D?) -> Double? {
+        guard let p = p, let at = playerElevationAt, let e = playerElevationM, Self.meters(at, p) <= 30 else { return nil }
+        return e
+    }
+
+    private static func meters(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
+        CLLocation(latitude: a.latitude, longitude: a.longitude).distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
     }
 
     private func elevation(_ coord: CLLocationCoordinate2D) async -> Double? {

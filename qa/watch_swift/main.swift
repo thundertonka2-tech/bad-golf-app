@@ -268,5 +268,21 @@ await MainActor.run {
 if let f = MapFrame.fit([tee, mid], bearing: 0, width: 184, height: 224, pad: 20, padBottom: 84) {
     ok(f.screen(tee).y <= 224 - 83 && f.screen(mid).y >= 19, "fit with a bottom margin keeps the tee above the HUD (\(f.screen(tee).y))")
 }
+// v1943: colour-blind slope palette = the phone's exact numbers (gvSlopeImage _cbPal)
+let cLvl = SlopeColor.rgb(cellZ: 10, pinZ: 12, cb: true), cUp = SlopeColor.rgb(cellZ: 0, pinZ: 45, cb: true), cDn = SlopeColor.rgb(cellZ: 45, pinZ: 0, cb: true)
+func rgb255(_ c: (r: Double, g: Double, b: Double)) -> [Int] { [Int((c.r * 255).rounded()), Int((c.g * 255).rounded()), Int((c.b * 255).rounded())] }
+ok(rgb255(cLvl) == [232, 232, 232], "cb level = light gray")
+ok(rgb255(cUp) == [240, 90, 0], "cb up = orange (\(rgb255(cUp)))")
+ok(rgb255(cDn) == [0, 80, 240], "cb down = blue (\(rgb255(cDn)))")
+ok(rgb255(SlopeColor.rgb(cellZ: 10, pinZ: 12)) == [46, 184, 92], "default palette unchanged (green level)")
+// v1943: the hand-off's cb flag, and a round cached before v1943 (no cb key) still decodes
+ok(RoundParser.gps(["cb": true]).cb == true && RoundParser.gps([:]).cb == false, "gps.cb parsed (default off)")
+do {
+    let gi = RoundParser.gps(["cb": true])
+    var obj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(gi)) as! [String: Any]
+    obj.removeValue(forKey: "cb")
+    let old = try JSONDecoder().decode(GpsInfo.self, from: JSONSerialization.data(withJSONObject: obj))
+    ok(old.cb == nil, "pre-v1943 cached GpsInfo decodes (cb absent)")
+} catch { ok(false, "pre-v1943 cached GpsInfo decodes: \(error)") }
 print("  \(pass) passed, \(fail) failed")
 exit(fail == 0 ? 0 : 1)
