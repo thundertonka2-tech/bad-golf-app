@@ -63,6 +63,12 @@ public class BGMeasurePlugin: CAPPlugin {
                     call.resolve(["cancelled": true])
                 }
             }
+            // v1952 (Hoon, Buffalo Creek): a camera / AR session failure used to sit on the
+            // measure screen with a hint and never come back to the app. It rejects now, so
+            // the web side can point the scorer at the typed distance boxes.
+            vc.onError = { code in
+                call.reject(code)
+            }
             vc.modalPresentationStyle = .fullScreen
             presenter.present(vc, animated: true, completion: nil)
         }
@@ -72,6 +78,7 @@ public class BGMeasurePlugin: CAPPlugin {
 final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
 
     var onFinish: ((Double?) -> Void)?
+    var onError: ((String) -> Void)?             // v1952: CAMERA_DENIED / AR_FAILED
     var titleText: String = "Measure"
     var strings: [String: String] = [:]          // v1840: English -> player's language
     func L(_ s: String) -> String { return strings[s] ?? s }
@@ -408,8 +415,16 @@ final class BGMeasureViewController: UIViewController, ARSCNViewDelegate {
 
     func session(_ session: ARSession, didFailWithError error: Error) {
         DispatchQueue.main.async { [weak self] in
-            guard let me = self else { return }
+            guard let me = self, !me.done else { return }
             me.setInfo(me.L("Camera problem:") + " " + error.localizedDescription + ". " + me.L("Check Settings > Bad Golf > Camera."))
+            // v1952: hand the failure back to the app instead of waiting on Cancel.
+            me.done = true
+            me.onFinish = nil
+            var code = "AR_FAILED"
+            if let ar = error as? ARError, ar.code == .cameraUnauthorized { code = "CAMERA_DENIED" }
+            let cb = me.onError
+            me.onError = nil
+            me.dismiss(animated: true) { cb?(code) }
         }
     }
 }
