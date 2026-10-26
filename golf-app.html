@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1961-->
+<!--BGVER=v2026.11.1962-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12102,7 +12102,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1961';
+const BG_BUILD = 'v2026.11.1962';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -78052,6 +78052,8 @@ async function lgPurgeMemberFromLiveRounds(sid, name) {
 async function _t2NotifyAdded(tid, uid) {
   try {
     if (!uid || (_authUser && uid === _authUser.id)) return;
+    // v1962 PERF: during setup the event on screen already says it isn't live -- no read.
+    try { const _c = (typeof _t2Current !== 'undefined') ? _t2Current : null; if (_c && String(_c.id) === String(tid) && String(_c.status || '') !== 'live') return; } catch (e) {}
     const _tt = await t2Get(tid);
     // Only ping for a LATE add to an already-STARTED event. Adds during setup are
     // batched when the host taps Start (t2NotifyAllPlayers), so invites never go out
@@ -78508,6 +78510,19 @@ async function t2AddGroupMember(groupId, tournamentPlayerId, team, slot) {
     return !error;
   } catch (e) { return false; }
 }
+// v1962: every group's members in one query (was one read per group).
+async function t2GetMembersForGroups(groups, opts) {
+  const out = {}; (groups || []).forEach(g => { if (g && g.id) out[g.id] = []; });
+  const ids = Object.keys(out); if (!ids.length) return out;
+  try {
+    const rows = await _bgReadList(() => supa.from('tournament_group_members').select('*').in('group_id', ids), 't2GetMembersForGroups', opts);
+    (rows || []).forEach(m => { if (m && out[m.group_id]) out[m.group_id].push(m); });
+    return out;
+  } catch (e) {
+    await Promise.all(ids.map(async id => { try { out[id] = await t2GetGroupMembers(id, opts); } catch (e2) { out[id] = []; } }));
+    return out;
+  }
+}
 async function t2GetGroupMembers(groupId, opts) {
   if (!(opts && opts.strict)) { const _f = _bgFeedWhere('tournament_group_members', r => r.group_id === groupId); if (_f) return _f; }   // v1736
   return await _bgReadList(() => supa.from('tournament_group_members').select('*').eq('group_id', groupId), 't2GetGroupMembers', opts);
@@ -78552,15 +78567,17 @@ async function _t2PruneGroupGames(tid) {
     });
   } catch (e) { return false; }
 }
-async function t2ClearGroups(dayId) {
+async function t2ClearGroups(dayId, opts) {
   try {
     const { error } = await supa.from('tournament_groups').delete().eq('day_id', dayId);
     if (error) { console.warn('t2ClearGroups', error); return false; }
     // v1134: the pre-read that taken the doomed ids is gone — see
     // _t2PruneGroupGames. Reconcile against what survived instead of guessing.
+    // v1962 PERF: a day that had no groups has nothing to prune (opts.hadNone) -- that
+    // was 4+ serial round trips on every first open of the Groups screen.
     try {
       const _t = (typeof _t2Current !== 'undefined') ? _t2Current : null;
-      if (_t && _t.id) await _t2PruneGroupGames(_t.id);
+      if (_t && _t.id && !(opts && opts.hadNone)) await _t2PruneGroupGames(_t.id);
     } catch (e) {}
     return true;
   }
@@ -84144,13 +84161,14 @@ async function _t2BuildCartsOfTwoImpl(dayId, dayNumber, byHcp, opts) {
   // in-progress rounds (their group link is gone, so the day's cup points go to
   // zero) and wiping every tee time and scorekeeper. Rebuilding is now an explicit,
   // confirmed action; anything else adds players to the carts that already exist.
+  let _hadGroups = false;
   {
-    let _existing = [];
-    try { _existing = await t2GetGroups(dayId); } catch (e) { _existing = []; }
+    let _existing = [], _ds = [];
+    try { [_existing, _ds] = await Promise.all([t2GetGroups(dayId).catch(() => []), t2GetDays(t.id).catch(() => [])]); } catch (e) { _existing = []; _ds = []; }   // v1962: one wave
+    _hadGroups = !!(_existing && _existing.length);
     const _live = _existing.filter(g => g && g.game_code);
     let _dayActive = false;
     try {
-      const _ds = await t2GetDays(t.id);
       const _d = (_ds || []).find(x => x && x.id === dayId);
       _dayActive = !!(_d && /^(active|live|complete|completed|final)$/i.test(String(_d.status || '')));
     } catch (e) {}
@@ -84161,11 +84179,12 @@ async function _t2BuildCartsOfTwoImpl(dayId, dayNumber, byHcp, opts) {
       return false;
     }
   }
-  if (!(await t2ClearGroups(dayId))) { showToast('Could not clear the old carts — nothing was changed'); return false; }
+  if (!(await t2ClearGroups(dayId, { hadNone: !_hadGroups }))) { showToast('Could not clear the old carts — nothing was changed'); return false; }
   // v1137: building the carts is the moment a name-only slot becomes a real
-  // participant, so re-try linking those rows to accounts before they are written
-  // in. Best-effort, never blocking — see _t2LinkNameOnlySlots.
-  try { const _tid = (typeof _t2Current !== 'undefined' && _t2Current) ? _t2Current.id : null; if (_tid) await _t2LinkNameOnlySlots(_tid); } catch (e) {}
+  // participant, so re-try linking those rows to accounts. Best-effort.
+  // v1962 PERF: in the background -- it is a per-player serial lookup chain and the carts
+  // don't depend on it (the member rows are keyed by tournament_player id, not account).
+  try { const _tid = (typeof _t2Current !== 'undefined' && _t2Current) ? _t2Current.id : null; if (_tid) _t2LinkNameOnlySlots(_tid).catch(() => {}); } catch (e) {}
   // v986 (T46): two inserts total instead of ~250 sequential round-trips.
   const _made = await t2CreateGroupsBulk(dayId, groups.map((g, gi) => ({ groupNumber: gi + 1, size: g.length })));
   if (_made) {
@@ -84189,6 +84208,18 @@ async function _t2BuildCartsOfTwoImpl(dayId, dayNumber, byHcp, opts) {
       }
     }
   }
+  // v1960/v1962: the commissioner is the scorekeeper of his own cart by default (this is
+  // the auto-build the Groups screen runs on first open; v1960 only covered the wizard's builder).
+  try {
+    const _me = (typeof _authUser !== 'undefined' && _authUser) ? String(_authUser.id) : '';
+    if (_me && _made && t2CanManage(t)) {
+      for (let gi = 0; gi < groups.length; gi++) {
+        const g = _made[gi]; if (!g) continue;
+        const mine = groups[gi].find(p => p && p.user_id && String(p.user_id) === _me);
+        if (mine && mine.display_name) { await t2SetGroupCaptain(g.id, mine.display_name); break; }
+      }
+    }
+  } catch (e) {}
   showToast(byHcp ? 'Groups balanced by handicap ⚖️' : 'Groups built — tap again to reshuffle');
   return true;
 }
@@ -84289,11 +84320,12 @@ async function openT2Carts(dayNumber, dayId) {
   } catch (e) {}
   const render = async (autoTried) => {
     const body = ov.querySelector('#t2-carts-body'); if (!body) return;
-    const players = await t2GetPlayers(t.id);
+    // v1962 PERF (Tyler: "when I click groups it took several seconds to pop up"): players
+    // and groups in one wave, every group's members in ONE read.
+    const [players, _groups0] = await Promise.all([t2GetPlayers(t.id), t2GetGroups(dayId)]);
     const pById = {}; players.forEach(p => pById[p.id] = p);
-    let groups = await t2GetGroups(dayId);
-    const membersByGroup = {};
-    await Promise.all(groups.map(async g => { membersByGroup[g.id] = await t2GetGroupMembers(g.id); }));
+    let groups = _groups0 || [];
+    const membersByGroup = await t2GetMembersForGroups(groups);
     // v986 (T22): the auto-(re)build below used to fire t2BuildCartsOfTwo — which
     // starts with a full t2ClearGroups — on EVERY render whenever anything looked
     // off. Two ways that bit:
@@ -85725,12 +85757,16 @@ async function openT2AddPlayerPicker(t, onDone, known) {
   const real = () => (players || []).filter(p => !t2IsOpenSlot(p));
   const inEvent = (name) => real().find(p => K(p.display_name) === K(name)) || null;
   const pending = new Set();   // name keys with a save in flight
+  const wanted = new Map();    // v1962: what the tap asked for (true = in), shown at once
   let list = [];
   const _rebuild = () => {
     const seen = new Set(); list = [];
     (roster || []).forEach(r => { if (r && r.name && !seen.has(K(r.name))) { seen.add(K(r.name)); list.push(r); } });
     real().forEach(p => { if (p.display_name && !seen.has(K(p.display_name))) { seen.add(K(p.display_name)); list.push({ name: p.display_name, handicap: p.handicap, _evOnly: true }); } });
     list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    // v1962 PERF: the roster handicap (a sort of each player's score history) was recomputed
+    // for every row on every paint -- and every tap painted twice. Once per rebuild now.
+    list.forEach(r => { try { r._rh = t2RosterHcp(r); } catch (e) { r._rh = null; } });
   };
   _rebuild();
   const ov = document.createElement('div');
@@ -85753,7 +85789,12 @@ async function openT2AddPlayerPicker(t, onDone, known) {
   } catch (e) {}
   const rowsEl = ov.querySelector('#t2ap-rows');
   const countEl = ov.querySelector('#t2ap-count');
-  const paintCount = () => { const n = real().length; countEl.textContent = '👥 ' + n + ' player' + (n === 1 ? '' : 's'); };
+  const paintCount = () => {
+    // v1962: count what the taps asked for, so the pill moves with the finger.
+    let n = real().length;
+    try { pending.forEach(k => { const inDb = !!real().find(p => K(p.display_name) === k); const want = !!wanted.get(k); if (want && !inDb) n++; else if (!want && inDb) n--; }); } catch (e) {}
+    countEl.textContent = '👥 ' + n + ' player' + (n === 1 ? '' : 's');
+  };
   // Saves run one at a time, in tap order, so teams balance and nothing races.
   let _chain = Promise.resolve();
   const enqueue = (fn) => { _chain = _chain.then(fn).catch(() => {}); return _chain; };
@@ -85769,15 +85810,27 @@ async function openT2AddPlayerPicker(t, onDone, known) {
   ov.querySelector('#t2ap-x').onclick = close;
   ov.querySelector('#t2ap-done').onclick = close;
   const checkHtml = (on) => '<div class="t2ap-check" style="flex:0 0 auto;width:24px;height:24px;border-radius:7px;border:2px solid ' + (on ? 'var(--accent)' : 'var(--border)') + ';background:' + (on ? 'var(--accent)' : 'transparent') + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800">' + (on ? '✓' : '') + '</div>';
+  // v1962: a pending tap shows what it asked for, not what the database has so far.
+  const isOn = (name) => { const k = K(name); return pending.has(k) && wanted.has(k) ? !!wanted.get(k) : !!inEvent(name); };
   const rowHtml = (arr) => arr.length ? arr.map(r => {
     const ev = inEvent(r.name);
-    const h = ev && ev.handicap != null ? bgHcpNum(ev.handicap) : t2RosterHcp(r);
+    const h = ev && ev.handicap != null ? bgHcpNum(ev.handicap) : (r._rh !== undefined ? r._rh : t2RosterHcp(r));
     const busy = pending.has(K(r.name));
     return '<div class="t2ap-row' + (busy ? ' is-busy' : '') + '" data-name="' + t2esc(r.name) + '" data-hcp="' + (h != null ? h : '') + '" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 2px;border-top:1px solid var(--border)">' +
       crewAvatarHtml(r, false) +
       '<div style="flex:1;min-width:0;overflow:hidden"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500">' + t2esc(r.name) + guestPillHtml(r.name, r) + testPillHtml(r.name) + (h != null && h !== '' ? ' <span class="small-text" style="color:var(--text-muted)">(HCP ' + h + ')</span>' : '') + '</div></div>' +
-      checkHtml(!!ev) + '</div>';
+      checkHtml(isOn(r.name)) + '</div>';
   }).join('') : (_loading ? '<div class="help-text" style="padding:8px 2px">Loading players…</div>' : '<div class="help-text" style="padding:8px 2px">No one matches — use “+ Guest”.</div>');
+  // v1962: repaint ONE row (the tapped one) instead of the whole list.
+  const paintRow = (name) => {
+    try {
+      const k = K(name);
+      const row = Array.from(rowsEl.querySelectorAll('.t2ap-row')).find(el => K(el.getAttribute('data-name')) === k);
+      if (!row) return;
+      row.classList.toggle('is-busy', pending.has(k));
+      const old = row.querySelector('.t2ap-check'); if (old) old.outerHTML = checkHtml(isOn(name));
+    } catch (e) {}
+  };
   const curQ = () => { const sv = ov.querySelector('#t2ap-search'); return sv ? sv.value.trim().toLowerCase() : ''; };
   const paint = () => {
     const q = curQ();
@@ -85785,13 +85838,19 @@ async function openT2AddPlayerPicker(t, onDone, known) {
     const st = rowsEl.scrollTop; rowsEl.innerHTML = rowHtml(arr); rowsEl.scrollTop = st; wire(); paintCount();
   };
   const _od = (typeof t2IsOneDay === 'function') && t2IsOneDay(t);
+  /* v1962 (Tyler, 10/26): "it shows me in a different group even though we are all playing
+     together." Every add was dealt onto the smaller side unless the event was one-day, so a
+     multi-day INDIVIDUAL event still split its field into Team A / Team B (the printable
+     card then read "Team B" under one name and "Bad Golfers" under the rest). Only a team
+     event -- a cup, or 2-man teams -- balances sides; everyone else sits on side A. */
+  const _teamEvt = !!(t && t.settings && (t.settings.type === 'team' || t.settings.pairs));
   const addOne = async (name, hv) => {
     const nm2 = String(name || '').trim(); if (!nm2) return false;
     if (!players) { try { players = await t2GetPlayers(t.id); } catch (e) { players = []; } }
     if (inEvent(nm2)) return true;
     let _uid = null; try { _uid = await t2ResolveUserIdByName(nm2); } catch (e) {}
     let _team = 'A';
-    if (!_od) { try { _team = t2SmallestTeamKey(real().map(p => ({ team: p.team })), t); } catch (e) {} }
+    if (_teamEvt && !_od) { try { _team = t2SmallestTeamKey(real().map(p => ({ team: p.team })), t); } catch (e) {} }
     try {
       const row = await t2FillOrAddPlayer(t.id, { displayName: nm2, team: _team, handicap: (hv !== '' && hv != null) ? parseFloat(hv) : null, userId: _uid || null, _known: players });
       if (!row) return false;
@@ -85808,17 +85867,17 @@ async function openT2AddPlayerPicker(t, onDone, known) {
   const toggle = (name, hv) => {
     const k = K(name); if (pending.has(k)) return;
     const adding = !inEvent(name);
-    pending.add(k); paint();
+    pending.add(k); wanted.set(k, adding); paintRow(name); paintCount();   // v1962: ticks now, saves behind
     enqueue(async () => {
       const ok = adding ? await addOne(name, hv) : await removeOne(name);
-      pending.delete(k);
+      pending.delete(k); wanted.delete(k);
       if (!ok) showToast(adding ? ('Couldn’t add ' + name + ' — try again') : (window._bgRemoveCancelled ? 'Kept in the event' : ('Couldn’t take ' + name + ' off — try again')));
-      if (document.body.contains(ov)) { _rebuild(); paint(); }
+      if (document.body.contains(ov)) { if (ok) { paintRow(name); paintCount(); } else { _rebuild(); paint(); } }
     });
   };
   const wire = () => { rowsEl.querySelectorAll('.t2ap-row').forEach(row => row.onclick = () => toggle(row.getAttribute('data-name'), row.getAttribute('data-hcp'))); };
   paint();
-  const search = ov.querySelector('#t2ap-search'); if (search) search.oninput = paint;
+  { const search = ov.querySelector('#t2ap-search'); let _st = null; if (search) search.oninput = () => { clearTimeout(_st); _st = setTimeout(paint, 120); }; }   // v1962: debounced
   const gb = ov.querySelector('#t2ap-guest'); if (gb) gb.onclick = async () => {
     const nm = await uiPrompt('Guest name:', { title: 'Add guest', okLabel: 'Add' }); if (!nm || !nm.trim()) return;
     const g = nm.trim(); const k = K(g);
@@ -85941,6 +86000,8 @@ async function openT2DayConfig(dayNumber, _opts) {
         const opts = document.getElementById('opts-' + cb.id.replace(/^game-/, '').replace(/^tpot-(.*)-on$/, 'tpot-$1')); if (opts) opts.classList.remove('show');
       });
       state.gameParticipants = {}; state.nassauInstances = []; state.matchInstances = [];
+      state._tpotPlayers = {};   // v1962: the prize-pool tile pickers start from what this event saved
+      try { document.querySelectorAll('.participant-picker.tpot-picker').forEach(el => el.remove()); } catch (e) {}
       /* v1557 (Tyler, 9/8): "I went in to set up Day 2 and the Long Drive hole was
          already selected. Again these should be clean for each day." Unticking the
          box left everything INSIDE the option panel as Day 1 set it — the hole chips
@@ -95333,7 +95394,7 @@ async function _bgQsCreate(S) {
 
 // ---- the checklist (renderT2SettingsHub calls this when bgT2IsQuick) ----
 function _bgTeeMins(tt) { try { const x = String(tt || '').trim().toUpperCase(); const m = x.match(/(\d{1,2}):(\d{2})/); if (!m) return 1e9; let h = +m[1]; const mi = +m[2]; if (/PM/.test(x) && h < 12) h += 12; if (/AM/.test(x) && h === 12) h = 0; return h * 60 + mi; } catch (e) { return 1e9; } }
-async function bgT2QuickChecklist(t, days, players) {
+async function bgT2QuickChecklist(t, days, players) {   // v1962: see the members read below
   _bgQsCss();
   const esc = t2esc;
   const s = t.settings || {};
@@ -95364,7 +95425,7 @@ async function bgT2QuickChecklist(t, days, players) {
   await Promise.all((days || []).map(async d => {
     let gs = []; try { gs = await t2GetGroups(d.id); } catch (e) {}
     groupsByDay[d.day_number] = gs || [];
-    await Promise.all((gs || []).map(async g => { try { membersByGroup[g.id] = await t2GetGroupMembers(g.id); } catch (e) { membersByGroup[g.id] = []; } }));
+    try { Object.assign(membersByGroup, await t2GetMembersForGroups(gs || [])); } catch (e) { (gs || []).forEach(g => { membersByGroup[g.id] = []; }); }   // v1962: one read per day, not per group
   }));
   let req = 0, reqDone = 0; const missing = [];
   const row = (act, ic, label, sub, st) => {
@@ -101729,6 +101790,11 @@ function _syncTourneyPotTiles() {
       if (val && !val._tpWired) { val._tpWired = true; val.addEventListener('change', _saveTourneyPotTiles); }
     };
     Object.keys(_TPOT_MAP).forEach(id => wire(id, sp[_TPOT_MAP[id]]));
+    /* v1962 (Tyler, 10/26): "The player selector is missing from all the pool games in
+       tournament setup." The event prize pools (Low Net / Most GIRs / Fewest Putts / Long
+       Putt / Skins) kept their who's-in list on a separate hub row. Same chip picker as every
+       other game now, inside each tile, saved with the tile (everyone ticked = no list). */
+    try { _tpotPickerPaint('lownet', sp.lowNet); _tpotPickerPaint('girs', sp.girs); _tpotPickerPaint('putts', sp.putts); _tpotPickerPaint('longputt', st.tourneyLongPutt); _tpotPickerPaint('skins', st.tourneySkins); } catch (e) {}
     wire('longputt', st.tourneyLongPutt);
     wire('skins', st.tourneySkins, () => {
       const h = document.getElementById('tpot-skins-hcp');
@@ -101741,6 +101807,45 @@ function _syncTourneyPotTiles() {
     });
   } catch (e) {}
 }
+// v1962: the event prize-pool tile picker. state._tpotPlayers[id] = Set of names IN the pool.
+const _TPOT_LABEL = { lownet: 'Low Net Pool', girs: 'GIR Pool', putts: 'Fewest Putts Pool', longputt: 'Long Putt Pool', skins: 'Skins' };
+function _tpotRoster() {
+  try { return (state._t2DayPlayers || []).map(p => p && (p.display_name || p.name)).filter(Boolean); } catch (e) { return []; }
+}
+function _tpotPickerPaint(id, cfg) {
+  const panel = document.getElementById('opts-tpot-' + id); if (!panel) return;
+  const roster = _tpotRoster();
+  if (!state._tpotPlayers) state._tpotPlayers = {};
+  if (!state._tpotPlayers[id]) {
+    const nk = s => _t2NameKey(s);
+    const pl = (cfg && Array.isArray(cfg.players) && cfg.players.length) ? new Set(cfg.players.map(nk)) : null;
+    state._tpotPlayers[id] = new Set(roster.filter(n => !pl || pl.has(nk(n))));
+  }
+  const set = state._tpotPlayers[id];
+  let picker = panel.querySelector('.participant-picker.tpot-picker');
+  if (!picker) { picker = document.createElement('div'); picker.className = 'participant-picker tpot-picker'; panel.appendChild(picker); }
+  const count = roster.filter(n => set.has(n)).length;
+  const allSel = roster.length > 0 && count === roster.length;
+  const warn = count === 0 ? ' <span class="pp-warn">— pick at least 2</span>' : (count < 2 ? ' <span class="pp-warn">— need 1 more</span>' : ' ✓');
+  let html = '<div class="pp-label">' + (_TPOT_LABEL[id] || 'Pool') + ' participants (' + count + ' selected)' + warn + ' <button type="button" class="bg-btn bg-btn--primary pp-selectall" style="margin-left:6px;vertical-align:middle">' + (allSel ? 'Clear all' : 'Select all') + '</button></div><div class="pp-chips">';
+  if (!roster.length) html += '<div class="small-text" style="padding:4px">Add players first.</div>';
+  else roster.forEach(n => { html += bgPickerChipHtml(n, set.has(n), 'data-tpot="' + id + '" data-name="' + escAttr(n) + '"'); });
+  html += '</div>';
+  picker.innerHTML = html;
+  picker.querySelectorAll('.participant-chip').forEach(chip => {
+    chip.onclick = () => { const n = chip.dataset.name; if (set.has(n)) set.delete(n); else set.add(n); _tpotPickerPaint(id, cfg); _saveTourneyPotTiles(); };
+  });
+  const sa = picker.querySelector('.pp-selectall');
+  if (sa) sa.onclick = () => { if (allSel) set.clear(); else roster.forEach(n => set.add(n)); _tpotPickerPaint(id, cfg); _saveTourneyPotTiles(); };
+}
+// null = everyone (no list stored); otherwise the picked names.
+function _tpotPlayersOut(id) {
+  try {
+    const set = state._tpotPlayers && state._tpotPlayers[id]; if (!set) return undefined;   // untouched: keep what is stored
+    const roster = _tpotRoster(); const picked = roster.filter(n => set.has(n));
+    return (roster.length && picked.length === roster.length) ? null : picked;
+  } catch (e) { return undefined; }
+}
 let _tpSaveT = null;
 function _saveTourneyPotTiles() {
   try {
@@ -101752,7 +101857,15 @@ function _saveTourneyPotTiles() {
         // v1322: this REPLACES tourneySidePots wholesale, so carry the prize pool's opt-out
         // list across or a tap on any tile silently puts everybody back in.
         const _prevSP = (_t2Current.settings && _t2Current.settings.tourneySidePots) || {};
-        const _keep = (id, key) => { const o = read(id); const pl = _prevSP[key] && _prevSP[key].players; if (pl && pl.length) o.players = pl.slice(); return o; };
+        const _keep = (id, key) => {
+          const o = read(id);
+          const pick = _tpotPlayersOut(id);   // v1962: the tile's own picker
+          if (pick === undefined) { const pl = _prevSP[key] && _prevSP[key].players; if (pl && pl.length) o.players = pl.slice(); }
+          else if (pick) o.players = pick.slice();
+          return o;
+        };
+        const _lpPick = _tpotPlayersOut('longputt'), _skPick = _tpotPlayersOut('skins');
+        const _withPick = (obj, pick) => { if (pick === undefined) return obj; if (pick) obj.players = pick.slice(); else delete obj.players; return obj; };
         const cfgOut = { lowNet: _keep('lownet', 'lowNet'), girs: _keep('girs', 'girs'), putts: _keep('putts', 'putts') };
         const hasLp = !!document.getElementById('tpot-longputt-on');
         const hasSk = !!document.getElementById('tpot-skins-on');
@@ -101762,15 +101875,15 @@ function _saveTourneyPotTiles() {
         const skTies = (tiesEl && tiesEl.value === 'countback') ? 'countback' : 'void';
         const ok = await t2MergeSettings(_t2Current.id, s => {
           s.tourneySidePots = cfgOut;
-          if (hasLp) s.tourneyLongPutt = Object.assign({ mode: 'buyin' }, s.tourneyLongPutt, { on: lpOut.on, value: lpOut.value });
-          if (hasSk) s.tourneySkins = Object.assign({ mode: 'buyin' }, s.tourneySkins, { on: skOut.on, value: skOut.value, hcpPct: skHcp, ties: skTies });
+          if (hasLp) s.tourneyLongPutt = _withPick(Object.assign({ mode: 'buyin' }, s.tourneyLongPutt, { on: lpOut.on, value: lpOut.value }), _lpPick);
+          if (hasSk) s.tourneySkins = _withPick(Object.assign({ mode: 'buyin' }, s.tourneySkins, { on: skOut.on, value: skOut.value, hcpPct: skHcp, ties: skTies }), _skPick);
         });
         if (ok) {
           try {
             _t2Current.settings = _t2Current.settings || {};
             _t2Current.settings.tourneySidePots = cfgOut;
-            if (hasLp) _t2Current.settings.tourneyLongPutt = Object.assign({ mode: 'buyin' }, _t2Current.settings.tourneyLongPutt, { on: lpOut.on, value: lpOut.value });
-            if (hasSk) _t2Current.settings.tourneySkins = Object.assign({ mode: 'buyin' }, _t2Current.settings.tourneySkins, { on: skOut.on, value: skOut.value, hcpPct: skHcp, ties: skTies });
+            if (hasLp) _t2Current.settings.tourneyLongPutt = _withPick(Object.assign({ mode: 'buyin' }, _t2Current.settings.tourneyLongPutt, { on: lpOut.on, value: lpOut.value }), _lpPick);
+            if (hasSk) _t2Current.settings.tourneySkins = _withPick(Object.assign({ mode: 'buyin' }, _t2Current.settings.tourneySkins, { on: skOut.on, value: skOut.value, hcpPct: skHcp, ties: skTies }), _skPick);
           } catch (e) {}
           showToast('Event prize pools saved ✓');
         } else showToast('Couldn’t save the pools — try again');
