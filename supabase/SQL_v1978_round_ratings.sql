@@ -65,3 +65,8 @@ language sql stable security definer set search_path = public as $$
   limit 200;
 $$;
 grant execute on function public.bg_round_ratings_detail(text) to authenticated;
+
+-- v1979: the table was created without privileges for the API roles, so every request got 403.
+grant select, insert, update, delete on table public.round_ratings to authenticated;
+grant select on table public.round_ratings to anon;
+grant all on table public.round_ratings to service_role;
