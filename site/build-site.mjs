@@ -56,7 +56,8 @@ write('handicaps/index.html', handicapsPage()); add('/handicaps/', 0.7);
 
 // ---- courses
 write('courses/index.html', coursesIndex(byState, courses.length)); add('/courses/', 0.9, 'weekly');
-write('courses/index.txt', courses.map(c => [STATES[c.st] ? c.st : '', c.id, c.name.replace(/[|\n]/g, ' '), (c.city || '').replace(/[|\n]/g, ' ')].join('|')).join('\n'));
+// st|id|name|city|rating  (rating = "avg~n", avg blank until 3 ratings; empty when unrated) - read by course-search.js
+write('courses/index.txt', courses.map(c => [STATES[c.st] ? c.st : '', c.id, c.name.replace(/[|\n]/g, ' '), (c.city || '').replace(/[|\n]/g, ' ').replace(/,\s*[A-Za-z]{2}\.?$/, ''), c.rr ? ((c.rr.avg != null ? c.rr.avg.toFixed(1) : '') + '~' + c.rr.n) : ''].join('|')).join('\n'));
 const km = (a, b) => { const R = 6371, dLat = (b.lat - a.lat) * Math.PI / 180, dLng = (b.lng - a.lng) * Math.PI / 180; const s = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(s)); };
 const stateUrls = {};
 for (const st of Object.keys(byState)) {

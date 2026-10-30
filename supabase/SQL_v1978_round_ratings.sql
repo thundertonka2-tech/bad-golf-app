@@ -34,7 +34,7 @@ create policy round_ratings_delete_admin on public.round_ratings
 
 -- Summary for a batch of course ids: average (null until 3+ ratings), count, and the
 -- 5..1 histogram. One call per picker paint.
-create or replace function public.bg_round_ratings_summary(p_ids text[])
+create or replace function public.bg_round_rating_summary(p_ids text[])
 returns table (course_id text, avg numeric, n int, h5 int, h4 int, h3 int, h2 int, h1 int)
 language sql stable security definer set search_path = public as $$
   select s.course_id,
@@ -49,10 +49,10 @@ language sql stable security definer set search_path = public as $$
   where s.course_id = any(p_ids)
   group by s.course_id;
 $$;
-grant execute on function public.bg_round_ratings_summary(text[]) to authenticated;
+grant execute on function public.bg_round_rating_summary(text[]) to authenticated;
 
 -- Detail for one course: every rating with the rater's display name, newest first.
-create or replace function public.bg_round_ratings_detail(p_id text)
+create or replace function public.bg_round_rating_detail(p_id text)
 returns table (user_id uuid, name text, stars int, note text, updated_at timestamptz)
 language sql stable security definer set search_path = public as $$
   select s.user_id,
@@ -64,7 +64,7 @@ language sql stable security definer set search_path = public as $$
   order by s.updated_at desc
   limit 200;
 $$;
-grant execute on function public.bg_round_ratings_detail(text) to authenticated;
+grant execute on function public.bg_round_rating_detail(text) to authenticated;
 
 -- v1979: the table was created without privileges for the API roles, so every request got 403.
 grant select, insert, update, delete on table public.round_ratings to authenticated;

@@ -42,9 +42,23 @@ for (let off = 0; ; off += 1000) {
 }
 const gone = new Set([...(dels || []), ...(delsL || [])]);
 const ver = new Set(verified || []);
+// 2026-10-30 (Tyler: "I cannot find Buffalo Creek, my home course, on the website"): the app's
+// library is COURSE_LIBRARY_SEED (102 hand-built courses baked into golf-app.html - the DFW
+// home market, Firewheel, Cowboys, the famous courses) PLUS the Supabase additions blob. The
+// site only ever read the blob, so 96 seed courses had no page. Read the seed from the app
+// file exactly as the app does: seed first, then additions, first id wins.
+let seed = [];
+try {
+  const src = fs.readFileSync(new URL('../golf-app.html', import.meta.url), 'utf8');
+  const m = src.match(/const COURSE_LIBRARY_SEED = (\[[\s\S]*?\n\]);/);
+  if (m) seed = new Function('return ' + m[1])();
+  if (!Array.isArray(seed)) seed = [];
+} catch (e) { console.warn('seed library not read:', e.message); seed = []; }
 const seen = new Set(); const courses = [];
-for (const c of lib) {
+for (const c of [...seed, ...lib]) {
   if (!c || !c.id || seen.has(c.id) || gone.has(c.id)) continue; seen.add(c.id);
+  // a row whose "name" is really an id (e.g. "firewheel-bridges#tradition") is not a course page
+  if (!c.name || /#/.test(c.name) || String(c.name).trim().toLowerCase() === String(c.id).toLowerCase()) continue;
   const o = { id: c.id, name: c.name, city: c.city || '', st: (c.st || '').toUpperCase(), lat: c.lat, lng: c.lng, holes: c.holes };
   if (nameOvr && nameOvr[c.id]) o.name = nameOvr[c.id];
   const d = detOvr && detOvr[c.id]; if (d) { if (d.name) o.name = d.name; if (d.city != null) o.city = d.city; if (d.st) o.st = d.st.toUpperCase(); }
@@ -53,9 +67,22 @@ for (const c of lib) {
   if (k) { o.pars = k.pars; o.sis = k.sis; o.tees = (k.tees || []).filter(t => t && (t.rating || t.slope || t.yards)).map(t => ({ label: t.label, rating: t.rating, slope: t.slope, yards: t.yards, ratingW: t.ratingW, slopeW: t.slopeW })); o.updatedAt = k.updatedAt; }
   if (gps[c.id]) o.greens = gps[c.id];
   if (ver.has(c.id)) o.verified = true;
-  const ct = contact[c.id]; if (ct) { o.phone = ct.phone; o.website = ct.website; o.address = ct.address; }
+  const ct = contact[c.id]; if (ct) { o.phone = ct.phone; o.website = ct.website; o.address = ct.address; if (o.lat == null && ct.lat != null) { o.lat = ct.lat; o.lng = ct.lng; } }
   courses.push(o);
 }
+// v1980: Round Rating (1-5 stars from players, NOT the USGA rating) - one RPC per 400 ids.
+// avg is null until 3 people have rated; n is the count. Missing = no ratings.
+try {
+  const ids = courses.map(c => c.id); let rated = 0;
+  for (let i = 0; i < ids.length; i += 400) {
+    const r = await fetch(URL_ + '/rpc/bg_round_rating_summary', { method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_ids: ids.slice(i, i + 400) }) });
+    if (!r.ok) throw new Error('round rating ' + r.status);
+    const rows = await r.json();
+    const by = {}; rows.forEach(x => { if (x && x.course_id) by[x.course_id] = x; });
+    courses.forEach(c => { const x = by[c.id]; if (x && Number(x.n) > 0) { c.rr = { avg: x.avg == null ? null : Number(x.avg), n: Number(x.n) }; rated++; } });
+  }
+  console.log(`round ratings: ${rated} courses rated`);
+} catch (e) { console.warn('round ratings skipped:', e.message); }
 fs.mkdirSync(out.replace(/\/[^/]*$/, ''), { recursive: true });
 fs.writeFileSync(out, JSON.stringify({ fetchedAt: new Date().toISOString(), count: courses.length, courses }));
 const rich = courses.filter(c => (c.pars && c.pars.length) || (c.tees && c.tees.length) || c.greens).length;

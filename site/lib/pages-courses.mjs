@@ -6,6 +6,8 @@ export const stateSlug = st => (STATES[st] ? st.toLowerCase() : 'other');
 export const coursePath = c => `/courses/${stateSlug(c.st)}/${c.id}/`;
 
 const sum = a => a.reduce((x, y) => x + (+y || 0), 0);
+// Round Rating chip (players' 1-5 stars; NOT the USGA course rating). Average only at 3+ ratings.
+export const rrChip = c => (c && c.rr && c.rr.n) ? `<span class="rr" title="Round Rating from Bad Golf App players">\u2605 ${c.rr.avg != null ? c.rr.avg.toFixed(1) + ' ' : ''}<small>(${c.rr.n})</small></span>` : '';
 export function courseFacts(c) {
   const holes = c.holes || (c.pars && c.pars.length) || 18;
   const par = c.pars && c.pars.length ? sum(c.pars) : null;
@@ -48,7 +50,8 @@ export function coursePage(c, nearby) {
   const maps = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(c.name + (loc ? ', ' + loc : ''))}`;
   const ld = { '@context': 'https://schema.org', '@type': 'GolfCourse', name: c.name, url: SITE + path,
     address: { '@type': 'PostalAddress', ...(c.address ? { streetAddress: c.address } : {}), addressLocality: c.city || undefined, addressRegion: STATES[c.st] ? c.st : undefined, addressCountry: STATES[c.st] ? 'US' : undefined },
-    geo: { '@type': 'GeoCoordinates', latitude: c.lat, longitude: c.lng }, ...(c.phone ? { telephone: c.phone } : {}), ...(c.website ? { sameAs: c.website } : {}) };
+    geo: { '@type': 'GeoCoordinates', latitude: c.lat, longitude: c.lng }, ...(c.phone ? { telephone: c.phone } : {}), ...(c.website ? { sameAs: c.website } : {}),
+    ...((c.rr && c.rr.avg != null) ? { aggregateRating: { '@type': 'AggregateRating', ratingValue: c.rr.avg, bestRating: 5, worstRating: 1, ratingCount: c.rr.n } } : {}) };
   const body = `<section class="page"><div class="wrap">
   ${crumbs([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: st, path: `/courses/${stateSlug(c.st)}/` }, { name: c.name, path }])}
   <h1>${esc(c.name)}</h1>
@@ -59,7 +62,9 @@ export function coursePage(c, nearby) {
     ${par ? `<div class="stat"><b>${par}</b><small>Par</small></div>` : ''}
     ${top && top.yards ? `<div class="stat"><b>${top.yards.toLocaleString()}</b><small>Yards (${esc(top.label || 'longest')})</small></div>` : ''}
     ${top && top.rating ? `<div class="stat"><b>${top.rating}</b><small>Course rating</small></div><div class="stat"><b>${top.slope}</b><small>Slope</small></div>` : ''}
+    ${c.rr && c.rr.n ? `<div class="stat stat-rr"><b>\u2605 ${c.rr.avg != null ? c.rr.avg.toFixed(1) : '\u2014'}</b><small>Round Rating (${c.rr.n} rating${c.rr.n === 1 ? '' : 's'})</small></div>` : ''}
   </div>
+  ${c.rr && c.rr.n ? `<p class="rr-line">Players who scored a round here in the Bad Golf App rate it ${c.rr.avg != null ? `<strong>\u2605 ${c.rr.avg.toFixed(1)} out of 5</strong> across ${c.rr.n} ratings` : `\u2014 ${c.rr.n} rating${c.rr.n === 1 ? '' : 's'} so far (the average shows after 3)`}. Rate it yourself after your next round.</p>` : ''}
   <div class="prose">
     ${tees.length ? `<h2>Tees, course rating &amp; slope</h2>${teesTable(tees)}` : ''}
     ${c.pars && c.pars.length ? `<h2 style="margin-top:1.4em">Scorecard</h2>${scorecard(c)}` : ''}
@@ -74,7 +79,7 @@ export function coursePage(c, nearby) {
     ${(c.address || c.phone || c.website) ? `<h2>Contact</h2><p>${c.address ? esc(c.address) + (c.city ? ', ' + esc(c.city) : '') + (STATES[c.st] ? ' ' + c.st : '') + '<br>' : ''}${c.phone ? `<a href="tel:${attr(c.phone.replace(/[^+\d]/g, ''))}">${esc(c.phone)}</a><br>` : ''}${c.website ? `<a href="${attr(c.website)}" rel="nofollow noopener" target="_blank">Course website</a><br>` : ''}<a href="${maps}" rel="nofollow noopener" target="_blank">Directions</a></p>` : `<p><a href="${maps}" rel="nofollow noopener" target="_blank">Directions to ${esc(c.name)}</a></p>`}
     <p style="font-size:.9rem;color:var(--ink-subtle)">Scorecard, ratings and GPS data are maintained by the Bad Golf App community and may differ from the printed card. Spot an error? <a href="mailto:support@officialbadgolf.com?subject=${encodeURIComponent('Course fix: ' + c.name)}">Tell us</a>.</p>
   </div>
-  ${nearby.length ? `<div class="related"><h2>Nearby courses${STATES[c.st] ? ' in ' + esc(st) : ''}</h2><ul class="list">${nearby.map(n => `<li><a href="${coursePath(n)}">${esc(n.name)}</a> <small>${esc(n.city || '')}${n.km != null ? ' · ' + Math.round(n.km * 0.621) + ' mi' : ''}</small></li>`).join('')}</ul></div>` : ''}
+  ${nearby.length ? `<div class="related"><h2>Nearby courses${STATES[c.st] ? ' in ' + esc(st) : ''}</h2><ul class="list">${nearby.map(n => `<li><a href="${coursePath(n)}">${esc(n.name)}</a> ${rrChip(n)}<small>${esc(n.city || '')}${n.km != null ? ' · ' + Math.round(n.km * 0.621) + ' mi' : ''}</small></li>`).join('')}</ul></div>` : ''}
   ${ctaBox(`Score your round at ${c.name}`, 'Free on iPhone and Android. Live scorecard, GPS, handicaps and every side game your group plays.')}
 </div></section>`;
   return page({ path, title, description, body, jsonld: [ld, breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: st, path: `/courses/${stateSlug(c.st)}/` }, { name: c.name, path }])] });
@@ -91,7 +96,7 @@ export function statePage(st, courses) {
   <h1>Golf courses in ${esc(name)}</h1>
   <p class="lede" style="max-width:46rem">${courses.length.toLocaleString()} ${esc(name)} golf courses in the Bad Golf App, ${mapped.toLocaleString()} with GPS-mapped greens. Every course has its scorecard, tee ratings and slope, and a live shared scorecard for your group.</p>
   <div class="stats" style="max-width:520px"><div class="stat"><b>${courses.length.toLocaleString()}</b><small>Courses</small></div><div class="stat"><b>${mapped.toLocaleString()}</b><small>GPS mapped</small></div><div class="stat"><b>${cities.length.toLocaleString()}</b><small>Cities</small></div></div>
-  ${cities.map(city => `<h2 id="${attr(city.toLowerCase().replace(/[^a-z0-9]+/g, '-'))}" style="font-size:1.2rem;margin-top:28px">${esc(city)}</h2><ul class="list">${byCity[city].sort((a, b) => a.name.localeCompare(b.name)).map(c => { const f = courseFacts(c); return `<li><a href="${coursePath(c)}">${esc(c.name)}</a> <small>${f.holes} holes${f.par ? ' · par ' + f.par : ''}${f.top && f.top.slope ? ' · slope ' + f.top.slope : ''}</small></li>`; }).join('')}</ul>`).join('')}
+  ${cities.map(city => `<h2 id="${attr(city.toLowerCase().replace(/[^a-z0-9]+/g, '-'))}" style="font-size:1.2rem;margin-top:28px">${esc(city)}</h2><ul class="list">${byCity[city].sort((a, b) => a.name.localeCompare(b.name)).map(c => { const f = courseFacts(c); return `<li><a href="${coursePath(c)}">${esc(c.name)}</a> ${rrChip(c)}<small>${f.holes} holes${f.par ? ' · par ' + f.par : ''}${f.top && f.top.slope ? ' · slope ' + f.top.slope : ''}</small></li>`; }).join('')}</ul>`).join('')}
   ${ctaBox(`Play ${name} golf with Bad Golf App`, 'Free on iPhone and Android. GPS yardages, live scorecard, handicaps and side games on every course above.')}
 </div></section>`;
   return page({ path, title: `${name} Golf Courses — Scorecards, Slope, Rating & GPS | Bad Golf App`, description: `${courses.length.toLocaleString()} golf courses in ${name} with scorecards, course rating and slope by tee, and GPS-mapped greens in the free Bad Golf App. Browse by city.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: name, path }])] });
@@ -110,11 +115,26 @@ export function coursesIndex(byState, total) {
   return page({ path: '/courses/', title: `Golf Course Scorecards, Slope & GPS — ${total.toLocaleString()} U.S. Courses | Bad Golf App`, description: `Scorecards, course rating and slope by tee, and GPS-mapped greens for ${total.toLocaleString()} U.S. golf courses. Find your course, then score your round in the free Bad Golf App.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }])], extraHead: `<script defer src="/course-search.js"></script>` });
 }
 
-// Tiny client-side search over /courses/index.txt (one course per line: st|id|name|city).
+// Client-side search over /courses/index.txt (st|id|name|city|rating). 2026-10-30 (Tyler:
+// "enhance our search so it's easier to find courses on the web"): words match by PREFIX
+// ("buff" finds Buffalo Creek), punctuation and "&"/"and" don't matter, full state names
+// work ("rockwall texas"), results are RANKED (name match first, then city, then state;
+// courses with GPS/ratings data are not favoured - this is a finder), a typo in one word
+// still finds the course (fallback to 4-letter prefixes), 15 results, Enter opens the first,
+// and every row shows the Round Rating chip.
+const STATE_WORDS = Object.entries(STATES).map(([k, v]) => k + ':' + v.toLowerCase().replace(/[^a-z ]/g, '')).join(',');
 export const searchJs = `(function(){var box=document.getElementById('course-search');if(!box)return;var inp=box.querySelector('input'),res=box.querySelector('.results'),rows=null,loading=false;
-function slug(s){return s.toLowerCase()}
-function load(cb){if(rows){cb();return}if(loading)return;loading=true;fetch('/courses/index.txt').then(function(r){return r.text()}).then(function(t){rows=t.split('\\n').filter(Boolean).map(function(l){var p=l.split('|');return{st:p[0],id:p[1],name:p[2],city:p[3],k:slug(p[2]+' '+p[3]+' '+p[0])}});cb()}).catch(function(){loading=false})}
-function esc(s){return s.replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
-function show(){var q=slug(inp.value.trim());if(q.length<2){res.style.display='none';return}var terms=q.split(/\\s+/),out=[];for(var i=0;i<rows.length&&out.length<12;i++){var r=rows[i],ok=true;for(var j=0;j<terms.length;j++){if(r.k.indexOf(terms[j])<0){ok=false;break}}if(ok)out.push(r)}
-res.innerHTML=out.length?out.map(function(r){var st=r.st?r.st.toLowerCase():'other';return'<a href="/courses/'+st+'/'+r.id+'/">'+esc(r.name)+'<small>'+esc(r.city)+(r.st?', '+r.st:'')+'</small></a>'}).join(''):'<a>No match — you can add a course inside the app.</a>';res.style.display='block'}
-inp.addEventListener('focus',function(){load(function(){})});inp.addEventListener('input',function(){load(show);if(rows)show()});document.addEventListener('click',function(e){if(!box.contains(e.target))res.style.display='none'})})();`;
+var SN={};'${STATE_WORDS}'.split(',').forEach(function(p){var i=p.indexOf(':');SN[p.slice(0,i)]=p.slice(i+1)});
+function norm(s){return (s||'').toLowerCase().replace(/&/g,' and ').replace(/[\\u2018\\u2019']/g,'').replace(/[^a-z0-9]+/g,' ').replace(/\\s+/g,' ').trim()}
+function load(cb){if(rows){cb();return}if(loading)return;loading=true;fetch('/courses/index.txt').then(function(r){return r.text()}).then(function(t){rows=t.split('\\n').filter(Boolean).map(function(l){var p=l.split('|');var st=p[0]||'';return{st:st,id:p[1],name:p[2],city:p[3]||'',rr:p[4]||'',n:norm(p[2]),c:norm(p[3]),s:(st.toLowerCase()+' '+(SN[st]||''))}});cb()}).catch(function(){loading=false})}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function hit(hay,t){if(!hay)return 0;if(hay===t)return 4;if(hay.indexOf(t+' ')===0)return 3;if(hay.indexOf(' '+t)>=0||hay.indexOf(t)===0)return 2;if(hay.indexOf(t)>=0)return 1;return 0}
+function score(r,terms){var sc=0;for(var j=0;j<terms.length;j++){var t=terms[j],a=hit(r.n,t),b=hit(r.c,t),c=hit(r.s,t);if(!a&&!b&&!c)return 0;sc+=a*10+b*4+c*2}return sc}
+function rank(q){var terms=q.split(' '),out=[];for(var i=0;i<rows.length;i++){var r=rows[i],sc=score(r,terms);if(sc){if(r.n===q)sc+=100;else if(r.n.indexOf(q)===0)sc+=40;out.push([sc,r])}}out.sort(function(x,y){return y[0]-x[0]||x[1].n.length-y[1].n.length});return out.slice(0,15).map(function(x){return x[1]})}
+function chip(rr){if(!rr)return'';var p=rr.split('~');return'<span class="rr">\\u2605 '+(p[0]?esc(p[0])+' ':'')+'<small>('+esc(p[1]||'')+')</small></span>'}
+function show(){var q=norm(inp.value);if(q.length<2){res.style.display='none';return}var out=rank(q);
+if(!out.length&&q.length>=5){var q2=q.split(' ').map(function(t){return t.length>4?t.slice(0,4):t}).join(' ');out=rank(q2)}
+res.innerHTML=(out.length?out.map(function(r){var st=r.st?r.st.toLowerCase():'other';return'<a href="/courses/'+st+'/'+r.id+'/">'+esc(r.name)+chip(r.rr)+'<small>'+esc(r.city)+(r.st?(r.city?', ':'')+r.st:'')+'</small></a>'}).join(''):'<a class="none">No match for \\u201c'+esc(inp.value.trim())+'\\u201d \\u2014 try fewer words, or add the course inside the app in a couple of minutes.</a>');res.style.display='block'}
+inp.addEventListener('focus',function(){load(function(){})});inp.addEventListener('input',function(){load(show);if(rows)show()});
+inp.addEventListener('keydown',function(e){if(e.key==='Enter'){var a=res.querySelector('a[href]');if(a&&res.style.display!=='none'){e.preventDefault();location.href=a.getAttribute('href')}}else if(e.key==='Escape'){res.style.display='none'}});
+document.addEventListener('click',function(e){if(!box.contains(e.target))res.style.display='none'})})();`;
