@@ -26,12 +26,23 @@ for (let i = 0; i < 64; i += 16) {
   rows.forEach(d => { if (d) for (const k in d) cards[k] = d[k]; });
 }
 const gps = {};
+const gpsYds = {};   // course_id -> [18] GPS hole lengths in yards
 // 2026-09-25 health check: 1,000 rows of full hole JSON per page was hitting the database's
 // statement timeout (31 x 500 in a day), so each deploy leaned on retries. 250 per page, ordered
 // so paging is stable.
 for (let off = 0; ; off += 250) {
   const rows = await get(`/course_gps?select=course_id,holes&order=course_id&limit=250&offset=${off}`);
-  rows.forEach(r => { let n = 0; for (const k in (r.holes || {})) if (r.holes[k] && r.holes[k].mid) n++; if (n) gps[r.course_id] = n; });
+  rows.forEach(r => {
+    let n = 0; for (const k in (r.holes || {})) if (r.holes[k] && r.holes[k].mid) n++; if (n) gps[r.course_id] = n;
+    // 2026-11-01 (Tyler): the website scorecard shows each hole's yardage. The library holds no
+    // per-hole yardage per tee, so this is the GPS length (mapped tee box -> green center) the
+    // app itself plays from. Keep only courses where most holes carry one.
+    try {
+      const L = []; let have = 0;
+      for (let h = 1; h <= 18; h++) { const v = r.holes && r.holes[String(h)] && Number(r.holes[String(h)].length); if (v > 0) { L[h - 1] = Math.round(v); have++; } else L[h - 1] = null; }
+      if (have >= 9) gpsYds[r.course_id] = L;
+    } catch (e) {}
+  });
   if (rows.length < 250) break;
 }
 const contact = {};
@@ -64,8 +75,14 @@ for (const c of [...seed, ...lib]) {
   const d = detOvr && detOvr[c.id]; if (d) { if (d.name) o.name = d.name; if (d.city != null) o.city = d.city; if (d.st) o.st = d.st.toUpperCase(); }
   if (!o.st && /,\s*([A-Z]{2})$/.test(o.city)) { o.st = RegExp.$1; o.city = o.city.replace(/,\s*[A-Z]{2}$/, ''); }
   const k = cards[c.id];
-  if (k) { o.pars = k.pars; o.sis = k.sis; o.tees = (k.tees || []).filter(t => t && (t.rating || t.slope || t.yards)).map(t => ({ label: t.label, rating: t.rating, slope: t.slope, yards: t.yards, ratingW: t.ratingW, slopeW: t.slopeW })); o.updatedAt = k.updatedAt; }
+  // 2026-11-01 (Tyler: "Why is the yardage for Buffalo Creek missing on the website?"): the
+  // seed scorecards (Buffalo Creek, Firewheel, Waterview, Woodbridge, the Michigan set) store a
+  // tee's length as `yardage`; user-entered tees store `yards`. The app reads both; the site
+  // only read `yards`, so those ten courses showed "—". Read both here too.
+  const _yds = t => (t.yards != null && t.yards !== '') ? Number(t.yards) || null : ((t.yardage != null && t.yardage !== '') ? Number(t.yardage) || null : null);
+  if (k) { o.pars = k.pars; o.sis = k.sis; o.tees = (k.tees || []).filter(t => t && (t.rating || t.slope || _yds(t))).map(t => ({ label: t.label, rating: t.rating, slope: t.slope, yards: _yds(t), ratingW: t.ratingW, slopeW: t.slopeW })); o.updatedAt = k.updatedAt; }
   if (gps[c.id]) o.greens = gps[c.id];
+  if (gpsYds[c.id]) { const nH = Array.isArray(o.pars) ? o.pars.length : 18; o.gpsYds = gpsYds[c.id].slice(0, nH); }
   if (ver.has(c.id)) o.verified = true;
   const ct = contact[c.id]; if (ct) { o.phone = ct.phone; o.website = ct.website; o.address = ct.address; if (o.lat == null && ct.lat != null) { o.lat = ct.lat; o.lng = ct.lng; } }
   courses.push(o);

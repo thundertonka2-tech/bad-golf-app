@@ -24,9 +24,18 @@ function scorecard(c) {
     const idx = Array.from({ length: to - from }, (_, i) => from + i);
     return `<div class="tablewrap"><table><thead><tr><th>Hole</th>${idx.map(i => `<th>${i + 1}</th>`).join('')}<th>${label}</th></tr></thead><tbody>
 <tr><td>Par</td>${idx.map(i => `<td>${c.pars[i] ?? ''}</td>`).join('')}<td><strong>${sum(idx.map(i => c.pars[i]))}</strong></td></tr>
-${sis.length ? `<tr><td>Handicap</td>${idx.map(i => `<td>${sis[i] ?? ''}</td>`).join('')}<td></td></tr>` : ''}</tbody></table></div>`;
+${sis.length ? `<tr><td>Handicap</td>${idx.map(i => `<td>${sis[i] ?? ''}</td>`).join('')}<td></td></tr>` : ''}
+${yds ? `<tr><td>Yards (GPS)</td>${idx.map(i => `<td>${yds[i] ?? '—'}</td>`).join('')}<td><strong>${sum(idx.map(i => yds[i])).toLocaleString()}</strong></td></tr>` : ''}</tbody></table></div>`;
   };
-  if (n >= 18) return block(0, 9, 'Out') + block(9, 18, 'In') + `<p style="margin-top:8px"><strong>Total par ${sum(c.pars)}</strong>${sis.length ? ' · Handicap row = stroke index (1 is the hardest hole)' : ''}</p>`;
+  // 2026-11-01 (Tyler): show each hole's yardage. No tee set in the library carries per-hole
+  // yards, so the row is the GPS length the app plays from (mapped tee box to green center).
+  const yds = (Array.isArray(c.gpsYds) && c.gpsYds.some(v => v > 0)) ? c.gpsYds : null;
+  // Name the tee when the GPS total lands within 2% of a rated tee's yardage (Buffalo Creek's
+  // mapped boxes total exactly the Gold 7,078), otherwise just say which measurement it is.
+  let ydsTee = null;
+  if (yds && yds.every(v => v > 0)) { const tot = sum(yds); const hit = (c.tees || []).filter(t => t.yards > 0).map(t => ({ t, d: Math.abs(t.yards - tot) / t.yards })).sort((a, b) => a.d - b.d)[0]; if (hit && hit.d <= 0.02) ydsTee = hit.t.label; }
+  const notes = [sis.length ? 'Handicap row = stroke index (1 is the hardest hole)' : '', yds ? `Yards (GPS) = mapped tee box to the center of the green, as the app measures it${ydsTee ? ` (the ${esc(ydsTee)} tees)` : ''}` : ''].filter(Boolean);
+  if (n >= 18) return block(0, 9, 'Out') + block(9, 18, 'In') + `<p style="margin-top:8px"><strong>Total par ${sum(c.pars)}</strong>${notes.length ? ' · ' + notes.join(' · ') : ''}</p>`;
   return block(0, n, 'Total');
 }
 
