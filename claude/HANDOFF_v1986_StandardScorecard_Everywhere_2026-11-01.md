@@ -1,0 +1,29 @@
+# HANDOFF v1986 — the printed-card scorecard layout everywhere (2026-11-01)
+
+Tyler, with the printed Buffalo Creek card: "This is a standard layout. Make our format match it." Then: the GPS screen card, the scoring screen card and the final standings card "should all match across the app… check tourney and leagues too… make sure this fits well on the mobile device and does not make it to where it can't be closed."
+
+## Decisions (Tyler, 11/1)
+- Tee rows = the tees someone in the round is playing (every tee with yardage when nobody is on the card yet).
+- Order = the printed card: tees (longest first), Handicap, Par, players, then the forward tee (the shortest when three or more tees are shown). Its own Handicap line appears ONLY when that tee's stroke index differs from the card's (per-tee SI from `g.teeSis`); same index = no second line.
+- Phones show two stacked nines (Out / In); wider screens show one 18-across card.
+- The shareable images (group + field PNG) follow the same order.
+
+## How it works
+- `bgScFrameHtml(html, g, opts)` — the one frame. Takes any scorecard table, injects the tee / Handicap rows (`bgScInjectRows`, shaped like the table's own Par row so each surface keeps its CSS), splits the 18-across table into two nines (`bgScSplit`) and emits `<div class="bg-sc"><div class="bg-sc-wide">…</div><div class="bg-sc-stack">…</div></div>`; CSS swaps them at 700px. `opts.match` runs bgMatchViewHtml on each variant (chips in both); `opts.single` keeps only the variant for the current viewport (the editable grid, so no input exists twice).
+- `bgScTeeModel(g)` reads `g.teeYards {label: [yds]}` (stamped at round creation from the course card since v1985; `bgScEnsureTeeYards` backfills older rounds from the shard card once and repaints). Colour bands: `bgScTeeColors` (black/gold/blue/white/green/red/silver/orange/yellow/purple/brown/teal; unknown labels neutral).
+- The Board's `#scorecard` and its Score-tab copy are `<table>`s that several painters write into, so they keep the table and get a stacked twin kept in sync by a MutationObserver (`bgScTwinSetup`); on phones the table hides and the twin shows.
+
+## Surfaces changed (both files, identical app script)
+1. GPS scorecard sheet — `buildStackedScorecardHtml` now emits one 18-across `mini-sc` table (Out / In / Tot) and frames it. Also the event whole-field view from the GPS.
+2. Score screen editable grid — `buildScoreEditCard` emits 18-across with `sce-tot-out/in/tot-<pid>` cells; framed single-variant; live totals repaint includes Tot.
+3. Board + Score tab card — `renderScorecard` injects the rows; twins for `#scorecard` / `#scorecard-score-tab`.
+4. Round page / finished sheet / follow-along web page — `buildRoundScorecardHtml` framed.
+5. Public event page whole-field card — `buildEventScorecardHtml` framed (Handicap row; no tee rows — the field card has no player tee data).
+6. League week card — `lgWeekScorecard` rebuilt on `table.scorecard` with Out / In / Tot and framed.
+7. Share images — `buildScorecardCanvas` draws tee rows (banded) + Handicap above Par and the forward tee below the players; `buildFieldScorecardCanvas` moves Handicap above Par.
+8. Website course page (earlier commit): same layout; the forward-tee Handicap line dropped (one index per course in the library).
+
+## Checks
+- Real-page render (playwright on golf-app.html with Kevin's 11/1 round + Buffalo Creek yardage): round page, GPS sheet, Board twin and edit grid draw the frame at 1100px and stack at 390px; no page errors; 9-hole round OK (single table, Out + Tot).
+- No new modal / overlay containers — every sheet keeps its existing close control (the GPS sheet's ✕, the grid's Done, the league sheet's Close).
+- Guard All clear; QA = the same four pre-existing failures as v1983.

@@ -56,7 +56,8 @@ function scorecard(c) {
   if (gps) body += row('Yards (GPS)' + (gpsTee ? ' · ' + gpsTee : ''), gps, { totals: true, cls: 'sc-tee sc-gps' });
   if (sis.length) body += row('Handicap', sis, { cls: 'sc-hcp' });
   body += row('Par', c.pars, { totals: true, bold: true, cls: 'sc-par' });
-  if (forward) { body += row(forward.label || 'Tee', forward.yds, { totals: true, style: teeStyle(forward.label), cls: 'sc-tee sc-forward' }); if (sis.length) body += row('Handicap', sis, { cls: 'sc-hcp' }); }
+  // Tyler (11/1): the forward tee's own Handicap line only when its stroke index differs -- the library carries one index per course, so none here.
+  if (forward) body += row(forward.label || 'Tee', forward.yds, { totals: true, style: teeStyle(forward.label), cls: 'sc-tee sc-forward' });
   const notes = [sis.length ? 'Handicap = stroke index (1 is the hardest hole)' : '', gps ? 'Yards (GPS) = mapped tee box to the center of the green, as the app measures it' : ''].filter(Boolean);
   return `<div class="tablewrap sc-card"><table class="scorecard">${'<thead>' + head + '</thead>'}<tbody>${body}</tbody></table></div>` +
     `<p style="margin-top:8px"><strong>Total par ${sum(c.pars)}</strong>${notes.length ? ' · ' + notes.join(' · ') : ''}</p>`;
