@@ -80,7 +80,7 @@ for (const c of [...seed, ...lib]) {
   // tee's length as `yardage`; user-entered tees store `yards`. The app reads both; the site
   // only read `yards`, so those ten courses showed "—". Read both here too.
   const _yds = t => (t.yards != null && t.yards !== '') ? Number(t.yards) || null : ((t.yardage != null && t.yardage !== '') ? Number(t.yardage) || null : null);
-  if (k) { o.pars = k.pars; o.sis = k.sis; o.tees = (k.tees || []).filter(t => t && (t.rating || t.slope || _yds(t))).map(t => ({ label: t.label, rating: t.rating, slope: t.slope, yards: _yds(t), ratingW: t.ratingW, slopeW: t.slopeW })); o.updatedAt = k.updatedAt; }
+  if (k) { o.pars = k.pars; o.sis = k.sis; o.tees = (k.tees || []).filter(t => t && (t.rating || t.slope || _yds(t))).map(t => ({ label: t.label, rating: t.rating, slope: t.slope, yards: _yds(t) || ((Array.isArray(t.yds) && t.yds.every(v => v > 0)) ? t.yds.reduce((a, b) => a + b, 0) : null), ratingW: t.ratingW, slopeW: t.slopeW, yds: (Array.isArray(t.yds) && t.yds.some(v => v > 0)) ? t.yds.map(v => (v > 0 ? Math.round(v) : null)) : undefined })); o.updatedAt = k.updatedAt; }
   if (gps[c.id]) o.greens = gps[c.id];
   if (gpsYds[c.id]) { const nH = Array.isArray(o.pars) ? o.pars.length : 18; o.gpsYds = gpsYds[c.id].slice(0, nH); }
   if (ver.has(c.id)) o.verified = true;

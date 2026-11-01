@@ -25,11 +25,16 @@ function scorecard(c) {
     return `<div class="tablewrap"><table><thead><tr><th>Hole</th>${idx.map(i => `<th>${i + 1}</th>`).join('')}<th>${label}</th></tr></thead><tbody>
 <tr><td>Par</td>${idx.map(i => `<td>${c.pars[i] ?? ''}</td>`).join('')}<td><strong>${sum(idx.map(i => c.pars[i]))}</strong></td></tr>
 ${sis.length ? `<tr><td>Handicap</td>${idx.map(i => `<td>${sis[i] ?? ''}</td>`).join('')}<td></td></tr>` : ''}
+${teeRows.map(t => `<tr><td>${esc(t.label || 'Tee')}</td>${idx.map(i => `<td>${t.yds[i] ?? '—'}</td>`).join('')}<td><strong>${sum(idx.map(i => t.yds[i])).toLocaleString()}</strong></td></tr>`).join('')}
 ${yds ? `<tr><td>Yards (GPS)</td>${idx.map(i => `<td>${yds[i] ?? '—'}</td>`).join('')}<td><strong>${sum(idx.map(i => yds[i])).toLocaleString()}</strong></td></tr>` : ''}</tbody></table></div>`;
   };
   // 2026-11-01 (Tyler): show each hole's yardage. No tee set in the library carries per-hole
   // yards, so the row is the GPS length the app plays from (mapped tee box to green center).
-  const yds = (Array.isArray(c.gpsYds) && c.gpsYds.some(v => v > 0)) ? c.gpsYds : null;
+  // 2026-11-01 (Tyler, "scope it and build it"): per-tee hole yardage from the course card (filled
+  // from the course's GolfPass scorecard by scripts/hole_yards_pull.mjs), longest tee first. When
+  // the card has them the GPS row is redundant and is dropped.
+  const teeRows = (c.tees || []).filter(t => Array.isArray(t.yds) && t.yds.length >= n && t.yds.slice(0, n).every(v => v > 0)).slice().sort((a, b) => sum(b.yds) - sum(a.yds));
+  const yds = (!teeRows.length && Array.isArray(c.gpsYds) && c.gpsYds.some(v => v > 0)) ? c.gpsYds : null;
   // Name the tee when the GPS total lands within 2% of a rated tee's yardage (Buffalo Creek's
   // mapped boxes total exactly the Gold 7,078), otherwise just say which measurement it is.
   let ydsTee = null;
