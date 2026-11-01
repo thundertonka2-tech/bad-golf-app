@@ -17,31 +17,49 @@ export function courseFacts(c) {
   return { holes, par, tees, top, full };
 }
 
+// Tee colour bands for the scorecard rows -- the printed card's look. Unknown labels stay neutral.
+const TEE_COLORS = [
+  [/\b(black|championship|tips)\b/i, '#1f2933', '#fff'], [/\bgold\b/i, '#d4a72c', '#1f2933'], [/\bblue\b/i, '#2c5aa0', '#fff'],
+  [/\bwhite\b/i, '#ffffff', '#1f2933'], [/\bgreen\b/i, '#6b8f3a', '#fff'], [/\bred\b/i, '#b23a3a', '#fff'], [/\bsilver|grey|gray\b/i, '#9aa4ae', '#1f2933'],
+  [/\borange|copper\b/i, '#d97a2b', '#fff'], [/\byellow\b/i, '#e3c030', '#1f2933'], [/\bpurple\b/i, '#6a4c93', '#fff'], [/\bbrown|tan\b/i, '#8a6a3f', '#fff'], [/\bteal\b/i, '#2a8f8f', '#fff']
+];
+function teeStyle(label) {
+  const hit = TEE_COLORS.find(([re]) => re.test(label || ''));
+  return hit ? `style="background:${hit[1]};color:${hit[2]}"` : '';
+}
+// 2026-11-01 (Tyler, with the printed Buffalo Creek card): "This is a standard layout. Make our
+// format match it." One card, all 18 holes across with Out / In / Tot; the longer tees banded in
+// their colours on top, then Handicap and Par; the forward (shortest) tee under Par with its own
+// handicap line, the way the printed card carries it. Per-tee yards come from the card's tees[].yds
+// (GolfPass); a course with none yet shows the single GPS row instead.
 function scorecard(c) {
   if (!c.pars || !c.pars.length) return '';
-  const n = c.pars.length, sis = c.sis || [];
-  const block = (from, to, label) => {
-    const idx = Array.from({ length: to - from }, (_, i) => from + i);
-    return `<div class="tablewrap"><table><thead><tr><th>Hole</th>${idx.map(i => `<th>${i + 1}</th>`).join('')}<th>${label}</th></tr></thead><tbody>
-<tr><td>Par</td>${idx.map(i => `<td>${c.pars[i] ?? ''}</td>`).join('')}<td><strong>${sum(idx.map(i => c.pars[i]))}</strong></td></tr>
-${sis.length ? `<tr><td>Handicap</td>${idx.map(i => `<td>${sis[i] ?? ''}</td>`).join('')}<td></td></tr>` : ''}
-${teeRows.map(t => `<tr><td>${esc(t.label || 'Tee')}</td>${idx.map(i => `<td>${t.yds[i] ?? '—'}</td>`).join('')}<td><strong>${sum(idx.map(i => t.yds[i])).toLocaleString()}</strong></td></tr>`).join('')}
-${yds ? `<tr><td>Yards (GPS)</td>${idx.map(i => `<td>${yds[i] ?? '—'}</td>`).join('')}<td><strong>${sum(idx.map(i => yds[i])).toLocaleString()}</strong></td></tr>` : ''}</tbody></table></div>`;
-  };
-  // 2026-11-01 (Tyler): show each hole's yardage. No tee set in the library carries per-hole
-  // yards, so the row is the GPS length the app plays from (mapped tee box to green center).
-  // 2026-11-01 (Tyler, "scope it and build it"): per-tee hole yardage from the course card (filled
-  // from the course's GolfPass scorecard by scripts/hole_yards_pull.mjs), longest tee first. When
-  // the card has them the GPS row is redundant and is dropped.
+  const n = c.pars.length, sis = c.sis || [], nine = n < 18;
   const teeRows = (c.tees || []).filter(t => Array.isArray(t.yds) && t.yds.length >= n && t.yds.slice(0, n).every(v => v > 0)).slice().sort((a, b) => sum(b.yds) - sum(a.yds));
-  const yds = (!teeRows.length && Array.isArray(c.gpsYds) && c.gpsYds.some(v => v > 0)) ? c.gpsYds : null;
-  // Name the tee when the GPS total lands within 2% of a rated tee's yardage (Buffalo Creek's
-  // mapped boxes total exactly the Gold 7,078), otherwise just say which measurement it is.
-  let ydsTee = null;
-  if (yds && yds.every(v => v > 0)) { const tot = sum(yds); const hit = (c.tees || []).filter(t => t.yards > 0).map(t => ({ t, d: Math.abs(t.yards - tot) / t.yards })).sort((a, b) => a.d - b.d)[0]; if (hit && hit.d <= 0.02) ydsTee = hit.t.label; }
-  const notes = [sis.length ? 'Handicap row = stroke index (1 is the hardest hole)' : '', yds ? `Yards (GPS) = mapped tee box to the center of the green, as the app measures it${ydsTee ? ` (the ${esc(ydsTee)} tees)` : ''}` : ''].filter(Boolean);
-  if (n >= 18) return block(0, 9, 'Out') + block(9, 18, 'In') + `<p style="margin-top:8px"><strong>Total par ${sum(c.pars)}</strong>${notes.length ? ' · ' + notes.join(' · ') : ''}</p>`;
-  return block(0, n, 'Total');
+  const gps = (!teeRows.length && Array.isArray(c.gpsYds) && c.gpsYds.some(v => v > 0)) ? c.gpsYds : null;
+  let gpsTee = null;
+  if (gps && gps.every(v => v > 0)) { const tot = sum(gps); const hit = (c.tees || []).filter(t => t.yards > 0).map(t => ({ t, d: Math.abs(t.yards - tot) / t.yards })).sort((a, b) => a.d - b.d)[0]; if (hit && hit.d <= 0.02) gpsTee = hit.t.label; }
+  const front = Array.from({ length: Math.min(9, n) }, (_, i) => i), back = nine ? [] : Array.from({ length: 9 }, (_, i) => 9 + i);
+  const seg = (vals, idx) => idx.map(i => `<td>${vals[i] ?? ''}</td>`).join('');
+  const tot = (vals, idx, bold) => `<td class="sc-sub">${bold ? '<strong>' : ''}${sum(idx.map(i => vals[i]))}${bold ? '</strong>' : ''}</td>`;   // plain 7078 like the printed card
+  const row = (label, vals, opts) => {
+    const o = opts || {}; const totals = !!o.totals;
+    return `<tr class="${o.cls || ''}" ${o.style || ''}><th scope="row"${o.style ? ' style="background:inherit;color:inherit"' : ''}>${esc(label)}</th>${seg(vals, front)}${totals ? tot(vals, front, o.bold) : '<td class="sc-sub"></td>'}` +
+      (nine ? '' : `${seg(vals, back)}${totals ? tot(vals, back, o.bold) : '<td class="sc-sub"></td>'}`) +
+      `${totals ? tot(vals, front.concat(back), true) : '<td class="sc-sub"></td>'}</tr>`;
+  };
+  const head = `<tr><th>Hole</th>${front.map(i => `<th>${i + 1}</th>`).join('')}<th class="sc-sub">Out</th>` + (nine ? '' : `${back.map(i => `<th>${i + 1}</th>`).join('')}<th class="sc-sub">In</th>`) + `<th class="sc-sub">Tot</th></tr>`;
+  const forward = teeRows.length >= 3 ? teeRows[teeRows.length - 1] : null;
+  const upper = forward ? teeRows.slice(0, -1) : teeRows;
+  let body = '';
+  upper.forEach(t => { body += row(t.label || 'Tee', t.yds, { totals: true, style: teeStyle(t.label), cls: 'sc-tee' }); });
+  if (gps) body += row('Yards (GPS)' + (gpsTee ? ' · ' + gpsTee : ''), gps, { totals: true, cls: 'sc-tee sc-gps' });
+  if (sis.length) body += row('Handicap', sis, { cls: 'sc-hcp' });
+  body += row('Par', c.pars, { totals: true, bold: true, cls: 'sc-par' });
+  if (forward) { body += row(forward.label || 'Tee', forward.yds, { totals: true, style: teeStyle(forward.label), cls: 'sc-tee sc-forward' }); if (sis.length) body += row('Handicap', sis, { cls: 'sc-hcp' }); }
+  const notes = [sis.length ? 'Handicap = stroke index (1 is the hardest hole)' : '', gps ? 'Yards (GPS) = mapped tee box to the center of the green, as the app measures it' : ''].filter(Boolean);
+  return `<div class="tablewrap sc-card"><table class="scorecard">${'<thead>' + head + '</thead>'}<tbody>${body}</tbody></table></div>` +
+    `<p style="margin-top:8px"><strong>Total par ${sum(c.pars)}</strong>${notes.length ? ' · ' + notes.join(' · ') : ''}</p>`;
 }
 
 function teesTable(tees) {
@@ -79,7 +97,7 @@ export function coursePage(c, nearby) {
     ${c.rr && c.rr.n ? `<div class="stat stat-rr"><b>\u2605 ${c.rr.avg != null ? c.rr.avg.toFixed(1) : '\u2014'}</b><small>Round Rating (${c.rr.n} rating${c.rr.n === 1 ? '' : 's'})</small></div>` : ''}
   </div>
   ${c.rr && c.rr.n ? `<p class="rr-line">Players who scored a round here in the Bad Golf App rate it ${c.rr.avg != null ? `<strong>\u2605 ${c.rr.avg.toFixed(1)} out of 5</strong> across ${c.rr.n} ratings` : `\u2014 ${c.rr.n} rating${c.rr.n === 1 ? '' : 's'} so far (the average shows after 3)`}. Rate it yourself after your next round.</p>` : ''}
-  <div class="prose">
+  <div class="prose has-sc">
     ${tees.length ? `<h2>Tees, course rating &amp; slope</h2>${teesTable(tees)}` : ''}
     ${c.pars && c.pars.length ? `<h2 style="margin-top:1.4em">Scorecard</h2>${scorecard(c)}` : ''}
     <h2>Play ${esc(c.name)} with Bad Golf App</h2>
