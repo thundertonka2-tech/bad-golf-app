@@ -63,6 +63,7 @@ function courseFor(mode) {
 const oN = g => (g.holes === 9 || g.pars.filter(x => x != null).length === 9) ? 9 : 18;
 const oSeq = g => { const n = oN(g); let s = parseInt(g.startHole, 10); if (!(s >= 1 && s <= n)) s = 1; const a = []; for (let i = 0; i < n; i++) a.push(((s - 1 + i) % n) + 1); return a; };
 const oPos = (g, h) => oSeq(g).indexOf(h);
+const oWPos = (g, h) => { const k = oPos(g, h); return k >= 0 ? k : h - 1; };   // a hole outside the round keeps its old place
 const oActive = (g, pid, h) => { const L = g.leftRound && g.leftRound.byId && g.leftRound.byId[pid]; if (!(L > 0)) return true; return oPos(g, h) <= oPos(g, L); };
 const oPl = (g, id) => g.players.find(p => p.id === id);
 const oPar = (g, pid, i) => { const p = oPl(g, pid); const t = g.teePars && p && g.teePars[p.teeLabel]; return (t && t[i] != null) ? t[i] : g.pars[i]; };
@@ -86,10 +87,11 @@ function oBanker(g, opts) {
   opts = opts || {};
   const cfg = g.games.banker, n = oN(g), parts = oParts(g, cfg), m = zero(g);
   const bd = g.bankerData || { holes: {}, picks: {} };
-  // House rule (Tyler): loser picks = last 3 holes PLAYED. Setup "Hole 16 (last 3)" therefore means the last
-  // three played on any round length; 13 = last 6, 10 = back nine (last 9 of an 18).
+  // House rule (Tyler) + DECISIONS v2002: loser picks = the last (19 - loserStart) holes PLAYED on any round
+  // length: 16 = last 3, 13 = last 6, 10 = last 9 (the whole of a nine), 99 = never.
   const ls = cfg.loserStart || 16;
-  const loserFromPos = (n === 18) ? ls : (ls === 16 ? n - 2 : ls);   // 1-based play position the phase starts on
+  const lastN = 19 - ls;
+  const loserFromPos = lastN > 0 ? (n - lastN + 1) : Infinity;   // 1-based play position the phase starts on
   const bankerFor = hole => {
     const act = parts.filter(p => oActive(g, p.id, hole)); if (!act.length) return null;
     const phase = cfg.mode === 'pick' ? true : (oPos(g, hole) + 1 >= loserFromPos);
@@ -230,7 +232,7 @@ function o3pt(g, key, table) {
 const splixTable = s => { const b = Math.min(...s), w = Math.max(...s), bc = s.filter(x => x === b).length, wc = s.filter(x => x === w).length; if (bc === 3) return [2, 2, 2]; if (bc === 2) return s.map(x => x === b ? 3 : 0); if (wc === 2) return s.map(x => x === b ? 4 : 1); return s.map(x => x === b ? 4 : (x === w ? 0 : 2)); };
 // Niners per the in-app help: "win a hole outright by 2+ strokes and you sweep all 9" (Blitz).
 const ninersTable = (s, cfg) => { const b = Math.min(...s), w = Math.max(...s), bc = s.filter(x => x === b).length, wc = s.filter(x => x === w).length; const srt = s.slice().sort((x, y) => x - y);
-  if (cfg.blitz && bc === 1 && (process.env.APP_RULES ? wc === 1 : true) && srt[1] - srt[0] >= 2) return s.map(x => x === b ? 9 : 0);
+  if (cfg.blitz && bc === 1 && srt[1] - srt[0] >= 2) return s.map(x => x === b ? 9 : 0);   // DECISIONS #4: 3-5-5 pays 9-0-0
   if (bc === 3) return [3, 3, 3]; if (bc === 2) return s.map(x => x === b ? 4 : 1); if (wc === 2) return s.map(x => x === b ? 5 : 2); return s.map(x => x === b ? 5 : (x === w ? 1 : 3)); };
 function oHighLow(g, ownTeePar) {
   const cfg = g.games.highLow, A = cfg.teamA.map(id => oPl(g, id)), B = cfg.teamB.map(id => oPl(g, id)), m = zero(g); const n = oN(g);
@@ -287,7 +289,7 @@ function oWolf(g) {
   const cfg = g.games.wolf, P0 = oParts(g, cfg), m = zero(g); if (P0.length < 3) return m;
   for (let i = 0; i < 18; i++) {
     const P = P0.filter(p => oActive(g, p.id, i + 1)); if (P.length < 3) continue;
-    const cap = P[i % P.length], hd = ((g.wolfData || {}).holes || {})[i + 1] || {}; if (!hd.choice) continue;
+    const cap = P[oWPos(g, i + 1) % P.length], hd = ((g.wolfData || {}).holes || {})[i + 1] || {}; if (!hd.choice) continue;   // DECISIONS: play order
     if (P.some(p => oRaw(g, p.id, i) == null)) continue;
     let t1, t2, mult;
     if (hd.choice === 'lone' || hd.choice === 'blind') { t1 = [cap]; t2 = P.filter(p => p !== cap); mult = hd.choice === 'lone' ? 2 : 3; }
@@ -339,8 +341,8 @@ function oTeamQuota(g) {
     if (at > bt) A.forEach(p => m[p.id] += pot / A.length); else if (bt > at) B.forEach(p => m[p.id] += pot / B.length); else A.concat(B).forEach(p => m[p.id] += bi); return m; }
   const x = (at - bt) * (cfg.value || 0); A.forEach(p => m[p.id] += x); B.forEach(p => m[p.id] -= x); return m;
 }
-const ORACLE = { banker: oBanker, vegas: oVegas, dvegas: oDVegas, sixes: g => oSixes(g, false), splixSixes: g => o3pt(g, 'splixSixes', splixTable), niners: g => o3pt(g, 'niners', ninersTable),
-  highLow: g => oHighLow(g, false), animals: g => oAnimals(g, false), hotPotato: oHotPotato, wolf: oWolf, stableford: g => oPointsGame(g, 'stableford'), quota: g => oPointsGame(g, 'quota'), teamQuota: oTeamQuota };
+const ORACLE = { banker: oBanker, vegas: oVegas, dvegas: oDVegas, sixes: g => oSixes(g, true), splixSixes: g => o3pt(g, 'splixSixes', splixTable), niners: g => o3pt(g, 'niners', ninersTable),
+  highLow: g => oHighLow(g, true), animals: g => oAnimals(g, false), hotPotato: oHotPotato, wolf: oWolf, stableford: g => oPointsGame(g, 'stableford'), quota: g => oPointsGame(g, 'quota'), teamQuota: oTeamQuota };
 
 // ───────────────────────── round builder ─────────────────────────
 let CODE = 0;
@@ -430,7 +432,7 @@ function applyGame(g, key, o) {
 }
 
 // Wolf partner == captain is not reachable from the UI; strip it so the oracle stays on real inputs.
-function fixWolf(g) { if (!g.wolfData) return; const P0 = oParts(g, g.games.wolf); for (const h in g.wolfData.holes) { const hd = g.wolfData.holes[h]; if (hd.choice !== 'partner') continue; const Pa = P0.filter(p => oActive(g, p.id, +h)); if (Pa.length < 3) continue; const cap = Pa[(h - 1) % Pa.length]; if (hd.partnerId === cap.id) hd.partnerId = Pa.find(p => p !== cap).id; } }
+function fixWolf(g) { if (!g.wolfData) return; const P0 = oParts(g, g.games.wolf); for (const h in g.wolfData.holes) { const hd = g.wolfData.holes[h]; if (hd.choice !== 'partner') continue; const Pa = P0.filter(p => oActive(g, p.id, +h)); if (Pa.length < 3) continue; const cap = Pa[oWPos(g, +h) % Pa.length]; if (hd.partnerId === cap.id) hd.partnerId = Pa.find(p => p !== cap).id; } }
 
 function runCase(key, g, axes, viaAll) {
   roundHoles(g); if (key === 'wolf') fixWolf(g);
@@ -515,6 +517,20 @@ function tcase(game, label, got, want, ok, extra) { T.push({ game, label, ok });
   g.bankerData = { holes: {}, picks: { 7: c, 8: c, 9: c } }; roundHoles(g);   // loser C picks himself on the last three
   const r = CALC.banker(g); const bankers = r.holeResults.map(x => x.bankerId === c ? 'C' : x.bankerId === a ? 'A' : 'B').join('');
   tcase('banker', '9-hole round: loser picks honoured on the last 3 holes played (setup loserStart=16)', bankers, 'ABCABCCCC', bankers === 'ABCABCCCC'); }
+// T2b loserStart 13 on a nine = last 6 holes played (positions 4-9); 99 = never
+{ const g = hand('BK9b', [{ scores: flat(9, 4) }, { scores: flat(9, 5) }, { scores: flat(9, 6) }], { pars: flat(9, 4), sis: [1, 2, 3, 4, 5, 6, 7, 8, 9], holes: 9, nineMode: 'front9' }); const [a, b, c] = ids(g);
+  g.games.banker = Object.assign({ net: false, mode: 'rotation', loserStart: 13, birdieDouble: 'off', birdieBasis: 'gross', order: 'setup', defaultBet: 1 }, P(g));
+  g.bankerData = { holes: {}, picks: { 3: c, 4: c, 5: c, 6: c, 7: c, 8: c, 9: c } }; roundHoles(g);
+  const nm = x => x.bankerId === c ? 'C' : x.bankerId === a ? 'A' : 'B';
+  const bk = CALC.banker(g).holeResults.map(nm).join(''); tcase('banker', '9-hole round, loserStart 13: picks honoured on the last 6 holes played', bk, 'ABCCCCCCC', bk === 'ABCCCCCCC');
+  g.games.banker.loserStart = 99; const bk2 = CALC.banker(g).holeResults.map(nm).join(''); tcase('banker', '9-hole round, loserStart 99: never (always rotate)', bk2, 'ABCABCABC', bk2 === 'ABCABCABC'); }
+// T2c 18 holes start on 10, loserStart 16: the last 3 PLAYED are holes 7-9
+{ const g = hand('BK18s', [{ scores: flat(18, 4) }, { scores: flat(18, 5) }, { scores: flat(18, 6) }], { startHole: 10 }); const [a, b, c] = ids(g);
+  g.games.banker = Object.assign({ net: false, mode: 'rotation', loserStart: 16, birdieDouble: 'off', birdieBasis: 'gross', order: 'setup', defaultBet: 1 }, P(g));
+  g.bankerData = { holes: {}, picks: { 6: b, 7: c, 8: c, 9: c, 16: b } }; roundHoles(g);   // B's picks on 6 / 16 are outside the phase
+  const nm = id => id === a ? 'A' : id === b ? 'B' : 'C'; const ph = {}; CALC.banker(g).holeResults.forEach(x => ph[x.hole] = nm(x.bankerId));
+  const got = [6, 7, 8, 9, 16].map(h => ph[h]).join('');
+  tcase('banker', 'start on 10, loserStart 16: picks honoured on holes 7-9 only (6 and 16 rotate)', got, 'CCCCA', got === 'CCCCA'); }
 // T3 Banker birdie against own tee par; banker birdie doubles every match; net birdie doesn't double (gross default)
 { const g = hand('BKTEE', [{ scores: flat(18, 4) }, { scores: [4].concat(flat(17, 4)), tee: 'Red' }, { scores: flat(18, 5) }], { teePars: { Red: [5].concat(flat(17, 4)) } }); const [a, b, c] = ids(g);
   g.games.banker = Object.assign({ net: false, mode: 'pick', birdieDouble: 'anyone', birdieMag: 'triple-eagle', birdieBasis: 'gross', defaultBet: 5 }, P(g));
@@ -538,6 +554,11 @@ function tcase(game, label, got, want, ok, extra) { T.push({ game, label, ok });
   g.games.sixes = Object.assign({ value: 5, net: false }, P(g)); roundHoles(g);
   const m = CALC.sixes(g).money; const want = oSixes(JSON.parse(JSON.stringify(g)), true);
   tcase('sixes', 'start on 10: hole 10 is in segment 1 (A&B), as Vegas 6-6-6 does', m, want, sameMoney(m, want, ids(g)), 'physical segments give A&C the point'); }
+// T6b Sixes on a pick-a-start (hole 16) 18: segment 1 = 16,17,18,1,2,3
+{ const sc = [flat(18, 4), flat(18, 4), flat(18, 4), flat(18, 4)]; sc[0][1] = 3; // A birdies hole 2 (5th played)
+  const g = hand('SXP', sc.map(s => ({ scores: s })), { startHole: 16, nineMode: 'all18' }); const [a, b, c, d] = ids(g);
+  g.games.sixes = Object.assign({ value: 2, net: false }, P(g)); roundHoles(g);
+  const m = CALC.sixes(g).money; tcase('sixes', 'pick-a-start 16: hole 2 is in segment 1 (A&B win)', m, { [a]: 2, [b]: 2, [c]: -2, [d]: -2 }, m[a] === 2 && m[b] === 2 && m[c] === -2); }
 // T7 Vegas 6-6-6 vs 6's on the same start-on-10 card: Vegas puts hole 10 in its first partnership
 { const sc = [flat(18, 4), flat(18, 4), flat(18, 4), flat(18, 4)]; sc[0][9] = 3;
   const g = hand('VGS', sc.map(s => ({ scores: s })), { startHole: 10 }); g.games.vegas = Object.assign({ value: 1, net: false, birdieBasis: 'gross', rotate: 'rotate' }, P(g)); roundHoles(g);
@@ -549,7 +570,15 @@ function tcase(game, label, got, want, ok, extra) { T.push({ game, label, ok });
   tcase('highLow', 'birdie double judged on the winning ball\'s OWN tee par', m[a], 36, m[a] === 36); }
 // T9 Wolf rotation on start-on-10, 4 players: wolf on the FIRST hole played should be player 1 (setup order)
 { const g = hand('WLS', [0, 1, 2, 3].map(() => ({ scores: flat(18, 4) })), { startHole: 10 }); g.games.wolf = Object.assign({ value: 1 }, P(g)); g.wolfData = { holes: { 10: { choice: 'lone' } } }; g.scores[g.players[0].id][9] = 3; roundHoles(g);
-  const r = CALC.wolf(g); const cap = r.holeResults[0] && r.holeResults[0].captain; T.push({ game: 'wolf', label: 'start-on-10 captain on first hole played = ' + cap + ' (physical rotation; OPEN RULE QUESTION, not counted)', ok: true }); }
+  const r = CALC.wolf(g); const cap = r.holeResults[0] && r.holeResults[0].captain; const bn = F('wolfCaptainForHole')(g, 10);
+  tcase('wolf', 'start-on-10: captain on the first hole played is player 1, banner and money agree', [cap, bn && bn.name], ['H0 X', 'H0 X'], cap === 'H0 X' && bn && bn.name === 'H0 X'); }
+// T9b Wolf with 5 players keeps the even rotation (players 1-3 wolf 4 times, 4-5 three times)
+{ const g = hand('WL5', [0, 1, 2, 3, 4].map(() => ({ scores: flat(18, 4) }))); g.games.wolf = Object.assign({ value: 1 }, P(g)); roundHoles(g);
+  const wc = F('wolfCaptainForHole'); const cnt = g.players.map(p => 0); for (let h = 1; h <= 18; h++) { const c = wc(g, h); cnt[g.players.indexOf(c)]++; }
+  tcase('wolf', '5 players: rotation 4-4-4-3-3 unchanged', cnt, [4, 4, 4, 3, 3], cnt.join() === '4,4,4,3,3'); }
+// T9c Wolf on a 9-hole course started on hole 4: hole 4 (first played) is player 1, hole 3 (last played) player 1 again (9th)
+{ const g = hand('WL9', [0, 1, 2, 3].map(() => ({ scores: flat(9, 4).concat(flat(9, null)) })), { pars: flat(9, 4), sis: [1, 2, 3, 4, 5, 6, 7, 8, 9], holes: 9, startHole: 4 }); g.games.wolf = Object.assign({ value: 1 }, P(g)); g.wolfData = { holes: { 4: { choice: 'lone' }, 3: { choice: 'lone' } } }; roundHoles(g);
+  const r = CALC.wolf(g); const caps = [4, 3].map(h => (r.holeResults.find(x => x.hole === h) || {}).captain); tcase('wolf', '9-hole course started on 4: player 1 is captain on holes 4 and 3', caps, ['H0 X', 'H0 X'], caps[0] === 'H0 X' && caps[1] === 'H0 X'); }
 // T10 Stableford/Quota per-point leaver (house rule: scored on holes played only)
 { const g = hand('SFL', [{ scores: flat(18, 4) }, { scores: flat(18, 5) }, { scores: flat(9, 3).concat(flat(9, null)) }], { leftRound: { at: 1, byId: {} } }); const [a, b, c] = ids(g); g.leftRound.byId[c] = 9;
   g.games.stableford = Object.assign({ mode: 'perpoint', net: false, value: 1 }, P(g)); roundHoles(g);
