@@ -1,7 +1,7 @@
 # Bad Golf — App Store text, builds 1977 → 1991 (live build: 1976)
 
 ## Promotional text
-The scorecard now reads like the one in your cart: your tee's yardage on every hole, HCP, par and scores. Plus Round Ratings — rate a course, see how your crew rates theirs.
+The scorecard now reads like the one in your cart: your tee's yardage on every hole, HCP, par and scores. Plus Round Ratings — rate a course, see what your crew thinks.
 
 ## What's New
 A real scorecard, Round Ratings, and a cleaner finish to every round.
@@ -33,5 +33,5 @@ FIXES
 ## Notes
 - Covers v1977–v1991 (main at v1991 as of 2026-11-01, commit 2f8c1cb). The live build is v1976.
 - No native (Swift) changes in this range; web deploy and iOS build carry the same app script.
-- Promo text is 165 characters (Apple limit 170). What's New is well under 4,000.
+- Promo text is 168 characters (Apple limit 170). What's New is well under 4,000.
 - Wording follows the de-gambled rules: units, "settle", no payment terms.
