@@ -349,12 +349,31 @@ L.card(mus[0], 0, pars_plus(0)); L.card(mus[1], 1, pars_plus(0)); L.card(mus[2],
 L.finalize(w)
 D = load(L)
 tr = D['settle']['transfers']
-check('server money', 'settle whole units', 'league_money_settle transfer amounts are whole units (house rule)', all(cents(t['amount']) % 100 == 0 for t in tr),
-      'transfers %s — the client prints each with bgWhole, so P02 (owes 3.33) shows "gives 2" + "gives 2" = 4' % [(t['from'], t['to'], t['amount']) for t in tr])
+check('server money', 'settle whole units', 'LEAGUE-3: 3.33 low-net split two ways -> P02 gives 3 in whole units, balances zero-sum', all(cents(t['amount']) % 100 == 0 for t in tr) and sum(cents(t['amount']) for t in tr) == 300,
+      'transfers %s' % [(t['from'], t['to'], t['amount']) for t in tr])
 money_checks(D, 'E13', 'settle')
 
-# ---------- E14. leaver: a member who left mid-season (left_week) ----------
-st, L = base(3, money={'buyin': 0, 'weekly': {}}, members=[{'name': 'P00 Q'}, {'name': 'P01 Q'}, {'name': 'P02 Q', 'status': 'withdrawn', 'left_week': 1}])
+# ---------- E14. OPEN-L6: a member removed mid-season: later field weeks shrink ----------
+st, L = base(3, money={'buyin': 0, 'weekly': {}})
+w1 = L.week(1, sn18, pp=10); w2 = L.week(2, sn18, pp=10)
+for wk in (1, 2):
+    for i in range(3): L.hcp(wk, i, 0)
+m1 = [L.matchup(w1, i) for i in range(3)]; m2 = [L.matchup(w2, i) for i in range(3)]
+for i in range(3): L.card(m1[i], i, pars_plus(i))
+L.finalize(w1)
+L.sql.append("select public.league_remove_member('%s','active');" % L.mid[2])
+for i in range(2): L.card(m2[i], i, pars_plus(i))
+L.finalize(w2)
+D = load(L)
+w2pts = {m['a'][-2:]: (float(m['ap']) if m['ap'] is not None else None, m['st']) for m in D['mu'] if m['w'] == w2}
+w1pts = {m['a'][-2:]: float(m['ap']) for m in D['mu'] if m['w'] == w1}
+check('server standings', 'removed member (OPEN-L6)', 'week 1 (already played) untouched: 10 / 6.67 / 3.33', w1pts == {'00': 10.0, '01': 6.6667, '02': 3.3333}, str(w1pts))
+check('server standings', 'removed member (OPEN-L6)', 'week 2 field shrinks to 2: P00 10, P01 5; P02 slot void (no forfeit)', w2pts.get('00', (0,))[0] == 10 and w2pts.get('01', (0,))[0] == 5 and w2pts.get('02', (0, ''))[1] == 'void', str(w2pts))
+stf = {s_['e'][-2:]: s_ for s_ in D['st']}
+check('server standings', 'removed member (OPEN-L6)', 'removed player keeps week 1 only: 1 played, 0 absent, 10 possible', stf.get('02') and stf['02']['wp'] == 1 and stf['02']['wa'] == 0 and float(stf['02']['poss']) == 10,
+      json.dumps({k: (v['wp'], v['wa'], v['pts'], v['poss']) for k, v in stf.items()}))
+# a slot left over from before v2002 (member removed, slot not voided) is voided at finalize
+st, L = base(3, money={'buyin': 0, 'weekly': {}}, members=[{'name': 'P00 Q'}, {'name': 'P01 Q'}, {'name': 'P02 Q', 'status': 'removed', 'left_week': 1}])
 w1 = L.week(1, sn18, pp=10); w2 = L.week(2, sn18, pp=10)
 for wk in (1, 2):
     for i in range(3): L.hcp(wk, i, 0)
@@ -363,13 +382,9 @@ for i in range(2): L.card(m1[i], i, pars_plus(i)); L.card(m2[i], i, pars_plus(i)
 L.raw_card(m1[2], 2, L.mid[2], 1, pars_plus(-1), pars_plus(-1))
 L.finalize(w1); L.finalize(w2)
 D = load(L)
-stf = {s['e'][-2:]: s for s in D['st']}
-check('server standings', 'leaver', 'player who left after week 1 keeps week 1 only; week 2 not counted as absent', stf.get('02') and stf['02']['wp'] == 1 and stf['02']['wa'] == 0 and float(stf['02']['poss']) == 10,
-      json.dumps({k: (v['wp'], v['wa'], v['pts'], v['poss']) for k, v in stf.items()}))
-w2pts = {m['a'][-2:]: (m['ap'], m['st']) for m in D['mu'] if m['w'] == w2}
-check('server scoring', 'leaver', 'week 2 field: the leaver still occupies a slot -> 3-man field points (10 / 6.67) and a forfeit row', True, str(w2pts))
-lv = w2pts.get('02')
-check('OPEN-RULE probe', 'leaver field size', 'leaver\'s empty week-2 slot shrinks the field (P00 10, P01 5) rather than counting as a 3rd place', w2pts.get('01', (None,))[0] in (5, 5.0), 'week 2 points %s' % w2pts)
+w2pts = {m['a'][-2:]: (float(m['ap']) if m['ap'] is not None else None, m['st']) for m in D['mu'] if m['w'] == w2}
+check('server standings', 'removed member (OPEN-L6)', 'pre-v2002 leftover slot voided at finalize: week 2 = 10 / 5', w2pts.get('01', (0,))[0] == 5 and w2pts.get('02', (0, ''))[1] == 'void', str(w2pts))
+money_checks(D, 'E14', 'removed member')
 
 # ---------- E15. blind draw blocks the real player's skin ----------
 st, L = base(3, money={'buyin': 0, 'weekly': {'skins': {'on': True, 'amount': 5}}})
@@ -451,6 +466,76 @@ L.finalize(w1); L.finalize(w2)
 D = load(L)
 seg = {(s['seg'], s['e'][-2:]): (s['rank'], float(s['pts'])) for s in D['st']}
 check('server standings', 'split season', 'h1 = week 1 only (P00 1st), h2 = week 2 only (P01 1st), full = both (tie on 15 pts, broken)', seg[('h1', '00')][0] == 1 and seg[('h2', '01')][0] == 1 and seg[('full', '00')][1] == 15 and seg[('full', '01')][1] == 15, str(seg))
+
+# ---------- E18. LEAGUE-10 fallback: a bracket built BEFORE v2002 (no slot in result_json) ----------
+st, L = playoff_case(8, 9)
+L.sql.append("""do $$ declare w uuid; begin
+  select id into w from league_weeks where season_id='%s' and is_playoff order by week_number limit 1;
+  update league_matchups set result_json = result_json - 'slot' where week_id = w;   -- as an old build wrote it
+  update league_weeks set status='final', settings_snapshot='{"x":1}', course_snapshot='{"holes":18}' where id=w;
+  update league_matchups set a_points=1, b_points=9, status='final' where week_id=w;   -- every LOWER seed wins (upsets)
+end $$;""" % L.sid)
+L.sql.append("select public.league_advance_playoffs('%s');" % L.sid)
+semi = json.loads(psql(L.text("select json_agg(json_build_array(mu.a_entrant_id, mu.b_entrant_id)) from league_matchups mu join league_weeks w on w.id=mu.week_id where w.is_playoff and (w.format_config->>'playoff_round')::int=2 and w.season_id='%s';" % L.sid))[-1])
+got = sorted(sorted(L.mid.index(x) + 1 for x in p) for p in semi)
+check('server playoffs', 'advance 8 (pre-v2002 bracket)', 'bracket with no slot, every underdog wins: semis 8v5 and 7v6 (halves kept)', got == [[5, 8], [6, 7]], 'app semis (seeds) %s' % got)
+# and on to the final from a v2002 round 2
+st, L = playoff_case(8, 9)
+L.sql.append("""do $$ declare w uuid; begin
+  select id into w from league_weeks where season_id='%s' and is_playoff order by week_number limit 1;
+  update league_weeks set status='final', settings_snapshot='{"x":1}', course_snapshot='{"holes":18}' where id=w;
+  update league_matchups set a_points=9, b_points=1, status='final' where week_id=w;
+end $$;""" % L.sid)
+L.sql.append("select public.league_advance_playoffs('%s');" % L.sid)
+L.sql.append("""do $$ declare w uuid; begin
+  select id into w from league_weeks where season_id='%s' and is_playoff and (format_config->>'playoff_round')::int=2;
+  update league_weeks set status='final', settings_snapshot='{"x":1}', course_snapshot='{"holes":18}' where id=w;
+  update league_matchups set a_points=1, b_points=9, status='final' where week_id=w;   -- the b side wins each semi
+end $$;""" % L.sid)
+L.sql.append("select public.league_advance_playoffs('%s');" % L.sid)
+fin = json.loads(psql(L.text("select json_agg(json_build_array(mu.a_entrant_id, mu.b_entrant_id)) from league_matchups mu join league_weeks w on w.id=mu.week_id where w.is_playoff and (w.format_config->>'playoff_round')::int=3 and w.season_id='%s';" % L.sid))[-1])
+got = sorted(L.mid.index(x) + 1 for x in fin[0])
+check('server playoffs', 'advance 8 to final', 'semis 1v4 (4 wins) and 2v3 (3 wins): final is 4 v 3, one from each half', got == [3, 4], 'final seeds %s' % got)
+
+# ---------- E19. a card the commissioner TYPES for a player who really played (source 'course', no absence) is a real card ----------
+st, L = base(3, money={'buyin': 0, 'weekly': {'lowest_net': {'on': True, 'amount': 5}}})
+w = L.week(1, sn18, pp=10)
+for i in range(3): L.hcp(1, i, 0)
+mus = [L.matchup(w, i) for i in range(3)]
+L.card(mus[0], 0, pars_plus(1)); L.card(mus[1], 1, pars_plus(2))
+L.sql.append("select public.league_card_place('%s','%s',%s,NULL,'course',NULL,'{}'::uuid[],'%s',false);" % (U0, mus[2], A(pars_plus(-1)), L.mid[2]))
+L.finalize(w)
+D = load(L); ln = msum(D, 'lowest_net')
+check('server absences', 'typed-in card (source course, no absence)', 'a hand-entered card for a player who played still enters and can win the pots (P02 +10)', ln == {'00': -500, '01': -500, '02': 1000}, str(ln))
+
+# ---------- E20. settle stress: odd cents, many members, zero-sum and whole ----------
+import random as _r
+for t in range(25):
+    rr = _r.Random(900 + t); n = rr.randint(3, 9)
+    amts = [round(rr.uniform(0.5, 9.99), 2) for _ in range(3)]
+    st, L = base(n, money={'buyin': rr.choice([0, 7.5, 33.33]), 'payout': rr.choice(['winner_take_all', '70_30', '50_30_20']),
+                           'weekly': {'skins': {'on': True, 'amount': amts[0]}, 'lowest_net': {'on': True, 'amount': amts[1]}}})
+    w = L.week(1, sn18, pp=10)
+    mus = [L.matchup(w, i) for i in range(n)]
+    for i in range(n):
+        L.hcp(1, i, rr.randint(0, 20)); L.card(mus[i], i, [max(1, p + rr.choice([-1, 0, 1, 1, 2])) for p in PARS18])
+    L.finalize(w)
+    D = load(L)
+    money_checks(D, 'E20 #%d n%d' % (t, n), 'settle stress')
+
+# ---------- E21. lowest-basis league with a sub at 80%: card net uses WHS order, sub counts toward the lowest ----------
+st, L = base(3, extra={'hcp_rules_set': True, 'hcp_rules': {'basis': 'lowest', 'pct': 80}}, money={'buyin': 0, 'weekly': {}},
+             members=[{'name': 'P00 Q'}, {'name': 'P01 Q'}, {'name': 'P02 Q'}, {'name': 'Sub Q', 'role': 'sub'}])
+w = L.week(1, sn18, pp=10)
+for i, h in enumerate([12, 7, 20, 3]): L.hcp(1, i, h)
+mus = [L.matchup(w, i) for i in range(3)]
+L.sql.append("insert into league_absences(id,season_id,matchup_id,member_id,week_number,resolution,sub_member_id,current_member_id) values ('%s','%s','%s','%s',1,'sub','%s','%s');" % (uid('abs', 300), L.sid, mus[2], L.mid[2], L.mid[3], L.mid[3]))
+L.card(mus[0], 0, pars_plus(1)); L.card(mus[1], 1, pars_plus(1)); L.card(mus[2], 3, pars_plus(1))
+L.finalize(w)
+D = load(L)
+ch = {c['m'][-2:]: float(c['ch']) for c in D['cards']}
+# WHS order: low = sub 3 -> round(2.4)=2; P00 round(9.6)=10-2=8, P01 round(5.6)=6-2=4, sub round(2.4)=2-2=0
+check('server hcp', 'lowest x sub x % (Q-L1)', 'strokes on the posted cards: P00 8, P01 4, sub 0 (sub is the lowest; % first, then subtract)', ch == {'00': 8, '01': 4, '03': 0}, 'app %s' % ch)
 
 if __name__ == '__main__':
     for r in R:

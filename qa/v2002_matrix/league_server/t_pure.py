@@ -36,24 +36,33 @@ check('server hcp', 'course_handicap', 'index x allowance x applies_to (%d)' % l
 
 # 3. league_week_rules_handicap (hcp_rules: pct, basis lowest vs min_effective, noHandicaps; legacy allowance_pct)
 cases = []
-for eff in [-2.5, -0.5, 0, 0.4, 0.5, 4, 9.5, 12.5, 12.6, 22, 40]:
-    for rules in [None, {'pct': 100, 'basis': 'full'}, {'pct': 90, 'basis': 'full'}, {'pct': 80, 'basis': 'lowest'}, {'pct': 100, 'basis': 'lowest'}, {'noHandicaps': True}, {'pct': 75}]:
-        for mn in [None, -1.5, 0, 3.5, 4]:
+for eff in [-10.5, -2.5, -0.5, 0, 0.4, 0.5, 4, 9.5, 12.5, 12.6, 15, 22, 40]:
+    for rules in [None, {'pct': 100, 'basis': 'full'}, {'pct': 90, 'basis': 'full'}, {'pct': 80, 'basis': 'lowest'}, {'pct': 100, 'basis': 'lowest'}, {'pct': 90, 'basis': 'lowest'}, {'pct': 85, 'basis': 'lowest'}, {'noHandicaps': True}, {'pct': 75}]:
+        for mn in [None, -2.5, -1.5, 0, 3.5, 4, 7]:
             cases.append((eff, rules, mn))
+def whs(x): return int(math.floor(x + 0.5 + 1e-12))
 def o_rules(eff, rules, mn):
-    base = pg_round(eff)
-    if rules is None: return pg_round(base * 1.0)
+    """DECISIONS: WHS rounding (.5 up, +2.5 plays +2); lowest basis = % to each, round, subtract the lowest."""
+    base = whs(eff)
+    if rules is None: return base
     if rules.get('noHandicaps'): return 0
     pct = rules.get('pct', 100); basis = rules.get('basis', 'full')
-    if basis == 'lowest' and mn is not None: base = max(0, base - pg_round(mn))
-    return pg_round(base * pct / 100.0)
+    if basis == 'lowest' and mn is not None: return max(0, whs(base * pct / 100.0) - whs(whs(mn) * pct / 100.0))
+    return whs(base * pct / 100.0)
 vals = []
 for i, (eff, rules, mn) in enumerate(cases):
     st = {'hcp_rules_set': True, 'hcp_rules': rules} if rules is not None else {}
     vals.append("(%d,%s,%s,%s)" % (i, eff, J(st), 'NULL' if mn is None else mn))
 got = json.loads(psql("select json_agg(public.league_week_rules_handicap(x.e, x.s, x.m) order by x.o) from (values %s) x(o,e,s,m);" % ','.join(vals))[-1])
 bad = [(c, g, o_rules(*c)) for c, g in zip(cases, got) if g != o_rules(*c)]
-check('server hcp', 'rules_handicap', 'eff x rules x min (%d)' % len(cases), not bad, str(bad[:4]))
+check('server hcp', 'rules_handicap (WHS)', 'eff x rules x min (%d): WHS .5-up rounding, lowest basis = %% first, round, then subtract' % len(cases), not bad, str(bad[:4]))
+# the WHS-order example from DECISIONS: 12 and 5 at 80%% lowest -> round(9.6)=10 - round(4.0)=4 = 6 (old order gave round(7*0.8)=6; pick one that differs)
+ex = json.loads(psql("select json_build_array(public.league_week_rules_handicap(13, '{\"hcp_rules_set\":true,\"hcp_rules\":{\"basis\":\"lowest\",\"pct\":85}}', 2), public.league_week_rules_handicap(-2.5, '{}'::jsonb, null), public.league_week_rules_handicap(12.5, '{}'::jsonb, null));")[-1])
+check('server hcp', 'rules_handicap (WHS)', '+2.5 plays +2 and 12.5 plays 13 (WHS .5 up); 13 vs low 2 at 85% = 11 - 2 = 9', ex == [9, -2, 13], 'app %s' % ex)
+ex2 = json.loads(psql("select public.league_week_rules_handicap(15, '{\"hcp_rules_set\":true,\"hcp_rules\":{\"basis\":\"lowest\",\"pct\":90}}', 3);")[-1])
+check('server hcp', 'rules_handicap (WHS)', '15 vs low 3 at 90%: round(13.5)=14 - round(2.7)=3 = 11', ex2 == 11, 'app %s' % ex2)
+ex3 = json.loads(psql("select public.league_week_rules_handicap(11, '{\"hcp_rules_set\":true,\"hcp_rules\":{\"basis\":\"lowest\",\"pct\":75}}', 1);")[-1])
+check('server hcp', 'rules_handicap (WHS)', '11 vs low 1 at 75%: WHS order 8 - 1 = 7 (the old order gave round(10 x 0.75) = 8)', ex3 == 7, 'app %s' % ex3)
 # the client mirror (lgLaunchWeekRound) — same arithmetic? client: base=lgRoundHcp(eff); lowest: max(0, base - min(lgRoundHcp(effs))); hcp=lgRoundHcp(base*pct/100)
 # identical by construction for the pool min; recorded in league.js. Here: plus-handicap 'lowest' basis
 plus = json.loads(psql("select json_build_array(public.league_week_rules_handicap(-2, '{\"hcp_rules_set\":true,\"hcp_rules\":{\"basis\":\"lowest\",\"pct\":100}}', -2), public.league_week_rules_handicap(5, '{\"hcp_rules_set\":true,\"hcp_rules\":{\"basis\":\"lowest\",\"pct\":100}}', -2));")[-1])
@@ -138,8 +147,8 @@ check('server money', 'reserve', '8 reserve cases (same answers as bgReserveAmou
 
 # 9. _league_payout_fracs + bracket order
 fr = json.loads(psql("select json_build_object('wta', _league_payout_fracs('winner_take_all'), '8020', _league_payout_fracs('80_20'), '7030', _league_payout_fracs('70_30'), '6040', _league_payout_fracs('60_40'), '532', _league_payout_fracs('50_30_20'), '4321', _league_payout_fracs('40_30_20_10'), 'null', _league_payout_fracs(NULL), 'junk', _league_payout_fracs('custom'));")[-1])
-exp = {'wta': [1.0], '8020': [0.8, 0.2], '7030': [0.7, 0.3], '6040': [0.6, 0.4], '532': [0.5, 0.3, 0.2], '4321': [0.4, 0.3, 0.2, 0.1], 'null': [0.6, 0.4], 'junk': [0.6, 0.4]}
-check('server money', 'payout fracs', 'every structure sums to 1 and matches the client _FR table', all([float(x) for x in fr[k]] == exp[k] for k in exp), json.dumps(fr))
+exp = {'wta': [1.0], '8020': [0.8, 0.2], '7030': [0.7, 0.3], '6040': [0.6, 0.4], '532': [0.5, 0.3, 0.2], '4321': [0.4, 0.3, 0.2, 0.1], 'null': [1.0], 'junk': [1.0]}
+check('server money', 'payout fracs', 'every structure sums to 1; missing / unknown payout = winner-take-all (LEAGUE-4)', all([float(x) for x in fr[k]] == exp[k] for k in exp), json.dumps(fr))
 bo = json.loads(psql("select json_build_array(league_bracket_order(2), league_bracket_order(4), league_bracket_order(8), league_bracket_order(6));")[-1])
 def o_bracket(n):  # standard seeding: 1 v n, then mirrored halves
     s = [1, 2]
@@ -147,6 +156,13 @@ def o_bracket(n):  # standard seeding: 1 v n, then mirrored halves
         m = len(s) * 2 + 1; s = [x for p in s for x in (p, m - p)]
     return s
 check('server playoffs', 'bracket order', '2/4/8 standard seeding; 6 not supported', bo[0] == o_bracket(2) and bo[1] == o_bracket(4) and bo[2] == o_bracket(8) and bo[3] is None, str(bo))
+
+# league_week_min_effective: subs count (Q-L1), WHS rounding
+from lgdb import League
+L = League({'type': 'individual'}, [{'name': 'P00 Q'}, {'name': 'P01 Q'}, {'name': 'Sub Q', 'role': 'sub'}, {'name': 'Gone Q', 'status': 'removed'}])
+for i, h in enumerate([6.4, 9, 1.5, -3]): L.hcp(1, i, h)
+mn = psql(L.text("select public.league_week_min_effective('%s', 1);" % L.sid))[-1]
+check('server hcp', 'min_effective x subs', 'lowest handicap includes the sub (1.5 -> 2 WHS), ignores removed members', float(mn) == 2, 'app %s' % mn)
 
 if __name__ == '__main__':
     for r in R: print(('PASS ' if r[3] else 'FAIL ') + r[0] + ' | ' + r[1] + ' | ' + r[2] + ('' if r[3] else '\n     ' + r[4][:800]))

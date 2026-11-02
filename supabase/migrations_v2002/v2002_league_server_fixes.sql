@@ -592,54 +592,71 @@ AS $function$
 declare
   v_out jsonb := '[]'::jsonb; v_pot numeric;
   v_amt bigint;
-  d_ids uuid[]; d_amt bigint[]; c_ids uuid[]; c_amt bigint[];
-  d_nm text[]; c_nm text[];
-  i int := 1; j int := 1;
-  v_resid bigint; v_guard int; r record;
+  m_id uuid[]; m_nm text[]; m_c bigint[]; m_u bigint[]; m_g bigint[];
+  d_ids uuid[] := '{}'; d_amt bigint[] := '{}'; d_nm text[] := '{}';
+  c_ids uuid[] := '{}'; c_amt bigint[] := '{}'; c_nm text[] := '{}';
+  i int := 1; j int := 1; k int; n int; v_pick int;
+  v_resid bigint; v_hold bigint; v_guard int;
 begin
   if not public.league_is_member(p_season_id) then raise exception 'NOT_A_MEMBER'; end if;
 
-  /* v2002 (LEAGUE-3, house rule): what people actually pay is a WHOLE unit, and the whole figures must still
-     sum to the same total as the cents. Same convention as the app's bgSettleNets:
-       1. cents per member;
-       2. round each to the nearest unit (half away from zero);
-       3. walk the residue back one unit at a time: too much handed out -> the member the rounding favoured
+  /* v2002 (LEAGUE-3, house rule): what people actually pay is a WHOLE unit, and the whole figures still sum to
+     zero with what the league holds. Same convention as the app's bgSettleNets:
+       1. each active member's balance in cents;
+       2. rounded to the nearest unit (half away from zero); the league's holding rounded the same way;
+       3. the residue walked back one unit at a time: too much handed out -> the member the rounding favoured
           most gives one back; too little -> the member it cost most takes one. Ties: the larger |balance|
-          absorbs it, then the lower member id.
-     Members only. Whatever the members owe collectively (the league fee / unwon pots) stays owed to the
-     league and is reported as to_the_league, rounded the same way. */
-  create temp table if not exists _lg_settle (id uuid primary key, nm text, cents bigint, units bigint, gain numeric) on commit drop;
-  delete from _lg_settle where true;
-  insert into _lg_settle (id, nm, cents)
-  select m.id, m.display_name, round(coalesce(sum(lm.amount), 0) * 100)::bigint
-    from public.league_members m
-    left join public.league_money lm on lm.member_id = m.id and lm.season_id = p_season_id and lm.status <> 'void'
-   where m.season_id = p_season_id and m.status = 'active'
-   group by m.id, m.display_name;
+          absorbs it, then the lower member id (fixed order).
+     STABLE like before: arrays, no temp tables. */
+  select array_agg(id order by id), array_agg(nm order by id), array_agg(c order by id)
+    into m_id, m_nm, m_c
+    from (select m.id, m.display_name nm, round(coalesce(sum(lm.amount), 0) * 100)::bigint c
+            from public.league_members m
+            left join public.league_money lm
+                   on lm.member_id = m.id and lm.season_id = p_season_id and lm.status <> 'void'
+           where m.season_id = p_season_id and m.status = 'active'
+           group by m.id, m.display_name) x;
+  n := coalesce(array_length(m_id, 1), 0);
 
-  select round(coalesce(sum(amount), 0) * 100)::bigint into v_resid
+  select round(coalesce(sum(amount), 0) * 100)::bigint into v_hold
     from public.league_money where season_id = p_season_id and party = 'pot' and status <> 'void';
-  -- the members' whole-unit total must equal -(what the league holds, in whole units)
-  update _lg_settle set units = (sign(cents) * floor(abs(cents) / 100.0 + 0.5))::bigint;
-  update _lg_settle set gain = units * 100 - cents;
-  v_resid := (select coalesce(sum(units), 0) from _lg_settle)
-           + (sign(v_resid) * floor(abs(v_resid) / 100.0 + 0.5))::bigint;
-  v_guard := (select count(*) from _lg_settle) * 4 + 20;
-  while v_resid > 0 and v_guard > 0 loop
-    select id into r from _lg_settle order by gain desc, abs(cents) desc, id asc limit 1;
-    update _lg_settle set units = units - 1, gain = gain - 100 where id = r.id;
-    v_resid := v_resid - 1; v_guard := v_guard - 1;
+  v_hold := (sign(v_hold) * floor(abs(v_hold) / 100.0 + 0.5))::bigint;
+
+  m_u := array_fill(0::bigint, array[greatest(n, 1)]); m_g := m_u;
+  v_resid := v_hold;
+  for k in 1 .. n loop
+    m_u[k] := (sign(m_c[k]) * floor(abs(m_c[k]) / 100.0 + 0.5))::bigint;
+    m_g[k] := m_u[k] * 100 - m_c[k];
+    v_resid := v_resid + m_u[k];
   end loop;
-  while v_resid < 0 and v_guard > 0 loop
-    select id into r from _lg_settle order by gain asc, abs(cents) desc, id asc limit 1;
-    update _lg_settle set units = units + 1, gain = gain + 100 where id = r.id;
-    v_resid := v_resid + 1; v_guard := v_guard - 1;
+  v_guard := n * 4 + 20;
+  while v_resid <> 0 and v_guard > 0 and n > 0 loop
+    v_pick := 1;
+    for k in 2 .. n loop
+      if (v_resid > 0 and (m_g[k] > m_g[v_pick]
+            or (m_g[k] = m_g[v_pick] and (abs(m_c[k]) > abs(m_c[v_pick])
+                 or (abs(m_c[k]) = abs(m_c[v_pick]) and m_id[k] < m_id[v_pick])))))
+      or (v_resid < 0 and (m_g[k] < m_g[v_pick]
+            or (m_g[k] = m_g[v_pick] and (abs(m_c[k]) > abs(m_c[v_pick])
+                 or (abs(m_c[k]) = abs(m_c[v_pick]) and m_id[k] < m_id[v_pick]))))) then
+        v_pick := k;
+      end if;
+    end loop;
+    if v_resid > 0 then
+      m_u[v_pick] := m_u[v_pick] - 1; m_g[v_pick] := m_g[v_pick] - 100; v_resid := v_resid - 1;
+    else
+      m_u[v_pick] := m_u[v_pick] + 1; m_g[v_pick] := m_g[v_pick] + 100; v_resid := v_resid + 1;
+    end if;
+    v_guard := v_guard - 1;
   end loop;
 
-  select array_agg(id order by units, id), array_agg(-units order by units, id), array_agg(nm order by units, id)
-    into d_ids, d_amt, d_nm from _lg_settle where units < 0;
-  select array_agg(id order by units desc, id), array_agg(units order by units desc, id), array_agg(nm order by units desc, id)
-    into c_ids, c_amt, c_nm from _lg_settle where units > 0;
+  -- debtors largest first, creditors largest first (ties by id) -- the same greedy match as before
+  select coalesce(array_agg(id order by u, id), '{}'), coalesce(array_agg(-u order by u, id), '{}'), coalesce(array_agg(nm order by u, id), '{}')
+    into d_ids, d_amt, d_nm
+    from (select m_id[q.ix] id, m_nm[q.ix] nm, m_u[q.ix] u from generate_series(1, n) q(ix)) y where u < 0;
+  select coalesce(array_agg(id order by u desc, id), '{}'), coalesce(array_agg(u order by u desc, id), '{}'), coalesce(array_agg(nm order by u desc, id), '{}')
+    into c_ids, c_amt, c_nm
+    from (select m_id[q.ix] id, m_nm[q.ix] nm, m_u[q.ix] u from generate_series(1, n) q(ix)) y where u > 0;
 
   while i <= coalesce(array_length(d_ids,1),0) and j <= coalesce(array_length(c_ids,1),0) loop
     v_amt := least(d_amt[i], c_amt[j]);
@@ -656,7 +673,8 @@ begin
   end loop;
 
   -- whatever the members still owe collectively is owed to the league itself (whole units)
-  select -coalesce(sum(units), 0) into v_pot from _lg_settle;
+  v_pot := 0;
+  for k in 1 .. n loop v_pot := v_pot - m_u[k]; end loop;
 
   return jsonb_build_object(
     'transfers', v_out,
