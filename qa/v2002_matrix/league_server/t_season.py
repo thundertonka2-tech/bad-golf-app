@@ -33,22 +33,27 @@ def money_checks(D, tag, axis):
             pots[(l['w'], l['k'])] = pots.get((l['w'], l['k']), 0) + cents(l['a'])
     stuck = {k: v for k, v in pots.items() if v != 0}
     check('server money', axis, tag + ' every weekly pot paid out exactly what it collected', not stuck, str(stuck))
-    # settle: transfers balanced against member balances
+    # settle (LEAGUE-3): whole units; each member's net transfer == his whole-unit balance (bgSettleNets);
+    # transfers + what is owed to the league sum to zero
     bal = {}
     for l in (D['money'] or []):
         if l['p'] == 'member': bal[l['m']] = bal.get(l['m'], 0) + cents(l['a'])
+    potc = sum(cents(l['a']) for l in (D['money'] or []) if l['p'] == 'pot')
+    for m in [x for x in bal]: pass
     tr = D['settle']['transfers'] or []
     got = {}
     for t in tr:
         got[t['from_member']] = got.get(t['from_member'], 0) - cents(t['amount'])
         got[t['to_member']] = got.get(t['to_member'], 0) + cents(t['amount'])
-    pos = {m: v for m, v in bal.items() if v > 0}
-    okc = all(got.get(m, 0) == v for m, v in pos.items())
-    owed_league = sum(-v for v in bal.values() if v < 0) - sum(pos.values())
-    okd = all(got.get(m, 0) >= v for m, v in bal.items() if v < 0)
-    check('server money', axis, tag + ' settle pays every creditor exactly, no debtor over-charged', okc and okd, 'bal %s transfers %s' % (bal, tr))
-    check('server money', axis, tag + ' settle "to the league" = what members still owe after transfers', cents(D['settle']['to_the_league']) == owed_league,
-          'to_league %s oracle %s' % (D['settle']['to_the_league'], owed_league / 100))
+    W = O.settle_whole(bal, potc)
+    pos = {m: v for m, v in W.items() if v > 0}; neg = {m: v for m, v in W.items() if v < 0}
+    okc = all(got.get(m, 0) == v * 100 for m, v in pos.items())
+    okd = all(0 >= got.get(m, 0) >= v * 100 for m, v in neg.items())
+    check('server money', axis, tag + ' settle: whole units, every creditor paid his whole balance exactly, no debtor over-charged', okc and okd and all(cents(t['amount']) % 100 == 0 for t in tr),
+          'whole %s transfers %s' % (W, tr))
+    tl = cents(D['settle']['to_the_league'])
+    check('server money', axis, tag + ' settle: transfers + owed to the league sum to zero (whole units)', tl == -sum(W.values()) * 100 and tl % 100 == 0,
+          'to_league %s whole balances %s' % (D['settle']['to_the_league'], W))
     whole = all(cents(t['amount']) % 100 == 0 for t in tr)
     return bal, tr, whole
 
@@ -91,7 +96,7 @@ def scenario(seed, shape, sys_, n, weeks=2, holes=18, rules=None, payout='winner
     return L, st, sn, hc, WEEKS, D, pp
 
 def oracle_week_nets(L, st, sn, hc, cards):
-    mn = min(O.pg_round(h) for h in hc)
+    mn = min(O.whs_round(h) for h in hc)   # every active member incl. subs (Q-L1); random seasons have none
     out = {}
     for i, g in cards.items():
         if g is None: out[i] = None; continue
@@ -207,7 +212,7 @@ def check_scenario(tag, shape, sys_, L, st, sn, hc, WEEKS, D, pp, axis):
     potc = gross - rsv
     if potc > 0:
         ranks = {mid[i]: rk[i] for i in rk}
-        for m, c in O.season_payout(potc, ranks, st['money'].get('payout') or 'winner_take_all', None, ).items(): exp[m] += c
+        for m, c in O.season_payout(potc, ranks, st['money'].get('payout'), None).items(): exp[m] += c
     bad = {m: (bal.get(m, 0), exp[m]) for m in mid if bal.get(m, 0) != exp[m]}
     check('server money', axis, tag + ' every member\'s season balance = oracle (fee, pots, season payout)', not bad, 'member: (app cents, oracle cents) %s' % bad)
     return whole

@@ -5,15 +5,19 @@ def strokes(ch, si, nh):
     if ch >= 0: return sum(1 for k in range(12) if ch >= k * nh + si)
     give, rank = -ch, nh + 1 - si
     return -sum(1 for k in range(12) if give >= k * nh + rank)
+def whs_round(x):  # DECISIONS core OPEN-1: .5 rounds up toward the higher handicap (+2.5 -> +2, 12.5 -> 13)
+    return int(math.floor(x + 0.5 + 1e-12))
 def rules_ch(eff, settings, mn):
-    base = pg_round(eff)
+    base = whs_round(eff)
     r = settings.get('hcp_rules') if settings.get('hcp_rules_set') else None
     if r is None:
         pct = (settings.get('handicap') or {}).get('allowance_pct', 100)
-        return pg_round(base * pct / 100.0)
+        return whs_round(base * pct / 100.0)
     if r.get('noHandicaps'): return 0
-    if r.get('basis') == 'lowest' and mn is not None: base = max(0, base - pg_round(mn))
-    return pg_round(base * r.get('pct', 100) / 100.0)
+    pct = r.get('pct', 100)
+    if r.get('basis') == 'lowest' and mn is not None:   # WHS order: % to each, round, then subtract the lowest
+        return max(0, whs_round(base * pct / 100.0) - whs_round(whs_round(mn) * pct / 100.0))
+    return whs_round(base * pct / 100.0)
 def cap(g, par, settings):
     if not settings.get('hcp_rules_set'): return g
     ms = (settings.get('hcp_rules') or {}).get('maxScore') or {}
@@ -76,13 +80,14 @@ def split_even(cents, ids):
     rem = cents - base * n; out = {}
     for k, i in enumerate(ids): out[i] = base + ((1 if rem > 0 else -1) if k < abs(rem) else 0)
     return out
+STANDIN = ('blind_draw', 'course', 'forfeit')
 PAYOUT = {'winner_take_all': [1.0], '80_20': [.8, .2], '70_30': [.7, .3], '60_40': [.6, .4], '50_30_20': [.5, .3, .2], '40_30_20_10': [.4, .3, .2, .1]}
 def season_payout(pot_cents, ranks, payout, members_of=None):
     """ranks: {eid: rank}. Places = entrants (a tie pools the shares of the places it OCCUPIES, as the client
        projection and standard golf payouts do); renormalise only when there are fewer entrants than paid places.
        Each entrant's share is split evenly over its members (odd cents to the lowest id). Leftover cents go to the
        lowest-id rank-1 member. Returns {member: cents}."""
-    fr = PAYOUT.get(payout or '', [.6, .4])
+    fr = PAYOUT.get(payout or '', [1.0])   # LEAGUE-4: missing/unknown = winner-take-all
     n = len(ranks); ef = fr[:min(n, len(fr))]; s = sum(ef)
     if s and abs(s - 1.0) > 1e-12: ef = [round(x / s, 6) for x in ef]
     order = sorted(ranks, key=lambda e: (ranks[e], e)); out = {}; paid = 0; place = 0
@@ -97,3 +102,16 @@ def season_payout(pot_cents, ranks, payout, members_of=None):
         r1 = sorted(m for e in ranks if ranks[e] == 1 for m in (members_of(e) if members_of else [e]))[0]
         out[r1] = out.get(r1, 0) + left
     return out
+
+def settle_whole(bal_cents, pot_cents):
+    """bgSettleNets on league members: round each balance to whole units (half away from zero), then walk the
+       residue (members' units + the league's whole holding must be 0) onto the member the rounding favoured most
+       (too much handed out) or cost most (too little); ties: larger |balance|, then lower id."""
+    rows = {m: dict(c=c, u=int(math.copysign(math.floor(abs(c) / 100.0 + 0.5), c)) if c else 0) for m, c in bal_cents.items()}
+    for r in rows.values(): r['g'] = r['u'] * 100 - r['c']
+    resid = sum(r['u'] for r in rows.values()) + (int(math.copysign(math.floor(abs(pot_cents) / 100.0 + 0.5), pot_cents)) if pot_cents else 0)
+    while resid > 0:
+        m = sorted(rows, key=lambda k: (-rows[k]['g'], -abs(rows[k]['c']), k))[0]; rows[m]['u'] -= 1; rows[m]['g'] -= 100; resid -= 1
+    while resid < 0:
+        m = sorted(rows, key=lambda k: (rows[k]['g'], -abs(rows[k]['c']), k))[0]; rows[m]['u'] += 1; rows[m]['g'] += 100; resid += 1
+    return {m: r['u'] for m, r in rows.items()}
