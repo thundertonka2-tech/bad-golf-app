@@ -37,7 +37,8 @@ const strip = h => String(h).replace(/<[^>]+>/g, ' ').replace(/&#39;|&apos;/g, "
   const tot = {}; (pay.rows || []).forEach(x => tot[x.name] = x.net);
   check('event totals', ['Ann Able','Bob Baker','Cal Cole','Dan Dunn','Eve Ellis','Fay Ford','Gus Gray'].map(n => tot[n]), [154, -24, -50, -17, -21, -21, -21]);
   check('nets to zero', Object.values(tot).reduce((a, b) => a + b, 0), 0);
-  const sg = (pay.byGame || []).find(b => b.key === "Splix 6's");
+  // v2002 (matrix TOURNEY-3/4): a group's OWN game is its own "(your group)" column so it never merges into an event column.
+  const sg = (pay.byGame || []).find(b => b.key === "Splix 6's (your group)");
   check('Splix 6’s column', sg && [sg.money['ann able'], sg.money['bob baker'], sg.money['cal cole']], [34, -4, -30]);
   check('breakdown table shows it', /Splix 6's/.test(strip(E._t2BreakdownTableHtml(pay.byGame, pay.rows))), true);
 

@@ -587,13 +587,13 @@ section("Splix 6's");
 }
 section('Niners');
 {
-  // h1 3,4,5 -> 5,3,1 ; h2 3,5,5 -> 5,2,2 ; h3 3,5,6 blitz -> 9,0,0 ; h4 4,4,5 -> 4,4,1 ; h5 4,4,4 -> 3,3,3
-  // A 26, B 12, C 7 (sum 45). perpoint $1 baseline 15 -> A +11 B -3 C -8
+  // v2002 (Tyler: Blitz sweeps even when the other two tie) h1 3,4,5 -> 5,3,1 ; h2 3,5,5 blitz -> 9,0,0 ; h3 3,5,6 blitz -> 9,0,0 ; h4 4,4,5 -> 4,4,1 ; h5 4,4,4 -> 3,3,3
+  // A 30, B 10, C 5 (sum 45). perpoint $1 baseline 15 -> A +15 B -5 C -10
   const sc = { p1: withHoles(fill(null), { 1: 3, 2: 3, 3: 3, 4: 4, 5: 4 }), p2: withHoles(fill(null), { 1: 4, 2: 5, 3: 5, 4: 4, 5: 4 }), p3: withHoles(fill(null), { 1: 5, 2: 5, 3: 6, 4: 5, 5: 4 }) };
   const g = mkRound({ players: pl(ids3), scores: sc, hcpRules: { noHandicaps: true }, games: { niners: { mode: 'perpoint', net: false, blitz: true, value: 1, participants: ids3 } } });
   const r = E.calcNiners(g);
-  check('niners points 26/12/7', r.points, { p1: 26, p2: 12, p3: 7 });
-  check('niners perpoint A +11 B -3 C -8', money(r, ids3), { p1: 11, p2: -3, p3: -8 });
+  check('niners points 30/10/5', r.points, { p1: 30, p2: 10, p3: 5 });
+  check('niners perpoint A +15 B -5 C -10', money(r, ids3), { p1: 15, p2: -5, p3: -10 });
   check('niners blitz hole 3 = 9-0-0', r.holePoints[2], { p1: 9, p2: 0, p3: 0 });
   // no blitz: h3 -> 5,3,1 -> A 22, B 15, C 8
   const g2 = mkRound({ players: pl(ids3), scores: sc, hcpRules: { noHandicaps: true }, games: { niners: { mode: 'perpoint', net: false, blitz: false, value: 1, participants: ids3 } } });
@@ -1217,7 +1217,8 @@ section('Long Drive from the GPS (v1829)');
   const r3 = E.bgLongDriveApply(r1.leader, { pid: 'p3', yds: 281, via: 'gps' });
   check('longer drive takes the lead', r3.lead && r3.leader.pid, 'p3');
   const r4 = E.bgLongDriveApply(r3.leader, { pid: 'p3', yds: 270, via: 'gps' });
-  check('leader can re-measure his own drive', r4.lead && r4.leader.yds, 270);
+  // v2002: since v2000 GL-4 (Tyler: every player's best mark is kept) a shorter re-measure never lowers his own best.
+  check('re-measure keeps his best drive', r4.leader.yds, 281);
   const r5 = E.bgLongDriveApply({ pid: 'p4' }, { pid: 'p1', yds: 240, via: 'gps' });
   check('a hand pick with no yards is beaten by any measured drive', r5.lead, true);
   const r6 = E.bgLongDriveApply({ pid: 'p4', yds: 300 }, { pid: 'p1', yds: 240, via: 'gps' });
