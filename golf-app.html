@@ -46752,7 +46752,9 @@ function gatherSetup() {
     // (the v1319 convention every field engine, the in/out sheet and the prize-pool
     // pickers already read) so a player added to the event afterwards is still in.
     try {
-      if (state._t2DayConfig && players.length && players.every(pl => partSet.has(pl.name))) {
+      // v2002 (matrix LEAGUE-7): the league side-games screen too - everyone ticked = no list,
+      // so a member who joins the league later is in.
+      if ((state._t2DayConfig || state._lgSideGamesCfg) && players.length && players.every(pl => partSet.has(pl.name))) {
         delete games[cfgKey].participants; delete games[cfgKey].participantNames;
       }
     } catch (e) {}
@@ -86708,8 +86710,13 @@ function _t2BackfillFieldGreenie(g, dayCfg) {
     return changed;
   } catch (e) { return false; }
 }
-function t2RemapGamesToGroup(src, gp, Aids, Bids, teamKeys) {
+function t2RemapGamesToGroup(src, gp, Aids, Bids, teamKeys, opts) {
   const out = {};
+  // v2002 (matrix LEAGUE-1): a league night has no field to pool across - its side games
+  // always settle inside the group (Q-L5). opts.inGroup says so, and turns a CTP / Long
+  // Putt opt-in list into this group's participants instead of a fieldNames list that
+  // calcCtp / calcLongPutt never read for a non-fieldOnly game.
+  const _inGroup = !!(opts && opts.inGroup);
   const allIds = gp.map(p => p.id);
   const _tkA = (teamKeys && teamKeys[0]) || 'A';
   const _tkB = (teamKeys && teamKeys[1]) || 'B';
@@ -86746,6 +86753,15 @@ function t2RemapGamesToGroup(src, gp, Aids, Bids, teamKeys) {
         _gpIn = gp.filter(p => p && p.name && _set.has(_nk(p.name)));
         _gpPicked = true;
         cfg.fieldNames = _ln.slice();
+        if (!_gpIn.length) continue;
+      }
+      // v2002 (matrix LEAGUE-1): league path - opted-out players are never charged. CTP and
+      // Long Putt are not fieldOnly in a league, so the list must become the participants.
+      if (_inGroup && _ln && _ln.length && (key === 'ctp' || key === 'longPutt') && !(src[key] && src[key].fieldOnly)) {
+        const _nk2 = s => normalizeNameSegment(String(s || ''));
+        const _set2 = new Set(_ln.map(_nk2));
+        _gpIn = gp.filter(p => p && p.name && _set2.has(_nk2(p.name)));
+        _gpPicked = true;
         if (!_gpIn.length) continue;
       }
     } catch (e) { _gpIn = gp; _gpPicked = false; }
@@ -109486,7 +109502,9 @@ function lgTeeRating(t, holes) {
     if (!t || t.rating == null || t.rating === '') return null;
     const r = Number(t.rating);
     if (!isFinite(r)) return null;
-    return (holes === 9) ? Math.round((r / 2) * 10) / 10 : r;
+    // v2002 (matrix LEAGUE-6): a 9-hole course's tee already carries a nine-hole rating -
+    // lgHalfRating only halves an 18-hole number (>= 46), so it is never halved twice.
+    return lgHalfRating(r, holes);
   } catch (e) { return null; }
 }
 
@@ -112114,7 +112132,10 @@ async function lgOpenStandings(sid, seg) {
       const _FR = { winner_take_all: [1], '80_20': [0.80, 0.20], '70_30': [0.70, 0.30],
                     '60_40': [0.60, 0.40], '50_30_20': [0.50, 0.30, 0.20],
                     '40_30_20_10': [0.40, 0.30, 0.20, 0.10] };
-      const _fr = _FR[_mny.payout] || _FR['60_40'];
+      /* v2002 (matrix LEAGUE-4 / Q-L4, Tyler default): a season with no saved payout is
+         winner-take-all - the same LG_PAYOUT_DEFAULT the Dues and pools picker shows. The
+         server's _league_payout_fracs fallback changes with it (coordinator, SQL). */
+      const _fr = _FR[_mny.payout] || _FR[(typeof LG_PAYOUT_DEFAULT !== 'undefined' && LG_PAYOUT_DEFAULT) || 'winner_take_all'] || _FR.winner_take_all;
       const _nPay = _payersSt || rows.length;   /* v1646: fee payers, not entrants */
       const _gross = _fee * _nPay;
       const _rsv = (typeof bgReserveAmount === 'function') ? bgReserveAmount(_mny.reserve, _gross, _nPay) : 0;
@@ -112139,6 +112160,16 @@ async function lgOpenStandings(sid, seg) {
       const _paid = rows.filter(function (r) {
         return (_share[r.entrant_id || r.name] || 0) > 0.004;
       });
+      /* v2002 (matrix LEAGUE-5): the printed shares are whole units, rounded largest-remainder
+         so they add up to the rounded pot (167/167/167 printed 501 of a 500 pot). Ties on the
+         remainder go to the higher place, then table order. */
+      try {
+        const _tgt = Math.round(_pot);
+        const _rs = _paid.map(function (r, i) { const k = r.entrant_id || r.name, v = _share[k] || 0; return { k: k, i: i, f: Math.floor(v + 1e-9), rem: v - Math.floor(v + 1e-9) }; });
+        let _left = _tgt - _rs.reduce(function (a, x) { return a + x.f; }, 0);
+        _rs.slice().sort(function (a, b) { return (b.rem - a.rem) || (a.i - b.i); }).forEach(function (x) { if (_left > 0) { x.f += 1; _left -= 1; } });
+        if (_left === 0) _rs.forEach(function (x) { _share[x.k] = x.f; });
+      } catch (e) {}
       if (_paid.length) {
         h += '<div class="card"><div class="bg-sec">' + (_seasonDoneSt ? 'Season prize pool — final' : 'If the season ended today') + '</div>' +
           '<p class="help-text" style="margin:6px 0 0;font-size:12px">The season prize pool is ' +
@@ -113237,6 +113268,18 @@ async function lgOpenMoney(sid) {
       lgEsc(lgMoney(amt)) + '</div></div>';
   };
   const _owes = function (n) { return n < 0 ? 'owes' : (n > 0 ? 'is outstanding' : 'square'); };
+  /* v2002 (matrix LEAGUE-3): every block's totals are whole units through bgNetsWhole, so
+     they sum to zero ([3.33, 3.33, 3.34, -10] printed 3/3/3/-10). A block that is not
+     zero-sum on its own falls back to per-player rounding inside bgNetsWhole. */
+  const _whole = function (byKey) {
+    try {
+      const ks = Object.keys(byKey || {});
+      if (typeof bgNetsWhole !== 'function' || !ks.length) return byKey;
+      const W = bgNetsWhole(byKey, ks.map(function (k) { return { id: k }; }));
+      const o = {}; ks.forEach(function (k) { o[k] = (typeof W[k] === 'number') ? W[k] : byKey[k]; });
+      return o;
+    } catch (e) { return byKey; }
+  };
 
   /* ---- one block per week: what the prize pools did that night ---- */
   try {
@@ -113255,6 +113298,7 @@ async function lgOpenMoney(sid) {
       const w = byWeek[wn];
       const names = Object.keys(w.by).sort(function (a, b) { return w.by[b] - w.by[a]; });
       if (!names.length) return;
+      w.by = _whole(w.by);   // v2002 (matrix LEAGUE-3)
       const won = Object.keys(w.kinds).map(function (k) { return potName[k] || k; }).sort();
       h += '<div class="card"><div class="bg-sec">Week ' + lgEsc(wn) + '</div>' +
         '<p class="help-text" style="margin:6px 0 0;font-size:12px">' +
@@ -113278,6 +113322,8 @@ async function lgOpenMoney(sid) {
     } catch (e) {}
     if (_seasonAny) {
       const names = Object.keys(seasonBy).sort(function (a, b) { return seasonBy[b] - seasonBy[a]; });
+      const _sW = _whole(seasonBy);   // v2002 (matrix LEAGUE-3)
+      names.forEach(function (n) { seasonBy[n] = _sW[n]; });
       h += '<div class="card"><div class="bg-sec">The season</div>' +
         '<p class="help-text" style="margin:6px 0 0;font-size:12px">The league fee, and what the final table gives back out of it. This one only settles when the season ends.</p>' +
         names.map(function (n) { return _row(n, seasonBy[n], _owes(seasonBy[n])); }).join('') +
@@ -113286,9 +113332,15 @@ async function lgOpenMoney(sid) {
 
     h += '<div class="card"><div class="bg-sec">Where everyone stands</div>' +
       '<p class="help-text" style="margin:6px 0 0;font-size:12px">Everything above, added up. Bad Golf works out who trails who — it never takes or tracks a payment, so square up the way you always have.</p>' +
-      members.map(function (m) {
-        return _row(m.name, m.net, _owes(Number(m.net)));
-      }).join('') + '</div>';
+      (function () {
+        /* v2002 (matrix LEAGUE-3): zero-sum whole figures, keyed by member_id. */
+        let W = null;
+        try { W = bgNetsWhole(Object.fromEntries(members.map(function (m) { return [m.member_id, Number(m.net) || 0]; })), members.map(function (m) { return { id: m.member_id }; })); } catch (e) { W = null; }
+        return members.map(function (m) {
+          const v = (W && typeof W[m.member_id] === 'number') ? W[m.member_id] : m.net;
+          return _row(m.name, v, _owes(Number(v)));
+        }).join('');
+      })() + '</div>';
   }
 
   /* Every pot, in the app's own pot layout (_bgPotTableHtml) — the same rows the
@@ -115238,6 +115290,7 @@ const LG_MAIN_TILES = new Set(['skins', 'ctp']);
    settle inside the round is a shot: closest to the pin, long drive, long putt. */
 const LG_SIDE_ALLOW_SCRAMBLE = new Set(['ctp', 'longdrive', 'longputt']);
 window._lgSideScramble = false;
+window._lgLdPotOn = false;   // v2002 (matrix LEAGUE-2 / Q-L3)
 
 function lgFilterSideGames(hide) {
   try {
@@ -115245,7 +115298,10 @@ function lgFilterSideGames(hide) {
       const key = cb.id.slice(5);
       const card = cb.closest('.game-toggle');
       const opts = document.getElementById('opts-' + key);
-      const drop = !!(hide && !((window._lgSideScramble ? LG_SIDE_ALLOW_SCRAMBLE : LG_SIDE_ALLOW).has(key)));   /* v1593 */
+      const drop = !!(hide && (!((window._lgSideScramble ? LG_SIDE_ALLOW_SCRAMBLE : LG_SIDE_ALLOW).has(key))
+                     /* v2002 (matrix LEAGUE-2 / Q-L3): the league's own Long Drive pot is on, so the
+                        group Long Drive side bet is hidden (launch would not play it). */
+                     || (key === 'longdrive' && window._lgLdPotOn)));   /* v1593 */
       /* v1414: .lg-off is the durable record of "the league dropped this",
          readable by anything else that manages the same tile's display. */
       if (card) {
@@ -115304,6 +115360,7 @@ async function lgOpenSideGames(sid, weekId) {
     }, 'lgOpenSideGames:season');
     if (!sr.ok) { try { showToast('Couldn’t load the league'); } catch (e) {} return; }
     try { window._lgSideScramble = (((sr.data && sr.data.settings) || {}).format === 'scramble'); } catch (e) { window._lgSideScramble = false; }   /* v1593 */
+    try { const _ldp = ((((sr.data && sr.data.settings) || {}).money || {}).weekly || {}).longest_drive; window._lgLdPotOn = !!(_ldp && _ldp.on); } catch (e) { window._lgLdPotOn = false; }   // v2002 (matrix LEAGUE-2 / Q-L3)
     let existing = ((sr.data && sr.data.settings) || {}).side_games || {};
 
     /* v1427: the last item of the setup spec -- ONE week that plays something
@@ -115966,7 +116023,7 @@ window.lgClearSub = lgClearSub;
    onto the name this round is actually using, by the app's own normaliser, and
    drop the ones who are not here -- which is exactly the right answer for
    somebody who is out this week. */
-function _lgFitGameNames(src, players) {
+function _lgFitGameNames(src, players, seatSubs) {
   let out;
   try { out = JSON.parse(JSON.stringify(src || {})); } catch (e) { return src || {}; }
   /* v1407: drop anything the league screen does not offer. An allow list means
@@ -115986,15 +116043,37 @@ function _lgFitGameNames(src, players) {
   };
   const byNorm = {};
   (players || []).forEach(function (p) { byNorm[norm(p.name)] = p.name; });
+  /* v2002 (matrix Q-L2, Tyler default): a sub takes over the absent player's side-game
+     entries. seatSubs maps the absent member's name -> the sub's name on this card, so a
+     list that named the absentee names the sub instead (pairs too). */
+  try {
+    if (seatSubs && typeof seatSubs === 'object') {
+      Object.keys(seatSubs).forEach(function (absent) {
+        const subNm = byNorm[norm(seatSubs[absent])];
+        if (subNm && !byNorm[norm(absent)]) byNorm[norm(absent)] = subNm;
+      });
+    }
+  } catch (e) {}
   const fit = function (arr) {
     if (!Array.isArray(arr)) return arr;
+    const seen = {};
     return arr.map(function (n) { return byNorm[norm(n)] || null; })
-              .filter(function (n) { return !!n; });
+              .filter(function (n) { if (!n || seen[n]) return false; seen[n] = 1; return true; });
   };
   Object.keys(out).forEach(function (k) {
     const cfg = out[k];
     if (!cfg || typeof cfg !== 'object') return;
-    if (cfg.participantNames) cfg.participantNames = fit(cfg.participantNames);
+    if (cfg.participantNames) {
+      const _had = Array.isArray(cfg.participantNames) && cfg.participantNames.length > 0;
+      cfg.participantNames = fit(cfg.participantNames);
+      /* v2002 (matrix LEAGUE-1): a list that named people, none of whom are in this group,
+         means nobody here opted in. An empty list downstream reads as "everyone", so drop
+         the game for this group instead. */
+      if (_had && Array.isArray(cfg.participantNames) && !cfg.participantNames.length) {
+        try { delete out[k]; } catch (e) {}
+        return;
+      }
+    }
     if (cfg.pair) cfg.pair = fit(cfg.pair);
     if (Array.isArray(cfg.instances)) {
       cfg.instances = cfg.instances.map(function (si) {
@@ -116492,6 +116571,10 @@ async function lgLaunchWeekRound(sid, weekId, matchupId, groupNo) {
        field by default -- they come into the round below, and only into the
        seat they were actually given. */
     let active = roster.filter(function (m) { return m.status === 'active' && m.role !== 'sub'; });
+    /* v2002 (matrix Q-L1 / Q-L2): every sub playing this week (whole week, not just this
+       fixture) and whose seat each one fills, by name. */
+    const _lgWeekSubIds = [];
+    const _lgSeatSubs = {};
 
     /* v1403 - who is out this week, and who is standing in for them.
        Without this the round teed off with the absent player still on the card
@@ -116522,6 +116605,10 @@ async function lgLaunchWeekRound(sid, weekId, matchupId, groupNo) {
                  below would drop them from every fixture without this. */
               try { _byId[s]._lgSeat = a.member_id; } catch (e) {}
               _in.push(_byId[s]);
+              try {
+                _lgWeekSubIds.push(String(s));
+                if (_byId[a.member_id] && _byId[a.member_id].display_name) _lgSeatSubs[_byId[a.member_id].display_name] = _byId[s].display_name;
+              } catch (e) {}
             }
           });
           active = active.filter(function (m) { return !_out[m.id]; });
@@ -116803,6 +116890,9 @@ async function lgLaunchWeekRound(sid, weekId, matchupId, groupNo) {
       try {
         const _act = {};
         (Array.isArray(roster) ? roster : []).forEach(function (m) { if (m && m.status === 'active' && m.role !== 'sub') _act[String(m.id)] = 1; });
+        /* v2002 (matrix Q-L1, Tyler default): in a "lowest handicap" league the sub counts
+           toward the lowest handicap, so a sub better than the roster keeps his strokes gap. */
+        _lgWeekSubIds.forEach(function (mid) { _act[mid] = 1; });
         Object.keys(hcpOf).forEach(function (mid) { if (_act[mid]) _minPool.push(lgRoundHcp(hcpOf[mid])); });
       } catch (e) { _minPool = []; }
       if (!_minPool.length) _minPool = players.map(function (p) { return lgRoundHcp(p.hcp); });
@@ -116879,12 +116969,34 @@ async function lgLaunchWeekRound(sid, weekId, matchupId, groupNo) {
         try {
           if (_lgSideGames && typeof _lgSideGames === 'object' &&
               Object.keys(_lgSideGames).length && typeof t2RemapGamesToGroup === 'function') {
-            _g = t2RemapGamesToGroup(_lgFitGameNames(_lgSideGames, players),
-                                     players, [], [], ['A', 'B']) || {};
+            const _fitG = _lgFitGameNames(_lgSideGames, players, _lgSeatSubs);   // v2002 (matrix Q-L2): sub takes the absentee's entries
+            _g = t2RemapGamesToGroup(_fitG, players, [], [], ['A', 'B'], { inGroup: true }) || {};   // v2002 (matrix LEAGUE-1 / Q-L5): settles inside the group
+            /* v2002 (matrix LEAGUE-2 / Q-L3): t2RemapGamesToGroup drops longDrive (a tournament
+               field-wide rule). The league's own Long Drive side bet is carried through as an
+               in-group bet; the league's Long Drive POT stamp below replaces it when that is on
+               (the side-bet tile is hidden then, so the two never both apply). */
+            const _ldS = _fitG && _fitG.longDrive;
+            if (_ldS && typeof _ldS === 'object' && Number(_ldS.value) > 0) {
+              let _ldIn = players;
+              if (Array.isArray(_ldS.participantNames) && _ldS.participantNames.length) {
+                const _nk = function (x) { return normalizeNameSegment(String(x || '')); };
+                const _ss = new Set(_ldS.participantNames.map(_nk));
+                _ldIn = players.filter(function (p) { return _ss.has(_nk(p.name)); });
+              }
+              if (_ldIn.length >= 2) {
+                const _ldc = JSON.parse(JSON.stringify(_ldS));
+                delete _ldc.fieldOnly; delete _ldc.pair; delete _ldc.instances;
+                _ldc.participants = _ldIn.map(function (p) { return p.id; });
+                _ldc.participantNames = _ldIn.map(function (p) { return p.name; });
+                _g.longDrive = _ldc;
+              }
+            }
           }
         } catch (e) { _g = {}; try { console.warn('league side games', e); } catch (e2) {} }
         try {
           const _wk = (((w.settings_snapshot || {}).money) || {}).weekly || {};
+          // v2002 (matrix LEAGUE-2 / Q-L3): the league's own Long Drive pot is on - the group side bet never plays.
+          if (_wk.longest_drive && _wk.longest_drive.on && _g.longDrive && !_g.longDrive.fieldOnly) delete _g.longDrive;
           if (_wk.ctp && _wk.ctp.on) {
             /* Closest to the pin is a par-3 game. The tournament asks which holes
                because it moves course every day; a league plays the same card

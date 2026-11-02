@@ -149,6 +149,8 @@ function oHcp(opts, mid, eff) {
   let base = pgRound(eff);
   if (!r.noHandicaps && r.basis === 'lowest') {
     const pool = opts.hcps.slice(0, opts.n).map(pgRound);   // active non-sub roster (absentee still counts)
+    // DECISIONS (League, Q-L1): in a "lowest handicap" league the sub counts toward the lowest handicap.
+    if (opts.absent != null && opts.subHcp != null) pool.push(pgRound(opts.subHcp));
     base = Math.max(0, base - Math.min.apply(null, pool));
   }
   return { base, hcp: pgRound(base * pct / 100) };
@@ -363,9 +365,8 @@ async function main() {
   {
     const r = await launch({ n: 4, hcps: [6, 10, 14, 4], rules: { pct: 100, basis: 'lowest' }, mode: 'field', side: {}, absent: 1, subHcp: 1 });
     const sp = r.g.players.find(p => p.mid === 'mS');
-    // the server rule (week minimum over the active non-sub roster) makes the sub max(0, 1 - 4) = 0 while
-    // the man on 4 also plays off 0: a 3-stroke gap erased.
-    check('OPEN-RULE probe', 'sub x lowest basis', 'sub better than the field min keeps his strokes gap (sub 1 vs low 4)', sp && (sp.hcp < r.g.players.find(p => p.mid === 'm3').hcp),
+    // DECISIONS (Q-L1): the sub counts toward the lowest, so the sub plays 0 and the man on 4 plays 3.
+    check('league rules', 'sub x lowest basis', 'sub better than the field min keeps his strokes gap (sub 1 vs low 4)', sp && (sp.hcp < r.g.players.find(p => p.mid === 'm3').hcp),
           'sub hcp ' + (sp && sp.hcp) + ', m3 (hcp 4) plays ' + r.g.players.find(p => p.mid === 'm3').hcp + ' — both off 0');
   }
   // incomplete card on a league night (leaver-like blank hole) — skins carry + low net void
@@ -416,10 +417,17 @@ async function main() {
     const r = await launch({ n: 4, hcps: [5, 5, 5, 5], mode: 'field', weekly: {}, absent: 0, subHcp: 5,
       side: { skins: { mode: 'perskin', value: 2, tieRule: 'carry', require: 'none', hcpPct: 100, participantNames: all5 } } });
     const subP = r.g.players.find(p => p.mid === 'mS');
-    check('OPEN-RULE probe', 'sub x side-game list', 'sub filling a seat is in the group Skins', r.g.games.skins.participants.indexOf(subP.id) >= 0,
+    // DECISIONS (Q-L2): a sub takes over the absent player's side-game entries.
+    check('league rules', 'sub x side-game list', 'sub filling a seat is in the group Skins', r.g.games.skins.participants.indexOf(subP.id) >= 0,
           'skins participants ' + J(r.g.games.skins.participantNames) + ' — Sub Zed not in it');
+    // DECISIONS (LEAGUE-7): ticking every player means "everyone" - from v2002 the league side-games
+    // screen saves NO list then (gatherSetup's everyone-ticked rule now runs under _lgSideGamesCfg),
+    // so the saved config this case launches from carries no participantNames.
+    const _gs = String(F('gatherSetup'));
+    check('side games', 'late joiner', 'gatherSetup: everyone ticked on the league screen stores no list',
+          /\(state\._t2DayConfig \|\| state\._lgSideGamesCfg\) && players\.length && players\.every/.test(_gs), 'rule not extended to _lgSideGamesCfg');
     const r2 = await launch({ n: 5, hcps: [5, 5, 5, 5, 5], mode: 'field', weekly: {},
-      side: { skins: { mode: 'perskin', value: 2, tieRule: 'carry', require: 'none', hcpPct: 100, participantNames: all5 } } });
+      side: { skins: { mode: 'perskin', value: 2, tieRule: 'carry', require: 'none', hcpPct: 100 } } });
     const late = r2.g.players.find(p => p.mid === 'm4');
     check('side games', 'late joiner', 'member added after the side games were saved is in Skins (everyone was ticked)', r2.g.games.skins.participants.indexOf(late.id) >= 0,
           'skins participants ' + J(r2.g.games.skins.participantNames) + ' — Player E Q (joined later) silently out');
@@ -508,8 +516,16 @@ async function main() {
     const pot = gross - rsv; const exp = {}; let place = 0;
     [...new Set(ranks)].sort((a, b) => a - b).forEach(rk => { const grp = ranks.map((r, i) => r === rk ? i : -1).filter(i => i >= 0); let s = 0; for (let q = 0; q < grp.length; q++) s += fr[place + q] || 0; place += grp.length; grp.forEach(i => { if (s * pot / grp.length > 0.004) exp['P' + i] = s * pot / grp.length; }); });
     const axis = 'payout ' + (payout || '(unset)') + (reserve ? ' + reserve' : '');
+    // DECISIONS (LEAGUE-5): printed shares are whole units, largest remainder to the rounded pot
+    // (remainder ties -> table order). Oracle written independently of the app.
+    { const ks = Object.keys(exp).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+      const fl = {}; ks.forEach(k => fl[k] = Math.floor(exp[k] + 1e-9));
+      let left = Math.round(pot) - ks.reduce((a, k) => a + fl[k], 0);
+      ks.slice().sort((a, b) => ((exp[b] - Math.floor(exp[b] + 1e-9)) - (exp[a] - Math.floor(exp[a] + 1e-9))) || (Number(a.slice(1)) - Number(b.slice(1))))
+        .forEach(k => { if (left > 0) { fl[k]++; left--; } });
+      ks.forEach(k => exp[k] = fl[k]); }
     const keysOk = J(Object.keys(got).sort()) === J(Object.keys(exp).sort());
-    const valsOk = keysOk && Object.keys(exp).every(k => Math.abs(got[k] - exp[k]) <= 0.5 + 1e-9);
+    const valsOk = keysOk && Object.keys(exp).every(k => got[k] === exp[k]);
     check('payout', axis, 'projection ' + J(ranks), keysOk && valsOk, 'app ' + J(got) + ' oracle ' + J(Object.fromEntries(Object.entries(exp).map(([k, v]) => [k, c2(v)]))));
     const shownSum = Object.values(got).reduce((a, b) => a + b, 0);
     check('payout', 'projection whole-unit sum', 'printed shares sum to the pot ' + J(ranks) + ' ' + (payout || 'unset') + (reserve ? ' rsv' : ''), Math.abs(shownSum - Math.round(pot)) < 1e-9 || !keysOk,
