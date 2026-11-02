@@ -38,3 +38,9 @@
 - **Snake when two players 3-putt the same final hole and there are no timestamps:** the hold is split.
 - **Birdie Bump "need a birdie" when only the eagle tier has a value:** any birdie still qualifies the player.
 - **Umbrella:** hole values follow play position (1–18).
+- **Field Scramble allowance:** the USGA 4-person table, 25/20/15/10, is used everywhere. That is what the field already uses, so the unused in-round `scramble4` [20,15,10,5] table is aligned to it. The allowance is figured from the course handicap and halved on a nine.
+- **A 4-man cart that taps Finish early:** it pays, but it can't win (the same as the leaver rule).
+- **Uneven Team Quota teams:** no bet, and the board shows the reason.
+- **Stroke-day cup point when a player left:** the leaver forfeits the point.
+- **CTP when flights are on:** CTP stays whole-field. The flight split applies to the other pools only, and the board says so.
+- **Flights:** points are scored on the full cart round first, then split by flight.

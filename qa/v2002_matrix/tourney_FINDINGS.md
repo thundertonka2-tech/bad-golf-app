@@ -173,3 +173,149 @@ This was report-only. Nothing in golf-app.html, www/index.html or the database w
 **Files:**
 - /home/claude/bad-golf-app/qa/v2002_matrix/tourney.js (the debug hooks are behind the environment variables TDBG, TALL, TAXES and TDEBUG)
 - /home/claude/bad-golf-app/qa/v2002_matrix/tourney_FINDINGS.md
+
+
+---
+
+# Addendum — closing the "Not covered" gaps (field team and points games, cup standings, flights)
+
+**Suite totals now: 33,437 cases run, 31,963 passed, 1,474 failed.**
+- The new sections added 9,558 cases: 9,060 passed and 498 failed.
+- Every new failure traces to TOURNEY-11 to TOURNEY-19 below, or to TOURNEY-1 (ties) and TOURNEY-3 (`buildVg` drops tee pars).
+- Run settings: `TOURNEY_FUZZ2` (team/points fuzz, default 400; 150 for Team Quota), `TOURNEY_CUPFUZZ` (default 600), `TOURNEY_FLFUZZ` (default 400).
+
+**Method:**
+- New independent oracles: field Stableford and Quota pools, 4-man Best Ball and Shamble across carts, field Scramble, field Team Quota for 2 and 3 teams, cup points, and per-flight versions of every pool.
+- Pairwise matrix: 40 events × 5 game families over 7 axes (cart sizes; 18/9/shotgun/pick; none/leaver/late/unfinished/early finish/withdrawn; spread/scratch/plus/80%/mixed tees; winner/80-20 payout; tie/no tie; 1–2 days).
+- Seeded fuzz on top of the matrix.
+- Cup standings: `tournament_group_members` is served from inside tourney.js (passed to `t2ComputeStandings`). `qa/harness_globals.js` is untouched.
+
+**Verified clean:**
+- Field Quota pool: 880/880.
+- Field Shamble 4-man: 880/880, including 1 and 2 balls and hcpPct 25/50/100.
+- Field Best Ball 4-man in every case except an early finish.
+- Field Stableford in every case except a leaver.
+- Cup points for singles and stroke days: 661/662, including withdrawal forfeits, shotgun and pick-a-start, 9-hole days, one-day events and 2–4 carts × 1–3 days.
+- Flight auto-assign is deterministic at a tied boundary.
+- Every flight's Skins pot is zero-sum on its own, and per-flight Skins, side pots, Long Putt, Nassau and Birdie Bump match the oracle (apart from the TOURNEY-1/2 causes).
+
+## New findings
+
+### TOURNEY-11 (P1) — Flights: a player who is the only member of his flight in his cart scores 0 Stableford/Quota points but still pays the entry
+- **Game:** `t2ComputeFieldStableford` / `t2ComputeFieldQuota` with flights per pool (`_t2ComputeFieldPointsPool` → `_bgFlightRows`).
+- **Repro (FL0):** 3 flights; carts 4/4. Frank Lonigro is the only Flight-1 player in cart 2.
+  - App: Frank 0 points, −5; Gregory wins Flight 1, +15.
+  - Oracle: Frank (on his real points) wins, +15; Gregory −5.
+  - 236 of 3,522 flight cases fail this way. It happens whenever flights split a cart.
+- **Cause:** `_bgFlightRows` trims each cart to that flight's players. `calcStableford`/`calcQuota` then return null when `participants.length < 2`, so `ptsMap` is empty. `_t2FieldPointsPoolAll` (~95030) still counts the player as started, so he is charged and ranked on 0.
+- **Fix:** score points on the full cart round, then filter by flight, or call a points function that does not need 2 participants.
+
+### TOURNEY-12 (P1) — Field Scramble pays while a launched team has posted no score
+- **Game:** `t2ComputeFieldScramble`.
+- **Repro (D2b):** 3 carts; cart 2 is launched with no score yet.
+  - App: `complete:true`. Cart 1 +10 each, cart 3 −10 each; cart 2 is left out of the pool entirely.
+  - Expected: pending.
+  - 49 of the 61 Scramble failures are late-team cases.
+- **Cause (~94840):** `if (!holes) return` drops the team before `D.rounds++`, so `finished === rounds` holds. This is the same class of bug as TOURNEY-2 / GL-6.
+- **Fix:** count every round that has a scramble config in `D.rounds` before the "no holes" skip.
+
+### TOURNEY-13 (P1) — Field Scramble allowance: wrong handicap source, not halved on a nine, and not the in-round 4-man table
+This answers the question "is the scramble4 [20,15,10,5] allowance applied on the field side?" **No.**
+- (a) **Different table.** The field engine uses its own 25/20/15/10 (`WEIGHTS`, ~94831; the setup help text says the same). `TEAM_HCP_ALLOWANCES.scramble4` (20/15/10/5) is never used on the field side, and `cfg.teamHcpPcts` is ignored. The in-round `calcScramble4man` applies no allowance at all. **D2a:** field 1.8 vs scramble4 2.0. This is a rule decision; see Q-TOURNEY-6.
+- (b) **Wrong handicap source (P1).** It reads `p.rawHcp`, which on an event round is the handicap **index**, not the course handicap the round plays off. This is the v1043 bug that was fixed for Skins and Low Net but not here.
+  - **D2a:** rawHcp 2 below the course handicap gives allowance 1.8/3.8 vs 3.2/5.2 from the course handicap.
+  - Code: `t2ComputeFieldScramble` ~94848. Fix: use `bgFullCourseHcp(p, g.hcpRules)`.
+- (c) **Not halved on a 9-hole day (P1).** **D2d:** a 9-hole day applies the full 18-hole allowance (5.2) to a 9-hole team total. All 7 non-late Scramble failures are 9-hole days. Fix: halve it when `hcpRules.hcp18 && nH === 9` (GL-9 convention).
+
+### TOURNEY-14 (P2) — 4-man Field Scramble and Best Ball rank a cart that stopped early on its partial total
+- **Game:** `t2ComputeFieldScramble`, `_t2ComputeFieldCartTeam` (Best Ball / Shamble).
+- **Repro, Scramble (D2c):** a cart taps Finish after 14 holes and wins the pool with 41 against 18-hole totals.
+- **Repro, Best Ball (D2e):** a cart stops after 13 holes and wins with 34 vs 45/18.
+- Both rank on the raw total with no check on hole count.
+- **Fix:** rank on to-par over the holes played, or require a full card. See Q-TOURNEY-7.
+
+### TOURNEY-15 (P1) — Field Stableford/Quota pool: a player who left mid-round can win it
+- **Game:** `_t2FieldPointsPoolAll`.
+- **Repro (D2f):** 6 players; one leaves after 12 holes, having scored 12 eagles (48 points). He wins the pool, +50.
+- House rule (brief + v1998 F-4): the leaver pays his buy-in but cannot win. The in-round `calcStableford` already applies this; the field pool does not.
+- **Fix:** exclude players with `bgLeftAfter(g, p.id) != null` from the winners (keep them in the entry) unless everyone left.
+
+### TOURNEY-16 (P2) — Field Team Quota with uneven event teams pays nothing and gives no reason
+- **Game:** `loadTourneyMoney` section 2 → `calcTeamQuota`.
+- **Repro (D2g, and 191 fuzz cases):** 9 players split 5 v 4. There is no "Team games (A vs B)" column, no pending flag and no money; the standings still rank the teams.
+- `calcTeamQuota` returns `_bgDropBet('uneven teams')`, but this pass never shows the dropped flag.
+- **Fix:** show the drop reason on the event board, and see Q-TOURNEY-8 for what should happen.
+
+### TOURNEY-17 (P2) — Field Team Quota with mixed tees scores the event settle off card par
+- **Repro:** FZtq#60 and FZtq3#70.
+  - FZtq#60: team B scores 37 (app) vs 40 (oracle), which flips the winner (±5 for everyone).
+  - FZtq3#70: same cause, splits differ (−0.5 vs −1.25).
+- `t2ComputeFieldTeamQuota` (the standings) uses `parFor` and agrees with the oracle. The money comes from the `buildVg` re-settle, which has no `teePars`.
+- So the standings and the money can disagree on which team won. Root cause TOURNEY-3; listed separately because a different game is affected.
+
+### TOURNEY-18 (P2) — Stroke-day cup point compares a leaver's partial net total with a full card
+- **Game:** `_t2CartCupMatches`, points/stroke day branch.
+- **Repro (D3b):** Tyler leaves after 11 holes, net 54. Gregory plays 18 holes, net 89. Tyler takes the cup point.
+- `metric` is the raw net total. The `holesOf` check only decides final vs projected, not who wins.
+- **Fix:** compare net to par over the common holes, or award the point to the full card. See Q-TOURNEY-9.
+
+### TOURNEY-19 (P2) — Flights: Closest to the Pin per flight cannot work, because each cart logs only one closest ball per hole
+- **Repro (D4c):** 2 flights mixed across 2 carts; both logged closest balls belong to Flight-1 players.
+  - Flight 2 has no CTP result at all. Its players are never charged and can never win.
+  - Whenever a cart's closest ball belongs to the other flight, the second flight loses its CTP for that hole without any message.
+- **Cause:** `g.ctpData[h]` holds one `pid`. `_bgFlightGeneric` simply drops the marks of players outside the flight.
+- **Fix:** store the closest ball per flight per hole when flights are on, or keep CTP whole-field. See Q-TOURNEY-10.
+
+## New OPEN RULE QUESTIONS
+
+**Q-TOURNEY-6 — Which field scramble allowance?**
+- Options:
+  - (a) keep the field's 25/20/15/10 (as the setup help text says);
+  - (b) use the in-round USGA table 20/15/10/5 (`TEAM_HCP_ALLOWANCES.scramble4`) everywhere;
+  - (c) let the director choose, with (b) as the default.
+- Either way, the handicap should be the course handicap and halved on a nine.
+
+**Q-TOURNEY-7 — A 4-man cart that taps Finish early in a Scramble or Best Ball pool.**
+- Options:
+  - (a) it ranks on to-par over the holes played;
+  - (b) it cannot win but pays;
+  - (c) it is pro-rated.
+
+**Q-TOURNEY-8 — Field Team Quota with uneven event teams (5 v 4).**
+- Options:
+  - (a) no bet, with a visible reason;
+  - (b) compare per-player average (total ÷ head count);
+  - (c) the bigger team's lowest result is dropped.
+
+**Q-TOURNEY-9 — Stroke-day cup point when one player in a pairing left mid-round.**
+- Options:
+  - (a) compare net to par on the holes both played;
+  - (b) the leaver forfeits the point;
+  - (c) halve the point.
+
+**Q-TOURNEY-10 — CTP when flights are on.**
+- Options:
+  - (a) CTP is always whole-field;
+  - (b) one CTP per flight, which means logging the closest ball per flight;
+  - (c) per flight, only for carts that hold a single flight.
+
+## Updated coverage — new rows
+
+| Game / area | Axes | Cases | Pass | Fail | Cause of the failures |
+|---|---|---|---|---|---|
+| Field Stableford (pool, winner/80-20, withdrawn, picker) | 26 | 881 | 880 | 1 | TOURNEY-15 |
+| Field Quota (pool) | 25 | 880 | 880 | 0 | — |
+| Field Best Ball 4-man | 26 | 881 | 880 | 1 | TOURNEY-14 |
+| Field Shamble 4-man (1/2 balls, 25/50/100%) | 25 | 880 | 880 | 0 | — |
+| Field Scramble 4-man (gross/net, winner/80-20) | 30 | 885 | 824 | 61 | TOURNEY-12 (49), TOURNEY-13 (11), TOURNEY-14 (1) |
+| Field Team Quota (2 and 3 teams, standings + event money) | 26 | 967 | 773 | 194 | TOURNEY-16 (192), TOURNEY-17 (2) |
+| Cup standings (`t2ComputeStandings`) | 34 | 662 | 661 | 1 | TOURNEY-18 |
+| Flights (Skins, CTP, Long Putt, Birdie Bump, side pots, Nassau, Stableford, per-flight zero-sum) | 25 | 3,522 | 3,282 | 240 | TOURNEY-11 (236), TOURNEY-1 (3), TOURNEY-19 (1) |
+| **New subtotal** | | **9,558** | **9,060** | **498** | |
+| **Whole suite** | | **33,437** | **31,963** | **1,474** | |
+
+**Still not covered:**
+- Team Match / Best Ball **2v2** cup points: the suite only checks that points are conserved and does not have an independent oracle for them.
+- Team Quota 4-man, "vs the field" standings.
+- The `_t2ApplyTourneyPot` event pot (it needs `t2LoadCupStandings` against the full days/groups tables).
+- Quota per flight. It has the same root cause as TOURNEY-11 (`calcQuota` also requires 2 participants) but was not run separately.

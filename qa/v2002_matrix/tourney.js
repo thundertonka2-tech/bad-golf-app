@@ -62,8 +62,8 @@ const full = (p) => (p.playsGross ? 0 : p.baseHcp);   // the event's FULL (pre-a
 // GATE oracle (house rule v1984 / GL-6): a field day settles when (a) only one group is launched, or (b) every
 // launched group has tapped Finish, or (c) every POSTED card holds every hole AND no launched group is still
 // to post its first score. (The "day is past" fallback is never exercised: all rounds are stamped today.)
-function oGate(rounds) {
-  if (rounds.length === 1) return true;
+function oGate(rounds, noSingle) {
+  if (rounds.length === 1 && !noSingle) return true;
   if (rounds.every(g => g.finishedAt)) return true;
   let cards = 0, short = 0;
   rounds.forEach(g => {
@@ -197,7 +197,7 @@ function oBirdie(rounds) {
     const Q = cfg.needBirdie ? K.filter(k => made[k] > 0) : K;
     const m = {}; K.forEach(k => m[k] = 0);
     awards.forEach(a => { m[a.k] += a.amt * (Q.length - 1); Q.forEach(o => { if (o !== a.k) m[o] -= a.amt; }); });
-    const complete = oGate(inn); perDay[day] = { complete, m };
+    const complete = oGate(inn, true); perDay[day] = { complete, m };   // Birdie Bump totals wait for the day even with one group (house rule)
     K.forEach(k => { live[k] = (live[k] || 0) + m[k]; if (complete) out[k] = (out[k] || 0) + m[k]; });
   });
   return { totals: out, live, perDay };
@@ -1173,6 +1173,7 @@ async function checkCombined(ev, label, axis, parts) {
     cmp('side pots', sideApp(SIDE(clone(rows), st.tourneySidePots)), oSum(r => oSide(r, st.tourneySidePots).totals), 'Flights');
     cmp('field Nassau', tbk(FNAS(clone(rows), st.tourneyNassau)), oSum(r => oFieldNassau(r, st.tourneyNassau).totals), 'Flights');
     cmp('Stableford pool', appMoneyKeyed(STBL(clone(rows), ev.t, [])), oSum(r => oPoints(r, ev.t, 'stableford', []).money), 'Flights');
+    if (process.env.TDBG === 'FC' + ci) { const a = CTP(clone(rows)); console.log('DBG FC', JSON.stringify(a && a.perDay.map(d => [d.flight, d.complete, d.holes.map(h => [h.hole, h.winnerName, h.dist, h.entrants])]))); for (let f = 1; f <= nF; f++) console.log('DBG FCo', f, JSON.stringify(oCtp(per(f))), per(f).map(g => g.code + ':' + (g.finishedAt ? 'F' : 'U') + ':' + JSON.stringify(g.ctpData) + ':' + g.players.map(p => p.name + '/' + scoredN(g, p) + '/' + p.id).join(',')).join(' | ')); }
     if (process.env.TDBG === 'FB' + ci) { const a = BIRD(clone(rows)); console.log('DBG FB', JSON.stringify(a && a.perDay.map(d => [d.flight, d.complete, d.rows.map(r => r.name + ':' + r.live)]))); for (let f = 1; f <= nF; f++) console.log('DBG FBo', f, JSON.stringify(oBirdie(per(f)).perDay), per(f).map(g => g.code + ':' + (g.finishedAt ? 'F' : 'U') + ':' + g.players.map(p => p.name + '/' + scoredN(g, p)).join(',')).join(' | ')); }
     if (process.env.TDBG === 'FL' + ci) { const a = STBL(clone(rows), ev.t, []); console.log('DBG FL', JSON.stringify(a.perDay.map(d => [d.flight, d.complete, d.N, d.rows.map(r => r.name + ':' + r.points)]))); for (let f = 1; f <= nF; f++) console.log('DBG FLo', f, JSON.stringify(oPoints(per(f), ev.t, 'stableford', []))); ev.rounds.forEach(g => console.log('DBG rd', JSON.stringify(g.leftRound), g.players.map(p => p.name + ':' + scoredN(g, p) + ':F' + flightOf(p.name)).join(','))); }
     // every flight is zero-sum on its own
