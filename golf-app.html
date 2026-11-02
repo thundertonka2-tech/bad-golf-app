@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1998-->
+<!--BGVER=v2026.11.2000-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12227,7 +12227,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1998';
+const BG_BUILD = 'v2026.11.2000';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -22743,6 +22743,14 @@ function _mergeGameInto(local, cloud, opts) {
       else if (C && L && C.pid && L.pid && _yd(C) === _yd(L) && _yd(C) >= 0) {
         const all = [L.pid].concat(L.co || [], [C.pid], C.co || []).filter((p, i, a) => p && a.indexOf(p) === i);
         if (all.length > 1) local.longDriveData = Object.assign({}, L, { pid: all[0], co: all.slice(1) });
+      }
+      // v2000 (audit GL-4): union every player's longest mark from both phones, so a save from
+      // a phone that never saw a drive cannot drop it. The leader record above is unchanged.
+      const _mk = (L && L.marks) || null, _mc = (C && C.marks) || null;
+      if ((_mk || _mc) && local.longDriveData && local.longDriveData.pid) {
+        const _u = {};
+        [_mk, _mc].forEach(src => { if (!src) return; Object.keys(src).forEach(k => { const m = src[k]; if (m && m.yds != null && (!_u[k] || Number(m.yds) > Number(_u[k].yds))) _u[k] = m; }); });
+        local.longDriveData = Object.assign({}, local.longDriveData, { marks: _u });
       }
     } catch (e) {}
     // v1223 (Tyler, 8/25): the broadcast markers — group hole, finish-open, hole
@@ -36922,7 +36930,7 @@ function strokesOnHole(playerHcp, holeSi, par, rules, nHoles) {
   // 9-hole card). Without this a 14 got 14 strokes over nine holes. Same
   // convention quotaTargetFor already uses (hcp * 0.5 on a nine). Rounds that
   // don't set hcp18 - i.e. every non-tournament round - are untouched.
-  if (rules && rules.hcp18 && nH === 9) playerHcp = Math.round(playerHcp / 2);
+  if (rules && rules.hcp18 && nH === 9) playerHcp = (playerHcp < 0 ? -1 : 1) * Math.round(Math.abs(playerHcp) / 2);   // v2000 (audit GL-9): halve plus and regular handicaps the same way (Math.round(-1.5) is -1, so a +3 used to give back only 1)
   // Plus handicap (better than scratch, stored as a negative): the player GIVES
   // strokes back, starting from the EASIEST hole (highest stroke index) upward.
   // Returns NEGATIVE strokes so net ends up higher than gross on those holes.
@@ -36932,11 +36940,15 @@ function strokesOnHole(playerHcp, holeSi, par, rules, nHoles) {
     let strokes = 0;
     if (give >= rank) strokes--;
     if (give >= nH + rank) strokes--;      // second pass for extreme plus handicaps
+    for (let _k = 2; _k < 10 && give >= _k * nH + rank; _k++) strokes--;   // v2000 (audit GL-7): no cap at two passes
     return strokes;
   }
   let strokes = 0;
   if (playerHcp >= holeSi) strokes++;
   if (playerHcp >= nH + holeSi) strokes++;
+  // v2000 (audit GL-7): a course handicap above 2x the holes (a 40 over 18, a 20 over a nine)
+  // gets a third stroke on the hardest holes instead of stopping at two. Identical below that.
+  for (let _k = 2; _k < 10 && playerHcp >= _k * nH + holeSi; _k++) strokes++;
   return strokes;
 }
 
@@ -38637,7 +38649,11 @@ function bgWatchStandings(g, fresh) {
     const m = computeAllGameMoney(g);
     const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
     const units = {};
-    g.players.forEach(p => { if (p && p.id) units[p.id] = r2(m && m.combined ? m.combined[p.id] : 0); });
+    // v2000 (audit GL-8): the wrist prints the same whole-unit, zero-sum total as the phone's Unit
+    // Totals (bgNetsWhole -> bgSettleNets). Per-game rows below stay raw, as on the phone.
+    let _wWhole = null;
+    try { _wWhole = (m && m.combined && typeof bgNetsWhole === 'function') ? bgNetsWhole(m.combined, g.players) : null; } catch (e) { _wWhole = null; }
+    g.players.forEach(p => { if (p && p.id) units[p.id] = (_wWhole && typeof _wWhole[p.id] === 'number') ? _wWhole[p.id] : r2(m && m.combined ? m.combined[p.id] : 0); });
     const games = ((m && m.byGame) || []).filter(b => b && !b.dropped).slice(0, 16).map(b => {
       const u = {}; Object.keys(b.money || {}).forEach(k => { u[k] = r2(b.money[k]); });
       return { key: String(b.key || ''), label: String(b.label || b.key || ''), units: u };
@@ -46837,6 +46853,23 @@ function _bgPlaySeq(g) {
   const seq = []; for (let i = 0; i < n; i++) seq.push(((s - 1 + i) % n) + 1);
   return seq;
 }
+// v2000 (audit GL-1/GL-2/GL-3): every game that carries something from hole to hole (a tie
+// streak, a carry, the potato, an auto-press streak, the loser-picks phase) walks the holes in
+// the order they were PLAYED, the same _bgPlaySeq walk Skins and Match use. On a start-on-1
+// round the order is 1..18 and nothing changes. These never throw: a bad round falls back to 1..n.
+function _bgPlaySeqOr(g, n) {
+  try { const s = _bgPlaySeq(g); if (Array.isArray(s) && s.length) return s; } catch (e) {}
+  const out = []; for (let i = 1; i <= (n || 18); i++) out.push(i); return out;
+}
+// 0-based position of `hole` (1-based) in play order. A hole outside the round keeps its old place.
+function _bgPlayPos(g, hole) {
+  try { const i = _bgPlaySeqOr(g, 18).indexOf(Number(hole)); return i >= 0 ? i : (Number(hole) - 1); } catch (e) { return Number(hole) - 1; }
+}
+// v2000 (audit GL-3): is `hole` in the Banker loser-picks phase? `from` is the old physical
+// threshold (16 on an 18 = the last three holes); it is now read as "the from-th hole PLAYED".
+function _bgBankerLoserHole(g, hole, from) {
+  try { return (_bgPlayPos(g, hole) + 1) >= from; } catch (e) { return hole >= from; }
+}
 function _bgScoresThrough(g, holeSet) {
   const sc = {};
   const src = g.scores || {};
@@ -48388,7 +48421,7 @@ function renderGameBanners() {
      nine hands the pick over for its last two. */
   const loserStart = cfg.loserStart || (((typeof roundHoles === 'function' ? roundHoles(g) : 18) === 9) ? 8 : 16);
     const _pickEvery = (cfg.mode === 'pick');                       // v928: pick-each-hole mode
-    const isLoserPickHole = _pickEvery || h >= loserStart;
+    const isLoserPickHole = _pickEvery || _bgBankerLoserHole(g, h, loserStart);   // v2000 (audit GL-3): last holes PLAYED
     const banker = getBankerForHole(g, h);
     const bankerAutoPressLive = (cfg.autoPress ? computeBankerAutoPress(g) : {});
 
@@ -49366,7 +49399,8 @@ function renderGameBanners() {
       if (!vPlan || !vPlan.length) vPlan = [{ teamA: [vParts[0], vParts[1]], teamB: [vParts[2], vParts[3]], start: 0, end: 18, label: '1-18' }];
       // Which segment is the hole being viewed (h is 1-based) in?
       let currentSeg = 0;
-      for (let _s = 0; _s < vPlan.length; _s++) { if ((h - 1) >= vPlan[_s].start) currentSeg = _s; }
+      const _vbPos = _bgPlayPos(g, h);   // v2000 (audit GL-1): segments are play positions
+      for (let _s = 0; _s < vPlan.length; _s++) { if (_vbPos >= vPlan[_s].start) currentSeg = _s; }
 
       // Pull live results so we can show per-segment points for/against.
       // calcVegas returns holeResults [{ hole, swing, winner, ... }, ...]
@@ -49391,7 +49425,7 @@ function renderGameBanners() {
         const t1NameLocal = escapeHtml(t1Players.map(p => p.name).join(' & '));   // v1898
         const t2NameLocal = escapeHtml(t2Players.map(p => p.name).join(' & '));
         holeResults.forEach(r => {
-          const holeIdx = r.hole - 1;
+          const holeIdx = _bgPlayPos(g, r.hole);   // v2000 (audit GL-1): play position, same as calcVegas
           if (holeIdx < segStart || holeIdx >= segEnd) return;
           holesScored++;
           if (r.winner === 'Tie') return;
@@ -49405,7 +49439,7 @@ function renderGameBanners() {
           t1Name: t1NameLocal,
           t2Name: t2NameLocal,
           t1Points, t2Points, holesScored, complete,
-          holeRange: `${segStart + 1}-${segEnd}`,
+          holeRange: (function () { try { const _sq = _bgPlaySeqOr(g, 18); if (_sq[segStart] != null && _sq[segEnd - 1] != null) return _sq[segStart] + '-' + _sq[segEnd - 1]; } catch (e) {} return (segStart + 1) + '-' + segEnd; })(),   // v2000 (audit GL-1): the real hole numbers played in this segment
           segLen
         };
       });
@@ -49414,12 +49448,12 @@ function renderGameBanners() {
 
       // Multiplier line — same logic as before, pending tie streak going INTO
       // this hole. Shown only if 2x or higher.
-      const vMult = vRes ? pendingTieMultiplier(holeResults, h) : 1;
+      const vMult = vRes ? pendingTieMultiplier(holeResults, h, g) : 1;   // v2000 (audit GL-1)
       const vMultLine = vMult > 1 ? `<div style="color:var(--gold);font-weight:600;margin-top:4px;font-size:12px">🔥 This hole is ${vMult}x — tie streak active</div>` : '';
 
       // --- Header ---
       const segLabel = isFixed
-        ? `Fixed teams · all ${cur.holeRange.split('-')[1]} holes`
+        ? `Fixed teams · all ${cur.segLen} holes`
         : (isSwitch9
             ? `${currentSeg === 0 ? 'Front' : 'Back'} nine · Holes ${cur.holeRange}${currentSeg === 0 ? ' · teams switch at the turn' : ' · teams switched'}`
             : `Segment ${currentSeg + 1} of ${segData.length} · Holes ${cur.holeRange}`);
@@ -49520,10 +49554,13 @@ function renderGameBanners() {
         const t2 = teams[1].map(id => (g.players.find(p => p.id === id) || {}).name).join(' & ');
         const div = document.createElement('div');
         div.className = 'turn-banner';
-        const hint = h === 1
+        // v2000 (audit GL-1): the pairing comes from the previous hole PLAYED.
+        let _dvPrevH = h - 1, _dvFirst = (h === 1);
+        try { const _sq = _bgPlaySeqOr(g, 18); const _i = _sq.indexOf(h); if (_i >= 0) { _dvFirst = (_i === 0); _dvPrevH = (_i > 0) ? _sq[_i - 1] : (h - 1); } } catch (e) {}
+        const hint = _dvFirst
           ? 'Hole 1 random pairing'
-          : `Based on hole ${h - 1}'s high &amp; low scorers`;
-        const dvMult = pendingTieMultiplier(dv.holeResults, h);
+          : `Based on hole ${_dvPrevH}'s high &amp; low scorers`;
+        const dvMult = pendingTieMultiplier(dv.holeResults, h, g);   // v2000 (audit GL-1)
         const dvMultLine = dvMult > 1 ? `<div style="color:var(--gold);font-weight:600;margin-top:2px">🔥 This hole is ${dvMult}x — tie streak active</div>` : '';
         div.innerHTML = `<div><strong>Dynamic Vegas:</strong> ${t1} vs ${t2}</div>
           ${dvMultLine}
@@ -50670,6 +50707,7 @@ function renderLongDriveEntry() {
       }
       g.longDriveData.pid = (g.longDriveData.pid === pid) ? null : pid;
       try { delete g.longDriveData.co; } catch (e) {}   // v1834: a hand pick replaces any tie
+      try { delete g.longDriveData.marks; } catch (e) {}   // v2000 (audit GL-4): ...and the GPS marks behind it
       if (!g.longDriveData.pid) g.longDriveData.yds = null;
       try { renderLongDriveEntry(); } catch (e) {}   // v1735: paint first, then save (the tap no longer waits on the cloud)
       await saveGame(g);
@@ -54518,7 +54556,13 @@ function bankerStandingsThrough(g, throughHole) {
   // against every player on every hole.
   const defaultBet = (cfg.defaultBet != null && cfg.defaultBet > 0) ? cfg.defaultBet : ((roundMin + roundMax) / 2);
 
-  for (let h = 0; h < throughHole; h++) {
+  // v2000 (audit GL-3): "standings before hole N" = every hole PLAYED before N, not holes 1..N-1.
+  const _bsSeq = _bgPlaySeqOr(g, 18);
+  const _bsCur = throughHole + 1;
+  let _bsN = (_bsCur >= 1 && _bsCur <= _bsSeq.length) ? _bsSeq.indexOf(_bsCur) : _bsSeq.length;
+  if (_bsN < 0) _bsN = Math.min(throughHole, _bsSeq.length);
+  for (let _bsK = 0; _bsK < _bsN; _bsK++) {
+    const h = _bsSeq[_bsK] - 1;
     const banker = getBankerForHole(g, h + 1);
     if (!banker) continue;
     const hd = g.bankerData.holes[h + 1] || {};
@@ -54555,8 +54599,9 @@ function bankerStandingsThrough(g, throughHole) {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return;
       const bBasis = _useNetBirdieS ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules, _nHS) : s;
-      if (bBasis <= par - 1) { birdiesByPlayer[p.id] = true; anyoneBirdie = true; }
-      if (bBasis <= par - 2) { eaglesByPlayer[p.id] = true; anyoneEagle = true; }
+      let _bp = par; try { const _v = parFor(g, p.id, h); if (_v != null) _bp = _v; } catch (e) {}   // v2000 (audit GL-5): same test as calcBanker
+      if (bBasis <= _bp - 1) { birdiesByPlayer[p.id] = true; anyoneBirdie = true; }
+      if (bBasis <= _bp - 2) { eaglesByPlayer[p.id] = true; anyoneEagle = true; }
     });
     const bankerBirdied = !!birdiesByPlayer[banker.id];
     const bankerEagled = !!eaglesByPlayer[banker.id];
@@ -54623,7 +54668,7 @@ function bgBankerPickUnresolved(g, hole) {
     const picks = g.bankerData && g.bankerData.picks;
     if (!picks || !picks[hole]) return null;
     const loserStart = cfg.loserStart || (((typeof roundHoles === 'function' ? roundHoles(g) : 18) === 9) ? 8 : 16);
-    if (hole < ((cfg.mode === 'pick') ? 1 : loserStart)) return null;
+    if (!_bgBankerLoserHole(g, hole, (cfg.mode === 'pick') ? 1 : loserStart)) return null;   // v2000 (audit GL-3)
     const participants = getParticipants(g, cfg);
     if (!participants.length) return null;
     if (participants.some(p => p.id === picks[hole])) return null;
@@ -54649,7 +54694,7 @@ function getBankerForHole(g, hole) {
   // (validate the pick is a participant; if not, fall back to rotation).
   // v928: in "pick each hole" mode EVERY hole is a pick hole (from hole 1).
   const _pickFrom = (cfg.mode === 'pick') ? 1 : loserStart;
-  if (hole >= _pickFrom && g.bankerData.picks && g.bankerData.picks[hole]) {
+  if (_bgBankerLoserHole(g, hole, _pickFrom) && g.bankerData.picks && g.bankerData.picks[hole]) {   // v2000 (audit GL-3): the loser picks for the last holes PLAYED
     const pickedId = g.bankerData.picks[hole];
     const picked = participants.find(p => p.id === pickedId);
     if (picked) return picked;
@@ -54682,7 +54727,11 @@ function computeBankerAutoPress(g) {
   const downBy = (cfg.autoPressDown != null && cfg.autoPressDown > 0) ? cfg.autoPressDown : 2;
   if (!g.bankerData) g.bankerData = { holes: {}, picks: {} };
   const streak = {}; // playerId -> losses to the banker since their last win
-  for (let h = 0; h < 18; h++) {
+  // v2000 (audit GL-3): losing streaks build in the order the holes were PLAYED, so a back-nine
+  // start can no longer auto-press its first hole off losses made on holes played hours later.
+  const _apSeq = _bgPlaySeqOr(g, 18);
+  for (let _apK = 0; _apK < _apSeq.length; _apK++) {
+    const h = _apSeq[_apK] - 1;
     const hole = h + 1;
     const banker = getBankerForHole(g, hole);
     if (!banker) continue;
@@ -54803,8 +54852,10 @@ function calcBanker(g) {
       const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
       if (s === null) return;
       const bBasis = _useNetBirdie ? netHoleScore(s, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : s;
-      if (bBasis <= par - 1) { birdiesByPlayer[p.id] = true; anyoneBirdie = true; }
-      if (bBasis <= par - 2) { eaglesByPlayer[p.id] = true; anyoneEagle = true; }
+      // v2000 (audit GL-5): a birdie is judged against THIS player's tee par (v1065), not the card's.
+      let _bp = par; try { const _v = parFor(g, p.id, h); if (_v != null) _bp = _v; } catch (e) {}
+      if (bBasis <= _bp - 1) { birdiesByPlayer[p.id] = true; anyoneBirdie = true; }
+      if (bBasis <= _bp - 2) { eaglesByPlayer[p.id] = true; anyoneEagle = true; }
     });
     const bankerBirdied = !!birdiesByPlayer[banker.id];
     const bankerEagled = !!eaglesByPlayer[banker.id];
@@ -54891,10 +54942,13 @@ function calcBanker(g) {
 // This MUST match the exponential math in calcVegas (Math.pow(2, tieStreak))
 // and calcDynamicVegas — otherwise the "🔥 Nx" banner lies about what the
 // next hole actually gives.
-function pendingTieMultiplier(holeResults, currentHole) {
+function pendingTieMultiplier(holeResults, currentHole, g) {   // v2000 (audit GL-1): optional round -> play order
   if (!Array.isArray(holeResults) || holeResults.length === 0) return 1;
   // Take only results before currentHole (1-indexed)
-  const priors = holeResults.filter(r => r.hole < currentHole).sort((a, b) => a.hole - b.hole);
+  // v2000 (audit GL-1): "before this hole" means PLAYED before it when the round is passed in.
+  let priors = null;
+  try { if (g) { const _pp = x => _bgPlayPos(g, x); const _c = _pp(currentHole); priors = holeResults.filter(r => _pp(r.hole) < _c).sort((a, b) => _pp(a.hole) - _pp(b.hole)); } } catch (e) { priors = null; }
+  if (!priors) priors = holeResults.filter(r => r.hole < currentHole).sort((a, b) => a.hole - b.hole);
   try { const _lp = priors[priors.length - 1]; if (_lp && typeof _lp.nextMultiplier === 'number') return _lp.nextMultiplier; } catch (e) {}   // v1899: read the engine's own carry (both-boost cancel, switch9 reset, maxDoubles cap)
   let streak = 0;
   for (let i = priors.length - 1; i >= 0; i--) {
@@ -54991,10 +55045,15 @@ function calcVegas(g) {
   let tieStreak = 0;
 
   let _prevSegIdx = -1;
-  for (let h = 0; h < 18; h++) {
+  // v2000 (audit GL-1): the tie streak and the partnerships run in the order the holes were PLAYED.
+  // A back-nine start's first hole opens at 1x, and "switch at the turn" switches after nine PLAYED.
+  // vegasSegmentPlan's start/end are read as play positions (identical on a start-on-1 round).
+  const _vSeq = _bgPlaySeqOr(g, 18);
+  for (let _vi = 0; _vi < _vSeq.length; _vi++) {
+    const h = _vSeq[_vi] - 1;
     // Pairing comes straight from the shared plan — no mode branching here.
     let segIdx = 0;
-    for (let s = 0; s < vSegs.length; s++) { if (h >= vSegs[s].start) segIdx = s; }
+    for (let s = 0; s < vSegs.length; s++) { if (_vi >= vSegs[s].start) segIdx = s; }
     const _seg = vSegs[segIdx] || vSegs[0];
     const teamA = _seg.teamA;
     const teamB = _seg.teamB;
@@ -55053,10 +55112,12 @@ function calcVegas(g) {
     const _boostNet = (cfg.birdieBasis === 'gross' || cfg.birdieBasis === 'net') ? (!!cfg.net && cfg.birdieBasis === 'net') : ((g && g.naturalBoost) ? false : cfg.net);   // v1814: per-game birdieBasis wins; legacy rounds fall back to the round-wide naturalBoost
     const aGross = teamA.map(p => getScore(p, _boostNet));
     const bGross = teamB.map(p => getScore(p, _boostNet));
-    const aBirdies = aGross.filter(s => s !== null && s === par - 1).length;
-    const bBirdies = bGross.filter(s => s !== null && s === par - 1).length;
-    const aEagles = aGross.filter(s => s !== null && s <= par - 2).length;
-    const bEagles = bGross.filter(s => s !== null && s <= par - 2).length;
+    // v2000 (audit GL-5): birdie / eagle against each player's own tee par (v1065), not the card's.
+    const _vPar = p => { try { const v = parFor(g, p.id, h); return v != null ? v : par; } catch (e) { return par; } };
+    const aBirdies = teamA.filter((p, i) => aGross[i] !== null && aGross[i] === _vPar(p) - 1).length;
+    const bBirdies = teamB.filter((p, i) => bGross[i] !== null && bGross[i] === _vPar(p) - 1).length;
+    const aEagles = teamA.filter((p, i) => aGross[i] !== null && aGross[i] <= _vPar(p) - 2).length;
+    const bEagles = teamB.filter((p, i) => bGross[i] !== null && bGross[i] <= _vPar(p) - 2).length;
 
     // Compute each team's boost tier as a multiplier in {1, 2, 4, 8, ...}
     // where 1 = "flip only", 2+ = "flip + ×N". 0 means no boost at all.
@@ -55124,7 +55185,7 @@ function calcVegas(g) {
     }
     // v1899: the multiplier the NEXT hole opens on, for the banner (switch9 starts the back nine clean)
     let _nextMult = Math.pow(2, Math.min(tieStreak, _maxDbl));
-    try { if (cfg.rotate === 'switch9') { let _ns = segIdx; for (let s = 0; s < vSegs.length; s++) { if ((h + 1) >= vSegs[s].start) _ns = s; } if (_ns !== segIdx) _nextMult = 1; } } catch (e) {}
+    try { if (cfg.rotate === 'switch9') { let _ns = segIdx; for (let s = 0; s < vSegs.length; s++) { if ((_vi + 1) >= vSegs[s].start) _ns = s;   /* v2000 (audit GL-1): next hole PLAYED */ } if (_ns !== segIdx) _nextMult = 1; } } catch (e) {}
 
     holeResults.push({
       hole: h + 1,
@@ -55193,17 +55254,20 @@ function calcDynamicVegas(g) {
 
   // Resolve teams for each hole, walking forward. teamsByHole[h] = [[idA,idB],[idC,idD]]
   const teamsByHole = [];
+  // v2000 (audit GL-1): partnerships and the tie streak follow the order the holes were PLAYED.
+  const _dvSeq = _bgPlaySeqOr(g, 18);
   // Hole 0 (1st hole) — seeded random across participants
   const hole1 = hole1Teams();
-  teamsByHole[0] = [
+  teamsByHole[_dvSeq[0] - 1] = [
     hole1[0].map(i => participants[i].id),
     hole1[1].map(i => participants[i].id)
   ];
 
-  for (let h = 1; h < 18; h++) {
+  for (let _dk = 1; _dk < _dvSeq.length; _dk++) {
+    const h = _dvSeq[_dk] - 1;   // v2000 (audit GL-1)
     // Look at hole h-1's gross scores among participants only. If any unscored,
     // fall back to previous hole's teams.
-    const prevH = h - 1;
+    const prevH = _dvSeq[_dk - 1] - 1;   // v2000 (audit GL-1): the previous hole PLAYED
     const prevScores = participants.map(p => ({
       id: p.id,
       score: (g.scores[p.id] && g.scores[p.id][prevH] != null) ? g.scores[p.id][prevH] : null
@@ -55243,7 +55307,8 @@ function calcDynamicVegas(g) {
   let tieStreak = 0;
 
   // Now calc each hole using these teams
-  for (let h = 0; h < 18; h++) {
+  for (let _dc = 0; _dc < _dvSeq.length; _dc++) {
+    const h = _dvSeq[_dc] - 1;   // v2000 (audit GL-1)
     const teamA = teamsByHole[h][0].map(id => g.players.find(p => p.id === id));
     const teamB = teamsByHole[h][1].map(id => g.players.find(p => p.id === id));
     const aScores = teamA.map(p => getScore(p, h, cfg.net));
@@ -55274,10 +55339,12 @@ function calcDynamicVegas(g) {
     const _boostNet = (cfg.birdieBasis === 'gross' || cfg.birdieBasis === 'net') ? (!!cfg.net && cfg.birdieBasis === 'net') : ((g && g.naturalBoost) ? false : cfg.net);   // v1814: per-game birdieBasis wins; legacy rounds fall back to the round-wide naturalBoost
     const aGross = teamA.map(p => getScore(p, h, _boostNet));
     const bGross = teamB.map(p => getScore(p, h, _boostNet));
-    const aBirdies = aGross.filter(s => s !== null && s === par - 1).length;
-    const bBirdies = bGross.filter(s => s !== null && s === par - 1).length;
-    const aEagles = aGross.filter(s => s !== null && s <= par - 2).length;
-    const bEagles = bGross.filter(s => s !== null && s <= par - 2).length;
+    // v2000 (audit GL-5): birdie / eagle against each player's own tee par.
+    const _vPar = p => { try { const v = parFor(g, p.id, h); return v != null ? v : par; } catch (e) { return par; } };
+    const aBirdies = teamA.filter((p, i) => aGross[i] !== null && aGross[i] === _vPar(p) - 1).length;
+    const bBirdies = teamB.filter((p, i) => bGross[i] !== null && bGross[i] === _vPar(p) - 1).length;
+    const aEagles = teamA.filter((p, i) => aGross[i] !== null && aGross[i] <= _vPar(p) - 2).length;
+    const bEagles = teamB.filter((p, i) => bGross[i] !== null && bGross[i] <= _vPar(p) - 2).length;
 
     function computeTier(eagles, birdies) {
       if (eagles >= 1) return Math.pow(2, eagles);
@@ -57306,7 +57373,47 @@ function bgLongDriveHolesFor(g) {
 // v1834 (Tyler): an EXACT tie shares the lead -- `co` lists the other leaders' ids and
 // the prize pool is split (calcLongDrive). A re-measure by a co-leader: longer takes it
 // outright, shorter drops them out of the tie.
+// v2000 (audit GL-4): "longest mark kept". longDriveData now also carries marks = { pid: {yds,
+// via, at, h, t2pid} }, every player's LONGEST drive. A re-measure can only raise a player's own
+// mark, never shorten it, and never erases anyone else's. The leader record (pid / yds / co) is
+// rebuilt from the marks each time, so calcLongDrive, the merge and the field lead read it exactly
+// as before; exact ties still share via `co`. Old data with only a leader record is read as
+// that leader's (and any co-leader's) mark. Falls back to the pre-v2000 rule if anything throws.
 function bgLongDriveApply(cur, rec) {
+  try {
+    const _y = d => (d && d.yds != null && isFinite(Number(d.yds))) ? Number(d.yds) : -1;
+    const marks = {};
+    if (cur && cur.marks && typeof cur.marks === 'object') {
+      Object.keys(cur.marks).forEach(k => { const m = cur.marks[k]; if (m && _y(m) >= 0) marks[k] = Object.assign({}, m, { yds: _y(m) }); });
+    }
+    if (cur && cur.pid && _y(cur) >= 0) {
+      // the stored leader record is authoritative for the leader(s) (a typed correction lands here)
+      [cur.pid].concat(Array.isArray(cur.co) ? cur.co : []).forEach(k => {
+        if (!k) return;
+        const base = { yds: _y(cur), via: cur.via, at: cur.at, h: cur.h };
+        if (k === cur.pid && cur.t2pid) base.t2pid = cur.t2pid;
+        marks[k] = Object.assign({}, marks[k] || {}, base);
+      });
+    }
+    const y = Number(rec && rec.yds);
+    if (!(rec && rec.pid && isFinite(y) && y >= 0)) return _bgLongDriveApplyV1(cur, rec);
+    const prev = marks[rec.pid];
+    if (!prev || y > _y(prev)) {
+      const m = { yds: y, via: rec.via, at: rec.at, h: rec.h };
+      if (rec.t2pid) m.t2pid = rec.t2pid;
+      marks[rec.pid] = m;
+    }
+    let best = -1; Object.keys(marks).forEach(k => { if (_y(marks[k]) > best) best = _y(marks[k]); });
+    let leaders = Object.keys(marks).filter(k => _y(marks[k]) === best);
+    if (cur && cur.pid && leaders.indexOf(cur.pid) > 0) leaders = [cur.pid].concat(leaders.filter(k => k !== cur.pid));   // keep the standing leader first
+    const top = marks[leaders[0]] || {};
+    const leader = { pid: leaders[0], yds: best, via: top.via, at: top.at, h: top.h, co: leaders.slice(1), marks: marks };
+    if (top.t2pid) leader.t2pid = top.t2pid;
+    const lead = leaders.indexOf(rec.pid) >= 0;
+    return lead ? { lead: true, tie: leaders.length > 1, leader: leader } : { lead: false, leader: leader };
+  } catch (e) { return _bgLongDriveApplyV1(cur, rec); }
+}
+function _bgLongDriveApplyV1(cur, rec) {
   const curY = (cur && cur.yds != null && isFinite(Number(cur.yds))) ? Number(cur.yds) : -1;
   const y = Number(rec.yds);
   const co = (cur && Array.isArray(cur.co)) ? cur.co.slice() : [];
@@ -58019,7 +58126,10 @@ function calcPotOfGold(g) {
   // On a NINE the prize pool ran (19 − si) instead of (10 − si) — 2.8× the units the
   // crew actually agreed to. Derive the top weight from the round's hole count.
   const _pogHoles = (typeof roundHoles === 'function') ? roundHoles(g) : 18;
-  for (let h = 0; h < 18; h++) {
+  // v2000 (audit GL-2): a tied pot carries to the next hole PLAYED.
+  const _pgSeq = _bgPlaySeqOr(g, 18);
+  for (let _pgK = 0; _pgK < _pgSeq.length; _pgK++) {
+    const h = _pgSeq[_pgK] - 1;
     const par = g.pars[h];
     const si = g.sis ? g.sis[h] : 0;
     const weight = (si >= 1 && si <= _pogHoles) ? ((_pogHoles + 1) - si) : 1;   // v983: SI 1 → nHoles× ... SI n → 1×
@@ -58318,7 +58428,10 @@ function calcHotPotato(g) {
   const _hpAuto = _bgHotPotatoAutoMode(g, cfg) !== null;
   const _hpAutoPick = (h, cur) => _bgHotPotatoAutoPick(g, cfg, participants, h, cur);
   let holder = null, val = 0, passes = 0, doubles = 0;
-  for (let h = 1; h <= 18; h++) {
+  // v2000 (audit GL-2): the potato moves in the order the holes were PLAYED; the last holder pays.
+  const _hpSeq = _bgPlaySeqOr(g, 18);
+  for (let _hpK = 0; _hpK < _hpSeq.length; _hpK++) {
+    const h = _hpSeq[_hpK];
     let e = (g.potatoData[h] || {}).holder;
     if (typeof e === 'string') e = [e];
     const onHole = Array.isArray(e) ? e.filter(id => partIds.has(id)) : [];
@@ -58389,7 +58502,11 @@ function _bgHotPotatoHolderThru(g, cfg, h) {
     const participants = getParticipants(g, cfg);
     const partIds = new Set(participants.map(p => p.id));
     let holder = null, autoOn = null;
-    for (let i = 1; i <= h; i++) {
+    // v2000 (audit GL-2): every hole PLAYED up to and including h.
+    const _htSeq = _bgPlaySeqOr(g, 18);
+    const _htEnd = _htSeq.indexOf(Number(h));
+    for (let _htK = 0; _htK <= (_htEnd < 0 ? h - 1 : _htEnd); _htK++) {
+      const i = (_htEnd < 0) ? (_htK + 1) : _htSeq[_htK];
       let e = ((g.potatoData || {})[i] || {}).holder;
       if (typeof e === 'string') e = [e];
       const onHole = Array.isArray(e) ? e.filter(id => partIds.has(id)) : [];
@@ -58573,7 +58690,10 @@ function calcHammer(g) {
       return best;
     };
     let carry = 0;
-    for (let h = 1; h <= roundHoles; h++) {
+    // v2000 (audit GL-2): a halved hole carries to the next hole PLAYED.
+    const _hmSeq = _bgPlaySeqOr(g, roundHoles);
+    for (let _hmK = 0; _hmK < _hmSeq.length; _hmK++) {
+      const h = _hmSeq[_hmK];
       const hd = (g.hammerData && g.hammerData.holes && g.hammerData.holes[h]) || null;
       const stake = (hd && hd.stake) ? hd.stake : 1;
       const result = (hd && hd.result) ? hd.result : 'play';
@@ -58620,7 +58740,10 @@ function calcHammer(g) {
   const money = {}; (g.players || []).forEach(p => money[p.id] = 0);   // v1998
   const holeResults = [];
   let carry = 0;
-  for (let h = 1; h <= roundHoles; h++) {
+  // v2000 (audit GL-2): a pushed hole carries to the next hole PLAYED.
+  const _hiSeq = _bgPlaySeqOr(g, roundHoles);
+  for (let _hiK = 0; _hiK < _hiSeq.length; _hiK++) {
+    const h = _hiSeq[_hiK];
     const hd = (g.hammerData && g.hammerData.holes && g.hammerData.holes[h]) || null;
     const stake = (hd && hd.stake) ? hd.stake : 1;
     const _pidSet = new Set(players.map(p => p.id));   // v1998: a fold logged for a non-participant is ignored
@@ -95299,6 +95422,13 @@ function _t2NoteDayCards(d, g) {
       d.cards = (d.cards || 0) + 1;
       if (n < nH) d.cardsShort = (d.cardsShort || 0) + 1;
     });
+    // v2000 (audit GL-6): a launched round where NOBODY has posted a score yet (a later tee time)
+    // is a group still to play, not a full card: it keeps the day pending until it posts, finishes,
+    // or the day is past. A no-show inside a group that IS playing is still left out (v1292).
+    try {
+      const _any = g.players.some(p => { const sc = (p && g.scores && g.scores[p.id]) || []; for (let h = 0; h < 18; h++) { if (sc[h] != null) return true; } return false; });
+      if (!_any && !g.finishedAt) d.cardsShort = (d.cardsShort || 0) + 1;
+    } catch (e) {}
   } catch (e) {}
 }
 function _t2DayFieldComplete(d) {
