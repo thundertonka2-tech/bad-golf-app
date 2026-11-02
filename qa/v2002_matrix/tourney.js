@@ -58,6 +58,10 @@ const oSi  = (g, p, h) => (g.teeSis && g.teeSis[p.teeLabel]) ? g.teeSis[p.teeLab
 const nHof = g => g.pars.length === 9 ? 9 : 18;
 const scoredN = (g, p) => (g.scores[p.id] || []).filter(v => v != null).length;
 const full = (p) => (p.playsGross ? 0 : p.baseHcp);   // the event's FULL (pre-allowance) handicap
+// leaver helpers (play-order aware; harness rounds carry no cell stamps so the effective start = startHole)
+const leftAfter = (g, p) => (g.leftRound && g.leftRound.byId && g.leftRound.byId[p.id]) || null;
+const playPos = (g, h1) => { const nH = nHof(g), st = g.startHole || 1; return ((h1 - st) % nH + nH) % nH; };
+const activeOn = (g, p, h1) => { const l = leftAfter(g, p); return l == null || playPos(g, h1) <= playPos(g, l); };
 
 // GATE oracle (house rule v1984 / GL-6): a field day settles when (a) only one group is launched, or (b) every
 // launched group has tapped Finish, or (c) every POSTED card holds every hole AND no launched group is still
@@ -120,7 +124,10 @@ function oSkins(rounds, cfg) {
   return { totals: out, perDay };
 }
 // FIELD CTP oracle — closest ball on each CTP hole across the field; every entrant (posted a card) puts in
-// `value` per hole; winner takes the pot. EXACT TIE across groups = split (house rule axis 4).
+// `value` per hole; winner takes the pot. EXACT TIE across groups = split among everyone tied (DECISIONS 1,
+// Tyler 11/2). Greenie mode: each tied player holds 1/k of the hole, judged on his own score (par or
+// better wins it from every other entrant, worse pays the Hero Tax on it). CTP is whole field even when
+// flights are on (DECISIONS, TOURNEY-19).
 function oCtp(rounds) {
   const out = {}, perDay = {};
   Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
@@ -137,9 +144,10 @@ function oCtp(rounds) {
       const p = g.players.find(x => x.id === e.pid); if (!p || !ent[nk(p.name)]) return;
       const inch = (e.ft != null || e.in != null) ? (Number(e.ft) || 0) * 12 + (Number(e.in) || 0) : Infinity;
       const sc = (g.scores[p.id] || [])[Number(h) - 1]; const par = g.pars[Number(h) - 1];
-      const b = best[h];
-      if (!b || inch < b.inch) best[h] = { inch, ks: [nk(p.name)], sc, par };
-      else if (inch === b.inch && inch !== Infinity) b.ks.push(nk(p.name));
+      const b = best[h], k = nk(p.name);
+      if (!b || inch < b.inch) best[h] = { inch, ks: [k], who: [{ k, sc, par }] };
+      else if (inch === b.inch && inch !== Infinity) { if (!b.ks.includes(k)) { b.ks.push(k); b.who.push({ k, sc, par }); } }
+      else if (inch === b.inch && k < b.ks[0]) best[h] = { inch, ks: [k], who: [{ k, sc, par }] };
     }));
     const complete = oGate(live);
     perDay[day] = { complete };
@@ -147,9 +155,9 @@ function oCtp(rounds) {
     Object.keys(best).forEach(h => {
       const b = best[h];
       if (greenie) {
-        if (b.sc == null) return;
-        const win = b.sc <= b.par;
-        Object.keys(ent).forEach(k => { const isW = k === b.ks[0]; out[k] = (out[k] || 0) + (win ? (isW ? val * (N - 1) : -val) : (isW ? -val * (N - 1) : val)); });
+        const kT = b.who.length;
+        b.who.forEach(w => { if (w.sc == null) return; const sg = w.sc <= w.par ? 1 : -1;
+          Object.keys(ent).forEach(k => { out[k] = (out[k] || 0) + (k === w.k ? sg * (val / kT) * (N - 1) : -sg * val / kT); }); });
         return;
       }
       Object.keys(ent).forEach(k => { out[k] = (out[k] || 0) - val + (b.ks.includes(k) ? val * N / b.ks.length : 0); });
@@ -193,10 +201,11 @@ function oBirdie(rounds) {
     K.forEach(k => { const { g, p } = ent[k]; for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; if (s == null) continue;
       const par = oPar(g, p, h); const b = cfg.birdieBasis === 'net' ? s - oStrokes(p.hcp, oSi(g, p, h), par, g.hcpRules, nH) : s;
       let amt = 0; if (s === 1 && Number(cfg.hio) > 0) amt = Number(cfg.hio); else if (b - par <= -2 && Number(cfg.eagle) > 0) amt = Number(cfg.eagle); else if (b - par <= -1) amt = Number(cfg.birdie) || 0;
-      if (amt) { awards.push({ k, amt }); made[k]++; } } });
+      if (amt) { awards.push({ k, amt, h }); made[k]++; } } });
     const Q = cfg.needBirdie ? K.filter(k => made[k] > 0) : K;
     const m = {}; K.forEach(k => m[k] = 0);
-    awards.forEach(a => { m[a.k] += a.amt * (Q.length - 1); Q.forEach(o => { if (o !== a.k) m[o] -= a.amt; }); });
+    // TOURNEY-5 (group rule v1602): only players still active on that hole pay an award.
+    awards.forEach(a => { const payers = Q.filter(o => o !== a.k && activeOn(ent[o].g, ent[o].p, a.h + 1)); m[a.k] += a.amt * payers.length; payers.forEach(o => { m[o] -= a.amt; }); });
     const complete = oGate(inn, true); perDay[day] = { complete, m };   // Birdie Bump totals wait for the day even with one group (house rule)
     K.forEach(k => { live[k] = (live[k] || 0) + m[k]; if (complete) out[k] = (out[k] || 0) + m[k]; });
   });
@@ -222,7 +231,7 @@ function oSide(rounds, cfg) {
       const k = nk(p.name); if (!parts[k] || parts[k].n < n) parts[k] = { k, n, net, girs, putts, ph, nets };
     }));
     const P = Object.values(parts); if (P.length < 2) return;
-    const complete = oGate(rs);
+    const complete = oGate(rs, true);   // waits for the day like Birdie Bump (TOURNEY-2); never settles live off one group
     perDay[day] = { complete };
     ['lowNet', 'girs', 'putts'].forEach(key => {
       const c = cfg[key]; if (!c || !c.on || !(Number(c.value) > 0)) return;
@@ -246,28 +255,34 @@ function oSide(rounds, cfg) {
 // FIELD (tournament) NASSAU oracle: Front / Back / (Overall) best net, entry `value` per segment from every
 // finisher; <= 10 players: one place, a tied lead CARRIES the whole segment onto the next; leftover carry dies.
 // 11-20: 2 places 65/35 (80/20), 21+: 3 places 50/30/20 (60/30/10); tied places pool and split.
+// DECISIONS (Tyler 11/2 + defaults): a 9-hole day plays the Front only and a tied Front REFUNDS; a player
+// who LEFT pays every segment he did not finish as a loser and cannot win it (the others compete); a
+// launched group with no card yet keeps every segment pending (late-group rule).
 function oFieldNassau(rounds, cfg) {
   const out = {}, pend = {};
-  const segs = cfg.segments === 'fb' ? [[0, 8], [9, 17]] : [[0, 8], [9, 17], [0, 17]];
   Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
     const parts = {};
+    const nineDay = Math.min(...rs.map(nHof)) === 9;
+    const late = rs.some(g => !g.finishedAt && !g.players.some(p => scoredN(g, p)));
     rs.forEach(g => { const nH = nHof(g); g.players.forEach(p => { const n = scoredN(g, p); if (!n) return; const net = [];
       for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; net.push(s == null ? null : s - oStrokes(p.hcp, oSi(g, p, h), oPar(g, p, h), g.hcpRules, nH)); }
-      const k = nk(p.name); if (!parts[k] || parts[k].n < n) parts[k] = { k, n, net }; }); });
+      const k = nk(p.name); if (!parts[k] || parts[k].n < n) parts[k] = { k, n, net, left: leftAfter(g, p) != null }; }); });
     const P = Object.values(parts), N = P.length; if (N < 2) return;
+    const segs = nineDay ? [[0, 8]] : (cfg.segments === 'fb' ? [[0, 8], [9, 17]] : [[0, 8], [9, 17], [0, 17]]);
     let carry = 0;
     segs.forEach(([a, b], si) => {
-      const fin = P.filter(x => { for (let h = a; h <= b; h++) if (x.net[h] == null) return false; return true; });
-      if (fin.length !== N) { pend[day + ':' + si] = true; return; }
+      const isFull = x => { for (let h = a; h <= b; h++) if (x.net[h] == null) return false; return true; };
+      const fin = P.filter(isFull), lo = P.filter(x => x.left && !isFull(x));
+      if (late || fin.length + lo.length !== N || !fin.length) { pend[day + ':' + si] = true; return; }
       const tot = x => { let t = 0; for (let h = a; h <= b; h++) t += x.net[h]; return t; };
       const units = 1 + carry, ante = cfg.value * units;
-      const places = Math.min(N <= 10 ? 1 : N <= 20 ? 2 : 3, N);
-      const srt = P.slice().sort((x, y) => tot(x) - tot(y));
-      if (places === 1 && tot(srt[0]) === tot(srt[1])) { carry = units; return; }
+      const places = Math.min(N <= 10 ? 1 : N <= 20 ? 2 : 3, fin.length);
+      const srt = fin.slice().sort((x, y) => tot(x) - tot(y));
+      if (places === 1 && srt.length > 1 && tot(srt[0]) === tot(srt[1])) { if (nineDay) { carry = 0; return; } carry = units; return; }
       carry = 0;
       const pot = N * ante;
       const split = places === 1 ? [1] : places === 2 ? (cfg.payoutSplit === '8020' ? [.8, .2] : [.65, .35]) : (cfg.payoutSplit === '8020' ? [.6, .3, .1] : [.5, .3, .2]);
-      srt.forEach(x => out[x.k] = (out[x.k] || 0) - ante);
+      P.forEach(x => out[x.k] = (out[x.k] || 0) - ante);
       let i = 0; while (i < srt.length) { let j = i; while (j < srt.length && tot(srt[j]) === tot(srt[i])) j++; let s = 0; for (let q = i; q < j; q++) if (q < places) s += split[q] * pot; for (let q = i; q < j; q++) out[srt[q].k] += s / (j - i); i = j; }
     });
   });
@@ -467,6 +482,15 @@ async function checkCombined(ev, label, axis, parts) {
   const grp = bubbleByName(ev);
   const exp = {}; [parts.skins, parts.ctp, parts.lp, parts.bird, parts.side, parts.fnas, parts.cross, grp].forEach(m => Object.keys(m || {}).forEach(k => exp[k] = (exp[k] || 0) + m[k]));
   const bad = mapEq(app, exp, allKeys(app, exp).filter(k => Math.abs(exp[k] || 0) > 0.001 || Math.abs(app[k] || 0) > 0.001)).filter(Boolean);
+  // v2002 split: the FIELD part of the combined payout (combined minus the group-games column, which is the
+  // F4b / TOURNEY-3 buildVg re-settle) must equal field oracles + cross-group oracle on its own.
+  { let money = null; try { money = await F('loadTourneyMoney')(ev.t); } catch (e) {}
+    const gcol = {}; ((money && money.groupRows) || []).forEach(r => gcol[nk(r.name)] = (gcol[nk(r.name)] || 0) + (r.net || 0));
+    ((money && money.tourneyRows) || []).forEach(r => gcol[nk(r.name)] = (gcol[nk(r.name)] || 0) + (r.net || 0));
+    const fApp = {}; allKeys(app, gcol).forEach(k => fApp[k] = (app[k] || 0) - (gcol[k] || 0));
+    const fExp = {}; [parts.skins, parts.ctp, parts.lp, parts.bird, parts.side, parts.fnas, parts.cross].forEach(m => Object.keys(m || {}).forEach(k => fExp[k] = (fExp[k] || 0) + m[k]));
+    const fb = mapEq(fApp, fExp, allKeys(fApp, fExp).filter(k => Math.abs(fExp[k] || 0) > 0.001 || Math.abs(fApp[k] || 0) > 0.001));
+    check(label + ' :: combined FIELD part (minus group-games column) = field + cross-group oracles', !fb.length, fb.slice(0, 5).join('; '), 'Combined payout (field part)', axis); }
   if (process.env.TDEBUG && label.indexOf(process.env.TDEBUG) === 0 && bad.length) { console.log('DEBUG', label); console.log(' byGame', JSON.stringify((pay.byGame||[]).map(b=>[b.key,b.pending,b.money]))); console.log(' parts', JSON.stringify(parts)); console.log(' grp', JSON.stringify(grp)); }
   check(label + ' :: combined per player = sum(field games + cross-group + own group games)', !bad.length, bad.slice(0, 5).join('; '), 'Combined payout', axis);
   check(label + ' :: event-wide zero-sum (cents)', Math.abs(sumv(app)) < 0.005, 'sum=' + c2(sumv(app)), 'Combined payout', axis);
@@ -679,8 +703,10 @@ async function checkCombined(ev, label, axis, parts) {
   }
   // A14 plus-handicap allowance rounding: +5 at 90% vs 5 at 90% (launch p.hcp and field Skins %).
   {
+    // DECISIONS (core OPEN-1, supersedes TOURNEY-9): one WHS rule everywhere -- .5 rounds up toward the
+    // higher handicap, so +4.5 plays as +4 and 4.5 plays as 5 (what Math.round already does).
     const r1 = Math.round(-5 * 90 / 100), r2 = Math.round(5 * 90 / 100);
-    check('A14 plus-handicap % allowance rounds symmetrically (+5@90% vs 5@90%)', r1 === -r2, 'app rounding Math.round: +5 -> ' + r1 + ', 5 -> ' + r2 + ' (t2LaunchDayRounds p.hcp and _t2FieldSkinsAll _skHcp)', 'Handicap', 'plus hcp %');
+    check('A14 plus-handicap % allowance follows the WHS .5 rule (+5@90% -> +4, 5@90% -> 5)', r1 === -4 && r2 === 5, 'app rounding Math.round: +5 -> ' + r1 + ', 5 -> ' + r2, 'Handicap', 'plus hcp %');
   }
   // A15 cross-group Nassau with an unfinished side (a leaver in one cart) = no bet on that side; 'fb' honoured.
   {
@@ -694,6 +720,99 @@ async function checkCombined(ev, label, axis, parts) {
     check('A15 cross-group Nassau/1v1 with a leaver + fb segments = oracle', !bad.length, bad.join('; ') + ' segs=' + JSON.stringify((a.nassaus || []).map(n => n.segments.map(s => s.name + ':' + s.settled))), 'Cross-group', 'leaver');
     const n1 = (a.nassaus || []).find(n => n.aKey === nk(names[0]) || n.bKey === nk(names[0]));
     check('A15b fb Nassau has no Total segment', n1 && n1.segments.every(s => s.name !== 'Total'), JSON.stringify(n1 && n1.segments.map(s => s.name)), 'Cross-group', 'fb');
+  }
+
+  // ── A16+ v2002 fix cases (DECISIONS) ──────────────────────────────────────
+  // A16 TOURNEY-2 no-show: a launched group with no card holds every field pot; once the commissioner marks it
+  // a no-show (g.t2.noShow) the pots settle without it. A no-show that later posts a score plays normally.
+  {
+    const names = NAMES.slice(0, 6); const hcp = {}; names.forEach((n, i) => hcp[n] = [0, 4, 8, 12, 16, 20][i]);
+    seed(31);
+    const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 3) }, { names: names.slice(3, 5) }, { names: names.slice(5), noCard: true }] }],
+      tSettings: { tourneySkins: SK(), tourneySidePots: SP(), tourneyLongPutt: LP(), tourneyNassau: { on: true, value: 3 } }, dayGames: stdDayGames([4, 8]) });
+    ev.rounds[0].scores[ev.rounds[0].players[0].id][0] = 3;
+    const pend = () => { const rows = rowsOf(ev); const sk = SKINS(clone(rows), ev.t.settings.tourneySkins), bb = BIRD(clone(rows)), sp = SIDE(clone(rows), ev.t.settings.tourneySidePots), fn = FNAS(clone(rows), ev.t.settings.tourneyNassau), ct = CTP(clone(rows));
+      return { sk: sk.perDay[0].complete, bb: bb.perDay[0].complete, sp: sp.perDay[0].pots.every(p => p.paying), fn: fn.perDay[0].segments.every(x => x.complete), ct: !ct || ct.perDay[0].complete }; };
+    const before = pend();
+    check('A16 late group holds Skins / Birdie Bump / side pots / Nassau / CTP', !before.sk && !before.bb && !before.sp && !before.fn && !before.ct, JSON.stringify(before), 'Field Birdie Bump', 'late group');
+    ev.rounds[2].t2.noShow = true;
+    const after = pend();
+    check('A16 commissioner marks the group a no-show: every field pot settles without it', after.sk && after.bb && after.sp && after.fn && after.ct, JSON.stringify(after), 'Field Birdie Bump', 'no-show');
+    const A16 = tbk(BIRD(rowsOf(ev))), O16 = oBirdie(ev.rounds.slice(0, 2)).totals;
+    const bad16 = mapEq(A16, O16, allKeys(A16, O16));
+    check('A16 no-show day: Birdie Bump = oracle over the groups that played', !bad16.length, bad16.join('; '), 'Field Birdie Bump', 'no-show');
+    const g2 = ev.rounds[2]; g2.players.forEach(p => { g2.scores[p.id] = genScores(g2, p, 5); });
+    const late = pend();
+    check('A16 a no-show group that posts a score plays normally (holds the day again until it is done)', !late.sk && !late.bb, JSON.stringify(late), 'Field Birdie Bump', 'no-show');
+    const scr = F('t2ComputeFieldScramble');
+    const ev2 = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 3) }, { names: names.slice(3, 5) }, { names: names.slice(5), noCard: true }] }], tSettings: { tourneyScramble: { on: true, buyin: 10 } },
+      dayGames: (d, G, players) => ({ scramble: { teamMode: '4man', teamA: players.map(p => p.id), teamB: [] } }) });
+    ev2.rounds.forEach((g, i) => { g.scrambleData = {}; if (i === 2) return; for (let h = 1; h <= 18; h++) g.scrambleData[h] = { teamA: g.pars[h - 1] - (i ? 0 : 1) }; });
+    const s1 = scr(rowsOf(ev2), ev2.t); ev2.rounds[2].t2.noShow = true; const s2 = scr(rowsOf(ev2), ev2.t);
+    check('A16 field Scramble: late team keeps it pending; no-show lets it pay', s1.complete === false && s2.complete === true, s1.complete + ' -> ' + s2.complete, 'Field Scramble 4-man', 'no-show');
+  }
+  // A17 TOURNEY-1 field Long Putt tie is independent of row order; greenie-mode CTP tie applies the Hero Tax per tied player.
+  {
+    const names = ['Ann Lee', 'Bo Diaz', 'Cy Young', 'Del Ray']; const hcp = {}; names.forEach(n => hcp[n] = 5);
+    seed(32);
+    const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), lpOverride: P => ({ pid: P[1].id, ft: 30, in: 0 }) }, { names: names.slice(2), lpOverride: P => ({ pid: P[1].id, ft: 30, in: 0 }) }] }],
+      tSettings: { tourneyLongPutt: LP() }, dayGames: () => ({ longPutt: { value: 0, fieldOnly: true } }) });
+    const A = tbk(LPUTT(rowsOf(ev), ev.t.settings.tourneyLongPutt)), B = tbk(LPUTT(rowsOf(ev).reverse(), ev.t.settings.tourneyLongPutt));
+    check('A17 field Long Putt tie result independent of row order', !mapEq(A, B, allKeys(A, B)).length, 'fwd=' + JSON.stringify(A) + ' rev=' + JSON.stringify(B), 'Field Long Putt', 'ties');
+    const evg = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), ctpOverride: P => ({ 4: { pid: P[0].id, ft: 6, in: 2 } }) }, { names: names.slice(2), ctpOverride: P => ({ 4: { pid: P[0].id, ft: 6, in: 2 } }) }] }],
+      dayGames: () => ({ ctp: { value: 4, fieldOnly: true, greenie: true } }) });
+    evg.rounds.forEach(g => g.players.forEach(p => { g.scores[p.id] = PARS18.slice(); }));
+    evg.rounds[1].scores[evg.rounds[1].players[0].id][3] = 5;   // Cy (tied closest) bogeys -> Hero Tax on his half
+    const G = tbk(CTP(rowsOf(evg))), GR = tbk(CTP(rowsOf(evg).reverse())), O = oCtp(evg.rounds).totals;
+    // hole 4 (value 4, 4 entrants, 2 tied -> 2 each): Ann wins her half +6 and gets +2 of Cy's tax = +8; Cy -6 -2 = -8; Bo/Del -2 +2 = 0
+    const badG = mapEq(G, O, allKeys(G, O));
+    check('A17 greenie CTP tie: Hero Tax / win per tied player, = oracle', !badG.length && near(G['ann lee'], 8) && near(G['cy young'], -8), 'app=' + JSON.stringify(G) + ' exp=' + JSON.stringify(O), 'Field CTP', 'ties');
+    check('A17 greenie CTP tie independent of row order', !mapEq(G, GR, allKeys(G, GR)).length, JSON.stringify(G) + ' vs ' + JSON.stringify(GR), 'Field CTP', 'ties');
+  }
+  // A18 TOURNEY-6 field Nassau: a 9-hole day with a tied Front refunds; a leaver pays the Back/Overall as a loser.
+  {
+    const names = NAMES.slice(0, 4); const hcp = {}; names.forEach(n => hcp[n] = 0);
+    const ev = buildEvent({ hcp, days: [{ nH: 9, groups: groupsFor(names, [2, 2]) }], tSettings: { tourneyNassau: { on: true, value: 5 } }, dayGames: () => ({}) });
+    ev.rounds.forEach(g => g.players.forEach(p => { g.scores[p.id] = PARS9.slice(); }));
+    const a = FNAS(rowsOf(ev), ev.t.settings.tourneyNassau); const sg = a.perDay[0].segments;
+    check('A18 9-hole day: Front only; a tied Front refunds (nothing moves, nothing pending)', sg.length === 1 && sg[0].seg === 'front' && sg[0].complete && sg[0].refunded && Object.values(tbk(a)).every(v => Math.abs(v) < 0.001), JSON.stringify(sg.map(x => [x.seg, x.complete, x.refunded])) + ' ' + JSON.stringify(tbk(a)), 'Field Nassau', '9-hole day');
+    const ev2 = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), leave: { [names[0]]: 12 } }, { names: names.slice(2) }] }], tSettings: { tourneyNassau: { on: true, value: 5 } }, dayGames: () => ({}) });
+    ev2.rounds.forEach(g => g.players.forEach(p => { for (let h = 0; h < 18; h++) if (g.scores[p.id][h] != null) g.scores[p.id][h] = PARS18[h] + 1; }));
+    ev2.rounds[0].scores[ev2.rounds[0].players[0].id][0] = 1;   // the leaver wins the Front
+    ev2.rounds[1].scores[ev2.rounds[1].players[0].id][10] = 3;  // Cy wins the Back and the Overall
+    const a2 = FNAS(rowsOf(ev2), ev2.t.settings.tourneyNassau), o2 = oFieldNassau(ev2.rounds, ev2.t.settings.tourneyNassau);
+    const bad18 = mapEq(tbk(a2), o2.totals, allKeys(tbk(a2), o2.totals));
+    check('A18 leaver: Back / Overall settle; he pays them as a loser, the others compete (= oracle)', !bad18.length && a2.perDay[0].segments.every(x => x.complete) && near(tbk(a2)[nk(names[0])], 15 - 5 - 5), bad18.join('; ') + ' app=' + JSON.stringify(tbk(a2)), 'Field Nassau', 'leaver');
+  }
+  // A19 TOURNEY-8: a cart that teed off on 10 without "Back nine first" (startHole 1, first score stamped on 10)
+  // walks the field Skins carry chain and the cross-group play order from 10, exactly like startHole 10.
+  {
+    const names = ['Ann Lee', 'Bo Diaz', 'Cy Young', 'Del Ray']; const hcp = {}; names.forEach(n => hcp[n] = 0);
+    const mk = (stamped) => {
+      const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), start: 1 }, { names: names.slice(2), start: stamped ? 1 : 10 }] }],
+        tSettings: { tourneySkins: SK({ value: 10 }) }, dayGames: () => ({}) });
+      ev.rounds.forEach(g => g.players.forEach(p => { g.scores[p.id] = PARS18.slice(); }));
+      const S = (g, nm) => g.scores[g.players.find(p => p.name === nm).id];
+      S(ev.rounds[0], 'Ann Lee')[0] = 3; S(ev.rounds[1], 'Cy Young')[9] = 3;
+      if (stamped) { const g = ev.rounds[1]; g.cellAt = { scores: {} }; g.players.forEach(p => { g.cellAt.scores[p.id] = new Array(18).fill(0).map((_, i) => NOW - 100000 + ((i - 9 + 18) % 18) * 1000); }); }
+      return ev;
+    };
+    const ref = mk(false), st = mk(true);
+    const A = skinsApp(SKINS(rowsOf(st), st.t.settings.tourneySkins)), R = skinsApp(SKINS(rowsOf(ref), ref.t.settings.tourneySkins));
+    check('A19 field Skins carry chain uses the effective start (stamped back-nine start = startHole 10)', !mapEq(A, R, allKeys(A, R)).length, 'stamped=' + JSON.stringify(A) + ' startHole10=' + JSON.stringify(R), 'Field Skins', 'effective start');
+    const pd = F('_t2EventPdataByDay')(rowsOf(st));
+    check('A19 cross-group pdata start = effective start (10)', pd[1].pdata['cy young'].start === 10, 'start=' + pd[1].pdata['cy young'].start, 'Cross-group', 'effective start');
+  }
+  // A20 TOURNEY-10: a played-out cross-group match on a shotgun reports remaining 0 (was "5 up (thru 18)", remaining 5).
+  {
+    const names = ['Ann Lee', 'Bo Diaz', 'Cy Young', 'Del Ray']; const hcp = {}; names.forEach(n => hcp[n] = 0);
+    const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), start: 1 }, { names: names.slice(2), start: 10 }] }],
+      tSettings: { groupGames: { g1: { match: { instances: [{ value: 10, net: true, pair: ['Ann Lee', 'Cy Young'] }] } } } }, dayGames: () => ({}) });
+    ev.rounds.forEach(g => g.players.forEach(p => { g.scores[p.id] = PARS18.slice(); }));
+    const S = (g, nm) => g.scores[g.players.find(p => p.name === nm).id];
+    S(ev.rounds[0], 'Ann Lee')[16] = PARS18[16] - 1;   // a single win late in both play orders: never closed out early
+    const m = (CROSS(ev.t, rowsOf(ev)).matches || [])[0];
+    check('A20 cross-group match fully played: remaining 0', m && m.played === 18 && m.remaining === 0 && m.settled, JSON.stringify(m && { status: m.status, played: m.played, remaining: m.remaining, decided: m.decided }), 'Cross-group', 'shotgun');
   }
 
   // ── B. PAIRWISE MATRIX ────────────────────────────────────────────────────
@@ -772,9 +891,6 @@ async function checkCombined(ev, label, axis, parts) {
   const STBL = F('t2ComputeFieldStableford'), QUOTA = F('t2ComputeFieldQuota'), TQ = F('t2ComputeFieldTeamQuota'),
     BB = F('t2ComputeFieldBestBall'), SH = F('t2ComputeFieldShamble'), SCR = F('t2ComputeFieldScramble'),
     STAND = F('t2ComputeStandings'), FREG = F('bgFlightsRegister'), FAUTO = F('bgFlightsAutoAssign');
-  const leftAfter = (g, p) => (g.leftRound && g.leftRound.byId && g.leftRound.byId[p.id]) || null;
-  const playPos = (g, h1) => { const nH = nHof(g), st = g.startHole || 1; return ((h1 - st) % nH + nH) % nH; };
-  const activeOn = (g, p, h1) => { const l = leftAfter(g, p); return l == null || playPos(g, h1) <= playPos(g, l); };
   const cardDone = g => !!g.finishedAt || g.players.every(p => { for (let h = 1; h <= nHof(g); h++) { if (!activeOn(g, p, h)) continue; if ((g.scores[p.id] || [])[h - 1] == null) return false; } return true; });
   const H9 = (g, H) => (nHof(g) === 9 && g.hcpRules.hcp18) ? (H < 0 ? -1 : 1) * Math.round(Math.abs(H) / 2) : H;
 
@@ -825,26 +941,28 @@ async function checkCombined(ev, label, axis, parts) {
             const H = KEY === 'shamble' ? Math.round((p.playsGross ? 0 : p.baseHcp) * ((cfg.hcpPct != null ? cfg.hcpPct : 50) / 100)) : p.hcp;
             return cfg.net ? s - oStrokes(H, oSi(g, p, h), oPar(g, p, h), g.hcpRules, nHof(g)) : s; }).filter(x => x != null).sort((a, b) => a - b);
           if (!v.length) continue; pl++; tot += v.slice(0, balls).reduce((a, b) => a + b, 0); }
-        if (pl) sides.push({ tot, ks: g.players.map(p => nk(p.name)) }); });
+        if (pl) sides.push({ tot, ks: g.players.map(p => nk(p.name)), full: pl >= nHof(g) }); });
       const complete = inR.every(g => g.finishedAt) && sides.length >= 2;
       if (!complete || !(val > 0)) return;
-      const best = Math.min(...sides.map(s => s.tot)); const W = sides.filter(s => s.tot === best); if (W.length === sides.length) return;
+      // DECISIONS (TOURNEY-14): a cart that tapped Finish early pays but cannot win.
+      const R = sides.some(s => s.full) ? sides.filter(s => s.full) : sides;
+      const best = Math.min(...R.map(s => s.tot)); const W = R.filter(s => s.tot === best); if (W.length === sides.length) return;
       const heads = sides.reduce((a, s) => a + s.ks.length, 0), wh = W.reduce((a, s) => a + s.ks.length, 0);
       sides.forEach(s => s.ks.forEach(k => money[k] = (money[k] || 0) - val)); W.forEach(s => s.ks.forEach(k => money[k] += heads * val / wh));
     });
     return money;
   }
-  // Oracle: field scramble. House expectations (flagged where the app differs): a launched team that has not
-  // posted keeps the day pending (GL-6); the allowance is the event's stated 25/20/15/10 of the four lowest
-  // FULL course handicaps, halved on an event nine (GL-9 / hcp18 convention).
+  // Oracle: field scramble (DECISIONS): a launched team that has not posted keeps the day pending (GL-6); the
+  // allowance is the USGA 4-person 25/20/15/10 of the four lowest FULL course handicaps, halved on an event
+  // nine (GL-9 / hcp18 convention); a team that tapped Finish early pays but cannot win (TOURNEY-14).
   function oScramble(rounds, cfg) {
     const money = {};
     Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
       const inR = rs.filter(g => g.games && g.games.scramble);
       const teams = [];
       inR.forEach(g => { let tot = 0, n = 0; for (let h = 1; h <= 18; h++) { const d = g.scrambleData && g.scrambleData[h]; if (!d || d.teamA == null) continue; tot += d.teamA; n++; }
-        let allow = 0; if (cfg.net) { const hs = g.players.map(p => H9(g, p.baseHcp)).sort((a, b) => a - b); [.25, .2, .15, .1].forEach((w, i) => { if (hs[i] != null) allow += hs[i] * w; }); allow = Math.round(allow * 10) / 10; }
-        if (n) teams.push({ total: tot - allow, code: g.code, ks: g.players.map(p => nk(p.name)) }); });
+        let allow = 0; if (cfg.net) { const hs = g.players.map(p => p.baseHcp).sort((a, b) => a - b); [.25, .2, .15, .1].forEach((w, i) => { if (hs[i] != null) allow += hs[i] * w; }); if (nHof(g) === 9 && g.hcpRules.hcp18) allow /= 2; allow = Math.round(allow * 10) / 10; }
+        if (n) teams.push({ total: tot - allow, code: g.code, ks: g.players.map(p => nk(p.name)), full: n >= nHof(g) }); });
       const complete = inR.length > 0 && inR.every(g => g.finishedAt) && teams.length >= 2;
       const buyin = Number(cfg.buyin != null ? cfg.buyin : cfg.value) || 0;
       if (!complete || !(buyin > 0)) return;
@@ -852,8 +970,9 @@ async function checkCombined(ev, label, axis, parts) {
       const pool = teams.reduce((a, t) => a + t.ks.length, 0) * buyin;
       teams.forEach(t => t.ks.forEach(k => money[k] = (money[k] || 0) - buyin));
       const payT = (share, list) => list.forEach(t => t.ks.forEach(k => money[k] += share / list.length / t.ks.length));
-      const W = teams.filter(t => t.total === teams[0].total);
-      if (cfg.payout === '8020' && W.length === 1) { payT(pool * .8, W); const rest = teams.slice(1); const s2 = rest.filter(t => t.total === rest[0].total); payT(pool * .2, s2); }
+      const R = teams.some(t => t.full) ? teams.filter(t => t.full) : teams;
+      const W = R.filter(t => t.total === R[0].total);
+      if (cfg.payout === '8020' && W.length === 1 && R.length >= 2) { payT(pool * .8, W); const rest = R.slice(1); const s2 = rest.filter(t => t.total === rest[0].total); payT(pool * .2, s2); }
       else payT(pool, W);
     });
     return money;
@@ -1008,7 +1127,10 @@ async function checkCombined(ev, label, axis, parts) {
       const sizesOf = {}; ev.rounds.forEach(g => g.players.forEach(p => { sizesOf[p.name] = teamOf[p.name]; }));
       const cnt = {}; Object.values(sizesOf).forEach(k => cnt[k] = (cnt[k] || 0) + 1);
       const uneven = Math.min(...Object.values(cnt)) !== Math.max(...Object.values(cnt));
-      if (uneven) { check(lbl + ' :: field Team Quota with UNEVEN event teams settles or says why', !!col, 'no Team games column, no pending flag; sizes=' + JSON.stringify(cnt), 'Field Team Quota', 'uneven teams'); return; }
+      if (uneven) {   // DECISIONS (TOURNEY-16): no bet, with a visible reason
+        const why = []; for (let d = 1; d <= cfg.days; d++) { const s = TQ(clone(rows), ev.t, d, tmap); if (s) why.push(s); }
+        const moved = col && Object.values(col.money || {}).some(v => Math.abs(v) > 0.001);
+        check(lbl + ' :: field Team Quota with UNEVEN event teams: no bet, reason shown', !moved && why.length > 0 && why.every(s => s.noBet && s.noBetReason), 'moved=' + !!moved + ' ' + JSON.stringify(why.map(s => [s.noBet, s.noBetReason])) + ' sizes=' + JSON.stringify(cnt), 'Field Team Quota', 'uneven teams'); return; }
       check(lbl + ' :: field Team Quota money (event settle) = oracle', !bad.length, bad.slice(0, 4).join('; ') + (col ? '' : ' (no Team games column)'), 'Field Team Quota', axis);
     }
   }
@@ -1032,8 +1154,10 @@ async function checkCombined(ev, label, axis, parts) {
     const exp = g => { const hs = g.players.map(p => p.baseHcp).sort((x, y) => x - y); return Math.round((hs[0] * .25 + hs[1] * .2 + hs[2] * .15 + hs[3] * .1) * 10) / 10; };
     const e0 = exp(ev.rounds[0]), e1 = exp(ev.rounds[1]); const a0 = s.find(x => x.code === ev.rounds[0].code).allow, a1 = s.find(x => x.code === ev.rounds[1].code).allow;
     check('D2a field scramble allowance reads the COURSE handicap (not rawHcp = index)', near(a0, e0) && near(a1, e1), 'app allow ' + a0 + '/' + a1 + ' vs course-hcp ' + e0 + '/' + e1, 'Field Scramble 4-man', 'hcp source');
-    const s4 = g => { const hs = g.players.map(p => p.baseHcp).sort((x, y) => x - y); return Math.round((hs[0] * .2 + hs[1] * .15 + hs[2] * .1 + hs[3] * .05) * 10) / 10; };
-    check('D2a field scramble uses the same 4-man allowance as the in-round scramble4 (20/15/10/5)', near(a0, s4(ev.rounds[0])), 'field ' + a0 + ' vs scramble4 ' + s4(ev.rounds[0]) + ' (field uses 25/20/15/10)', 'Field Scramble 4-man', 'allowance table');
+    // DECISIONS (TOURNEY-13): 25/20/15/10 everywhere; the in-round scramble4 table is aligned to it.
+    const T4 = qa.fn('TEAM_HCP_ALLOWANCES');
+    const s4 = g => { const w = ((T4 && T4.scramble4) || [20, 15, 10, 5]).map(x => x / 100); const hs = g.players.map(p => p.baseHcp).sort((x, y) => x - y); return Math.round((hs[0] * w[0] + hs[1] * w[1] + hs[2] * w[2] + hs[3] * w[3]) * 10) / 10; };
+    check('D2a field scramble and the in-round scramble4 table use the same 25/20/15/10 allowance', near(a0, s4(ev.rounds[0])) && near(a0, e0), 'field ' + a0 + ' vs scramble4 ' + s4(ev.rounds[0]) + ' vs 25/20/15/10 ' + e0 + ' table=' + JSON.stringify(T4 && T4.scramble4), 'Field Scramble 4-man', 'allowance table');
     // late team: launched, no scramble score yet
     const ev2 = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 4) }, { names: names.slice(4), noCard: true }, { names: NAMES.slice(8, 12) }] }], tSettings: { tourneyScramble: { on: true, buyin: 10 } },
       dayGames: (d, G, players) => ({ scramble: { teamMode: '4man', teamA: players.map(p => p.id), teamB: [] } }) });
@@ -1051,7 +1175,8 @@ async function checkCombined(ev, label, axis, parts) {
       dayGames: (d, G, players) => ({ scramble: { teamMode: '4man', teamA: players.map(p => p.id), teamB: [] } }) });
     ev4.rounds.forEach(g => { g.scrambleData = {}; for (let h = 1; h <= 9; h++) g.scrambleData[h] = { teamA: g.pars[h - 1] }; });
     const a4 = SCR(rowsOf(ev4), ev4.t); const al = a4.standings[0].allow, ex18 = exp(ev4.rounds.find(g => g.code === a4.standings[0].code));
-    check('D2d field scramble on a 9-hole day halves the team allowance (hcp18 / GL-9 convention)', al < ex18 * 0.75, 'allow=' + al + ' (full 18-hole allowance ' + ex18 + ')', 'Field Scramble 4-man', '9-hole day');
+    const exH = (() => { const g = ev4.rounds.find(x => x.code === a4.standings[0].code); const hs = g.players.map(p => p.baseHcp).sort((x, y) => x - y); return Math.round((hs[0] * .25 + hs[1] * .2 + hs[2] * .15 + hs[3] * .1) / 2 * 10) / 10; })();
+    check('D2d field scramble on a 9-hole day halves the team allowance (hcp18 / GL-9 convention)', near(al, exH), 'allow=' + al + ' expected ' + exH + ' (full 18-hole allowance ' + ex18 + ')', 'Field Scramble 4-man', '9-hole day');
   }
   {
     // D2e best ball / shamble 4-man: a cart that tapped Finish after 13 holes vs full carts
@@ -1080,9 +1205,12 @@ async function checkCombined(ev, label, axis, parts) {
     const ev = buildEvent({ hcp, days: [{ nH: 18, groups: groupsFor(names, [3, 3, 3]) }], tSettings: { teamCount: 2 },
       dayGames: (d, G, players) => ({ teamQuota: { mode: 'pool', basis: 'auto', buyin: 5, _t2field: true, teamA: players.filter(p => teamOf[p.name] === 'A').map(p => p.id), teamB: players.filter(p => teamOf[p.name] === 'B').map(p => p.id), teamAKey: 'A', teamBKey: 'B' } }) });
     install(ev); HG.S.players[ev.tid].forEach(p => p.team = teamOf[p.display_name]); F('_t2InvalidateFieldRounds')();
+    // DECISIONS (TOURNEY-16): uneven teams = no bet, and the board shows the reason.
     const pay = await COMB(ev.t); const col = (pay.byGame || []).find(b => /Team games/.test(b.key));
     const moved = col && Object.values(col.money || {}).some(v => Math.abs(v) > 0.001);
-    check('D2g field Team Quota with uneven teams (5 v 4) still settles (or says why)', moved, 'Team games column=' + JSON.stringify(col && col.money) + ' pendingPots=' + JSON.stringify(pay.pendingPots), 'Field Team Quota', 'uneven teams');
+    const tmap = {}; Object.keys(teamOf).forEach(n => tmap[nk(n)] = teamOf[n]);
+    const st = TQ(rowsOf(ev), ev.t, 1, tmap);
+    check('D2g field Team Quota with uneven teams (5 v 4): no bet, and the standings carry the reason', !moved && st && st.noBet && /uneven 5 v 4/.test(st.noBetReason || ''), 'moved=' + !!moved + ' noBet=' + (st && st.noBet) + ' reason=' + (st && st.noBetReason), 'Field Team Quota', 'uneven teams');
   }
 
   // ---- D3. CUP STANDINGS (t2ComputeStandings) with a served tournament_group_members ------------------
@@ -1172,7 +1300,7 @@ async function checkCombined(ev, label, axis, parts) {
     const lbl = (fuzz ? 'FZF' : 'FL') + ci + ' [flights=' + nF + ' carts=' + sizes.join('/') + ' holes=' + holesMode + ' chaos=' + chaos + ']';
     const cmp = (name, app, exp, gname) => { const bad = mapEq(app, exp, allKeys(app, exp)); check(lbl + ' :: ' + name + ' per flight = oracle', !bad.length, bad.slice(0, 4).join('; '), gname, axis); };
     cmp('Skins', skinsApp(SKINS(clone(rows), st.tourneySkins)), oSum(r => oSkins(r, st.tourneySkins).totals), 'Flights');
-    cmp('CTP', tbk(CTP(clone(rows))), oSum(r => oCtp(r).totals), 'Flights');
+    cmp('CTP (whole field, DECISIONS TOURNEY-19)', tbk(CTP(clone(rows))), oCtp(ev.rounds).totals, 'Flights');
     cmp('Long Putt', tbk(LPUTT(clone(rows), st.tourneyLongPutt)), oSum(r => oLongPutt(r, st.tourneyLongPutt).totals), 'Flights');
     cmp('Birdie Bump', tbk(BIRD(clone(rows))), oSum(r => oBirdie(r).totals), 'Flights');
     cmp('side pots', sideApp(SIDE(clone(rows), st.tourneySidePots)), oSum(r => oSide(r, st.tourneySidePots).totals), 'Flights');
@@ -1197,8 +1325,14 @@ async function checkCombined(ev, label, axis, parts) {
     const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), ctpOverride: P => ({ 4: { pid: P[0].id, ft: 3, in: 0 } }) }, { names: names.slice(2), ctpOverride: P => ({ 4: { pid: P[0].id, ft: 5, in: 0 } }) }] }],
       dayGames: () => ({ ctp: { holes: [4], value: 5, fieldOnly: true } }) });
     ev.t.settings.flights = { n: 2, names: { 'ann lee': 1, 'cy young': 1, 'bo diaz': 2, 'del ray': 2 }, per: { all: true } }; FREG(ev.t);
-    const r = CTP(rowsOf(ev)); const f2 = (r.perDay || []).filter(d => d.flight === 2);
-    check('D4c flights: Flight 2 has a CTP result on hole 4 (each cart logs only its overall closest — Flight 2 never gets one)', f2.length > 0, 'flight-2 CTP days=' + JSON.stringify(f2), 'Flights', 'CTP per flight');
+    // DECISIONS (TOURNEY-19): CTP stays whole field with flights on, and the board says so.
+    const r = CTP(rowsOf(ev)); const fl = (r.perDay || []).filter(d => d.flight);
+    const h4 = r.perDay[0].holes.find(h => h.hole === 4);
+    check('D4c flights: CTP stays whole field (no per-flight split; Ann 3ft wins hole 4 over the whole field)', !fl.length && h4 && h4.winnerName === 'Ann Lee' && near(tbk(r)['ann lee'], 15), 'perDay=' + JSON.stringify(r.perDay.map(d => [d.flight, d.holes.map(h => [h.hole, h.winnerName])])), 'Flights', 'CTP per flight');
+    install(ev); const pr = F('bgPotRowsForEvent')(ev.t, rowsOf(ev)); const ctpRow = JSON.stringify(pr.filter(x => /Closest to the pin/.test(JSON.stringify(x))));
+    check('D4c flights: the board labels CTP "whole field"', /whole field/.test(ctpRow) && !/Flight/.test(ctpRow), ctpRow.slice(0, 300), 'Flights', 'CTP per flight');
+    const PN = qa.fn('BG_FLIGHT_POOL_NAMES') || [];
+    check('D4c flights: the flights editor no longer lists Closest to the pin as a per-flight pool', Array.isArray(PN) && PN.length > 0 && !PN.some(n => /closest/i.test(n)), JSON.stringify(PN), 'Flights', 'CTP per flight');
   }
 
   // ── report ────────────────────────────────────────────────────────────────
