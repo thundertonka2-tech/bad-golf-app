@@ -52,3 +52,4 @@
 - **League OPEN-L6, a removed player's later field weeks:** drop his unfinished field slots so the field shrinks. Weeks already played are untouched.
 - **League OPEN-L7, blind-draw / "play the course" / forfeit cards:** they count for match and standings points only. They never enter a weekly pot and are never charged.
 - **League OPEN-L4, confirmed:** a season with no saved payout pays winner-take-all on the server, so only the projection card changes.
+- **Umbrella, a partner leaves (Tyler confirmed, 2026-11-02):** the partner plays on as net double bogey with no GIR or birdie, so the hole still counts. This is the same rule as Shamble.
