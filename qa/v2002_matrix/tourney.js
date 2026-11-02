@@ -616,7 +616,9 @@ async function checkCombined(ev, label, axis, parts) {
     const evGrp = pay && pay.byGame.find(b => /Birdie Bump \(your group\)|^Birdie Bump$/.test(b.key) && false);
     const groupCol = {}; (pay.byGame || []).forEach(b => { if (b.key === 'Birdie Bump' || b.key === 'Group games' || /Birdie/.test(b.key)) {} });
     const evTyler = (pay.rows.find(r => r.id === nk(names[0])) || {}).net;
-    const fieldBump = tbk(BIRD(rowsOf(ev)))[nk(names[0])] || 0;
+    // v2002 fix: the event Totals also carry the day's field CTP (hole 4); take it out with the field bump.
+    const fieldBump = (tbk(BIRD(rowsOf(ev)))[nk(names[0])] || 0) + (tbk(CTP(rowsOf(ev)))[nk(names[0])] || 0);
+    if (process.env.TDBG === 'A9') console.log('DBG A9', JSON.stringify((pay.byGame || []).map(b => [b.key, b.money && b.money[nk(names[0])], b.pending])));
     const bubbleTyler = (bub.combined || {})[ev.rounds[0].players[0].id] || 0;
     check('A9 group own Birdie Bump: units bubble shows it (same as event Totals group part)', near(evTyler - fieldBump, bubbleTyler), 'event total=' + evTyler + ' minus field bump ' + fieldBump + ' = ' + c2(evTyler - fieldBump) + ' vs bubble ' + bubbleTyler + ' (grp row in bubble: ' + !!grpBump + ')', 'Ownership split', 'group own game same key');
   }
@@ -904,6 +906,9 @@ async function checkCombined(ev, label, axis, parts) {
         const A = g.players.filter(p => side(p) === 'a').sort((x, y) => tb[x.t2pid].slot - tb[y.t2pid].slot), B = g.players.filter(p => side(p) === 'b').sort((x, y) => tb[x.t2pid].slot - tb[y.t2pid].slot);
         for (let i = 0; i < Math.min(A.length, B.length); i++) { const ha = scoredN(g, A[i]), hb = scoredN(g, B[i]); if (!ha || !hb) continue;   // app: a pairing where either player has no card yet is not a match
           let na = 0, nb = 0; for (let h = 0; h < 18; h++) { const x = netOf(A[i], h), y = netOf(B[i], h); if (x != null) na += x; if (y != null) nb += y; }
+          // DECISIONS (v2002): stroke-day cup point when a player left -> the leaver forfeits the point.
+          const la = !!leftAfter(g, A[i]), lb = !!leftAfter(g, B[i]);
+          if (la !== lb) { M.push({ a: la ? 0 : 1, b: la ? 1 : 0, dec: fin || (ha >= nH && hb >= nH) }); continue; }
           M.push({ a: na < nb ? 1 : na > nb ? 0 : .5, b: nb < na ? 1 : nb > na ? 0 : .5, dec: fin || (ha >= nH && hb >= nH) }); }
       }
       let decided = M.length > 0 && M.every(m => m.dec);
@@ -1201,6 +1206,7 @@ async function checkCombined(ev, label, axis, parts) {
   const gsum = {}; Object.keys(COV).forEach(k => { const [g, a] = k.split('|'); const s = gsum[g] || (gsum[g] = { run: 0, pass: 0, axes: 0 }); s.run += COV[k].run; s.pass += COV[k].pass; s.axes++; });
   Object.keys(gsum).sort().forEach(g => console.log('   ' + g.padEnd(28) + ' cases ' + String(gsum[g].run).padStart(6) + '  pass ' + String(gsum[g].pass).padStart(6) + '  fail ' + (gsum[g].run - gsum[g].pass) + '  axes ' + gsum[g].axes));
   if (process.env.TAXES) Object.keys(COV).sort().forEach(k => { if (COV[k].run !== COV[k].pass) console.log('   FAILAXIS ' + k + ' ' + (COV[k].run - COV[k].pass) + '/' + COV[k].run); });
+  if (process.env.TDUMP) require('fs').writeFileSync(process.env.TDUMP, FAILS.join('\n'));
   if (process.env.TALL) FAILS.filter(f => new RegExp(process.env.TALL).test(f)).slice(0, 6).forEach(f => console.log('   ALL> ' + f.slice(0, 700)));
   // distinct failure signatures (first occurrence) so the report stays readable
   const sig = {}; FAILS.forEach(f => { const s = f.split('\n')[0].replace(/^(FZ|B)\d+ \[[^\]]*\] :: /, ''); if (!sig[s]) sig[s] = { n: 0, ex: f }; sig[s].n++; });

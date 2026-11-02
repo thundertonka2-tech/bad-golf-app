@@ -49804,6 +49804,12 @@ function bgGroupGamesView(g) {
     if (!g || !g.groupGames || g._noGroupGames || typeof g.groupGames !== 'object' || !Object.keys(g.groupGames).length) return null;
     const sub = {}; for (const k in g) { if (k === 'games' || k === 'groupGames') continue; sub[k] = g[k]; }
     sub.games = g.groupGames; sub._noGroupGames = true;
+    // v2002 (matrix TOURNEY-4): the event's day list (t2.dayGameKeys) names the EVENT's games, not
+    // the group's own. Copied onto this view it made calcBirdiePool stand down for the group's own
+    // Birdie Bump whenever the event also ran one, so the bump left the group's bubble. An EMPTY
+    // list (not a missing one) also keeps the pre-v670 state._t2DayGameKeys fallback from firing;
+    // a group config is never fieldOnly, which is the only marker this view needs.
+    if (sub.t2 && typeof sub.t2 === 'object') sub.t2 = Object.assign({}, sub.t2, { dayGameKeys: [] });
     return sub;
   } catch (e) { return null; }
 }
@@ -59205,8 +59211,10 @@ function computeAllGameMoney(g) {
   // labelled "(your group)" so the board/breakdown show them as their own rows.
   try {
     if (g && g.groupGames && !g._noGroupGames && typeof g.groupGames === 'object' && Object.keys(g.groupGames).length) {
-      const sub = {}; for (const k in g) { if (k === 'games' || k === 'groupGames') continue; sub[k] = g[k]; }
-      sub.games = g.groupGames; sub._noGroupGames = true;
+      // v2002 (matrix TOURNEY-4): one builder for this view (bgGroupGamesView), which strips the
+      // event's t2.dayGameKeys so the group's own Birdie Bump is not suppressed by the event's.
+      let sub = (typeof bgGroupGamesView === 'function') ? bgGroupGamesView(g) : null;
+      if (!sub) { sub = {}; for (const k in g) { if (k === 'games' || k === 'groupGames') continue; sub[k] = g[k]; } sub.games = g.groupGames; sub._noGroupGames = true; }
       const gm = computeAllGameMoney(sub);
       g.players.forEach(p => { combined[p.id] = (combined[p.id] || 0) + ((gm.combined && gm.combined[p.id]) || 0); });
       (gm.byGame || []).forEach(b => byGame.push({ key: 'grp:' + b.key, label: b.label + ' (your group)', money: b.money, group: true }));
@@ -68734,9 +68742,11 @@ function buildRoundSummary(g) {
     .filter(x => x.r).sort((a, b) => a.name.localeCompare(b.name));
 
   // Combined units
+  // v2002 (matrix TOURNEY-3 follow-up): the engine's own `combined` -- the exact figure the units
+  // bubble and bgNetsWhole elsewhere use. Re-summing results[*].money let a non-numeric award
+  // (which `combined` zeroes and flags) turn a player's Final standings total into NaN.
   const money = {};
-  g.players.forEach(p => money[p.id] = 0);
-  games.forEach(g2 => g.players.forEach(p => money[p.id] += ((g2.r.money && g2.r.money[p.id]) || 0)));
+  g.players.forEach(p => { const v = _agm && _agm.combined ? _agm.combined[p.id] : 0; money[p.id] = (typeof v === 'number' && isFinite(v)) ? v : 0; });
 
   const sorted = [...g.players].sort((a, b) => money[b.id] - money[a.id]);
   const settlements = calculateSettlements(money, g.players);
@@ -89298,7 +89308,12 @@ function _t2OwnedGameKeys(g) {
     const _claim = k => { if (g.games[k] !== undefined && _T2_FIELD_SETTLED.has(k)) owned.add(k); };
     (_T2_FMT_GAMES[String(g.t2.format || '').toLowerCase()] || []).forEach(_claim);
     (Array.isArray(g.t2.dayGameKeys) ? g.t2.dayGameKeys : []).forEach(_claim);
-    (Array.isArray(state._t2DayGameKeys) ? state._t2DayGameKeys : []).forEach(_claim);
+    // v2002 (matrix CORE hardening): state._t2DayGameKeys is the live re-fetch for pre-v670
+    // rounds that carry no list of their own. Trust it ONLY then -- the same rule calcBirdiePool
+    // follows -- so a stale list left over from another round can't strip this round's games.
+    if (!Array.isArray(g.t2.dayGameKeys)) {
+      (typeof state !== 'undefined' && state && Array.isArray(state._t2DayGameKeys) ? state._t2DayGameKeys : []).forEach(_claim);
+    }
   } catch (e) {}
   return owned;
 }
@@ -89492,6 +89507,15 @@ function _t2CartCupMatches(g, fmt, finished, rHoles, gk, members, od) {
         const av = metric(pa), bv = metric(pb);
         if (av == null || bv == null) continue;
         const dec = finished || (ha >= rHoles && hb >= rHoles);
+        // v2002 (matrix TOURNEY-18): a player who LEFT mid-round forfeits the cup point (DECISIONS:
+        // "the leaver forfeits the point"). His partial net total used to beat a full card. Both
+        // left -> compare as before.
+        let _lvA = false, _lvB = false;
+        try { _lvA = bgLeftAfter(g, pa.id) != null; _lvB = bgLeftAfter(g, pb.id) != null; } catch (e) {}
+        if (_lvA !== _lvB) {
+          push(_lvA ? [0, 1] : [1, 0], dec, name + ' ' + first(pa.name) + ' v ' + first(pb.name) + ': ' + (_lvA ? first(pa.name) : first(pb.name)) + ' left', key);
+          continue;
+        }
         push(split(higherWins ? av > bv : av < bv, higherWins ? bv > av : bv < av), dec, name + ' ' + first(pa.name) + ' v ' + first(pb.name) + ': ' + fmtV(av) + ' / ' + fmtV(bv) + (dec ? '' : ' thru ' + Math.min(ha, hb)), key);
       }
     }
@@ -94536,7 +94560,10 @@ async function loadTourneyScores(t) {
           const s = sc[h];
           if (s == null) continue;
           gross += s; thru++;
-          if (pars && pars[h] != null) parThru += pars[h];
+          // v2002 (matrix TOURNEY-7): to-par is figured off the player's OWN tee par, the same
+          // par the strokes below already use -- a Red-tee card at par 72 on a par-71 card
+          // showed +1 for an even round.
+          if (pars) { const _ph = parFor(g, p.id, h); if (_ph != null) parThru += _ph; }
           if (_hasSi) { try { strk += (strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) || 0); } catch (e) {} }
         }
         if (thru === 0) return;
@@ -99585,7 +99612,11 @@ async function loadTourneyTeamStandings(t) {
 const TOURNEY_FIELD_GAMES = ['skins', 'stroke', 'p3greenie', 'ctp', 'junk', 'birdiePool', 'nassau', 'match',
   'banker', 'vegas', 'dvegas', 'sixes', 'splixSixes', 'niners', 'highLow', 'animals', 'marks', 'hotPotato',
   'stableford', 'bingoBangoBongo', 'wolf', 'hammer', 'quota', 'longPutt', 'longDrive', 'ryderCup',
-  'scramble', 'umbrella', 'potofgold'];
+  'scramble', 'umbrella', 'potofgold',
+  // v2002 (matrix TOURNEY-3): a group's own Low Net / GIR / Fewest Putts pools showed on its
+  // bubble (+15/-5) and never reached event Totals. A day-level copy is de-duplicated against
+  // the event's side pots in loadTourneyMoney, the same way Skins/Nassau/Long Putt are.
+  'lowNetPool', 'girPool', 'puttsPool'];
 async function loadTourneyMoney(t) {
   try {
     if (!supaReady && !_bgEvpPreFor(t)) await initSupabase();
@@ -99604,7 +99635,7 @@ async function loadTourneyMoney(t) {
     rounds.forEach(g => g.players.forEach(p => {
       if (!p || !p.name) return;
       const k = nm(p.name); if (!k) return;
-      if (!canonOf[k]) { const id = 'tw_' + k.replace(/[^a-z0-9]/g, '') + '_' + Object.keys(canonPlayer).length; canonOf[k] = id; canonPlayer[id] = { id, name: p.name, firstName: p.firstName, lastName: p.lastName, hcp: p.hcp, rawHcp: p.rawHcp, playsGross: p.playsGross, teeLabel: p.teeLabel }; }
+      if (!canonOf[k]) { const id = 'tw_' + k.replace(/[^a-z0-9]/g, '') + '_' + Object.keys(canonPlayer).length; canonOf[k] = id; canonPlayer[id] = { id, name: p.name, firstName: p.firstName, lastName: p.lastName, hcp: p.hcp, rawHcp: p.rawHcp, baseHcp: p.baseHcp, playsGross: p.playsGross, teeLabel: p.teeLabel }; }   // v2002 (matrix TOURNEY-3): + baseHcp (display/fallback only; settles use each day's own row)
     }));
     const allIds = Object.keys(canonPlayer);
     if (allIds.length < 2) return null;
@@ -99645,8 +99676,22 @@ async function loadTourneyMoney(t) {
       // event -- a multi-day event plays a different course each day.
       const _b = baseG || (roundList || []).find(g => Array.isArray(g.pars)) || base;
       const vg = { code: 'tw_' + t.id, course: _b.course, pars: _b.pars, sis: _b.sis, hcpRules: _b.hcpRules, players: playerList, scores: {}, junkData: {}, p3greenieData: {}, ctpData: {}, huckleData: { huckles: [] }, games: gamesObj };
+      // v2002 (matrix TOURNEY-17): carry the per-tee card (keyed by tee label, so it needs no
+      // remap) and who left -- Team Quota scored a Red-tee player off the card par, flipping the winner.
+      try {
+        if (_b.tees) vg.tees = _b.tees;
+        const _tp = {}, _ts = {};
+        (roundList || []).forEach(g => { Object.assign(_tp, g.teePars || {}); Object.assign(_ts, g.teeSis || {}); });
+        if (Object.keys(_tp).length) vg.teePars = _tp;
+        if (Object.keys(_ts).length) vg.teeSis = _ts;
+        if (_b.holes) vg.holes = _b.holes;
+      } catch (e) {}
       roundList.forEach(g => {
         const map = {}; (g.players || []).forEach(p => { if (p && p.name) map[p.id] = canonOf[nm(p.name)]; });
+        try {   // v2002 (matrix TOURNEY-17): the leaver mark, remapped to canonical ids
+          const _lb = g.leftRound && g.leftRound.byId;
+          if (_lb) { vg.leftRound = vg.leftRound || { byId: {} }; Object.keys(_lb).forEach(pid => { const c = map[pid]; if (c && vg.leftRound.byId[c] == null) vg.leftRound.byId[c] = _lb[pid]; }); }
+        } catch (e) {}
         if (g.scores) Object.keys(g.scores).forEach(pid => { const c = map[pid]; if (c && !vg.scores[c]) vg.scores[c] = g.scores[pid]; });
         if (g.junkData) Object.keys(g.junkData).forEach(h => { const hd = g.junkData[h]; if (!hd) return; vg.junkData[h] = vg.junkData[h] || {}; Object.keys(hd).forEach(tp => { const arr = Array.isArray(hd[tp]) ? hd[tp] : []; vg.junkData[h][tp] = (vg.junkData[h][tp] || []).concat(arr.map(pid => map[pid]).filter(Boolean)); }); });
         if (g.p3greenieData) Object.keys(g.p3greenieData).forEach(h => { const hd = g.p3greenieData[h]; if (!hd) return; const cur = vg.p3greenieData[h] = vg.p3greenieData[h] || { winners: [], threePutts: [] }; (hd.winners || []).forEach(pid => { const c = map[pid]; if (c) cur.winners.push(c); }); (hd.threePutts || []).forEach(pid => { const c = map[pid]; if (c) cur.threePutts.push(c); }); if (hd.birdieWinner && map[hd.birdieWinner]) cur.birdieWinner = map[hd.birdieWinner]; if (hd.birdieOnGreen) { cur.birdieOnGreen = cur.birdieOnGreen || {}; Object.keys(hd.birdieOnGreen).forEach(pid => { const c = map[pid]; if (c) cur.birdieOnGreen[c] = hd.birdieOnGreen[pid]; }); } });
@@ -99672,8 +99717,41 @@ async function loadTourneyMoney(t) {
     // 10 Nassau) never fed into the Event Leaderboard total at all. Settle each
     // source separately (never merge the two under one key — they're genuinely
     // different games) and add both into the same running group total.
+    // v2002 (matrix TOURNEY-3): settle a round's games the way its own screens do.
+    //   own=false -> g.games on a clone with _noGroupGames (every game, no field strip, no recursion);
+    //   own=true  -> g.groupGames on bgGroupGamesView, the exact sub-round behind the bubble's grp: rows.
+    // The clone keeps the round's real start hole, tees, leavers, side data and per-day handicaps.
+    const _gameResCache = new Map();
+    const _gameRes = (g, own) => {
+      const ck = own ? 'own' : 'day';
+      let per = _gameResCache.get(g); if (!per) { per = {}; _gameResCache.set(g, per); }
+      if (ck in per) return per[ck];
+      let r = null;
+      try {
+        const c = JSON.parse(JSON.stringify(g));
+        if (own) { const v = bgGroupGamesView(c); r = v ? computeAllGameMoney(v) : null; }
+        else { c.groupGames = null; c._noGroupGames = true; r = computeAllGameMoney(c); }
+      } catch (e) { r = null; }
+      per[ck] = r;
+      return r;
+    };
+    // Re-key byGame rows from this round's player ids to the event's canonical (by-name) ids.
+    const _reKey = (g, rows) => {
+      const map = {}; (g.players || []).forEach(p => { if (p && p.name) map[p.id] = canonOf[nm(p.name)]; });
+      const combined = {}, byGame = [];
+      (rows || []).forEach(b => {
+        const m = {};
+        Object.keys(b.money || {}).forEach(pid => {
+          const c = map[pid]; const v = Number(b.money[pid]);
+          if (!c || !isFinite(v) || !v) return;
+          m[c] = (m[c] || 0) + v; combined[c] = (combined[c] || 0) + v;
+        });
+        byGame.push({ key: b.key, label: b.label, money: m });
+      });
+      return { combined, byGame };
+    };
     rounds.forEach(g => {
-      [g.games, g.groupGames].forEach(src => {
+      [g.games].forEach(src => {   // v2002 (matrix TOURNEY-3): g.groupGames is taken whole after this loop
         if (!src) return;
         const gi = {};
         TOURNEY_FIELD_GAMES.forEach(k => { if (src[k]) gi[k] = Object.assign({}, src[k]); });
@@ -99730,6 +99808,14 @@ async function loadTourneyMoney(t) {
             if (_st.tourneySkins && _st.tourneySkins.on) delete gi.skins;         // -> t2ComputeFieldSkins
             if (_st.tourneyNassau && _st.tourneyNassau.on) delete gi.nassau;      // -> t2ComputeFieldNassau
             if (_st.tourneyLongPutt && _st.tourneyLongPutt.on) delete gi.longPutt; // -> t2ComputeFieldLongPutt
+            // v2002 (matrix TOURNEY-3): the side pots are now in TOURNEY_FIELD_GAMES; a day copy of one
+            // the event already pays field-wide must not pay again here.
+            try {
+              const _sp = (typeof t2EffectiveSidePots === 'function') ? t2EffectiveSidePots(t) : null;
+              if (_sp && _sp.lowNet && _sp.lowNet.on) delete gi.lowNetPool;   // -> t2ComputeFieldSidePots
+              if (_sp && _sp.girs && _sp.girs.on) delete gi.girPool;
+              if (_sp && _sp.putts && _sp.putts.on) delete gi.puttsPool;
+            } catch (e) {}
             // fieldOnly configs (CTP, Long Putt) already self-suppress in their own
             // calc*, but drop them here too so the intent is explicit.
             Object.keys(gi).forEach(k => { if (gi[k] && gi[k].fieldOnly) delete gi[k]; });
@@ -99767,15 +99853,33 @@ async function loadTourneyMoney(t) {
           } catch (e) {}
           if (!Object.keys(gi).length) return;
         }
-        let res = null;
-        try { res = computeAllGameMoney(buildVg([g], gi, gpl, g)); } catch (e) {}
-        // v1058: `map` used to be passed as a 5th argument here against a 4-param
-        // signature and was silently dropped. It was harmless -- `gpl` is built from
-        // canonPlayer, so res.combined / res.byGame are already keyed canonically and
-        // need no remap -- but a dead argument implies a remap step that isn't
-        // happening, which is a trap for the next reader. Removed, not parameterised.
-        addCombined(res, groupNet, groupLabels, groupNetByGame);    // ← GROUP pool
+        // v2002 (matrix TOURNEY-3): settle on the REAL round, not a rebuilt one. buildVg copied
+        // only scores/junk/greenie/ctp/huckles and one day-1 snapshot of each player, so it lost
+        // startHole, tee pars/SIs, leftRound, putts/GIR, Wolf/Banker/Potato/BBB/Long Putt/Long
+        // Drive data and baseHcp -- the event's "Group games" disagreed with the group's own
+        // numbers (40 of 40 seeds with a leaver, 39 of 40 at 80%). Now g.games is settled by
+        // computeAllGameMoney on a clone of this very round with _noGroupGames (no field strip,
+        // no group recursion), and only re-keyed by name. `gi` above stays the de-dup policy:
+        // which g.games keys the event counts here rather than in a field engine or pass (2).
+        const _gres = _gameRes(g, false);
+        if (!_gres) return;
+        const _gameOf = { matchPlay: 'match', snake: 'junk' };   // result key -> g.games key (as computeAllGameMoney)
+        const _sel = (_gres.byGame || []).filter(b => b && !b.dropped && Object.prototype.hasOwnProperty.call(gi, _gameOf[b.key] || b.key));
+        addCombined(_reKey(g, _sel), groupNet, groupLabels, groupNetByGame);    // ← GROUP pool
       });
+      // v2002 (matrix TOURNEY-3/4): the group's OWN games ("Your group's games", g.groupGames) are
+      // the bubble's grp: rows, taken whole from the same sub-round the bubble uses
+      // (bgGroupGamesView). Pass (2) never reads groupGames, so nothing can count twice.
+      try {
+        if (g.groupGames && typeof g.groupGames === 'object' && Object.keys(g.groupGames).length) {
+          const _gres = _gameRes(g, true);
+          // Labelled "(your group)" exactly as the bubble labels them, so a group's own Birdie Bump
+          // is its own column and never merges into the event's field "Birdie Bump" column.
+          const _own = ((_gres && _gres.byGame) || []).filter(b => b && !b.dropped)
+            .map(b => ({ key: b.key, label: b.label + ' (your group)', money: b.money }));
+          if (_own.length) addCombined(_reKey(g, _own), groupNet, groupLabels, groupNetByGame);   // ← GROUP pool
+        }
+      } catch (e) {}
     });
     // (2) CROSS-GROUP team units games (teamMatch / teamLowball / teamQuota) — combine
     // each group's A/B into ONE event-wide A vs B and settle once across the field.
@@ -99873,7 +99977,15 @@ async function loadTourneyMoney(t) {
             _t2field: false, _t2fieldCount: 0
           });
         });
-        let res = null; try { res = computeAllGameMoney(buildVg(dayRounds, tGames, Object.values(canonPlayer))); } catch (e) {}
+        // v2002 (matrix TOURNEY-3/17): this DAY's player rows (handicap, baseHcp, tee), not the
+        // first round ever seen -- canonPlayer froze day-1 values for every later day.
+        const _dayPl = {};
+        dayRounds.forEach(g => (g.players || []).forEach(p => {
+          if (!p || !p.name) return; const c = canonOf[nm(p.name)];
+          if (c && !_dayPl[c]) _dayPl[c] = Object.assign({}, p, { id: c });
+        }));
+        const _dayList = allIds.map(id => _dayPl[id] || canonPlayer[id]);
+        let res = null; try { res = computeAllGameMoney(buildVg(dayRounds, tGames, _dayList)); } catch (e) {}
         addCombined(res, tourneyNet, tourneyLabels, tourneyNetByGame);   // ← TOURNAMENT pool (cross-group team games)
         // v1113: keep the ranking, not just the units. Handles both shapes —
         // calcTeamQuotaMulti (3+ sides: teamTotals/teamIds) and the original two-team
