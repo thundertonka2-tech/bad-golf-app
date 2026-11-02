@@ -254,18 +254,24 @@ function oAnimals(g, physical) {
   const cfg = g.games.animals, P = oParts(g, cfg), ids = new Set(P.map(p => p.id)), m = zero(g), pts = {}; P.forEach(p => pts[p.id] = 0);
   const sel = Array.isArray(cfg.animals) ? cfg.animals : Object.keys(ANIMALS);
   const order = (physical || process.env.APP_RULES) ? Array.from({ length: 18 }, (_, k) => k + 1) : oSeq(g);   // "passes to the LAST player who did it" = last in PLAY order
+  // DECISIONS rule 2 (v2002): head to head, but only among players still playing the hole. A held
+  // animal is paid to everyone still in on the hole it was last earned; a bird is paid by everyone
+  // still in on that hole. A leaver can't earn an animal after he left. No leaver = (n*p_i - total) x value.
+  const v = cfg.value || 0;
   Object.keys(ANIMALS).filter(a => sel.includes(a)).forEach(a => {
-    let hold = null;
+    let hold = null, hh = 0;
     order.forEach(h => {
       let e = ((g.animalData || {})[h] || {})[a]; if (typeof e === 'string') e = [e]; if (!Array.isArray(e)) e = [];
       let who = e.filter(id => ids.has(id));
       if (a === 'snake' && g.trackPutts && g.puttsData) { const pv = id => { const x = (g.puttsData[id] || [])[h - 1]; return x == null ? null : x; }; who = who.filter(id => pv(id) == null || pv(id) >= 3); P.forEach(p => { const v = pv(p.id); if (v != null && v >= 3 && !who.includes(p.id)) who.push(p.id); }); }
-      if (who.length) hold = who;
+      who = who.filter(id => oActive(g, id, h));
+      if (who.length) { hold = who; hh = h; }
     });
-    if (hold) hold.forEach(id => pts[id] -= ANIMALS[a] / hold.length);
+    if (hold) { const each = ANIMALS[a] / hold.length; P.forEach(o => { if (hold.includes(o.id) || !oActive(g, o.id, hh)) return; hold.forEach(id => { m[id] -= each * v; m[o.id] += each * v; }); }); }
   });
-  P.forEach(p => { for (let i = 0; i < 18; i++) { const r = oRaw(g, p.id, i); if (r == null || g.pars[i] == null) continue; const b = cfg.birdieBasis === 'net' ? oNet(g, p.id, i) : r; const d = b - oPar(g, p.id, i); pts[p.id] += d <= -3 ? 8 : d === -2 ? 4 : d === -1 ? 2 : 0; } });
-  const tot = P.reduce((s, p) => s + pts[p.id], 0); P.forEach(p => m[p.id] = (P.length * pts[p.id] - tot) * (cfg.value || 0)); return m;
+  P.forEach(p => { for (let i = 0; i < 18; i++) { const r = oRaw(g, p.id, i); if (r == null || g.pars[i] == null) continue; const b = cfg.birdieBasis === 'net' ? oNet(g, p.id, i) : r; const d = b - oPar(g, p.id, i); const bp = d <= -3 ? 8 : d === -2 ? 4 : d === -1 ? 2 : 0;
+    if (bp) P.forEach(o => { if (o.id === p.id || !oActive(g, o.id, i + 1)) return; m[o.id] -= bp * v; m[p.id] += bp * v; }); } });
+  return m;
 }
 function oHotPotato(g) {
   const cfg = g.games.hotPotato, P = oParts(g, cfg), ids = new Set(P.map(p => p.id)), m = zero(g);

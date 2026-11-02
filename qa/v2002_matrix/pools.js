@@ -13,6 +13,11 @@
 //   node qa/v2002_matrix/pools.js golf-app.html
 //
 // REPORT ONLY. Exits 1 when anything fails (findings are expected on v2001).
+// v2002 fix build: the oracles now encode qa/v2002_matrix/DECISIONS.md (the answer key) --
+// CTP / Long Putt exact ties split; a leaver is settled on Snake and Marks only for the holes he
+// played; Umbrella hole values follow play position and a leaver plays on as net double bogey;
+// Birdie Bump on net needs a gross eagle for the eagle tier and any birdie qualifies "need a birdie";
+// Greenie "made par" uses the winner's own tee par; Snake ties without putt stamps split the hold.
 const path = require('path');
 const APP = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'golf-app.html'));
 const { loadApp } = require(path.join(__dirname, '..', 'app.js'));
@@ -176,40 +181,52 @@ function oBirdie(g) {
     hp.forEach(p => {
       const raw = oSc(g, p.id, i); if (raw == null) return;
       const par = oPar(g, p.id, i); const b = net ? oNet(g, p, i, oHcp(g, p)) : raw;
-      let amt = 0;
-      if (raw === 1 && Number(cfg.hio) > 0) amt = Number(cfg.hio);
-      else if (b - par <= -2 && Number(cfg.eagle) > 0) amt = Number(cfg.eagle);
-      else if (b - par <= -1) amt = Number(cfg.birdie) || 0;
-      if (amt) aw.push({ id: p.id, amt, hp });
+      let amt = 0, bird = false;
+      // DECISIONS: on a net basis the eagle tier still needs a GROSS eagle (net only lifts a gross par to birdie).
+      if (raw === 1 && Number(cfg.hio) > 0) { amt = Number(cfg.hio); bird = true; }
+      else if (raw - par <= -2 && Number(cfg.eagle) > 0) { amt = Number(cfg.eagle); bird = true; }
+      else if (b - par <= -1) { amt = Number(cfg.birdie) || 0; bird = true; }
+      // DECISIONS: "need a birdie" - any birdie qualifies, even one whose rate is 0.
+      if (bird) aw.push({ id: p.id, amt, hp });
     });
   }
   const q = cfg.needBirdie ? new Set(aw.map(a => a.id)) : null;
   const m = zeros(g);
-  aw.forEach(a => a.hp.forEach(o => { if (o.id === a.id || (q && !q.has(o.id))) return; m[o.id] -= a.amt; m[a.id] += a.amt; }));
+  aw.forEach(a => { if (!a.amt) return; a.hp.forEach(o => { if (o.id === a.id || (q && !q.has(o.id))) return; m[o.id] -= a.amt; m[a.id] += a.amt; }); });
   return m;
 }
 function oSnakeIds(g, h, partIds) {
   let e = (g.junkData[h] || {}).snake; if (typeof e === 'string') e = [e]; if (!Array.isArray(e)) e = [];
   let ids = e.filter(id => partIds.has(id));
+  let ordered = ids.length < 2;
   if (g.trackPutts && g.puttsData) {
     const pv = id => { const a = g.puttsData[id]; const v = Array.isArray(a) ? a[h - 1] : null; return v != null ? Number(v) : null; };
     ids = ids.filter(id => { const v = pv(id); return v == null || v >= 3; });
     partIds.forEach(id => { const v = pv(id); if (v != null && v >= 3 && ids.indexOf(id) < 0) ids.push(id); });
+    const ca = g.cellAt && g.cellAt.puttsData; const at = id => { const a = ca && ca[id]; return (Array.isArray(a) && a[h - 1] != null) ? Number(a[h - 1]) : null; };
+    if (ids.length > 1 && ids.every(id => at(id) != null)) { ids = ids.slice().sort((x, y) => at(x) - at(y)); ordered = true; }
+    else ordered = ids.length < 2;
   }
-  return ids;
+  ids = ids.filter(id => oActive(g, id, h));   // a leaver can't 3-putt a hole he didn't play
+  return { ids, ordered: ordered || ids.length < 2 };
 }
 function oSnake(g) {
   const j = g.games.junk; if (!j || !(j.snake > 0)) return null;
   let parts = oParts(g, j); if (parts.length < 2) return null;
   if (Array.isArray(j.snakeParticipants) && j.snakeParticipants.length) { const s = new Set(j.snakeParticipants); const f = g.players.filter(p => s.has(p.id)); if (f.length >= 2) parts = f; }
   const pid = (Array.isArray(j.snakeParticipants) && j.snakeParticipants.length && parts.length >= 2 && parts.length === g.players.filter(p => j.snakeParticipants.indexOf(p.id) >= 0).length && j.snakeParticipants.length) ? new Set(j.snakeParticipants.filter(id => parts.some(p => p.id === id))) : new Set(parts.map(p => p.id));
-  let cnt = 0, holders = [];
+  let cnt = 0, holders = [], ord = true; const made = [];
   // HOUSE RULE: the snake is held by the LAST 3-putt in PLAY order.
-  const seq = oSeq(g).concat(oHoles(g) === 9 ? [] : []);
-  for (const h of seq) { const ids = oSnakeIds(g, h, pid); if (ids.length) { cnt += ids.length; holders = ids; } }
+  for (const h of oSeq(g)) { const r = oSnakeIds(g, h, pid); if (r.ids.length) { cnt += r.ids.length; holders = r.ids; ord = r.ordered; r.ids.forEach(() => made.push(h)); } }
   if (!cnt) return null;
-  const holder = holders[holders.length - 1]; const others = parts.filter(p => p.id !== holder);
-  const m = zeros(g); const pot = j.snake * cnt; m[holder] -= pot; others.forEach(o => m[o.id] += pot / others.length);
+  // DECISIONS: several 3-putts on the final snake hole with no putt stamps -> the hold is split.
+  const hold = ord ? [holders[holders.length - 1]] : holders.slice();
+  const others = parts.filter(p => hold.indexOf(p.id) < 0); if (!others.length) return null;
+  // DECISIONS rule 2: a leaver is settled only on the holes he played - each snake pays the
+  // non-holders still in on the hole it was made on.
+  const m = zeros(g); let pot = 0;
+  made.forEach(h => { const r = others.filter(o => oActive(g, o.id, h)); if (!r.length) return; pot += j.snake; r.forEach(o => m[o.id] += j.snake / r.length); });
+  hold.forEach(id => m[id] -= pot / hold.length);
   return m;
 }
 const JTYPES = ['gir', 'sandy', 'barkie', 'polie', 'arnie', 'chipin', 'rolo'];
@@ -245,33 +262,36 @@ function oP3(g) {
     W.forEach(w => {
       if (ov) return;
       if (tp.indexOf(w) >= 0 && !cfg.ignore3Putt) { if (cfg.bfEnabled !== false && cfg.bfValue > 0) hp.forEach(o => { if (o.id !== w) { m[w] -= cfg.bfValue; m[o.id] += cfg.bfValue; } }); return; }
-      const s = oSc(g, w, h - 1); if (!(s != null && s <= par) && !cfg.ignore3Putt) return;
+      const s = oSc(g, w, h - 1); if (!(s != null && s <= oPar(g, w, h - 1)) && !cfg.ignore3Putt) return;   // DECISIONS: own tee par
       pay(w, hp, cfg.value);
     });
     if (ov) pay(ov, hp, cfg.value);
   }
   return m;
 }
+const oTied = d => (d && d.pid) ? [d.pid].concat(Array.isArray(d.co) ? d.co : []).filter((x, i, a) => x && a.indexOf(x) === i) : [];
 function oCtp(g) {
   const cfg = g.games.ctp; if (!cfg) return null; const parts = oParts(g, cfg); if (parts.length < 2) return null;
   const pid = new Set(parts.map(p => p.id)); const data = g.ctpData || {}; const m = zeros(g);
   if (cfg.mode === 'pool') {
     const val = Number(cfg.value) || 0; if (val <= 0) return null; const wins = {}; parts.forEach(p => wins[p.id] = 0); let dec = 0;
-    (cfg.holes || []).forEach(h => { const d = data[h]; if (d && d.pid && pid.has(d.pid)) { wins[d.pid]++; dec++; } });
+    (cfg.holes || []).forEach(h => { const d = data[h]; const w = oTied(d).filter(x => pid.has(x)); if (w.length) { w.forEach(x => wins[x] += 1 / w.length); dec++; } });
     if (!dec) return null;
     const n = g.pars.length; const all = parts.every(p => { let c = 0; for (let i = 0; i < n; i++) if (oSc(g, p.id, i) != null) c++; return c >= n; });
     if (!all && !g.finishedAt) return null;
     const best = Math.max(...parts.map(p => wins[p.id])); const W = parts.filter(p => wins[p.id] === best); if (W.length >= parts.length) return null;
     parts.forEach(p => m[p.id] = (W.indexOf(p) >= 0 ? val * parts.length / W.length : 0) - val); return m;
   }
-  (cfg.holes || []).forEach(h => { const d = data[h]; if (!d || !d.pid || !pid.has(d.pid) || !oActive(g, d.pid, Number(h))) return;
-    parts.filter(p => oActive(g, p.id, Number(h))).forEach(o => { if (o.id !== d.pid) { m[o.id] -= cfg.value || 0; m[d.pid] += cfg.value || 0; } }); });
+  // DECISIONS rule 1: an exact tie ([pid, ...co]) splits; a winner must still be playing the hole.
+  (cfg.holes || []).forEach(h => { const W = oTied(data[h]).filter(x => pid.has(x) && oActive(g, x, Number(h))); if (!W.length) return;
+    parts.filter(p => oActive(g, p.id, Number(h)) && W.indexOf(p.id) < 0).forEach(o => { m[o.id] -= cfg.value || 0; W.forEach(w => m[w] += (cfg.value || 0) / W.length); }); });
   return m;
 }
 function oLongPutt(g) {
   const cfg = g.games.longPutt; if (!cfg || cfg.fieldOnly) return null; const parts = oParts(g, cfg); if (parts.length < 2) return null;
   const d = g.longPuttData; const m = zeros(g);
-  if (d && d.pid && parts.some(p => p.id === d.pid)) parts.forEach(p => { if (p.id !== d.pid) { m[p.id] -= cfg.value || 0; m[d.pid] += cfg.value || 0; } });
+  const W = oTied(d).filter(x => parts.some(p => p.id === x));   // DECISIONS rule 1: exact tie splits
+  if (W.length) parts.forEach(p => { if (W.indexOf(p.id) < 0) { m[p.id] -= cfg.value || 0; W.forEach(w => m[w] += (cfg.value || 0) / W.length); } });
   return m;
 }
 function oLongDrive(g) {
@@ -319,13 +339,20 @@ function oUmbrella(g) {
   const A = cfg.teamA.map(id => g.players.find(p => p.id === id)), B = cfg.teamB.map(id => g.players.find(p => p.id === id));
   const nv = (p, i) => cfg.net ? oNet(g, p, i, oHcp(g, p)) : oSc(g, p.id, i);
   let a = 0, b = 0;
+  // DECISIONS: a partner who LEFT plays on as net double bogey (par + 2 + his strokes gross), with no GIR / birdie.
+  const gone = (p, i) => !oActive(g, p.id, i + 1);
+  const ndb = (p, i) => oPar(g, p.id, i) + 2 + oStrokes(oHcp(g, p), oSi(g, p.id, i), oPar(g, p.id, i), g.hcpRules, oHoles(g));
+  const nv2 = (p, i) => { if (!gone(p, i)) return nv(p, i); const r = ndb(p, i); return cfg.net ? r - oStrokes(oHcp(g, p), oSi(g, p.id, i), oPar(g, p.id, i), g.hcpRules, oHoles(g)) : r; };
   for (let i = 0; i < 18; i++) {
-    if ([...A, ...B].some(p => oSc(g, p.id, i) == null)) continue;
-    const worth = i + 1, par = g.pars[i]; const an = A.map(p => nv(p, i)), bn = B.map(p => nv(p, i)); const c = [];
+    if ([...A, ...B].some(p => !gone(p, i) && oSc(g, p.id, i) == null)) continue;
+    if (g.pars[i] == null) continue;
+    const worth = oSeq(g).indexOf(i + 1) + 1;   // DECISIONS: hole value = play position 1..18
+    const an = A.map(p => nv2(p, i)), bn = B.map(p => nv2(p, i)); const c = [];
     const cmp = (x, y) => x < y ? 1 : y < x ? -1 : 0;
     c.push(cmp(Math.min(...an), Math.min(...bn))); c.push(cmp(an[0] + an[1], bn[0] + bn[1]));
-    for (let k = 0; k < 2; k++) { const ag = oGir(g, A[k].id, i + 1) === true, bg = oGir(g, B[k].id, i + 1) === true; c.push(ag && !bg ? 1 : bg && !ag ? -1 : 0); }
-    const ab = par != null && an.some(s => s <= par - 1), bb = par != null && bn.some(s => s <= par - 1); c.push(ab && !bb ? 1 : bb && !ab ? -1 : 0);
+    for (let k = 0; k < 2; k++) { const ag = !gone(A[k], i) && oGir(g, A[k].id, i + 1) === true, bg = !gone(B[k], i) && oGir(g, B[k].id, i + 1) === true; c.push(ag && !bg ? 1 : bg && !ag ? -1 : 0); }
+    const brd = (T, ns) => T.some((p, k) => !gone(p, k === k ? i : i) && ns[k] <= oPar(g, p.id, i) - 1);   // own tee par (POOLS-6)
+    const ab = brd(A, an), bb = brd(B, bn); c.push(ab && !bb ? 1 : bb && !ab ? -1 : 0);
     const aw = c.filter(x => x === 1).length, bw = c.filter(x => x === -1).length;
     let ah = aw * worth, bh = bw * worth; if (aw === 5 && bw === 0) ah *= 2; else if (bw === 5 && aw === 0) bh *= 2; a += ah; b += bh;
   }
@@ -334,11 +361,14 @@ function oUmbrella(g) {
 const MARK_PTS = { gir: 1, sandy: 1, chipin: 2, fishy: 2, darts: 1, muscles: 1 };
 function oMarks(g) {
   const cfg = g.games.marks; if (!cfg) return null; const parts = oParts(g, cfg); if (parts.length < 2) return null; const pid = new Set(parts.map(p => p.id));
-  const pts = {}; parts.forEach(p => pts[p.id] = 0); const net = cfg.birdieBasis === 'net';
-  parts.forEach(p => { for (let i = 0; i < 18; i++) { const raw = oSc(g, p.id, i), par = oPar(g, p.id, i); if (raw == null || par == null) continue;
-    const d = (net ? oNet(g, p, i, oHcp(g, p)) : raw) - par; pts[p.id] += d <= -3 ? 10 : d === -2 ? 5 : d === -1 ? 2 : 0; } });
-  for (let h = 1; h <= 18; h++) { const hd = (g.marksData || {})[h] || {}; Object.keys(MARK_PTS).forEach(k => { let e = hd[k]; if (typeof e === 'string') e = [e]; if (!Array.isArray(e)) return; e.filter(id => pid.has(id)).forEach(id => pts[id] += MARK_PTS[k]); }); }
-  const avg = parts.reduce((s, p) => s + pts[p.id], 0) / parts.length; const m = zeros(g); parts.forEach(p => m[p.id] = (pts[p.id] - avg) * (cfg.value || 0)); return m;
+  const net = cfg.birdieBasis === 'net'; const m = zeros(g);
+  // DECISIONS rule 2 (Marks): hole by hole among the players still playing the hole.
+  for (let h = 1; h <= 18; h++) { const i = h - 1; const on = parts.filter(p => oActive(g, p.id, h)); const pts = {}; on.forEach(p => pts[p.id] = 0);
+    on.forEach(p => { const raw = oSc(g, p.id, i), par = oPar(g, p.id, i); if (raw == null || par == null) return;
+      const d = (net ? oNet(g, p, i, oHcp(g, p)) : raw) - par; pts[p.id] += d <= -3 ? 10 : d === -2 ? 5 : d === -1 ? 2 : 0; });
+    const hd = (g.marksData || {})[h] || {}; Object.keys(MARK_PTS).forEach(k => { let e = hd[k]; if (typeof e === 'string') e = [e]; if (!Array.isArray(e)) return; e.filter(id => pid.has(id) && pts[id] != null).forEach(id => pts[id] += MARK_PTS[k]); });
+    if (on.length < 2) continue; const avg = on.reduce((s, p) => s + pts[p.id], 0) / on.length; on.forEach(p => m[p.id] += (pts[p.id] - avg) * (cfg.value || 0)); }
+  return m;
 }
 const GAMES = {
   skins:            { calc: 'calcSkins',     oracle: oSkins },
@@ -451,9 +481,10 @@ function addGames(g, ax) {
       const w = pick(on); const hd = { winners: [w], threePutts: chance(0.25) ? [w] : [] }; const b = on.filter(x => oSc(g, x, h - 1) < g.pars[h - 1] && x !== w); if (b.length && chance(0.7)) { hd.birdieWinner = pick(b); hd.birdieOnGreen = { [hd.birdieWinner]: chance(0.7) }; } g.p3greenieData[h] = hd; }
     const c = g.games.p3greenie; lab.p3greenie = ['bf=' + c.bfEnabled, 'override=' + c.birdieOverride, 'ignore3=' + c.ignore3Putt]; }
   if (want()) { const holes = shuffle(Array.from({ length: N }, (_, i) => i + 1)).slice(0, ri(1, 4)).sort((a, b) => a - b); g.games.ctp = { value: pick([1, 5]), holes, participants: parts() }; if (chance(0.35)) g.games.ctp.mode = 'pool';
-    g.ctpData = {}; holes.forEach(h => { const on = ids.filter(id => act(g, id, h)); if (on.length && chance(0.85)) g.ctpData[h] = { pid: pick(on), ft: ri(1, 30), in: ri(0, 11) }; });
-    lab.ctp = ['mode=' + (g.games.ctp.mode || 'perhole'), 'holes=' + (holes.length > 1 ? 'many' : 'one')]; }
-  if (want()) { g.games.longPutt = { value: pick([1, 5]), participants: parts() }; if (chance(0.85)) g.longPuttData = { pid: pick(g.games.longPutt.participants), ft: ri(10, 60), in: 0 }; lab.longPutt = ['set=' + !!g.longPuttData]; }
+    g.ctpData = {}; let ctpTie = false; holes.forEach(h => { const on = shuffle(ids.filter(id => act(g, id, h))); if (on.length && chance(0.85)) { g.ctpData[h] = { pid: on[0], ft: ri(1, 30), in: ri(0, 11) }; if (on.length > 1 && chance(0.25)) { g.ctpData[h].co = on.slice(1, ri(2, on.length)); ctpTie = true; } } });
+    lab.ctp = ['mode=' + (g.games.ctp.mode || 'perhole'), 'holes=' + (holes.length > 1 ? 'many' : 'one'), 'tie=' + ctpTie]; }
+  if (want()) { g.games.longPutt = { value: pick([1, 5]), participants: parts() }; if (chance(0.85)) { const lp = shuffle(g.games.longPutt.participants); g.longPuttData = { pid: lp[0], ft: ri(10, 60), in: 0 }; if (lp.length > 1 && chance(0.25)) g.longPuttData.co = lp.slice(1, ri(2, lp.length)); }
+    lab.longPutt = ['set=' + !!g.longPuttData, 'tie=' + !!(g.longPuttData && g.longPuttData.co)]; }
   if (want()) { const P = parts(); g.games.longDrive = { value: pick([1, 5]), holes: [pick([1, 2, 5, 6])], participants: P }; const legacy = chance(0.3);
     const marks = {}; P.forEach(id => { if (chance(0.8)) marks[id] = { yds: pick([250, 260, 260, 270, 280]) }; });
     const ks = Object.keys(marks); if (ks.length) { const best = Math.max(...ks.map(k => marks[k].yds)); const L = ks.filter(k => marks[k].yds === best);
@@ -615,13 +646,17 @@ const M = r => (r && r.money) || {};
   const r = run('calcBirdiePool', g); const exp = oBirdie(JSON.parse(JSON.stringify(g)));
   // p0,p1,p3 qualify; p2 out. hole1 p3 birdie: from p0,p1 (+2). hole3 p1 birdie: from p0,p3 (+2). hole13 p0: from p1 only (p3 left) (+1)
   dcheck('BB-a', 'needBirdie: non-birdier out; leaver pays only holes he played', moneyEq(r, exp, ['p0', 'p1', 'p2', 'p3']) && M(r).p2 === 0, fmt(M(r)) + ' exp ' + fmt(exp)); }
-// BB-b: net basis - a gross birdie with a stroke is a net eagle -> pays the EAGLE rate
+// BB-b: net basis - a gross birdie with a stroke is a net eagle. DECISIONS: the eagle tier needs a GROSS eagle -> birdie rate.
 { const g = base(2); g.players[0].hcp = g.players[0].baseHcp = 18; g.games.birdiePool = { birdie: 1, eagle: 5, hio: 0, birdieBasis: 'net', needBirdie: false, participants: ['p0', 'p1'] };
-  for (let i = 0; i < 18; i++) g.scores.p0[i] = g.pars[i] + 1; g.scores.p0[0] = 3;   // net 2 on par 4
-  const r = run('calcBirdiePool', g); dcheck('BB-b', 'INFO net basis: gross birdie + stroke counted as eagle (5) - see OPEN RULE Q', true, fmt(M(r))); }
-// BB-c: needBirdie, eagle box priced but birdie box 0 -> a birdie does not qualify the player (award 0 is skipped)
+  for (let i = 0; i < 18; i++) g.scores.p0[i] = g.pars[i] + 1; g.scores.p0[0] = 3;   // net 2 on par 4; every other hole a gross bogey = net par
+  const r = run('calcBirdiePool', g); dcheck('BB-b', 'net basis: gross birdie + stroke pays the BIRDIE rate (1), not the eagle rate (DECISIONS)', M(r).p0 === 1 && M(r).p1 === -1, fmt(M(r))); }
+// BB-b2: a real gross eagle on a net basis still pays the eagle rate
+{ const g = base(2); g.players[0].hcp = g.players[0].baseHcp = 18; g.games.birdiePool = { birdie: 1, eagle: 5, hio: 0, birdieBasis: 'net', needBirdie: false, participants: ['p0', 'p1'] };
+  for (let i = 0; i < 18; i++) g.scores.p0[i] = g.pars[i] + 1; g.scores.p0[2] = 3;   // gross eagle on the par 5
+  const r = run('calcBirdiePool', g); dcheck('BB-b2', 'net basis: a GROSS eagle still pays the eagle rate (5)', M(r).p0 === 5, fmt(M(r))); }
+// BB-c: needBirdie, eagle box priced but birdie box 0. DECISIONS: any birdie still qualifies the player.
 { const g = base(3); g.games.birdiePool = { birdie: 0, eagle: 3, hio: 0, birdieBasis: 'gross', needBirdie: true, participants: ['p0', 'p1', 'p2'] }; g.scores.p0[2] = 3; g.scores.p1[0] = 3;
-  const r = run('calcBirdiePool', g); dcheck('BB-c', 'eagle-only bump: eagler takes 3 from... only qualified (p1 birdie unpriced -> p1 out) => +0', true, 'INFO ' + fmt(M(r))); }
+  const r = run('calcBirdiePool', g); dcheck('BB-c', 'eagle-only bump: Ann eagles (3), Bob\'s unpriced birdie still qualifies him -> Ann +3, Bob -3, Cal (no birdie) out', M(r).p0 === 3 && M(r).p1 === -3 && M(r).p2 === 0, fmt(M(r))); }
 
 // SN-a: snake holder = LAST 3-putt in PLAY order (start on 10). 3-putts: Ann on hole 15 (6th played), Bob on hole 4 (13th played) -> Bob holds.
 { const g = base(3, { holes: 'start10' }); g.games.junk = { snake: 1 }; g.junkData = { 15: { snake: ['p0'] }, 4: { snake: ['p1'] } };
@@ -631,13 +666,17 @@ const M = r => (r && r.money) || {};
   const r = run('calcSnake', g); dcheck('SN-b', 'shotgun-14: Cal (hole 2, 7th played) after Ann (hole 16, 3rd played) -> Cal holds 4', M(r).p2 === -4, 'app ' + fmt(M(r))); }
 // SN-c: two 3-putts on the final snake hole: last recorded holds
 { const g = base(3); g.games.junk = { snake: 1 }; g.junkData = { 18: { snake: ['p1', 'p0'] } };
-  const r = run('calcSnake', g); dcheck('SN-c', 'same-hole 3-putts: last recorded (Ann) holds, pot = 2 snakes', M(r).p0 === -2 && M(r).p1 === 1, fmt(M(r))); }
+  const r = run('calcSnake', g); dcheck('SN-c', 'same-hole 3-putts, no putt stamps: the hold is SPLIT (DECISIONS) -> Ann -1, Bob -1, Cal +2', M(r).p0 === -1 && M(r).p1 === -1 && M(r).p2 === 2, fmt(M(r))); }
+// SN-c2: same hole, putts tracked WITH stamps -> whoever holed out last holds it alone
+{ const g = base(3); g.trackPutts = true; g.games.junk = { snake: 1 }; g.junkData = {}; g.puttsData = { p0: new Array(18).fill(2), p1: new Array(18).fill(2), p2: new Array(18).fill(2) }; g.puttsData.p0[17] = 3; g.puttsData.p1[17] = 3;
+  g.cellAt = { puttsData: { p0: [], p1: [] } }; g.cellAt.puttsData.p0[17] = 2000; g.cellAt.puttsData.p1[17] = 1000;
+  const r = run('calcSnake', g); dcheck('SN-c2', 'same-hole 3-putts with putt stamps: Ann holed out last -> Ann holds 2, Bob & Cal +1', M(r).p0 === -2 && M(r).p1 === 1 && M(r).p2 === 1, fmt(M(r))); }
 // SN-d: putts tracked override the taps (3 putts recorded but not tapped)
 { const g = base(3); g.trackPutts = true; g.games.junk = { snake: 1 }; g.junkData = { 5: { snake: ['p0'] } }; g.puttsData = { p0: new Array(18).fill(2), p1: new Array(18).fill(2), p2: new Array(18).fill(2) }; g.puttsData.p2[12] = 3;
   const r = run('calcSnake', g); dcheck('SN-d', 'recorded 2 putts cancels the Ann tap on 5; Cal 3 putts on 13 holds 1 snake', M(r).p2 === -1 && M(r).p0 === 0.5, fmt(M(r))); }
 // SN-e: leaver holds no snake but still collects a share of the pot after leaving
 { const g = base(3); g.games.junk = { snake: 1 }; g.leftRound = { byId: { p2: 6 } }; for (let i = 6; i < 18; i++) g.scores.p2[i] = null; g.junkData = { 3: { snake: ['p0'] }, 15: { snake: ['p1'] } };
-  const r = run('calcSnake', g); dcheck('SN-e', 'INFO leaver (left after 6) collects half of a 2-snake pot built on 3 & 15: ' + fmt(M(r)), true, 'see OPEN RULE Q'); }
+  const r = run('calcSnake', g); dcheck('SN-e', 'leaver (left after 6) only shares the snake made on 3 (DECISIONS): Bob -2, Ann +1.5, Cal +0.5', M(r).p1 === -2 && M(r).p0 === 1.5 && M(r).p2 === 0.5, fmt(M(r))); }
 
 // JK-a: every junk type pays amt from every other on-hole participant
 { JTYPES.forEach(t => { const g = base(4); g.games.junk = { [t]: 2 }; g.junkData = { 7: { [t]: ['p1'] } }; const r = run('calcJunk', g);
@@ -652,7 +691,7 @@ const M = r => (r && r.money) || {};
 { const auto = [['syncSandyJunk', 'sandy', g => { g.trackSands = true; g.sandData = { p0: new Array(18).fill(null) }; g.sandData.p0[1] = true; }],
                 ['syncRoloJunk', 'rolo', g => { g.trackPenalties = true; g.penaltiesData = { p0: new Array(18).fill(0) }; g.penaltiesData.p0[1] = 1; }],
                 ['syncChipInJunk', 'chipin', g => { g.trackPutts = true; g.puttsData = { p0: new Array(18).fill(2), p1: new Array(18).fill(2) }; g.puttsData.p0[1] = 0; }],
-                ['syncArnieJunk', 'arnie', g => { g.trackFairways = true; g.trackGirs = true; g.trackPutts = true; g.fairwaysData = { p0: new Array(18).fill(false) }; g.puttsData = { p0: new Array(18).fill(3), p1: new Array(18).fill(2) }; }]];
+                ['syncArnieJunk', 'arnie', g => { g.trackFairways = true; g.trackGirs = true; g.trackPutts = true; g.fairwaysData = { p0: new Array(18).fill(false) }; g.puttsData = { p0: new Array(18).fill(1), p1: new Array(18).fill(2) }; }]];   // 5 with 1 putt = on in 4: a GIR miss on her par 5 (3 putts would be on in 2 = a GIR)
   auto.forEach(([fn, t, prep]) => { const g = base(2); g.players[0].teeLabel = 'Red'; g.teePars = { Red: g.pars.slice() }; g.teePars.Red[1] = 5; g.scores.p0[1] = 5; g.games.junk = { [t]: 1 }; g.junkData = {}; prep(g);
     quiet(() => F(fn)(g, 2)); const got = ((g.junkData[2] || {})[t] || []).indexOf('p0') >= 0;
     dcheck('JK-d', fn + ': Red-tee player makes HER par (5) on a card par-4 -> ' + t + ' should auto-fill', got, 'auto-filled=' + got); }); }
@@ -739,10 +778,14 @@ const M = r => (r && r.money) || {};
 { const g = base(3); g.games.bingoBangoBongo = { value: 1 }; g.bbbData = { 1: { bingo: 'p0', bango: 'p0', bongo: 'p1' } };
   const m = M(run('calcBBB', g)); dcheck('BBB-a', 'BBB: Ann 2 pts (+4), Bob 1 (+2-2=0) ... Ann +3, Bob 0, Cal -3', m.p0 === 3 && m.p1 === 0 && m.p2 === -3, fmt(m)); }
 { const g = base(4, { holes: 'start10' }); g.games.umbrella = { value: 1, net: false, teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] }; g.scores.p0[8] = 3;
-  const m = M(run('calcUmbrella', g)); dcheck('UM-a', 'INFO start-10: Ann birdie on hole 9 (the 18th played) worth 9 x2 pts (low ball + birdie, low total) = ' + fmt(m), true, 'worth = physical hole number, see OPEN RULE Q'); }
+  const m = M(run('calcUmbrella', g)); dcheck('UM-a', 'start-10: Ann birdie on hole 9 (the 18th played) is worth 18 (DECISIONS: play position) x3 pts (low ball, low total, birdie) = 54', m.p0 === 54 && m.p2 === -54, fmt(m)); }
+// UM-c: a leaver plays on as net double bogey - his partner still plays the hole
+{ const g = base(4); g.games.umbrella = { value: 1, net: false, teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] }; g.leftRound = { byId: { p1: 17 } }; g.scores.p1[17] = null;
+  const r = run('calcUmbrella', g); const row = r && r.result && r.result.holeRows.find(x => x.hole === 18);
+  dcheck('UM-c', 'Bob left after 17: hole 18 still played, Bob = double bogey -> Team B wins low total only (18 pts)', !!row && row.bWins === 1 && row.aWins === 0 && M(r).p2 === 18, JSON.stringify(row) + ' ' + fmt(M(r))); }
 { const g = base(3); g.games.marks = { value: 1, birdieBasis: 'gross' }; g.leftRound = { byId: { p2: 9 } }; for (let i = 9; i < 18; i++) g.scores.p2[i] = null;
   g.scores.p0[12] = 3; g.scores.p1[1] = 3;
-  const m = M(run('calcMarks', g)); dcheck('MK-a', 'INFO marks leaver: Ann 2, Bob 2, leaver 0 -> leaver pays for holes 10-18 he never played: ' + fmt(m), true, 'see OPEN RULE Q'); }
+  const m = M(run('calcMarks', g)); dcheck('MK-a', 'marks leaver (DECISIONS: hole by hole): Bob birdie on 2 -> Bob +1.33, Ann/Cal -0.67; Ann birdie on 13 after Cal left -> Ann +1, Bob -1', c2(m.p0) === 0.33 && c2(m.p1) === 0.33 && c2(m.p2) === -0.67, fmt(m)); }
 
 // TOT-a: live view hides pool-mode games mid-round; combined on the Board == bgSettleNets(combined)
 { const g = base(4); g.finishedAt = null; g.games.skins = { mode: 'perskin', value: 1, tieRule: 'carry', require: 'none', hcpPct: 100 }; g.games.ctp = { value: 5, holes: [4], mode: 'pool' }; g.ctpData = { 4: { pid: 'p0' } }; g.scores.p0[0] = 3;
@@ -774,7 +817,7 @@ const M = r => (r && r.money) || {};
 // P3-g: Greenie par check uses the CARD par (mixed tees)
 { const g = base(3); g.players[0].teeLabel = 'Red'; g.teePars = { Red: g.pars.slice() }; g.teePars.Red[3] = 4; g.scores.p0[3] = 4;   // Red par 4 on card par-3 hole 4, Ann pars it
   g.games.p3greenie = { value: 1, bfEnabled: true, bfValue: 1, birdieOverride: false, ignore3Putt: false }; g.p3greenieData = { 4: { winners: ['p0'], threePutts: [] } };
-  const m = M(run('calcP3Greenie', g)); dcheck('P3-g', 'INFO Greenie on a hole that is par 4 from Ann’s tee: app reads card par 3, so her par 4 is "no par" -> ' + fmt(m), true, 'tee-par question, see findings'); }
+  const m = M(run('calcP3Greenie', g)); dcheck('P3-g', 'Greenie on a hole that is par 4 from Ann’s tee: her 4 is par on her tee (DECISIONS) -> Ann +2', m.p0 === 2, fmt(m)); }
 // SK-h: Skins with tied totals at leftover carry -> void (no units), and leaver can't take it on low total
 { const g = base(3); g.games.skins = { mode: 'perskin', value: 1, tieRule: 'carry', require: 'none', hcpPct: 100 }; g.leftRound = { byId: { p2: 9 } }; for (let i = 9; i < 18; i++) g.scores.p2[i] = null; g.scores.p2[0] = 3;
   g.scores.p0[17] = 5;   // Ann bogeys 18 -> Bob wins 18? no: Bob & leaver... leaver gone; Bob 4 < Ann 5 -> Bob wins 18 with carry

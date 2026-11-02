@@ -49886,6 +49886,9 @@ function renderJunkEntry() {
       <div class="junk-row">`;
     g.players.forEach(p => {
       const active = earners.includes(p.id);
+      // v2002 (matrix POOLS-4): a player who left before this hole can't earn junk on it -- hide his
+      // chip (kept only while it is still marked, so a stray mark can be cleared).
+      try { if (!active && !bgActiveOnHole(g, p.id, h)) return; } catch (e) {}
       html += `<span class="junk-chip ${active ? 'active' : ''}" data-junk-type="${jt}" data-pid="${p.id}">${displayFirst(p)}</span>`;
     });
     html += `</div></div>`;
@@ -50669,6 +50672,35 @@ function bgDistInputsHtml(idBase, hd) {
       <span style="font-size:13px;font-weight:700">in</span>`;
 }
 
+// v2002 (matrix POOLS-7, DECISIONS rule 1): the tie row under a picked CTP / Long Putt winner.
+// Tapping another player marks him tied at exactly the same distance (hd.co); the engines split
+// the prize between [pid, ...co]. `kind` is 'ctp' or 'lp'; `players` are the chips allowed.
+function bgPrizeTieRowHtml(g, hd, kind, players) {
+  try {
+    if (!hd || !hd.pid) return '';
+    const co = Array.isArray(hd.co) ? hd.co : [];
+    const others = (players || []).filter(p => p && p.id !== hd.pid);
+    if (!others.length) return '';
+    let h = '<div style="font-size:12px;font-weight:500;margin:8px 0 4px">Split among tied</div><div class="junk-row">';
+    others.forEach(p => { h += '<span class="junk-chip ' + (co.indexOf(p.id) >= 0 ? 'active' : '') + '" data-' + kind + '-tie="' + p.id + '">' + displayFirst(p) + '</span>'; });
+    h += '</div>';
+    const ids = bgPrizeTieIds(hd);
+    if (ids.length > 1) {
+      const _tn = ids.map(id => { const p = g.players.find(x => x && x.id === id); return p ? displayFirst(p) : ''; }).filter(Boolean);
+      h += '<div class="small-text" style="margin-top:6px;font-weight:600">\ud83e\udd1d Tied at ' + (hd.ft != null ? ctpFmtDist(hd) : '') + ': ' + escapeHtml(_tn.join(' & ')) + ' \u2014 the prize pool splits</div>';
+    }
+    return h;
+  } catch (e) { return ''; }
+}
+// Toggle `pid` in hd.co (never the winner himself). Returns the new list.
+function bgPrizeTieToggle(hd, pid) {
+  if (!hd || !hd.pid || !pid || pid === hd.pid) return (hd && hd.co) || [];
+  const co = (Array.isArray(hd.co) ? hd.co : []).filter(x => x && x !== hd.pid);
+  const i = co.indexOf(pid);
+  if (i >= 0) co.splice(i, 1); else co.push(pid);
+  if (co.length) hd.co = co; else { try { delete hd.co; } catch (e) {} }
+  return co;
+}
 function renderLongPuttEntry() {
   const g = state.game;
   const ctr = $('longputt-entry-section');
@@ -50701,6 +50733,7 @@ function renderLongPuttEntry() {
     html += `<span class="junk-chip ${hd.pid === p.id ? 'active' : ''}" data-lp-pid="${p.id}">${displayFirst(p)}</span>`;
   });
   html += `</div>`;
+  if (hd.pid) html += bgPrizeTieRowHtml(g, hd, 'lp', g.players);   // v2002 (matrix POOLS-7): mark an exact tie
   if (hd.pid) {
     html += `<div class="bg-dist-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-top:10px;min-width:0;max-width:100%">
       <span style="font-size:12px;font-weight:500">Distance:</span>
@@ -50711,7 +50744,23 @@ function renderLongPuttEntry() {
   }
   html += `</div>`;
   ctr.innerHTML = html;
-  ctr.querySelectorAll('.junk-chip').forEach(chip => {
+  ctr.querySelectorAll('.junk-chip[data-lp-tie]').forEach(chip => {   // v2002 (matrix POOLS-7)
+    chip.onclick = async () => {
+      const pid = chip.dataset.lpTie;
+      if (state.game && state.game !== g) {
+        try { renderLongPuttEntry(); } catch (e) {}
+        const _nc = ctr.querySelector('.junk-chip[data-lp-tie="' + pid + '"]');
+        if (_nc && _nc !== chip && typeof _nc.onclick === 'function') return _nc.onclick();
+        return;
+      }
+      bgPrizeTieToggle(g.longPuttData, pid);
+      g.longPuttData.at = Date.now();
+      try { renderLongPuttEntry(); } catch (e) {}
+      await saveGame(g);
+      renderLongPuttEntry();
+    };
+  });
+  ctr.querySelectorAll('.junk-chip[data-lp-pid]').forEach(chip => {
     chip.onclick = async () => {
       const pid = chip.dataset.lpPid;
       if (state.game && state.game !== g) {   // v1925: same stale-round replay as CTP
@@ -50721,6 +50770,7 @@ function renderLongPuttEntry() {
         return;
       }
       g.longPuttData.pid = (g.longPuttData.pid === pid) ? null : pid;
+      try { delete g.longPuttData.co; } catch (e) {}   // v2002 (matrix POOLS-7): a new pick replaces any tie
       if (!g.longPuttData.pid) { g.longPuttData.ft = null; g.longPuttData.in = null; }
       g.longPuttData.at = Date.now();   // v1161
       try { renderLongPuttEntry(); } catch (e) {}   // v1735: paint first, then save (the tap no longer waits on the cloud)
@@ -50864,10 +50914,14 @@ function renderCtpEntry() {
     <div class="lbl" style="color:var(--accent)">${cfg.greenie ? ('⛳ Par 3 Greenie (' + cfg.value + ' per player, whole field) — closest ball on the green; par or better wins, worse than par gives the Hero Tax') : ('🎯 Closest to the Pin (' + cfg.value + '/player prize pool) — ball must be on the green')}</div>
     <div style="font-size:12px;font-weight:500;margin-bottom:4px">Closest in this group</div>
     <div class="junk-row">`;
-  g.players.forEach(p => {
+  // v2002 (matrix POOLS-4): a player who left before this hole can't be closest -- his chip is hidden
+  // (kept only if he is already marked, so a stray mark can still be cleared).
+  const _ctpOn = g.players.filter(p => { try { return bgActiveOnHole(g, p.id, h) || bgPrizeTieIds(hd).indexOf(p.id) >= 0; } catch (e) { return true; } });
+  _ctpOn.forEach(p => {
     html += `<span class="junk-chip ${hd.pid === p.id ? 'active' : ''}" data-ctp-pid="${p.id}">${displayFirst(p)}</span>`;
   });
   html += `</div>`;
+  if (hd.pid) html += bgPrizeTieRowHtml(g, hd, 'ctp', _ctpOn);   // v2002 (matrix POOLS-7): mark an exact tie
   // v1952 (Hoon, Buffalo Creek): "didn't realize [typing it] was an option." Say so.
   if (!hd.pid) html += `<div class="small-text" style="color:var(--text-muted);margin-top:6px">Tap the winner, then type the distance${bgMeasureAvailable() ? ' or measure it with the camera' : ''}.</div>`;
   if (hd.pid) {
@@ -50881,7 +50935,23 @@ function renderCtpEntry() {
   html += `</div>`;
   ctr.innerHTML = html;
 
-  ctr.querySelectorAll('.junk-chip').forEach(chip => {
+  ctr.querySelectorAll('.junk-chip[data-ctp-tie]').forEach(chip => {   // v2002 (matrix POOLS-7)
+    chip.onclick = async () => {
+      const pid = chip.dataset.ctpTie;
+      if (state.game && state.game !== g) {
+        try { renderCtpEntry(); } catch (e) {}
+        const _nc = ctr.querySelector('.junk-chip[data-ctp-tie="' + pid + '"]');
+        if (_nc && _nc !== chip && typeof _nc.onclick === 'function') return _nc.onclick();
+        return;
+      }
+      _touch();
+      bgPrizeTieToggle(hd, pid);
+      try { renderCtpEntry(); } catch (e) {}
+      await saveGame(g);
+      renderCtpEntry();
+    };
+  });
+  ctr.querySelectorAll('.junk-chip[data-ctp-pid]').forEach(chip => {
     chip.onclick = async () => {
       const pid = chip.dataset.ctpPid;
       /* v1925 (Tyler 10/17): "Gregory won the CTP on 17 but I could not click his name. After
@@ -50899,6 +50969,7 @@ function renderCtpEntry() {
       }
       _touch();
       hd.pid = (hd.pid === pid) ? null : pid;
+      try { delete hd.co; } catch (e) {}   // v2002 (matrix POOLS-7): a new pick replaces any tie
       if (!hd.pid) { hd.ft = null; hd.in = null; }
       try { renderCtpEntry(); } catch (e) {}   // paint first, then save
       await saveGame(g);
@@ -51180,10 +51251,10 @@ function syncArnieJunk(g, h) {
   if (!g.junkData) g.junkData = {};
   if (!g.junkData[h]) g.junkData[h] = {};
   if (g.junkData[h]._arnieManual) return;   // user manually set this hole's Arnie — don't overwrite
-  const par = g.pars && g.pars[h - 1];
   const list = [];
   (g.players || []).forEach(p => {
     try {
+      const par = parFor(g, p.id, h - 1);   // v2002 (matrix POOLS-5): par on HIS tee, as the engines use since v1065
       const s = (g.scores && g.scores[p.id]) ? g.scores[p.id][h - 1] : null;
       const fw = (g.fairwaysData && g.fairwaysData[p.id]) ? g.fairwaysData[p.id][h - 1] : null;
       const gir = (typeof girStatusFor === 'function') ? girStatusFor(g, p.id, h) : null;
@@ -51208,7 +51279,7 @@ function syncSandyJunk(g, h) {
     const inSand = g.sandData && Array.isArray(g.sandData[p.id]) && g.sandData[p.id][h - 1] === true;
     if (!inSand) return;
     const s = (g.scores && g.scores[p.id]) ? g.scores[p.id][h - 1] : null;
-    const par = g.pars ? g.pars[h - 1] : null;
+    const par = parFor(g, p.id, h - 1);   // v2002 (matrix POOLS-5): his own tee par
     if (s != null && par != null && s <= par) list.push(p.id);
   });
   g.junkData[h]['sandy'] = list;
@@ -51229,7 +51300,7 @@ function syncRoloJunk(g, h) {
       const pen = (g.penaltiesData && Array.isArray(g.penaltiesData[p.id])) ? (g.penaltiesData[p.id][h - 1] || 0) : 0;
       if (!(pen > 0)) return;
       const s = (g.scores && g.scores[p.id]) ? g.scores[p.id][h - 1] : null;
-      const par = g.pars ? g.pars[h - 1] : null;
+      const par = parFor(g, p.id, h - 1);   // v2002 (matrix POOLS-5): his own tee par
       if (s != null && par != null && s <= par) list.push(p.id);
     } catch (e) {}
   });
@@ -51261,7 +51332,7 @@ function syncChipInJunk(g, h) {
       const pu = (g.puttsData && Array.isArray(g.puttsData[p.id])) ? g.puttsData[p.id][h - 1] : null;
       if (pu == null || Number(pu) !== 0) return;   // strictly zero putts, and actually entered
       const s = (g.scores && g.scores[p.id]) ? g.scores[p.id][h - 1] : null;
-      const par = g.pars ? g.pars[h - 1] : null;
+      const par = parFor(g, p.id, h - 1);   // v2002 (matrix POOLS-5): his own tee par
       if (s == null || par == null) return;
       if (Number(s) === 1) return;                  // hole-in-one, not a chip-in
       if (s <= par) list.push(p.id);
@@ -57204,6 +57275,17 @@ function _bgSnakeIdsForHole(g, h, manual, partIds) {
   } catch (err) {}
   return ids;
 }
+// v2002 (DECISIONS: Snake tie): is the order of several 3-putts on hole h known? Only when every
+// one of them has a putt timestamp (_bgSnakeIdsForHole then sorted them by when the putt went in).
+function _bgSnakeHoleOrdered(g, h, ids) {
+  try {
+    if (!Array.isArray(ids) || ids.length < 2) return true;
+    if (!(g && g.trackPutts && g.puttsData)) return false;
+    const ca = (g.cellAt && g.cellAt.puttsData) || null;
+    if (!ca) return false;
+    return ids.every(id => { const a = ca[id]; const t = Array.isArray(a) ? Number(a[h - 1]) : NaN; return Array.isArray(a) && a[h - 1] != null && isFinite(t); });
+  } catch (e) { return false; }
+}
 // v1771: Snake settles on its OWN line now (it rode inside Junk, where a +2 snake and a
 // -2 GIR netted to nothing on the results screen). calcJunk(g, 'snake') = snake only;
 // calcJunk(g) = the Junk bundle without the snake.
@@ -57241,7 +57323,9 @@ function calcJunk(g, _jMode) {
       // SNAKE is NOT awarded per 3-putt — only the FINAL holder gives (handled below).
       if (jt === 'snake') return;
       // Only count earners who are participants in the junk side game
-      earnerIds = earnerIds.filter(id => partIds.has(id));
+      // v2002 (matrix POOLS-4): ...and still playing this hole. A leaver tapped (or merged back in)
+      // on a hole after he left earns nothing, the same way he already pays nothing there.
+      earnerIds = earnerIds.filter(id => partIds.has(id) && bgActiveOnHole(g, id, h));
       if (earnerIds.length === 0) return;
 
       const jdef = JUNK_TYPES.find(x => x.id === jt);
@@ -57287,10 +57371,16 @@ function calcJunk(g, _jMode) {
         const _sFil = g.players.filter(p => _sIds.has(p.id));
         if (_sFil.length >= 2) { snakeParts = _sFil; snakePartIds = _sIds; }
       }
-      let finalHole = 0, holders = [], snakeCount = 0;
-      for (let h = 1; h <= 18; h++) {
-        const ids = _bgSnakeIdsForHole(g, h, (g.junkData[h] || {})['snake'], snakePartIds);   // v1771
-        if (ids.length) { snakeCount += ids.length; finalHole = h; holders = ids; }   // tally every snake; last hole = final holder
+      let finalHole = 0, holders = [], snakeCount = 0, finalOrdered = true;
+      const _snEv = [];   // v2002: one entry per snake (3-putt): the hole it was made on
+      // v2002 (matrix POOLS-1): the snake passes in the order the holes were PLAYED (start on 10,
+      // pick-a-start, shotgun, a nine started mid-card), not by hole number. Same walk as Skins,
+      // Pot of Gold and Hot Potato. A leaver can't 3-putt a hole he didn't play.
+      const _snSeq = _bgPlaySeqOr(g, 18);
+      for (let _snK = 0; _snK < _snSeq.length; _snK++) {
+        const h = _snSeq[_snK];
+        const ids = _bgSnakeIdsForHole(g, h, (g.junkData[h] || {})['snake'], snakePartIds).filter(id => bgActiveOnHole(g, id, h));   // v1771
+        if (ids.length) { snakeCount += ids.length; finalHole = h; holders = ids; finalOrdered = _bgSnakeHoleOrdered(g, h, ids); ids.forEach(() => _snEv.push(h)); }   // tally every snake; last hole = final holder
       }
       if (finalHole && holders.length && snakeCount > 0) {
         // STANDARD SNAKE RULE (#5): only ONE player holds the snake. When two or
@@ -57299,17 +57389,27 @@ function calcJunk(g, _jMode) {
         // hole. holders[] is in record (tap) order, so the LAST entry is that
         // player. The prize pool still grows by EVERY 3-putt all round (snakeCount); the
         // single final holder gives the whole prize pool and everyone else splits it.
-        const finalHolderId = holders[holders.length - 1];
-        const nonHolders = snakeParts.filter(p => p.id !== finalHolderId);
+        // v2002 (DECISIONS: Snake tie): when the putt timestamps can't say who holed out last on
+        // the final snake hole (no stamps, or taps only), the players who 3-putted it SPLIT the hold.
+        const holdIds = (holders.length > 1 && !finalOrdered) ? holders.slice() : [holders[holders.length - 1]];
+        const finalHolderId = holdIds[holdIds.length - 1];
+        const nonHolders = snakeParts.filter(p => holdIds.indexOf(p.id) < 0);
         if (nonHolders.length) {
-          const pot = snakeAmt * snakeCount;            // final holder gives amount × #snakes
+          // v2002 (DECISIONS rule 2, Snake): a leaver is settled only on the holes he played -- each
+          // snake's amount goes to the non-holders who were still playing the hole it was made on.
+          // Nobody left = every snake splits over every non-holder, exactly as before.
+          let pot = 0;
+          _snEv.forEach(eh => {
+            const rcv = nonHolders.filter(nh => bgActiveOnHole(g, nh.id, eh));
+            if (!rcv.length) return;
+            pot += snakeAmt;
+            rcv.forEach(nh => { money[nh.id] += snakeAmt / rcv.length; });
+          });
           const share = pot / nonHolders.length;         // others split the prize pool evenly
-          money[finalHolderId] -= pot;
-          nonHolders.forEach(nh => { money[nh.id] += share; });
-          const pp = g.players.find(x => x.id === finalHolderId);
-          const hNames = pp ? pp.name : '?';
-          events.push({ hole: finalHole, junk: 'snake', snakePenalty: true, holder: hNames, winner: hNames, winnerId: finalHolderId, snakeCount: snakeCount, amt: -pot });
-          _snakeInfo = { holder: hNames, holderId: finalHolderId, count: snakeCount, amt: snakeAmt, pot: pot, share: share, finalHole: finalHole, others: nonHolders.length };
+          holdIds.forEach(id => { money[id] -= pot / holdIds.length; });   // final holder gives amount × #snakes
+          const hNames = holdIds.map(id => { const pp = g.players.find(x => x.id === id); return pp ? pp.name : '?'; }).join(' & ');
+          events.push({ hole: finalHole, junk: 'snake', snakePenalty: true, holder: hNames, winner: hNames, winnerId: finalHolderId, holderIds: holdIds.slice(), snakeCount: snakeCount, amt: -pot });
+          _snakeInfo = { holder: hNames, holderId: finalHolderId, holderIds: holdIds.slice(), split: holdIds.length > 1, count: snakeCount, amt: snakeAmt, pot: pot, share: share, finalHole: finalHole, others: nonHolders.length };
         }
       }
     }
@@ -57434,10 +57534,14 @@ function calcBirdiePool(g) {
       // awarded 0 while a 2 on the same par 3 awarded the eagle/birdie rate. If no HIO
       // amount is configured the ace now falls through and settles as the eagle it
       // also is. Explicit hio > 0 still wins.
+      // v2002 (DECISIONS default, Birdie Bump on a net basis): net only lifts a GROSS par to a
+      // birdie. The eagle tier still needs a gross eagle (and the ace a real 1), so a gross birdie
+      // plus a stroke is a birdie, never an eagle. A gross eagle stays an eagle.
+      const _eagleOk = (raw - _par <= -2);
       if (raw === 1 && (Number(cfg.hio) || 0) > 0) {
         kind = 'HIO';
         amount = Number(cfg.hio) || 0;
-      } else if (basis - _par <= -2 && (Number(cfg.eagle) || 0) > 0) {
+      } else if (_eagleOk && (Number(cfg.eagle) || 0) > 0) {
         kind = 'Eagle';
         amount = Number(cfg.eagle) || 0;
       } else if (basis - _par <= -1) {
@@ -57450,12 +57554,16 @@ function calcBirdiePool(g) {
         kind = 'Birdie';
         amount = Number(cfg.birdie) || 0;
       }
-      if (!kind || amount === 0) return;
+      if (!kind) return;
+      // v2002 (DECISIONS default): with "need a birdie" on, ANY birdie qualifies the player even when
+      // only the Eagle box is priced (a 0-rate birdie pays nothing but still lets him in).
+      if (amount === 0) { if (_needB) _awards.push({ h: h, p: p, kind: kind, amount: 0, parts: participants, qualifyOnly: true }); return; }
       _awards.push({ h: h, p: p, kind: kind, amount: amount, parts: participants });
     });
   }
   const _qual = _needB ? new Set(_awards.map(a => a.p.id)) : null;
   _awards.forEach(a => {
+    if (a.qualifyOnly) return;   // v2002: qualifies only, pays nothing
     // Player takes `amount` from each OTHER participant (v1974: each other QUALIFIED participant)
     const others = a.parts.filter(o => o.id !== a.p.id && (!_qual || _qual.has(o.id)));
     money[a.p.id] += a.amount * others.length;
@@ -57486,14 +57594,18 @@ function calcLongPutt(g) {
   const events = [];
   const hd = g.longPuttData;
   if (hd && hd.pid) {
-    const w = partIds.has(hd.pid) ? participants.find(p => p.id === hd.pid) : null;
-    if (w) {
+    // v2002 (matrix POOLS-7, DECISIONS rule 1): an exact tie (hd.co) splits the prize pool evenly
+    // between everyone tied, the same as Long Drive (v1834). Old single-pid data reads as before.
+    const ws = bgPrizeTieIds(hd).filter(id => partIds.has(id)).map(id => participants.find(p => p.id === id)).filter(Boolean);
+    if (ws.length) {
       const per = cfg.value || 0;
-      participants.forEach(p => { if (p.id === w.id) return; money[p.id] -= per; money[w.id] += per; });
+      const k = ws.length;
+      const losers = participants.filter(p => !ws.some(w => w.id === p.id));
+      losers.forEach(p => { money[p.id] -= per; ws.forEach(w => { money[w.id] += per / k; }); });
       // v973: amt is what the user SEES. It used g.players (everyone in the round)
       // instead of the pool's participants, so a 3-player pool in a 4-player round
       // displayed 30 on a 20 win. money[] was always right.
-      events.push({ kind: 'longputt', playerId: w.id, name: w.name + (hd.ft != null ? ' (' + ctpFmtDist(hd) + ')' : ''), amt: per * (participants.length - 1) });
+      ws.forEach(w => events.push({ kind: 'longputt', playerId: w.id, name: w.name + (hd.ft != null ? ' (' + ctpFmtDist(hd) + (k > 1 ? ', tie' : '') + ')' : (k > 1 ? ' (tie)' : '')), amt: per * losers.length / k }));
     }
   }
   if (events.length === 0) return null;
@@ -57698,7 +57810,19 @@ function calcLongDrive(g) {
   const hd = g.longDriveData;
   if (hd && hd.pid) {
     // v1834: exact ties (hd.co) split the prize pool evenly between the tied players.
-    const ids = [hd.pid].concat(Array.isArray(hd.co) ? hd.co : []).filter((id, i, a) => id && a.indexOf(id) === i && partIds.has(id));
+    let ids = [hd.pid].concat(Array.isArray(hd.co) ? hd.co : []).filter((id, i, a) => id && a.indexOf(id) === i && partIds.has(id));
+    // v2002 (matrix POOLS-3): with GPS marks (v2000), the leaders are worked out from the marks of the
+    // players IN the game only -- a drive marked by someone outside the pot no longer voids it. The
+    // leader record above stays the fallback for old data that has no marks.
+    try {
+      const _mk = (hd.marks && typeof hd.marks === 'object') ? hd.marks : null;
+      if (_mk && Object.keys(_mk).length) {
+        const _y = id => { const m = _mk[id]; return (m && m.yds != null && isFinite(Number(m.yds))) ? Number(m.yds) : null; };
+        const _in = participants.map(p => p.id).filter(id => _y(id) != null);
+        if (_in.length) { const _best = Math.max.apply(null, _in.map(_y)); ids = _in.filter(id => _y(id) === _best); }
+        else ids = [];
+      }
+    } catch (e) {}
     const ws = ids.map(id => participants.find(p => p.id === id)).filter(Boolean);
     if (ws.length) {
       const per = cfg.value || 0;
@@ -57706,7 +57830,7 @@ function calcLongDrive(g) {
       const losers = participants.filter(p => ids.indexOf(p.id) < 0);
       losers.forEach(p => { money[p.id] -= per; ws.forEach(w => { money[w.id] += per / k; }); });
       // v973: see calcLongPutt — display figure must use the pool's participants.
-      ws.forEach(w => events.push({ kind: 'longdrive', playerId: w.id, name: w.name + (hd.yds != null ? ' (' + bgDy(hd.yds) + ' ' + bgUnitYd() + (k > 1 ? ', tie' : '') + ')' : ''), amt: per * losers.length / k }));
+      ws.forEach(w => { const _wy = (hd.marks && hd.marks[w.id] && hd.marks[w.id].yds != null) ? hd.marks[w.id].yds : hd.yds; events.push({ kind: 'longdrive', playerId: w.id, name: w.name + (_wy != null ? ' (' + bgDy(_wy) + ' ' + bgUnitYd() + (k > 1 ? ', tie' : '') + ')' : ''), amt: per * losers.length / k }); });   // v2002 (matrix POOLS-3): the winner's own mark
     }
   }
   if (events.length === 0) return null;
@@ -57850,6 +57974,15 @@ function calcPuttsPool(g) {
 // CTP in POOL mode (v914, Tyler): instead of awarding on every qualifying hole,
 // the whole round is one prize pool and the player who won the MOST closest-to-the-pins
 // takes it (ties split). Per-hole CTP is untouched and stays the default.
+// v2002 (matrix POOLS-7, DECISIONS rule 1): CTP and Long Putt records carry `co: []` like Long
+// Drive (v1834) -- the other players tied at exactly the same distance. Everyone in [pid, ...co]
+// shares the prize. Old single-pid records have no `co` and read exactly as before.
+function bgPrizeTieIds(hd) {
+  try {
+    if (!hd || !hd.pid) return [];
+    return [hd.pid].concat(Array.isArray(hd.co) ? hd.co : []).filter((id, i, a) => id && a.indexOf(id) === i);
+  } catch (e) { return (hd && hd.pid) ? [hd.pid] : []; }
+}
 function _calcCtpPool(g, cfg, participants) {
   try {
     const val = Number(cfg.value) || 0;
@@ -57864,8 +57997,10 @@ function _calcCtpPool(g, cfg, participants) {
     let decided = 0;
     holes.forEach(h => {
       const hd = data[h];
-      if (!hd || !hd.pid || !partIds.has(hd.pid)) return;
-      wins[hd.pid] = (wins[hd.pid] || 0) + 1;
+      // v2002 (matrix POOLS-7): a tied hole is shared -- each tied player gets an equal part of that win.
+      const _tw = bgPrizeTieIds(hd).filter(id => partIds.has(id));
+      if (!_tw.length) return;
+      _tw.forEach(id => { wins[id] = (wins[id] || 0) + 1 / _tw.length; });
       decided++;
     });
     if (!decided) return null;                       // nothing logged -> prize pool void
@@ -57890,7 +58025,7 @@ function _calcCtpPool(g, cfg, participants) {
     participants.forEach(p => { money[p.id] = (winSet.has(p.id) ? share : 0) - val; });
     const events = winners.map(w => ({
       kind: 'ctp', playerId: w.id,
-      name: (typeof displayFirst === 'function' ? displayFirst(w) : w.name) + ' — ' + best + ' CTP' + (best === 1 ? '' : 's') + (winners.length > 1 ? ' (split ' + winners.length + ' ways)' : ''),
+      name: (typeof displayFirst === 'function' ? displayFirst(w) : w.name) + ' — ' + (Math.round(best * 100) / 100) + ' CTP' + (best === 1 ? '' : 's') + (winners.length > 1 ? ' (split ' + winners.length + ' ways)' : ''),
       amt: share - val
     }));
     return { money, events };
@@ -57914,20 +58049,25 @@ function calcCtp(g) {
   (cfg.holes || []).forEach(h => {
     const hd = data[h];
     if (!hd || !hd.pid) return;
-    const w = g.players.find(p => p.id === hd.pid);
-    if (!w || !partIds.has(w.id)) return;
+    // v2002 (matrix POOLS-4): the winner must still be playing this hole -- a leaver recorded (or
+    // merged back in) as CTP on a hole after he left collects nothing.
+    // v2002 (matrix POOLS-7): an exact tie (hd.co) splits the hole between everyone tied.
+    const ws = bgPrizeTieIds(hd).filter(id => partIds.has(id) && bgActiveOnHole(g, id, Number(h)))
+      .map(id => g.players.find(p => p.id === id)).filter(Boolean);
+    if (!ws.length) return;
     const per = cfg.value || 0;
+    const k = ws.length;
     const participants = bgHoleParts(g, _cParts0, Number(h));   // v1602
-    participants.forEach(p => {
-      if (p.id === w.id) return;
+    const losers = participants.filter(p => !ws.some(w => w.id === p.id));
+    losers.forEach(p => {
       money[p.id] -= per;
-      money[w.id] += per;
+      ws.forEach(w => { money[w.id] += per / k; });
     });
-    events.push({
+    ws.forEach(w => events.push({
       hole: h, kind: 'ctp', playerId: w.id,
-      name: w.name + (hd.ft != null ? ' (' + ctpFmtDist(hd) + ')' : ''),
-      amt: per * (participants.length - 1)
-    });
+      name: w.name + (hd.ft != null ? ' (' + ctpFmtDist(hd) + (k > 1 ? ', tie' : '') + ')' : (k > 1 ? ' (tie)' : '')),
+      amt: per * losers.length / k
+    }));
   });
   if (events.length === 0 && !(cfg.holes || []).length) return null;
   return { money, events };
@@ -57982,7 +58122,7 @@ function calcP3Greenie(g) {
       const w = g.players.find(p => p.id === wid);
       if (!w) return;
       const score = (g.scores[wid] && g.scores[wid][h - 1] != null) ? g.scores[wid][h - 1] : null;
-      const madePar = score != null && score <= g.pars[h - 1];
+      const madePar = score != null && score <= parFor(g, wid, h - 1);   // v2002 (DECISIONS default): "made par" on the winner's OWN tee par (the hole is still a card par 3)
       const threePutted = threePutts.includes(wid) && !cfg.ignore3Putt;   // v939: "3-putts still win" waives the forfeit
 
       // Birdie Override in effect — an on-green birdie STOLE the greenie, so this
@@ -58255,13 +58395,22 @@ function calcUmbrella(g) {
   const netOf = (p, raw, h) => (cfg.net && g.sis) ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules) : raw;
   let aPts = 0, bPts = 0, played = 0, complete = true, umbrellas = 0;
   const holeRows = [];
+  // v2002 (DECISIONS rule 2, Umbrella): a partner who LEFT the round (a marked leaver, not a
+  // forgotten cell) plays on as net double bogey on the holes after he left -- the same rule as
+  // Shamble best-2 -- with no GIR and no birdie, so his partner still plays the hole and his team
+  // can't win a point on his ball. A blank for a player still in the round keeps skipping the hole.
+  const _gone = (p, h) => { try { return bgLeftAfter(g, p.id) != null && !bgActiveOnHole(g, p.id, h + 1); } catch (e) { return false; } };
+  const _ndbRaw = (p, h) => { const _pp = parFor(g, p.id, h); if (_pp == null) return null; return _pp + 2 + ((g.sis) ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), _pp, g.hcpRules) : 0); };   // gross that nets to double bogey
+  const _rawOf = (p, h) => { const v = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null; if (v != null) return v; return _gone(p, h) ? _ndbRaw(p, h) : null; };
   for (let h = 0; h < 18; h++) {
-    const aRaw = teamA.map(p => (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null);
-    const bRaw = teamB.map(p => (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null);
+    const aRaw = teamA.map(p => _rawOf(p, h));
+    const bRaw = teamB.map(p => _rawOf(p, h));
     if (aRaw.some(s => s === null) || bRaw.some(s => s === null)) { complete = false; continue; }
+    if (teamA.concat(teamB).every(p => _gone(p, h))) continue;
     played++;
-    const worth = h + 1;
-    const par = (g.pars && g.pars[h] != null) ? g.pars[h] : null;
+    // v2002 (DECISIONS default, matrix UM-a): a hole is worth its PLAY position (1..18), so on a
+    // back-nine start hole 10 is worth 1 and hole 9 (the last played) is worth 18.
+    const worth = _bgPlayPos(g, h + 1) + 1;
     const aNet = teamA.map((p, i) => netOf(p, aRaw[i], h));
     const bNet = teamB.map((p, i) => netOf(p, bRaw[i], h));
     const cats = [];                                   // +1 team A wins, -1 team B, 0 tie
@@ -58270,12 +58419,13 @@ function calcUmbrella(g) {
     const aTot = aNet[0] + aNet[1], bTot = bNet[0] + bNet[1];
     cats.push(aTot < bTot ? 1 : (bTot < aTot ? -1 : 0));              // 2) low total
     for (let slot = 0; slot < 2; slot++) {                            // 3 & 4) each partner's GIR
-      const aG = girStatusFor(g, teamA[slot].id, h + 1) === true;
-      const bG = girStatusFor(g, teamB[slot].id, h + 1) === true;
+      const aG = !_gone(teamA[slot], h) && girStatusFor(g, teamA[slot].id, h + 1) === true;
+      const bG = !_gone(teamB[slot], h) && girStatusFor(g, teamB[slot].id, h + 1) === true;
       cats.push((aG && !bG) ? 1 : ((bG && !aG) ? -1 : 0));
     }
-    let aBird = false, bBird = false;                                 // 5) birdie (either partner)
-    if (par != null) { aBird = aNet.some(s => s <= par - 1); bBird = bNet.some(s => s <= par - 1); }
+    // 5) birdie (either partner). v2002 (matrix POOLS-6): each partner against HIS OWN tee par.
+    const _isBird = (team, nets) => team.some((p, i) => { if (_gone(p, h)) return false; const _pp = parFor(g, p.id, h); return _pp != null && nets[i] <= _pp - 1; });
+    const aBird = _isBird(teamA, aNet), bBird = _isBird(teamB, bNet);
     cats.push((aBird && !bBird) ? 1 : ((bBird && !aBird) ? -1 : 0));
     const aWins = cats.filter(c => c === 1).length;
     const bWins = cats.filter(c => c === -1).length;
@@ -58405,8 +58555,8 @@ function calcPotOfGold(g) {
         for (let hh = 0; hh < 18; hh++) {
           const rw = (g.scores[p.id] && g.scores[p.id][hh] != null) ? g.scores[p.id][hh] : null;
           if (rw == null) continue;
-          const si2 = g.sis ? g.sis[hh] : 0;
-          t += useNet ? netHoleScore(rw, effectiveHcp(p, g.hcpRules), si2, g.pars[hh], g.hcpRules) : rw;
+          // v2002 (matrix POOLS-8): the player's own tee SI / par, the same as the hole loop above.
+          t += useNet ? netHoleScore(rw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, hh), parFor(g, p.id, hh), g.hcpRules) : rw;
           cnt++;
         }
         return { pid: p.id, name: p.name, tot: t, n: cnt };
@@ -58501,16 +58651,27 @@ function calcAnimals(g) {
   // v1772 (Tyler): "If two people tie on an animal it is split." Everyone who earned the
   // animal on its LAST hole holds it together and the penalty is split evenly.
   const events = [], holders = {}, birds = [];
+  // v2002 (DECISIONS rule 2, Animals): settled hole by hole among the players still playing the
+  // hole. A held animal is paid by its holder(s) to every other player who was still in on the hole
+  // it was last earned; a bird is paid to its maker by every other player still in on that hole.
+  // Nobody left = exactly the v1785 head-to-head totals.
+  const _onH = (id, h) => { try { return bgActiveOnHole(g, id, h); } catch (e) { return true; } };
+  const _payH2H = (fromIds, toId, amt) => { fromIds.forEach(f => { if (f === toId) return; money[f] -= amt * value; money[toId] += amt * value; }); };
+  // v2002 (matrix PTS-4): the animal passes in the order the holes were PLAYED (start on 10,
+  // pick-a-start, shotgun), the same walk as Snake, Skins and Hot Potato.
+  const _anSeq = _bgPlaySeqOr(g, 18);
   _activeA.forEach(a => {
     let hold = null, holdHole = 0;
-    for (let h = 1; h <= 18; h++) {
-      const ids = _bgAnimalIdsForHole(g, h, a.id, (g.animalData[h] || {})[a.id], partIds);
+    for (let _k = 0; _k < _anSeq.length; _k++) {
+      const h = _anSeq[_k];
+      const ids = _bgAnimalIdsForHole(g, h, a.id, (g.animalData[h] || {})[a.id], partIds).filter(id => _onH(id, h));   // a leaver can't earn one after he left
       if (ids.length) { hold = ids.slice(); holdHole = h; events.push({ hole: h, animal: a.id, ids: ids.slice() }); }
     }
     if (hold && hold.length) {
       const each = a.pts / hold.length;
       hold.forEach(id => { if (points[id] != null) points[id] -= each; });
       holders[a.id] = { ids: hold, hole: holdHole, each: each };
+      participants.forEach(o => { if (hold.indexOf(o.id) >= 0 || !_onH(o.id, holdHole)) return; hold.forEach(hid => { money[hid] -= each * value; money[o.id] += each * value; }); });
     }
   });
   // Birds auto from scorecard: bird +2, eagle +4, albatross(or better) +8.
@@ -58524,7 +58685,7 @@ function calcAnimals(g) {
       const basis = _useNetAN ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), par, g.hcpRules) : raw;
       const d = basis - par;
       const _bp = d <= -3 ? 8 : (d === -2 ? 4 : (d === -1 ? 2 : 0));
-      if (_bp) { points[p.id] += _bp; birds.push({ hole: h + 1, id: p.id, pts: _bp }); }
+      if (_bp) { points[p.id] += _bp; birds.push({ hole: h + 1, id: p.id, pts: _bp }); _payH2H(participants.filter(o => _onH(o.id, h + 1)).map(o => o.id), p.id, _bp); }
     }
   });
   // v1785 (Tyler/Kevin, 9/25: "none of them are calculating correctly"). This settled
@@ -58534,9 +58695,7 @@ function calcAnimals(g) {
   // player the animal's points x units, and each other player pays a birdie maker.
   // Player i nets sum over j of (p_i - p_j) x value = (n*p_i - total) x value.
   // Snake at 1/pt in a foursome: holder -6, the other three +2 each. Zero-sum as before.
-  const total = participants.reduce((s, p) => s + points[p.id], 0);
-  const _nA = participants.length;
-  participants.forEach(p => { money[p.id] = (_nA * points[p.id] - total) * value; });
+  // (v2002: money is now built hole by hole above; with no leaver it equals (n*p_i - total) x value.)
   return { money, points, events, holders, birds, value, headToHead: true };
 }
 
@@ -58562,31 +58721,36 @@ function calcMarks(g) {
   g.players.forEach(p => money[p.id] = 0);
   participants.forEach(p => points[p.id] = 0);
   const _useNetMK = (cfg.birdieBasis === 'net') && !!g.sis;   // net-or-gross birds per game (Tyler, Jul 2026)
-  participants.forEach(p => {
-    for (let h = 0; h < 18; h++) {
-      const raw = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
-      const par = parFor(g, p.id, h); // v1065: this player's tee par
-      if (raw == null || par == null) continue;
-      const basis = _useNetMK ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), par, g.hcpRules) : raw;
-      const d = basis - par;
-      if (d <= -3) points[p.id] += 10;
-      else if (d === -2) points[p.id] += 5;
-      else if (d === -1) points[p.id] += 2;
-    }
-  });
   if (!g.marksData) g.marksData = {};
+  /* v2002 (DECISIONS rule 2, Marks): settled HOLE BY HOLE among the players still playing that
+     hole, the same way Stableford per-point went in v1901. Each hole pays (your points on the hole -
+     the hole's average among the players on it) x value. Nobody left = identical to the old
+     whole-round (points - average) x value. A leaver neither pays nor collects on holes after he left. */
   for (let h = 1; h <= 18; h++) {
+    const on = participants.filter(p => { try { return bgActiveOnHole(g, p.id, h); } catch (e) { return true; } });
+    const hp = {}; on.forEach(p => hp[p.id] = 0);
+    on.forEach(p => {
+      const raw = (g.scores[p.id] && g.scores[p.id][h - 1] != null) ? g.scores[p.id][h - 1] : null;
+      const par = parFor(g, p.id, h - 1); // v1065: this player's tee par
+      if (raw == null || par == null) return;
+      const basis = _useNetMK ? netHoleScore(raw, effectiveHcp(p, g.hcpRules), siFor(g, p.id, h - 1), par, g.hcpRules) : raw;
+      const d = basis - par;
+      if (d <= -3) hp[p.id] += 10;
+      else if (d === -2) hp[p.id] += 5;
+      else if (d === -1) hp[p.id] += 2;
+    });
     const hd = g.marksData[h] || {};
     MARK_MANUAL.forEach(m => {
       let e = hd[m.id];
       if (typeof e === 'string') e = [e];
       if (!Array.isArray(e)) return;
-      e.filter(id => partIds.has(id)).forEach(id => { if (points[id] != null) points[id] += m.pts; });
+      e.filter(id => partIds.has(id) && hp[id] != null).forEach(id => { hp[id] += m.pts; });
     });
+    on.forEach(p => { points[p.id] += hp[p.id]; });
+    if (on.length < 2) continue;
+    const avg = on.reduce((s, p) => s + hp[p.id], 0) / on.length;
+    on.forEach(p => { money[p.id] += (hp[p.id] - avg) * value; });
   }
-  const total = participants.reduce((s, p) => s + points[p.id], 0);
-  const avg = total / participants.length;
-  participants.forEach(p => { money[p.id] = (points[p.id] - avg) * value; });
   return { money, points };
 }
 
