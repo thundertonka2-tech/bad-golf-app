@@ -36,9 +36,21 @@ const gpsYds = {};   // course_id -> [18] GPS hole lengths in yards
 {
   // bg_gps_counts_all returns ONE jsonb array (PostgREST's 1000-row cap applies to
   // set-returning RPCs only), so this is a single ~3 MB call instead of 51 pages.
-  const r = await fetch(URL_ + '/rpc/bg_gps_counts_all', { method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_with_dig: false }) });
-  if (!r.ok) throw new Error('bg_gps_counts_all ' + r.status);
-  const rows = await r.json();
+  // v1998 hotfix (deploy #1904 died on one 500): a cold call can run long, and a deploy must
+  // not fail on a single slow database answer. Retry with a pause, up to 5 tries.
+  let rows = null, lastErr = null;
+  for (let attempt = 1; attempt <= 5 && !rows; attempt++) {
+    try {
+      const r = await fetch(URL_ + '/rpc/bg_gps_counts_all', { method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_with_dig: false }) });
+      if (!r.ok) throw new Error('bg_gps_counts_all ' + r.status);
+      rows = await r.json();
+    } catch (e) {
+      lastErr = e; rows = null;
+      console.warn('gps counts attempt ' + attempt + ' failed: ' + (e && e.message));
+      if (attempt < 5) await new Promise(res => setTimeout(res, 4000 * attempt));
+    }
+  }
+  if (!rows) throw lastErr || new Error('bg_gps_counts_all failed');
   if (!Array.isArray(rows) || rows.length < 1000) throw new Error('gps counts look wrong: ' + (rows && rows.length));
   rows.forEach(r => {
     if (!r || !r.course_id) return;
