@@ -17379,6 +17379,17 @@ let _adminPars = null; // { courseId, name, pars[18], sis[18], tees[] }
 // to 1-9, tee ratings halved when they are 18-ratings (>=46; a 9-band rating is
 // kept), tee yardage halved. 9->18 doubles it back (reversible). Matches the
 // format of every 9-hole course already in the library.
+// v2002 (matrix CORE-5): moved out of init() - bgCourseSwitchCard called it from outside that scope, the
+// ReferenceError was swallowed and every Front/Back-9-twice course switch was refused.
+function _bg9SplitSis(a) {
+  const nine = (Array.isArray(a) ? a : []).map(Number);
+  if (nine.length !== 9) return nine.concat(nine);   // not a clean nine: leave it alone
+  const order = nine.map((v, i) => ({ v: isFinite(v) ? v : 99, i: i }))
+                    .sort((x, y) => x.v - y.v);
+  const rank = new Array(9);
+  order.forEach((o, k) => { rank[o.i] = k + 1; });
+  return rank.map(r => r * 2 - 1).concat(rank.map(r => r * 2));
+}
 function _bg9RankCompress(front) {
   var s = front.slice().sort(function (a, b) { return a - b; });
   return front.map(function (v) { return s.indexOf(v) + 1; });
@@ -21608,6 +21619,7 @@ const BG_MERGE_RULES = {
      games yet — they were the NEXT one of these bugs, found before it cost anybody
      anything, which is the entire point of the guard. */
   scrambleData: 'holeMap', animalData: 'holeMap', marksData: 'holeMap', potatoData: 'holeMap',
+  pickedUp: 'holeMap',   // v2002 Block Finish: { pid: { holeIdx: {v, at, auto?} } } - union per player, per hole
   wolfData: 'holeMap:holes', hammerData: 'holeMap:holes',
   // --- one-way announcements, newest `at` wins -------------------------------------
   groupHole: 'newestAt', finishOpen: 'newestAt', celebrateHole: 'newestAt',
@@ -23634,6 +23646,7 @@ async function saveGame(game, opts) {
     }
   } catch (e) {}
   try { bgFillBlankPutts(game); } catch (e) {}   // v1800
+  try { bgMaterializePickups(game); } catch (e) {}   // v2002 Block Finish
   // v1116: this round is about to change, so the event-wide field-round cache is
   // stale from here on. Dropping the entry costs nothing and keeps a scorer's own
   // edit from reading back as the pre-save value on the next award screen.
@@ -23666,6 +23679,7 @@ async function loadGame(code) {
   // treat it as "no game" instead.
   try { g = JSON.parse(v); } catch (e) { console.warn('loadGame: corrupt game payload for ' + code, e); return null; }
   migrateLegacyData(g);
+  try { bgMaterializePickups(g); } catch (e) {}   // v2002 Block Finish
   return g;
 }
 
@@ -24097,6 +24111,11 @@ async function confirmSetupWarnings(setup) {
     if (w.unranked && w.unranked.length) {
       var ok1 = await uiConfirm('This round is missing ' + w.unranked.join(', ') + '. You can still play it, but it will NOT count toward anyone’s handicap, and net games (like Quota) will score as GROSS because there are no stroke indexes to give strokes.', { title: 'Start as an unranked round?', okLabel: 'Start anyway', cancelLabel: 'Go back', danger: false });
       if (!ok1) { showToast('Add a course, a tee (rating + slope), and the stroke index to make this a ranked round'); return false; }
+    }
+    // v2002 (matrix CORE-8): a blank stroke-index box gives nobody a stroke on that hole - ask before starting.
+    if (w.siBlank && w.siBlank.length) {
+      var okSi = await uiConfirm(bgT('Stroke index is blank on hole') + ' ' + w.siBlank.join(', ') + '. ' + bgT('Nobody gets a handicap stroke on a hole with no stroke index.'), { title: bgT('Stroke index missing'), okLabel: bgT('Start anyway'), cancelLabel: bgT('Go back'), danger: false });
+      if (!okSi) { showToast(bgT('Fill in the stroke index for every hole, then start the round again')); return false; }
     }
     if (w.zeroHcp) {
       var ok2 = await uiConfirm('These players have a 0 handicap: ' + w.zeroHcp + '. A true scratch golfer is 0 — but it’s often just not entered yet. Keep 0?', { title: 'Zero handicap?', okLabel: 'Keep 0', cancelLabel: 'Go back', danger: false });
@@ -36866,6 +36885,9 @@ function nineDoubleSpecFromId(id){
 // doubled to the 18 rating; an explicit tee.rating18/slope18 wins when present.
 function bg9DoubleCard(pars9, sis9, tees9){
   var p9=(pars9||[]).slice(0,9), s9=(sis9||[]).slice(0,9);
+  // v2002 (matrix CORE-8): a nine printed on the 18 scale (1,3,5..17) is re-ranked 1..9 first, or the split
+  // below produced SIs up to 34. Only a complete card (every box > 0) is re-ranked.
+  try { if (s9.length===9 && p9.length===9 && s9.every(function(v){ return Number(v)>0; }) && typeof _siForPars==='function') s9=_siForPars(s9.map(Number), p9); } catch(e){}
   var pars=p9.concat(p9), sis=[];
   for (var i=0;i<9;i++){ var s=parseInt(s9[i])||(i+1); sis[i]=2*s-1; sis[9+i]=2*s; }
   var tees=(tees9||[]).map(function(t){
@@ -36937,6 +36959,9 @@ function rebuildParSiGrids(n){
 // `par` and `rules` are optional; if rules.noPar3Strokes is set, par-3 holes give 0.
 function strokesOnHole(playerHcp, holeSi, par, rules, nHoles) {
   if (rules && rules.noPar3Strokes && par === 3) return 0;
+  // v2002 (matrix CORE-8): a blank stroke-index box (saved as 0) or a missing SI gives NO stroke. It read
+  // as "SI 0", so a scratch player got a stroke there.
+  if (holeSi == null || holeSi === '' || !(Number(holeSi) > 0)) return 0;
   // v960: allocate over the number of holes actually played. On a 9-hole round the
   // stroke indexes run 1–9, so the 2nd-stroke threshold is nH+SI (9+SI), not 18+SI —
   // a 12-handicap correctly gets 1 stroke everywhere plus a 2nd on SI 1–3 instead of
@@ -37134,6 +37159,10 @@ function bgFullCourseHcp(player, rules) {
     const _pct = (rules && rules.pct != null && rules.pct !== '' && !isNaN(Number(rules.pct))) ? Number(rules.pct) : 100;
     const _b = (player.baseHcp != null && !isNaN(Number(player.baseHcp))) ? Number(player.baseHcp) : null;
     if (_b != null && _pct > 0 && Math.round(_b * _pct / 100) === Math.round(_h)) return _b;
+    // v2002 (DECISIONS "Lowest" basis): on the WHS lowest order round(base x %) can sit one stroke off the playing
+    // handicap (the % is applied before the lowest is subtracted). baseHcp is still the true pre-allowance
+    // figure, so a per-game % keeps measuring from it. Event rounds (hcp18) are left as they were.
+    if (_b != null && rules && rules.basis === 'lowest' && !rules.hcp18 && _pct > 0 && _pct !== 100 && Math.abs(Math.round(_b * _pct / 100) - Math.round(_h)) <= 1) return _b;
     if (_pct > 0 && _pct !== 100) return Math.round(_h * 100 / _pct);
     return Math.round(_h);
   } catch (e) { return (player && player.hcp) || 0; }
@@ -38675,7 +38704,8 @@ function bgWatchStandings(g, fresh) {
     const sig = String(g.updatedAt || 0) + '|' + JSON.stringify(g.scores || {}) + '|' + JSON.stringify(g.junkData || {});
     const c = window._bgWatchStCache;
     if (!fresh && c && c.code === g.code && c.sig === sig && (Date.now() - c.at) < 60000) return c.val;
-    const m = computeAllGameMoney(g);
+    // v2002 (matrix CORE-6): the same live view as the phone strip / GPS chip (pool-mode games wait for the finish).
+    const m = (typeof _liveMoneyView === 'function') ? _liveMoneyView(g, computeAllGameMoney(g)) : computeAllGameMoney(g);
     const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
     const units = {};
     // v2000 (audit GL-8): the wrist prints the same whole-unit, zero-sum total as the phone's Unit
@@ -39879,11 +39909,44 @@ function computeCourseHcp(index, tee, parTotal, gender) {
   if (index == null) return null;
   const rs = (typeof pickTeeRS === 'function') ? pickTeeRS(tee, gender) : { rating: tee && tee.rating, slope: tee && tee.slope };
   if (!tee || rs.slope == null || !rs.slope) return Math.round(index);
-  var _nine9 = ((typeof isNineRating === 'function') && isNineRating(rs.rating)) || (parTotal && parTotal < 55);
+  var _nineByRating = (typeof isNineRating === 'function') && isNineRating(rs.rating);
+  var _nine9 = _nineByRating || (parTotal && parTotal < 55);
   var _idx9 = _nine9 ? (index / 2) : index;   // 9-hole Course Handicap = half the 18-hole index
+  // v2002 (matrix CORE-7): a 9-hole card (par < 55) whose tee carries an 18-HOLE rating (> 46) halves the
+  // rating too, as round creation does for Front/Back 9 only. It subtracted par 35 from 68.4 and gave a 10 index a 39.
+  var _rat = rs.rating;
+  if (_nine9 && !_nineByRating && typeof _rat === 'number' && isFinite(_rat) && _rat > 46) _rat = _rat / 2;
   let ch = _idx9 * (rs.slope / 113);
-  if (rs.rating != null && parTotal) ch += (rs.rating - parTotal);
-  return Math.round(ch);
+  if (_rat != null && parTotal) ch += (_rat - parTotal);
+  return bgHcpRound(ch);   // v2002 (matrix CORE-3): an exact .5 rounds up (WHS); float noise can no longer flip it
+}
+/* v2002 (matrix CORE-3, DECISIONS OPEN-1): one rounding rule for every handicap number, the WHS reading:
+   an exact .5 goes up toward the higher handicap (10.5 -> 11, +10.5 i.e. -10.5 -> +10). The value is
+   snapped to 6 decimals first, so 0.2 + (71.3 - 71) = 0.49999... rounds as the exact 0.5 it is. */
+function bgHcpRound(x) {
+  const v = Number(x);
+  if (!isFinite(v)) return v;
+  return Math.round(Math.round(v * 1e6) / 1e6);
+}
+// v2002 (matrix CORE-3): a handicap x an allowance %, rounded on the same exact basis.
+function bgHcpPct(h, pct) {
+  const v = Number(h) || 0, p = (pct == null || pct === '' || !isFinite(Number(pct))) ? 100 : Number(pct);
+  return bgHcpRound(v * p / 100);
+}
+/* v2002 (DECISIONS "Lowest" basis with an allowance %): the WHS order. Apply the % to each course
+   handicap, round, THEN subtract the lowest. chs = whole-stroke course handicaps. Returns per player
+   { base: the pre-% figure (CH, or CH - lowest CH on the lowest basis), hcp: the playing handicap }.
+   At 100% (or on the 'full' basis) this is identical to the old order. */
+function bgApplyHcpBasis(chs, basis, pct, noHcp) {
+  const list = (Array.isArray(chs) ? chs : []).map(v => Number(v) || 0);
+  const p = noHcp ? 0 : ((pct == null || pct === '' || !isFinite(Number(pct))) ? 100 : Number(pct));
+  const low = !!(!noHcp && basis === 'lowest' && list.length);
+  const minCh = low ? Math.min.apply(null, list) : 0;
+  const plays = list.map(ch => bgHcpPct(ch, p));
+  const minPlay = low ? Math.min.apply(null, plays) : 0;
+  return list.map((ch, i) => low
+    ? { base: Math.max(0, ch - minCh), hcp: Math.max(0, plays[i] - minPlay) }
+    : { base: ch, hcp: plays[i] });
 }
 /* v1902: currentParTotal removed (unreferenced, audit 10/9) */
 async function autofillHcpForRow(row) {
@@ -43565,6 +43628,17 @@ function bgTeeColor(lbl) {
    so "Adj 7" on setup is the 7 on the scorecard. null = nothing to adjust: plays gross, no rated tee
    picked, or an event/league round (there the box already IS the playing handicap, v1719).
    Display only - never writes to the row. */
+/* v2002 (matrix CORE-4): a setup row's gender = playerGender(roster entry), read from the roster cache by
+   name (gatherSetup is synchronous). No roster row -> 'M', exactly as before. */
+function bgSetupGender(name) {
+  try {
+    const k = normalizeNameSegment(String(name || ''));
+    if (!k) return 'M';
+    const r = (typeof _rosterCacheVal !== 'undefined' && Array.isArray(_rosterCacheVal)) ? _rosterCacheVal : [];
+    const e = r.find(p => p && normalizeNameSegment(p.name || ((p.firstName || '') + ' ' + (p.lastName || '')).trim()) === k);
+    return playerGender(e || null);
+  } catch (e) { return 'M'; }
+}
 function bgSetupAdjHcp(row, hcpStr, teeLbl) {
   try {
     if (!teeLbl) return null;
@@ -43583,7 +43657,9 @@ function bgSetupAdjHcp(row, hcpStr, teeLbl) {
       const _tp = Array.isArray(teeObj.pars) ? teeObj.pars : (_m[teeObj.label] || null);
       if (_tp && _tp.length === pars.length) parTot = _tp.reduce((a, b) => a + (b || 0), 0);
     } catch (e) {}
-    const ch = computeCourseHcp(parseHcpInput(hcpStr), teeObj, parTot);
+    // v2002 (matrix CORE-4): same gender as gatherSetup, so the chip and the scorecard agree.
+    let _gNm = ''; try { const _fn = row.querySelector('.first-name'), _ln = row.querySelector('.last-name'); _gNm = combineName(_fn ? _fn.value.trim() : '', _ln ? _ln.value.trim() : ''); } catch (e) {}
+    const ch = computeCourseHcp(parseHcpInput(hcpStr), teeObj, parTot, bgSetupGender(_gNm));
     if (ch == null || isNaN(ch)) return null;
     return ch < 0 ? '+' + Math.abs(ch) : String(ch);
   } catch (e) { return null; }
@@ -45835,8 +45911,12 @@ function gatherSetup() {
   const pars = [];
   $('par-grid').querySelectorAll('input').forEach(inp => pars.push(parseInt(inp.value) || 4));
   const parTotal = pars.reduce((a, b) => a + b, 0); // for index → course-handicap conversion
-  const sis = [];
+  let sis = [];
   $('si-grid').querySelectorAll('input').forEach(inp => sis.push(parseInt(inp.value) || 0));
+  // v2002 (matrix CORE-8): a complete card is normalised to a 1..n stroke index (a 9-hole card printed on the
+  // 18 scale, odd 1..17, gave a 10-handicap 6 strokes). A blank box (0) stays blank: it gives no stroke and
+  // the validation below names the hole.
+  try { if (sis.length === pars.length && sis.every(v => v > 0) && typeof _siForPars === 'function') sis = _siForPars(sis, pars); } catch (e) {}
   // Tees: array of {label, rating, slope}. Only keep entries with a non-empty
   // label AND both rating + slope filled in (a partial entry is useless for
   // handicap math). The picker validation tolerates 0 tees — round still works
@@ -45942,7 +46022,8 @@ function gatherSetup() {
          index -> course handicap conversion. */
       const _fixedHcp = !!(typeof state !== 'undefined' && state && (state._t2DayConfig || state._t2GroupGamesConfig || state._t2GroupConfig || state._lgSideGamesCfg
         || (state.editingLiveRound && state.game && ((state.game.t2 && state.game.t2.tournamentId) || (state.game.lg && state.game.lg.sid)))));
-      const courseHcp = _fixedHcp ? Math.round(hcpIndex) : computeCourseHcp(hcpIndex, teeObj, _parTotalP);
+      // v2002 (matrix CORE-4): the player's gender picks the women's rating/slope on a dual-rated tee.
+      const courseHcp = _fixedHcp ? Math.round(hcpIndex) : computeCourseHcp(hcpIndex, teeObj, _parTotalP, bgSetupGender(name));
       players.push({
         id: playerId,
         puid: row.dataset.puid, // stable row id — keys team assignments (name-edit safe)
@@ -46026,16 +46107,16 @@ function gatherSetup() {
 
   // Compute effective HCP per player based on basis and percentage.
   // With noHandicaps, pct=0 zeroes everyone out — pure gross game.
-  const minHcp = Math.min(...players.map(p => p.hcp));
-  players.forEach(p => {
+  // v2002 (DECISIONS "Lowest" basis): WHS order via bgApplyHcpBasis - % on each course handicap, round,
+  // then subtract the lowest (was: subtract, then %). 1 vs 3 at 80% now plays 0 vs 1, not 0 vs 2.
+  const _basisOut = bgApplyHcpBasis(players.map(p => p.hcp), hcpBasis, hcpPct, false);
+  players.forEach((p, i) => {
     p.rawHcp = (p.index != null) ? p.index : p.hcp; // index drives re-prefill/display
-    let base = p.hcp; // tee-adjusted course handicap (whole strokes)
-    if (hcpBasis === 'lowest') base = Math.max(0, p.hcp - minHcp);
     // v919: keep the PRE-percentage base on the player so a per-game allowance
     // (Skins) can be measured off the full course handicap instead of
     // compounding on top of the round's percentage.
-    p.baseHcp = base;
-    p.hcp = Math.round(base * hcpPct / 100);
+    p.baseHcp = _basisOut[i].base;
+    p.hcp = _basisOut[i].hcp;
   });
   const hcpRules = { basis: hcpBasis, pct: hcpPct, noPar3Strokes, noHandicaps };
   // v1164: tournament max score per hole (off / par+2 / par+3 / par×2 / fixed N)
@@ -46789,6 +46870,9 @@ function gatherSetup() {
   const courseNamed   = !!($('course-name').value.trim());
   const hasValidTee   = tees.length >= 1; // already filtered to label+rating+slope
   const hasStrokeIndex = sis.length === 18 && sis.some(v => v > 0);
+  // v2002 (matrix CORE-8): one blank stroke-index box used to pass. It gives no stroke now, so name the hole.
+  const _siBlankHoles = sis.some(v => v > 0) ? sis.map((v, i) => (v > 0 ? 0 : i + 1)).filter(Boolean) : [];
+  if (_siBlankHoles.length) _setupWarnings.siBlank = _siBlankHoles.slice();
   let unranked = false;
   if (!courseNamed || !hasValidTee || !hasStrokeIndex) {
     const missing = [];
@@ -54738,7 +54822,7 @@ function calcStroke(g) {
     // v1043: baseHcp is the raw handicap INDEX in a tournament round (see
     // bgFullCourseHcp) -- it handed everyone ~2 extra strokes at Buffalo Creek and
     // turned Kevin's outright win of the Group 2 stroke prize pool into a split.
-    const hcp = _sGross ? 0 : Math.round(bgFullCourseHcp(p, g.hcpRules) * _sPct);   // v957: prize pool% replaces the round allowance, not stacks
+    const hcp = _sGross ? 0 : bgHcpPct(bgFullCourseHcp(p, g.hcpRules), _sPct * 100);   // v957: prize pool% replaces the round allowance, not stacks. v2002 (matrix CORE-3): exact rounding
     const arr = g.scores[p.id] || [];
     let net = 0;
     const _nH = roundHoles(g);
@@ -54746,7 +54830,10 @@ function calcStroke(g) {
     return net;
   };
   const score = p => cfg.net ? _netAllow(p) : totals[p.id].gross;
-  const sorted = [...completed].sort((a, b) => score(a) - score(b));
+  // v2002 (matrix CORE-2): a leaver pays but can never win the Stroke pool (same rule as Low Net).
+  const _canWin = completed.filter(p => !(typeof bgLeftAfter === 'function' && bgLeftAfter(g, p.id) != null));
+  if (!_canWin.length) return { winners: [], money, pot: cfg.buyin * participants.length, complete: false, winShare: 0 };
+  const sorted = [..._canWin].sort((a, b) => score(a) - score(b));
   const lowest = score(sorted[0]);
   const winners = sorted.filter(p => score(p) === lowest);
   const pot = cfg.buyin * participants.length;
@@ -57871,7 +57958,7 @@ function _bgPoolStats(g, players, hcpPct) {
     // handicaps" and handed the prize pool to the wrong player. Hoisted out.
     const _gross = !!((g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true);
     if (_gross) fullHcp = 0;
-    else if (_pct != null) fullHcp = Math.round(fullHcp * _pct / 100);
+    else if (_pct != null) fullHcp = bgHcpPct(fullHcp, _pct);   // v2002 (matrix CORE-3): exact rounding
     let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
     for (let h = 0; h < nHoles; h++) {
       const s = sc[h];
@@ -57930,7 +58017,9 @@ function _bgSettlePool(g, cfg, kind, label, statOf, lowWins, eligible) {
       if (_full.length >= 1 && _short.every(s => bgLeftAfter(g, s.id) != null)) { done = true; _lvScoped = true; }
     }
     if (!done) return null;
-    const elig = stats.filter(s => eligible(s) && (!_lvScoped || (s.scored >= s.holes && bgLeftAfter(g, s.id) == null)));
+    // v2002 (matrix CORE-2, DECISIONS OPEN-4): a leaver NEVER wins, whichever path set `done` (the group ending
+    // on the hole he left made every card equal and let him collect). He pays; the best full-card non-leaver wins.
+    const elig = stats.filter(s => eligible(s) && bgLeftAfter(g, s.id) == null && (!_lvScoped || s.scored >= s.holes));
     if (!elig.length) return null;                        // no qualifier -> prize pool void
     const sorted = elig.slice().sort((a, b) => lowWins ? (statOf(a) - statOf(b)) : (statOf(b) - statOf(a)));
     const best = statOf(sorted[0]);
@@ -59300,6 +59389,7 @@ function _bgDropBet(key, why) {
 }
 
 function computeAllGameMoney(g) {
+  try { bgMaterializePickups(g); } catch (e) {}   // v2002 Block Finish: a finished round's pick-ups are in the card before any engine runs
   // v973 (Tyler code review): strokesOnHole falls back to g.hcpRules.holes when a
   // caller doesn't pass the hole count, but that field is only stamped as a SIDE
   // EFFECT of roundHoles(). buildRoundSummary calls calcSkins BEFORE calcNassau,
@@ -59430,6 +59520,9 @@ function computeAllGameMoney(g) {
     const moneyForGame = {};
     let anyMoney = false;
     let anyBad = false;
+    // v2002 (matrix CORE-9): one non-finite cell voids the WHOLE row (still flagged calcError) - zeroing only that
+    // cell left the row non-zero-sum and the Board and settle-up disagreed.
+    const _rowBad = g.players.some(p => { const v = (r.money && r.money[p.id] != null) ? r.money[p.id] : 0; return typeof v !== 'number' || !isFinite(v); });
     g.players.forEach(p => {
       // v973 (Tyler code review): this was `|| 0`. NaN is falsy, so a game whose
       // units went NaN contributed 0 for EVERY player and — because anyMoney
@@ -59441,6 +59534,7 @@ function computeAllGameMoney(g) {
         try { console.warn('[BadGolf] non-numeric units in game "' + key + '" for player ' + p.id + ':', v); } catch (e) {}
         v = 0;
       }
+      if (_rowBad) { anyBad = true; v = 0; }
       moneyForGame[p.id] = v;
       if (v !== 0) anyMoney = true;
       combined[p.id] += v;
@@ -59479,7 +59573,7 @@ function computeAllGameMoney(g) {
       if (!sub) { sub = {}; for (const k in g) { if (k === 'games' || k === 'groupGames') continue; sub[k] = g[k]; } sub.games = g.groupGames; sub._noGroupGames = true; }
       const gm = computeAllGameMoney(sub);
       g.players.forEach(p => { combined[p.id] = (combined[p.id] || 0) + ((gm.combined && gm.combined[p.id]) || 0); });
-      (gm.byGame || []).forEach(b => byGame.push({ key: 'grp:' + b.key, label: b.label + ' (your group)', money: b.money, group: true }));
+      (gm.byGame || []).forEach(b => { const _row = { key: 'grp:' + b.key, label: b.label + ' (your group)', money: b.money, group: true }; if (b.dropped) _row.dropped = true; if (b.calcError) _row.calcError = true; byGame.push(_row); });   // v2002 (matrix CORE-10): keep the flags (the watch filters !dropped)
       Object.keys(gm.results || {}).forEach(k => { if (gm.results[k]) results['grp:' + k] = gm.results[k]; });
     }
   } catch (e) {}
@@ -61772,6 +61866,15 @@ async function bgFinishRoundFlow() {
         `Finish anyway?`
       , { title: 'Wolf pick missing', okLabel: 'Finish anyway', cancelLabel: 'Go back', danger: true }))) return;
     }
+    // v2002 BLOCK FINISH (Tyler, DECISIONS #3): a player who did not leave and has a blank on a hole the
+    // round played must be filled or marked "Picked up" before the round can finish. Covers Finish, End
+    // round early, the Board's Finish and the watch's Finish (all of them come through here).
+    if (!_finishViewer && bgFinishBlanks(g).length) {
+      const _resolved = await bgResolveFinishBlanks(g);
+      if (!_resolved || !bgFinishCanComplete(g)) return;
+      try { Promise.resolve(saveGame(g)).catch(function () {}); } catch (e) {}
+      try { if (typeof render === 'function') render(); } catch (e) {}
+    }
     // Incomplete-holes guard: a ghost/duplicate roster row (or a player never scored)
     // can leave holes blank. Don't hard-block — warn and let the scorer finish with
     // the holes that ARE scored. (Tyler, Jul 2026)
@@ -63629,6 +63732,7 @@ function bgScLegendHtml(cardHtml) {
   const grp = /skin-win(?![-\w])/.test(h), fld = /skin-win-field/.test(h);
   if (grp) parts.push('<span class="sc-mark skin-win" style="' + pill + '">' + (fld ? 'group skin' : 'skin') + '</span>');
   if (fld) parts.push('<span class="sc-mark skin-win-field" style="' + pill + '">event skin</span>');
+  if (/class="sc-pu"/.test(h)) parts.push('<sup style="font-size:9px;font-weight:800">PU</sup> ' + bgT('picked up (net double bogey)'));   // v2002 Block Finish
   if (!parts.length) return '';
   return '<div class="small-text" style="color:var(--text-muted);margin-top:4px;line-height:1.9">' + parts.join(' · ') + '</div>';
 }
@@ -64113,7 +64217,7 @@ function buildRoundScorecardHtml(g, fieldSkinMap) {
         const won = !!(skinMap[i] && skinMap[i][p.id]);
         const wonF = !!(fMap[i] && fMap[i][p.id]);   // v897: tournament field skin → gold
         if (s != null) { if (i < 9) out += s; else inT += s; }
-        html += '<td style="position:relative">' + dot + (s != null ? mark(s, g.pars[i], won, wonF) : '—') + '</td>';
+        html += '<td style="position:relative">' + dot + (s != null ? mark(s, g.pars[i], won, wonF) + bgPickupTag(_bgRealG, p.id, i) : '—') + '</td>';   // v2002 Block Finish: PU tag
         if (i === 8) html += '<td class="total">' + bgGrossNetInner(nt.outGross, nt.outNet) + '</td>';
       }
       html += '<td class="total">' + bgGrossNetInner(nt.inGross, nt.inNet) + '</td><td class="total">' + bgGrossNetInner(nt.gross, nt.net) + '</td></tr>';
@@ -65426,7 +65530,7 @@ function renderScorecard(g, totals, fieldSkinMap) {
         const s = arr[i];
         const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, i), parFor(g, p.id, i), g.hcpRules) : 0;
         const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
-        if (s != null) { out += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id]))}${_mkMull(i)}</td>`; }
+        if (s != null) { out += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id]))}${bgPickupTag(g, p.id, i)}${_mkMull(i)}</td>`; }   // v2002 Block Finish: PU tag
         else html += `<td style="position:relative">${dot}—</td>`;
       }
       html += `<td class="total">${bgGrossNetInner(nt.outGross, nt.outNet)}</td>`;
@@ -65435,7 +65539,7 @@ function renderScorecard(g, totals, fieldSkinMap) {
           const s = arr[i];
           const strokes = g.sis ? strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, i), parFor(g, p.id, i), g.hcpRules) : 0;
           const dot = strokes > 0 ? '<span class="sc-stroke-dot"></span>' : '';
-          if (s != null) { inT += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id]))}${_mkMull(i)}</td>`; }
+          if (s != null) { inT += s; html += `<td style="position:relative">${dot}${skinMark(s, g.pars[i], !!(skinMap[i] && skinMap[i][p.id]), !!(fSkinMap[i] && fSkinMap[i][p.id]))}${bgPickupTag(g, p.id, i)}${_mkMull(i)}</td>`; }
           else html += `<td style="position:relative">${dot}—</td>`;
         }
         html += `<td class="total">${bgGrossNetInner(nt.inGross, nt.inNet)}</td>`;
@@ -68666,6 +68770,8 @@ async function renderHomeLive() {
       try {
         const g = await loadGame(b.dataset.code);
         if (g && !g.finishedAt) {
+          // v2002 BLOCK FINISH: an admin's End is a forced finish - blanks become logged pick-ups first.
+          try { bgAutoPickupBlanks(g, (typeof _authUser !== 'undefined' && _authUser && _authUser.id) || null); } catch (e) {}
           g.finishedAt = Date.now();
           try { await bgStampRoundUids(g); } catch (e) {}   // v1357: before the round closes to its players
           await saveGame(g);
@@ -83074,6 +83180,9 @@ async function t2ForceFinishRound(code) {
     g.updatedAt = now;
     g.forceFinishedBy = (_authUser && _authUser.id) || null;
     try { g.t2 = g.t2 || {}; g.t2.forceFinishedBy = g.forceFinishedBy; g.t2.forceFinishedAt = now; } catch (e) {}   // v1998: the RPC patch carries it inside t2
+    // v2002 BLOCK FINISH: a force-finish resolves every blank as a pick-up (net double bogey), logged on the
+    // round (auto: true, by: this account). g.t2.pickedUp carries it through the t2-only RPC patch.
+    try { const _pu = bgAutoPickupBlanks(g, g.forceFinishedBy); if (_pu.length) g.t2.pickupLog = { at: now, by: g.forceFinishedBy, n: _pu.length }; } catch (e) {}
     let saved = false;
     try { saved = await bgT2SaveRoundPatch(g, { finishedAt: g.finishedAt, t2: g.t2 }); } catch (e) { console.warn('t2ForceFinishRound save', e); }   // v1998 (05 F-2): a co-admin who did not launch the cart is no longer refused
     if (saved === false) { showToast('Could not save — check your connection and try again'); return; }
@@ -89096,13 +89205,12 @@ async function t2LaunchDayRounds(courseId) {
     // v1155: a gross bracket plays every game on the cart with no strokes.
     try { if (t2IsBracket(t) && bgBracketCfg(t).handicaps === false) _dayRules = Object.assign({}, _dayRules || {}, { noHandicaps: true }); } catch (e) {}
     (function () {
-      const _min = Math.min.apply(null, gp.map(p => p.hcp));
       const _pct = _dayRules.noHandicaps ? 0 : (_dayRules.pct != null ? (Number(_dayRules.pct) || 0) : 100);
-      gp.forEach(p => {
-        let base = p.hcp;
-        if (!_dayRules.noHandicaps && _dayRules.basis === 'lowest') base = Math.max(0, p.hcp - _min);
-        p.baseHcp = base;
-        p.hcp = Math.round(base * _pct / 100);
+      // v2002 (DECISIONS "Lowest" basis): WHS order, the same helper gatherSetup uses.
+      const _bo = bgApplyHcpBasis(gp.map(p => p.hcp), _dayRules.basis, _pct, !!_dayRules.noHandicaps);
+      gp.forEach((p, i) => {
+        p.baseHcp = _bo[i].base;
+        p.hcp = _bo[i].hcp;
       });
     })();
     // v1086: a cart carries at most two teams, but with 3+ teams in the event they
@@ -94697,7 +94805,7 @@ async function _t2FetchFieldRounds(t, cols) {
 async function _t2FetchFieldRoundsRaw(t, cols) {
   const _r = await _t2FetchFieldRoundsRaw0(t, cols);
   // v1800: every field read sees a finished group's blank putts (scored hole) as 0.
-  try { if (_r && Array.isArray(_r.data)) _r.data.forEach(row => { try { bgFillBlankPutts(row && row.data ? row.data : row); } catch (e) {} }); } catch (e) {}
+  try { if (_r && Array.isArray(_r.data)) _r.data.forEach(row => { try { bgFillBlankPutts(row && row.data ? row.data : row); } catch (e) {} try { bgMaterializePickups(row && row.data ? row.data : row); } catch (e) {} }); } catch (e) {}   // v2002 Block Finish
   return _r;
 }
 async function _t2FetchFieldRoundsRaw0(t, cols) {
@@ -95872,7 +95980,7 @@ function _t2FieldSkinsAll(rows, cfg) {
   // v1043: was `p.rawHcp` -- the raw handicap INDEX in a tournament round, not the
   // tee-adjusted COURSE handicap every other game plays off (see bgFullCourseHcp).
   // Also now honours "Plays gross" / "No handicaps", which rawHcp ignored outright.
-  const _skHcp = (p, rules) => Math.round(bgFullCourseHcp(p, rules) * _skPct / 100);
+  const _skHcp = (p, rules) => bgHcpPct(bgFullCourseHcp(p, rules), _skPct);   // v2002 (matrix CORE-3): exact rounding
   // v1322: per-player opt-out for the event prize pools (Tyler, 8/30). Not entered, cannot win.
   const _skIn = (typeof _t2FieldOptIn === 'function') ? _t2FieldOptIn(cfg) : null;
   const byDay = {};
@@ -97829,9 +97937,8 @@ async function _bgPrintDayData(t, dayNumber) {
   const teamName = (k) => { try { return (typeof t2TeamName === 'function') ? t2TeamName(t, k) : (k === 'A' ? (t.team_a_name || 'Team A') : (k === 'B' ? (t.team_b_name || 'Team B') : k)); } catch (e) { return k || ''; } };
   const grp = groups.map(g => {
     const ms = (members[g.id] || []).map(m => { const p = pById[m.tournament_player_id] || {}; return { name: p.display_name || 'Player', raw: Math.round(parseFloat(p.handicap) || 0), team: m.team || p.team || null, tee: teeMap[m.tournament_player_id] || '' }; });
-    const min = ms.length ? Math.min.apply(null, ms.map(p => p.raw)) : 0;
     const pct = rules.noHandicaps ? 0 : (rules.pct != null ? (Number(rules.pct) || 0) : 100);
-    ms.forEach(p => { let base = p.raw; if (!rules.noHandicaps && rules.basis === 'lowest') base = Math.max(0, p.raw - min); p.play = Math.round(base * pct / 100); });
+    { const _bo = bgApplyHcpBasis(ms.map(p => p.raw), rules.basis, pct, !!rules.noHandicaps); ms.forEach((p, i) => { p.play = _bo[i].hcp; }); }   // v2002 (DECISIONS "Lowest" basis): WHS order, as the round
     const hole = sg && sg.holes ? (Number(sg.holes[g.id]) || null) : null;
     return { n: g.group_number || 0, time: g.tee_time || '', hole: hole, players: ms };
   }).filter(g => g.players.length);
@@ -99703,7 +99810,7 @@ function _t2FieldSidePotsAll(rows, cfg) {
         try { if ((g.hcpRules && g.hcpRules.noHandicaps) || p.playsGross === true) fullHcp = 0; } catch (e) {}
         // v1159: Low Net from a day Stroke game carries that game's gross/net + hcp %.
         let lnHcp = fullHcp;
-        try { const _ln = cfg.lowNet || {}; if (_ln.gross) lnHcp = 0; else if (_ln.hcpPct != null && Number(_ln.hcpPct) !== 100) lnHcp = Math.round(fullHcp * (Number(_ln.hcpPct) / 100)); } catch (e) {}
+        try { const _ln = cfg.lowNet || {}; if (_ln.gross) lnHcp = 0; else if (_ln.hcpPct != null && Number(_ln.hcpPct) !== 100) lnHcp = bgHcpPct(fullHcp, Number(_ln.hcpPct)); }   /* v2002 (matrix CORE-3): exact rounding */ catch (e) {}
         let scored = 0, net = 0, girs = 0, putts = 0, puttHoles = 0;
         const nets = new Array(_nH).fill(null);   // v1847: per-hole net, for the card-off
         for (let h = 0; h < 18; h++) {
@@ -105233,6 +105340,191 @@ function lastHoleOfRound(g) {
    individual card with leavers skipped -- so this asks it rather than keeping a
    second, format-blind copy of the rule. The old walk stays as a fallback so a
    load order that somehow lacks isHoleComplete can't break the round. */
+/* v2002 BLOCK FINISH (Tyler, DECISIONS #3): "No game ever settles on a forgotten cell."
+   At Finish (and End round early -> Finish, the watch's Finish, a commissioner's force-finish) every
+   player who did NOT leave must have a score on every hole the round played (a hole anyone scored).
+   The scorer fills each blank or marks it "Picked up", which is stored as NET DOUBLE BOGEY for that
+   player on that hole (par + 2 + the strokes he gets there) and flagged in g.pickedUp so the
+   scorecard can show it. Finish cannot complete with an unresolved blank. A force-finish marks the
+   blanks picked up automatically and logs it (auto: true, by: the account that forced it).
+   g.pickedUp = { pid: { holeIdx: { v, at, auto?, by? } } }. A forced finish by a commissioner who is
+   not on the card can only patch g.t2 (bg_t2_save_round), so the same map rides in g.t2.pickedUp and
+   bgMaterializePickups writes it into the card on every read of a finished round. */
+function bgPickupValue(g, pid, idx) {
+  try {
+    const p = (g.players || []).find(x => x && x.id === pid);
+    let par = Number(parFor(g, pid, idx)); if (!(par > 0)) par = Number(g.pars && g.pars[idx]) || 4;
+    let st = 0;
+    try { if (g.sis && p) st = strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, pid, idx), par, g.hcpRules, roundHoles(g)); } catch (e) { st = 0; }
+    return Math.max(1, par + 2 + (Number(st) || 0));
+  } catch (e) { return 6; }
+}
+function bgTeamBallRound(g) {
+  return !!(g && g.games && (g.games.scramble || g.games.ryderCup));
+}
+// The blanks Finish must resolve, in play order: [{ pid, name, hole (1-based), idx }].
+function bgFinishBlanks(g) {
+  const out = [];
+  try {
+    if (!g || !Array.isArray(g.players) || !g.scores || bgTeamBallRound(g)) return out;
+    const rh = roundHoles(g) || 18;
+    const seq = (typeof _bgPlaySeqOr === 'function') ? _bgPlaySeqOr(g, rh) : Array.from({ length: rh }, (_, i) => i + 1);
+    const played = new Set();
+    seq.forEach(h => { if (g.players.some(p => p && g.scores[p.id] && g.scores[p.id][h - 1] != null)) played.add(h); });
+    g.players.forEach(p => {
+      if (!p || !p.id || bgLeftAfter(g, p.id) != null) return;
+      const sc = g.scores[p.id] || [];
+      seq.forEach(h => { if (played.has(h) && sc[h - 1] == null) out.push({ pid: p.id, name: (typeof displayFirst === 'function' ? displayFirst(p) : p.name) || p.name || '', hole: h, idx: h - 1 }); });
+    });
+  } catch (e) {}
+  return out;
+}
+function bgFinishCanComplete(g) { return bgFinishBlanks(g).length === 0; }
+// Write a score the scorer typed on the Finish sheet (same stamps as a tap on the card).
+function bgSetFinishScore(g, pid, idx, v) {
+  if (!g || !pid || !(idx >= 0)) return false;
+  const n = parseInt(v, 10); if (!(n >= 1 && n <= 30)) return false;
+  if (!g.scores) g.scores = {};
+  if (!Array.isArray(g.scores[pid])) g.scores[pid] = new Array(18).fill(null);
+  g.scores[pid][idx] = n;
+  try { _markScoreTouched('scores', pid, idx, g.code); } catch (e) {}
+  try { _bgStampCell(g, 'scores', pid, idx); } catch (e) {}
+  try { if (g.pickedUp && g.pickedUp[pid]) delete g.pickedUp[pid][idx]; } catch (e) {}
+  return true;
+}
+// Mark one blank "Picked up": net double bogey into the card, flagged.
+function bgApplyPickup(g, pid, idx, opts) {
+  if (!g || !pid || !(idx >= 0)) return null;
+  const v = bgPickupValue(g, pid, idx);
+  if (!g.scores) g.scores = {};
+  if (!Array.isArray(g.scores[pid])) g.scores[pid] = new Array(18).fill(null);
+  g.scores[pid][idx] = v;
+  try { _markScoreTouched('scores', pid, idx, g.code); } catch (e) {}
+  try { _bgStampCell(g, 'scores', pid, idx); } catch (e) {}
+  const rec = { v: v, at: Date.now() };
+  if (opts && opts.auto) { rec.auto = true; if (opts.by) rec.by = opts.by; }
+  if (!g.pickedUp || typeof g.pickedUp !== 'object') g.pickedUp = {};
+  if (!g.pickedUp[pid] || typeof g.pickedUp[pid] !== 'object') g.pickedUp[pid] = {};
+  g.pickedUp[pid][idx] = rec;
+  return v;
+}
+// Force-finish: every blank becomes a pick-up, logged. Returns the list that was filled.
+function bgAutoPickupBlanks(g, by) {
+  const list = bgFinishBlanks(g);
+  list.forEach(b => { bgApplyPickup(g, b.pid, b.idx, { auto: true, by: by || null }); });
+  if (list.length) {
+    try { if (g.t2 && typeof g.t2 === 'object') g.t2.pickedUp = JSON.parse(JSON.stringify(g.pickedUp || {})); } catch (e) {}
+    try { console.warn('[BG v2002] force-finish marked ' + list.length + ' blank(s) picked up on ' + g.code + ': ' + list.map(b => b.name + ' #' + b.hole).join(', ')); } catch (e) {}
+  }
+  return list;
+}
+// A finished round carries its pick-ups into the card (a forced finish may only have reached g.t2).
+function bgMaterializePickups(g) {
+  let changed = false;
+  try {
+    if (!g || !g.finishedAt || !g.scores) return false;
+    [g.pickedUp, g.t2 && g.t2.pickedUp].forEach(m => {
+      if (!m || typeof m !== 'object') return;
+      Object.keys(m).forEach(pid => {
+        const hm = m[pid]; if (!hm || typeof hm !== 'object') return;
+        if (!(g.players || []).some(p => p && p.id === pid)) return;
+        Object.keys(hm).forEach(k => {
+          const i = parseInt(k, 10), r = hm[k];
+          if (!(i >= 0 && i < 18) || !r || !(Number(r.v) > 0)) return;
+          if (!Array.isArray(g.scores[pid])) g.scores[pid] = new Array(18).fill(null);
+          if (g.scores[pid][i] == null) { g.scores[pid][i] = Number(r.v); changed = true; }
+          if (m !== g.pickedUp) { if (!g.pickedUp) g.pickedUp = {}; if (!g.pickedUp[pid]) g.pickedUp[pid] = {}; if (!g.pickedUp[pid][i]) g.pickedUp[pid][i] = r; }
+        });
+      });
+    });
+  } catch (e) {}
+  return changed;
+}
+// Is this cell a pick-up (still holding the net double bogey it was given)?
+function bgIsPickedUp(g, pid, idx) {
+  try {
+    const r = g && g.pickedUp && g.pickedUp[pid] && g.pickedUp[pid][idx];
+    const s = g.scores && g.scores[pid] && g.scores[pid][idx];
+    return !!(r && s != null && Number(s) === Number(r.v));
+  } catch (e) { return false; }
+}
+// Scorecard tag: text, not colour (Color-blind safe).
+function bgPickupTag(g, pid, idx) {
+  return bgIsPickedUp(g, pid, idx) ? '<sup class="sc-pu" title="' + bgT('Picked up (net double bogey)') + '" style="font-size:8px;font-weight:800;color:var(--text-muted);margin-left:1px">PU</sup>' : '';
+}
+/* The Finish sheet: one row per blank, a score box and a "Picked up" toggle. Resolves true once every
+   row is answered and saved into the round, false on Go back. Mobile-first, existing button classes,
+   the toggle carries a text label + aria-pressed so it never relies on colour. */
+function bgResolveFinishBlanks(g) {
+  return new Promise(function (resolve) {
+    try {
+      const list = bgFinishBlanks(g);
+      if (!list.length) { resolve(true); return; }
+      const esc = (typeof escapeHtml === 'function') ? escapeHtml : (x => String(x == null ? '' : x));
+      const ov = document.createElement('div');
+      ov.className = 'bg-finish-blanks';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:100080;background:rgba(0,0,0,0.55);display:flex;align-items:flex-end;justify-content:center;padding:12px;overflow-y:auto';
+      const card = document.createElement('div');
+      card.onclick = function (e) { e.stopPropagation(); };
+      card.style.cssText = 'background:var(--surface);color:var(--text);border-radius:16px;max-width:460px;width:100%;max-height:86vh;overflow-y:auto;padding:18px 16px;box-shadow:0 10px 40px rgba(0,0,0,0.4)';
+      const rows = list.map(function (b, k) {
+        return '<div class="bfb-row" data-k="' + k + '" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border)">' +
+          '<div style="flex:1;min-width:0"><div style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(b.name) + '</div>' +
+          '<div class="small-text" style="color:var(--text-muted)">' + esc(bgT('Hole')) + ' ' + b.hole + '</div></div>' +
+          '<input class="bfb-in" type="number" inputmode="numeric" pattern="[0-9]*" min="1" max="30" aria-label="' + esc(bgT('Score')) + '" style="width:58px;padding:10px 6px;font-size:18px;text-align:center;border:1px solid var(--border);border-radius:10px">' +
+          '<button type="button" class="bg-btn bg-btn--ghost bfb-pu" aria-pressed="false" style="white-space:nowrap;flex:0 0 auto">' + esc(bgT('Picked up')) + '</button>' +
+          '</div>';
+      }).join('');
+      card.innerHTML =
+        '<div style="font-weight:800;font-size:17px;margin-bottom:4px">' + esc(bgT('Missing scores')) + '</div>' +
+        '<div style="font-size:14px;color:var(--text-muted);line-height:1.5;margin-bottom:8px">' + esc(bgT('Enter each missing score, or tap Picked up. A pick-up counts as net double bogey. The round can’t finish with a blank.')) + '</div>' +
+        rows +
+        '<div class="small-text bfb-left" style="color:var(--text-muted);margin:10px 0 8px"></div>' +
+        '<div style="display:flex;gap:8px"><button type="button" class="bg-btn bg-btn--ghost bfb-cancel" style="flex:1">' + esc(bgT('Go back')) + '</button>' +
+        '<button type="button" class="bg-btn bg-btn--primary primary bfb-ok" style="flex:1">' + esc(bgT('Save & finish')) + '</button></div>';
+      const state_ = list.map(() => ({ pu: false, v: '' }));
+      const okBtn = card.querySelector('.bfb-ok'), leftEl = card.querySelector('.bfb-left');
+      const refresh = function () {
+        const left = state_.filter(x => !x.pu && !(parseInt(x.v, 10) >= 1 && parseInt(x.v, 10) <= 30)).length;
+        okBtn.disabled = left > 0;
+        leftEl.textContent = left > 0 ? (left + ' ' + bgT(left === 1 ? 'blank left' : 'blanks left')) : bgT('All set');
+      };
+      card.querySelectorAll('.bfb-row').forEach(function (row) {
+        const k = parseInt(row.getAttribute('data-k'), 10);
+        const inp = row.querySelector('.bfb-in'), pu = row.querySelector('.bfb-pu');
+        inp.addEventListener('input', function () {
+          state_[k].v = inp.value;
+          if (inp.value) { state_[k].pu = false; pu.setAttribute('aria-pressed', 'false'); pu.className = 'bg-btn bg-btn--ghost bfb-pu'; pu.textContent = bgT('Picked up'); }
+          refresh();
+        });
+        pu.onclick = function () {
+          state_[k].pu = !state_[k].pu;
+          pu.setAttribute('aria-pressed', state_[k].pu ? 'true' : 'false');
+          pu.className = state_[k].pu ? 'bg-btn bg-btn--primary primary bfb-pu' : 'bg-btn bg-btn--ghost bfb-pu';
+          pu.textContent = state_[k].pu ? ('✓ ' + bgT('Picked up')) : bgT('Picked up');
+          if (state_[k].pu) { inp.value = ''; state_[k].v = ''; }
+          refresh();
+        };
+      });
+      const done = function (val) { try { ov.remove(); } catch (e) {} resolve(val); };
+      card.querySelector('.bfb-cancel').onclick = function () { done(false); };
+      ov.onclick = function () { /* a backdrop tap is not an answer (v1448) */ };
+      okBtn.onclick = function () {
+        if (okBtn.disabled) return;
+        list.forEach(function (b, k) {
+          if (state_[k].pu) bgApplyPickup(g, b.pid, b.idx);
+          else bgSetFinishScore(g, b.pid, b.idx, state_[k].v);
+        });
+        if (!bgFinishCanComplete(g)) { refresh(); return; }
+        done(true);
+      };
+      refresh();
+      ov.appendChild(card); document.body.appendChild(ov);
+      try { if (typeof bgKeyboardSafe === 'function') bgKeyboardSafe(ov); } catch (e) {}
+      try { if (window.BG_I18N && BG_I18N.translateTree) BG_I18N.translateTree(ov); } catch (e) {}
+    } catch (e) { resolve(false); }
+  });
+}
 function allHolesScored(g) {
   if (!g || !Array.isArray(g.players) || !g.players.length) return false;
   const _rh = roundHoles(g);
@@ -117333,11 +117625,16 @@ async function lgLaunchWeekRound(sid, weekId, matchupId, groupNo) {
       if (!_minPool.length) _minPool = players.map(function (p) { return lgRoundHcp(p.hcp); });
       const _min = Math.min.apply(null, _minPool);
       const _pct = _lgRules.noHandicaps ? 0 : (_lgRules.pct != null ? (Number(_lgRules.pct) || 0) : 100);
+      // v2002 (DECISIONS "Lowest" basis): WHS order - % on each course handicap, round, then subtract the lowest
+      // PLAYING handicap of the same pool (_minPool, subs per Q-L1). lgRoundHcp kept to match the server.
+      const _lowB = !_lgRules.noHandicaps && _lgRules.basis === 'lowest';
+      const _minPlay = Math.min.apply(null, _minPool.map(function (x) { return lgRoundHcp(x * _pct / 100); }));
       players.forEach(function (p) {
         let base = lgRoundHcp(p.hcp);
-        if (!_lgRules.noHandicaps && _lgRules.basis === 'lowest') base = Math.max(0, base - _min);
+        const _play = lgRoundHcp(base * _pct / 100);
+        if (_lowB) base = Math.max(0, base - _min);
         p.baseHcp = base;
-        p.hcp = lgRoundHcp(base * _pct / 100);
+        p.hcp = _lowB ? Math.max(0, _play - _minPlay) : _play;
       });
     } catch (e) {}
     const game = {
@@ -118622,6 +118919,9 @@ function bgCourseSwitchCard(g, setup) {
       const sl = a => a.slice(from, from + 9);
       pars = sl(pars); sis = sl(sis);
       teePars = _bgTeeMapRemap(teePars, sl); teeSis = _bgTeeMapRemap(teeSis, sl);
+      // v2002 (matrix CORE-5): re-rank the nine 1..9, exactly as round creation does (v1898).
+      if (sis.length === 9) sis = _bg9RankCompress(sis.map(Number));
+      teeSis = _bgTeeMapRemap(teeSis, a => (Array.isArray(a) && a.length === 9) ? _bg9RankCompress(a.map(Number)) : a);
       const half = r => (typeof r === 'number' && isFinite(r) && r > 46) ? Math.round((r / 2) * 10) / 10 : r;
       tees = tees.map(t => Object.assign({}, t, { rating: half(t.rating), ratingW: half(t.ratingW), yardage: (t.yardage != null ? Math.round(t.yardage / 2) : t.yardage) }));
       const ty = {}; Object.keys(teeYards).forEach(k => { const a = teeYards[k]; ty[k] = Array.isArray(a) ? a.slice(from, from + 9) : a; }); teeYards = ty;
@@ -120624,15 +120924,8 @@ async function init() {
     // slots (2r-1) and loop 2 the even ones (2r) -- the standard USGA 9->18
     // split that bg9DoubleCard already uses for the ":x2" course path. This is
     // the SAME arithmetic, reached from the nine-mode dropdown instead.
-    const _bg9SplitSis = a => {
-      const nine = (Array.isArray(a) ? a : []).map(Number);
-      if (nine.length !== 9) return nine.concat(nine);   // not a clean nine: leave it alone
-      const order = nine.map((v, i) => ({ v: isFinite(v) ? v : 99, i: i }))
-                        .sort((x, y) => x.v - y.v);
-      const rank = new Array(9);
-      order.forEach((o, k) => { rank[o.i] = k + 1; });
-      return rank.map(r => r * 2 - 1).concat(rank.map(r => r * 2));
-    };
+    // v2002 (matrix CORE-5): _bg9SplitSis now lives at top level (beside _bg9RankCompress) so the mid-round
+    // course switch can reach it too.
     if (setup.nineMode === 'f9x2') {
       game.pars = setup.pars.slice(0, 9).concat(setup.pars.slice(0, 9));
       game.sis  = _bg9SplitSis(setup.sis.slice(0, 9));
@@ -120722,6 +121015,7 @@ async function init() {
           const _raw9 = (game.players || []).map(_raw9Of);
           const _rawVals9 = _raw9.filter(v => typeof v === 'number' && isFinite(v));
           const _min9 = _rawVals9.length ? Math.min.apply(null, _rawVals9) : 0;
+          const _minPlay9 = _rawVals9.length ? Math.min.apply(null, _rawVals9.map(v => bgHcpPct(v, _pct9))) : 0;   // v2002: WHS lowest order
           game.players = (game.players || []).map((p, i) => {
             try {
               if (!p || typeof p.hcp !== 'number' || !isFinite(p.hcp)) return p;
@@ -120733,7 +121027,8 @@ async function init() {
                 return _out;
               }
               const base9 = (_basis9 === 'lowest') ? Math.max(0, raw9 - _min9) : raw9;
-              const hcp9 = Math.round(base9 * _pct9 / 100);
+              // v2002 (DECISIONS "Lowest" basis): % on each nine handicap, round, then subtract the lowest.
+              const hcp9 = (_basis9 === 'lowest') ? Math.max(0, bgHcpPct(raw9, _pct9) - _minPlay9) : bgHcpPct(raw9, _pct9);
               return Object.assign({}, p, { hcp: hcp9, baseHcp: base9, hcp18: p.hcp });
             } catch (e) { return p; }
           });

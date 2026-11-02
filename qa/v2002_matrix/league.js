@@ -148,10 +148,13 @@ function oHcp(opts, mid, eff) {
   const pct = r.noHandicaps ? 0 : (r.pct != null ? Number(r.pct) : 100);
   let base = pgRound(eff);
   if (!r.noHandicaps && r.basis === 'lowest') {
+    // v2002 (DECISIONS "Lowest" basis): WHS order - % on each course handicap, round, then subtract the lowest.
     const pool = opts.hcps.slice(0, opts.n).map(pgRound);   // active non-sub roster (absentee still counts)
     // DECISIONS (League, Q-L1): in a "lowest handicap" league the sub counts toward the lowest handicap.
     if (opts.absent != null && opts.subHcp != null) pool.push(pgRound(opts.subHcp));
+    const play = pgRound(base * pct / 100), minPlay = Math.min.apply(null, pool.map(x => pgRound(x * pct / 100)));
     base = Math.max(0, base - Math.min.apply(null, pool));
+    return { base, hcp: Math.max(0, play - minPlay) };
   }
   return { base, hcp: pgRound(base * pct / 100) };
 }

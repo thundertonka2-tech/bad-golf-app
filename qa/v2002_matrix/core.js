@@ -141,8 +141,14 @@ const parOf = (g, pid, i) => { const p = g.players.find(x => x.id === pid); cons
   // Malformed stroke index (blank SI box saves 0; a 9-hole card printed on the 18 scale) — see CORE-6
   check(A, 'SI 0 (blank box): scratch player should get 0 strokes', strokesOnHole(0, 0, 4, {}, 18) === 0, 'app gives ' + strokesOnHole(0, 0, 4, {}, 18));
   check(A, 'SI null: scratch player should get 0 strokes', strokesOnHole(0, null, 4, {}, 18) === 0, 'app gives ' + strokesOnHole(0, null, 4, {}, 18));
-  { let t = 0; [1, 3, 5, 7, 9, 11, 13, 15, 17].forEach(si => { t += strokesOnHole(10, si, 4, { holes: 9 }, 9); });
-    check(A, '9-hole card carrying 18-scale SIs (1,3..17): a 10 should still get 10 strokes', t === 10, 'app gives ' + t + ' (no SI normalisation)'); }
+  // v2002 fix (CORE-8): the card is normalised where it enters the round (gatherSetup -> _siForPars), not inside
+  // strokesOnHole. Oracle: the SI the round actually carries after setup gives a 10 exactly 10 strokes.
+  { const _sfp = F('_siForPars'); const norm = _sfp([1, 3, 5, 7, 9, 11, 13, 15, 17], [4, 4, 3, 5, 4, 4, 3, 4, 5]);
+    let t = 0; norm.forEach(si => { t += strokesOnHole(10, si, 4, { holes: 9 }, 9); });
+    check(A, '9-hole card carrying 18-scale SIs (1,3..17): normalised at setup, a 10 gets 10 strokes', t === 10 && JSON.stringify(norm) === '[1,2,3,4,5,6,7,8,9]', 'norm ' + norm + ' strokes ' + t);
+    const src = mainScript(HTML);
+    check(A, 'gatherSetup runs _siForPars on a complete SI card', /sis = _siForPars\(sis, pars\)/.test(src));
+    check(A, 'setup validation names a blank SI box (warnings.siBlank)', /_setupWarnings\.siBlank = _siBlankHoles/.test(src)); }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -159,11 +165,13 @@ const parOf = (g, pid, i) => { const p = g.players.find(x => x.id === pid); cons
     // WHS rounds to nearest whole number; .5 is the rule question (OPEN-1). Only judge non-.5 cases here.
     const frac = Math.abs(raw - Math.trunc(raw));
     n++;
-    if (Math.abs(frac - 0.5) < 1e-9) { halfCases.push({ index, slope, rating, par, raw, app }); continue; }
-    const want = Math.round(raw);
+    // DECISIONS OPEN-1 (a): an exact .5 rounds UP (toward the higher handicap: 10.5 -> 11, -10.5 -> -10).
+    const exact = (Math.round(index * 10) * slope + (Math.round(rating * 10) - par * 10) * 113);   // CH x 1130, exact
+    const want = Math.floor((2 * exact + 1130) / 2260);
+    if (Math.abs(frac - 0.5) < 1e-9) halfCases.push({ index, slope, rating, par, raw, app, want });
     if (app !== want) { bad++; if (!firstBad) firstBad = JSON.stringify({ index, slope, rating, par, app, want }); }
   }
-  check(B, 'WHS course handicap matches on ' + n + ' index/slope/rating/par combos (excluding exact .5)', bad === 0, firstBad);
+  check(B, 'WHS course handicap matches on ' + n + ' index/slope/rating/par combos (exact .5 rounds up, OPEN-1)', bad === 0, firstBad);
   COV[B].run += n - 1; COV[B].pass += (bad === 0 ? n - 1 : n - 1 - bad); PASS += (bad === 0 ? n - 1 : n - 1 - bad); FAIL += (bad === 0 ? 0 : bad - 1);
   // floating point: compare against EXACT integer arithmetic (index, rating to 0.1). An exact x.5 that
   // the float lands on x.4999 rounds DOWN where Math.round(exact) rounds up -> two identical-looking inputs differ.
@@ -193,7 +201,9 @@ const parOf = (g, pid, i) => { const p = g.players.find(x => x.id === pid); cons
     const m = computeCourseHcp(20, tee, 72), w = computeCourseHcp(20, tee, 72, 'F');
     check(B, 'women\'s course handicap off ratingW/slopeW differs (engine supports it)', m === 20 && w === 27, m + '/' + w);
     const src = mainScript(HTML);
-    const setupCall = /const courseHcp = _fixedHcp \? Math\.round\(hcpIndex\) : computeCourseHcp\(hcpIndex, teeObj, _parTotalP\);/.test(src);
+    const setupCall = !/computeCourseHcp\(hcpIndex, teeObj, _parTotalP, bgSetupGender\(name\)\)/.test(src) || !/computeCourseHcp\(parseHcpInput\(hcpStr\), teeObj, parTot, bgSetupGender\(_gNm\)\)/.test(src);
+    const _sg = F('bgSetupGender');
+    check(B, 'bgSetupGender: unknown name -> M (unchanged default)', _sg('Nobody Here') === 'M');
     check(B, 'round setup passes the player\'s gender to computeCourseHcp (else a woman on a dual-rated tee plays off the MEN\'S slope/rating)', !setupCall, 'gatherSetup: computeCourseHcp(hcpIndex, teeObj, _parTotalP) - no gender arg; the setup chip (line ~43581) is the same');
   }
   // allowance: p.hcp = round(round(CH) x pct) (WHS: round course handicap, then playing handicap)
@@ -205,6 +215,26 @@ const parOf = (g, pid, i) => { const p = g.players.find(x => x.id === pid); cons
     check(B, 'allowance ' + pct + '% of CH ' + ch, app === want);
     if (app !== whsHalfUp) halfCases.push({ allowance: pct, ch, app, awayFromZero: whsHalfUp });
   }
+  // CORE-3 also on the allowance helper: exact x.5 never lands on x.4999
+  { const pct = F('bgHcpPct'); let bad = 0, ex = null;
+    for (let h = -20; h <= 60; h++) for (let p = 0; p <= 100; p++) { const want = Math.floor((2 * h * p + 100) / 200); const a = pct(h, p); if (a !== want) { bad++; if (!ex) ex = { h, p, a, want }; } }
+    check(B, 'bgHcpPct(h, pct) == exact round-half-up on 8,181 inputs', bad === 0, JSON.stringify(ex)); }
+  // DECISIONS "Lowest" basis with an allowance %: WHS - % on each CH, round, then subtract the lowest
+  { const ab = F('bgApplyHcpBasis'); let bad = 0, n = 0, ex = null;
+    const rh = x => Math.floor((2 * x + 100) / 200);   // round(x/100) half-up, x integer
+    for (let lo = 0; lo <= 30; lo++) for (let hi = lo; hi <= 40; hi++) for (const pct of [75, 80, 85, 90, 95, 100]) {
+      n++; const out = ab([lo, hi], 'lowest', pct, false);
+      const want = [0, rh(hi * pct) - rh(lo * pct)];
+      if (out[0].hcp !== want[0] || out[1].hcp !== want[1] || out[1].base !== hi - lo) { bad++; if (!ex) ex = { lo, hi, pct, got: out, want }; }
+    }
+    check(B, 'lowest basis x allowance follows WHS order on ' + n + ' pairs (e.g. 1 vs 3 at 80% -> 0 vs 1)', bad === 0, JSON.stringify(ex));
+    const e = ab([1, 3], 'lowest', 80, false); check(B, 'lowest basis: 1 vs 3 at 80% plays 0 vs 1', e[0].hcp === 0 && e[1].hcp === 1, JSON.stringify(e));
+    const f = ab([7, 12, 20], 'full', 90, false); check(B, 'full basis unchanged: round(CH x %)', f[0].hcp === 6 && f[1].hcp === 11 && f[2].hcp === 18 && f[2].base === 20, JSON.stringify(f));
+    const z = ab([7, 12], 'lowest', 90, true); check(B, 'no handicaps -> everyone 0', z.every(x => x.hcp === 0), JSON.stringify(z));
+    const src = mainScript(HTML);
+    const sites = ['bgApplyHcpBasis(players.map(p => p.hcp), hcpBasis, hcpPct, false)', 'bgApplyHcpBasis(gp.map(p => p.hcp), _dayRules.basis, _pct', 'bgApplyHcpBasis(ms.map(p => p.raw), rules.basis, pct', 'p.hcp = _lowB ? Math.max(0, _play - _minPlay) : _play', 'Math.max(0, bgHcpPct(raw9, _pct9) - _minPlay9)'];
+    sites.forEach(t => check(B, 'lowest basis WHS order at: ' + t.slice(0, 48), src.indexOf(t) > 0));
+    check(B, 'no "subtract the lowest, then %" left (base - min ... * pct)', !/Math\.max\(0, (p\.hcp - minHcp|p\.hcp - _min|p\.raw - min)\)/.test(src)); }
   B_HALF = halfCases;
 }
 var B_HALF, B_FP;
@@ -272,10 +302,9 @@ var B_HALF, B_FP;
 {
   const D = 'D nineTwice';
   const src = mainScript(HTML);
-  const at = src.indexOf('const _bg9SplitSis = a => {');
-  let split = null;
-  if (at > 0) { const end = src.indexOf('\n    };', at); try { split = new Function(src.slice(at, end + 7).replace('const _bg9SplitSis =', 'return') )(); } catch (e) { split = null; } }
-  check(D, 'extracted the real _bg9SplitSis from round creation', typeof split === 'function');
+  // v2002 (CORE-5): _bg9SplitSis is top level now - the round creation and the course switch call the same one.
+  const split = qa.fn('_bg9SplitSis');
+  check(D, 'the real _bg9SplitSis is reachable at top level (round creation + course switch)', typeof split === 'function' && src.indexOf('const _bg9SplitSis = a => {') < 0);
   if (split) {
     for (const nine of [SIS.slice(0, 9), SIS.slice(9), [1,2,3,4,5,6,7,8,9], [9,8,7,6,5,4,3,2,1], [2,4,6,8,10,12,14,16,18]]) {
       const got = split(nine), want = oSplit(nine);
@@ -337,7 +366,10 @@ function oStroke(g) {
   if (done.length < 2 || (!g.finishedAt && done.length < parts.length)) return out;
   const pct = cfg.hcpPct != null ? cfg.hcpPct : 100;
   const sc = p => cfg.net ? oNet(g, p, hcpUsed(g, p, pct), nH) : (g.scores[p.id] || []).reduce((a, v) => a + (v || 0), 0);
-  const lo = Math.min(...done.map(sc)); const w = done.filter(p => sc(p) === lo);
+  const _lv = (g.leftRound && g.leftRound.byId) || {};
+  const canWin = done.filter(p => !_lv[p.id]);   // DECISIONS: a leaver pays and can't win (Stroke = Low Net)
+  if (!canWin.length) return out;
+  const lo = Math.min(...canWin.map(sc)); const w = canWin.filter(p => sc(p) === lo);
   parts.forEach(p => out[p.id] = -cfg.buyin); w.forEach(p => out[p.id] += cfg.buyin * parts.length / w.length);
   return out;
 }
@@ -495,7 +527,8 @@ const STROKE_MISS = [], LOWNET_MISS = [];
     const g = mkG('LV1', s.map(x => ({ hcp: 0, scores: x })), { leftRound: { p0LV1: 12 } });
     g.games = { lowNetPool: Object.assign({ value: 10 }, P(g)) };
     const a = appLowNet(g);
-    check(Fk, 'leaver left after 12, group pressed End round after 12: leaver cannot win Low Net', !a || cents(a.p0LV1) <= 0, 'app ' + fmt(g, a));
+    // DECISIONS OPEN-4 (a): he pays, the best full-card non-leaver wins. Kevin and Steve tie -> split.
+    check(Fk, 'leaver left after 12, group pressed End round after 12: leaver pays 10, Kevin/Steve split (+5/+5)', a && cents(a.p0LV1) === -10 && cents(a.p1LV1) === 5 && cents(a.p2LV1) === 5, 'app ' + fmt(g, a));
   }
   {
     const s = [Array(18).fill(4), Array(18).fill(5), Array(18).fill(5)]; s[0][0] = 3;
@@ -503,7 +536,7 @@ const STROKE_MISS = [], LOWNET_MISS = [];
     const g = mkG('LV1S', s.map(x => ({ hcp: 0, scores: x })), { leftRound: { p0LV1S: 12 } });
     g.games = { stroke: Object.assign({ buyin: 10, net: true }, P(g)) };
     const a = appStroke(g);
-    check(E, 'leaver left after 12, group ended after 12: leaver should not win the Stroke pool either', !a || cents(a.p0LV1S) <= 0, 'app ' + fmt(g, a));
+    check(E, 'leaver left after 12, group ended after 12: Stroke pool works the same (leaver -10, Kevin/Steve +5/+5)', a && cents(a.p0LV1S) === -10 && cents(a.p1LV1S) === 5 && cents(a.p2LV1S) === 5, 'app ' + fmt(g, a));
   }
   // Low Net: leaver mid-round, rest full -> leaver pays, B wins
   {
@@ -520,7 +553,55 @@ const STROKE_MISS = [], LOWNET_MISS = [];
     const g = mkG('BL', s.map(x => ({ hcp: 0, scores: x })), {});
     g.games = { lowNetPool: Object.assign({ value: 10 }, P(g)), stroke: Object.assign({ buyin: 10, net: true }, P(g)) };
     LOWNET_BLANK = { lowNet: fmt(g, appLowNet(g)), stroke: fmt(g, appStroke(g)) };
-    check(Fk, 'blank cell (finished): app behaviour recorded for OPEN-2', true);
+    check(Fk, 'blank cell (finished): app behaviour recorded for OPEN-2 (now prevented by Block Finish)', true);
+  }
+  // ── BLOCK FINISH (Tyler, DECISIONS #3) — data path ──
+  {
+    const BF = 'F blockFinish';
+    const flat = (n, v) => Array(n).fill(v);
+    const bgFinishBlanks = F('bgFinishBlanks'), bgFinishCanComplete = F('bgFinishCanComplete'), bgApplyPickup = F('bgApplyPickup');
+    const bgSetFinishScore = F('bgSetFinishScore'), bgAutoPickupBlanks = F('bgAutoPickupBlanks'), bgMaterializePickups = F('bgMaterializePickups');
+    const bgIsPickedUp = F('bgIsPickedUp'), bgPickupValue = F('bgPickupValue');
+    // Steve (hcp 18, gets a stroke on every hole) forgot hole 7 (SI 7, par 4); Hoon LEFT after 9 (his back nine is not a blank).
+    const s = [flat(18, 4), flat(18, 5), flat(18, 5), flat(18, 5)]; s[2][6] = null; for (let i = 9; i < 18; i++) s[3][i] = null;
+    const mk = code => { const g = mkG(code, [{ hcp: 0, scores: s[0].slice() }, { hcp: 0, scores: s[1].slice() }, { hcp: 18, scores: s[2].slice() }, { hcp: 0, scores: s[3].slice() }], { unfinished: true, leftRound: { ['p3' + code]: 9 } });
+      g.games = { lowNetPool: Object.assign({ value: 10 }, P(g)), stroke: Object.assign({ buyin: 10, net: true }, P(g)) }; return g; };
+    const g = mk('BF');
+    const bl = bgFinishBlanks(g);
+    check(BF, 'one blank found: Steve on hole 7 (the leaver\'s back nine is not a blank)', bl.length === 1 && bl[0].pid === 'p2BF' && bl[0].hole === 7, JSON.stringify(bl));
+    check(BF, 'finish is blocked while the blank is unresolved', bgFinishCanComplete(g) === false);
+    // a source check that the Finish flow and the force-finish both route through the gate
+    const src = mainScript(HTML);
+    check(BF, 'bgFinishRoundFlow returns before finishedAt while a blank is unresolved', /if \(!_resolved \|\| !bgFinishCanComplete\(g\)\) return;/.test(src) && src.indexOf('if (!_resolved || !bgFinishCanComplete(g)) return;') < src.indexOf("if (!g.finishedAt) g.finishedAt = Date.now();\n        try { if (typeof liveActivity"));
+    check(BF, 'commissioner force-finish auto-picks-up blanks', /bgAutoPickupBlanks\(g, g\.forceFinishedBy\)/.test(src));
+    // the picked-up value: net double bogey = par + 2 + strokes on the hole (Steve 18 -> 1 stroke on SI 7) = 7
+    const want = parOf(g, 'p2BF', 6) + 2 + oStrokes(18, siOf(g, 'p2BF', 6), parOf(g, 'p2BF', 6), g.hcpRules, 18);
+    check(BF, 'pick-up value = net double bogey (par 4 + 2 + 1 stroke = 7)', bgPickupValue(g, 'p2BF', 6) === want && want === 7, bgPickupValue(g, 'p2BF', 6) + ' vs ' + want);
+    const v = bgApplyPickup(g, 'p2BF', 6);
+    check(BF, 'picked up: the card holds 7 on hole 7, flagged', v === 7 && g.scores.p2BF[6] === 7 && bgIsPickedUp(g, 'p2BF', 6) && g.pickedUp.p2BF[6].v === 7);
+    check(BF, 'after the pick-up the round can finish', bgFinishCanComplete(g) === true);
+    g.finishedAt = 1786820000000;
+    // engines now settle on the picked-up value: Steve's card is full, net = 17 x 5 + 7 - 18 = 74; Tyler 72 wins.
+    const ln = appLowNet(g), st = appStroke(g);
+    check(BF, 'Low Net settles with the pick-up (Tyler +30, Hoon the leaver pays)', ln && cents(ln.p0BF) === 30 && cents(ln.p3BF) === -10 && cents(ln.p2BF) === -10, fmt(g, ln));
+    check(BF, 'Stroke pool settles with the pick-up (same winner)', st && cents(st.p0BF) === 30 && cents(st.p2BF) === -10, fmt(g, st));
+    // typing a real score over a pick-up clears the flag
+    bgSetFinishScore(g, 'p2BF', 6, 5);
+    check(BF, 'a typed score replaces the pick-up and clears the PU flag', g.scores.p2BF[6] === 5 && !bgIsPickedUp(g, 'p2BF', 6));
+    check(BF, 'bad typed score refused (0 / 31 / text)', !bgSetFinishScore(g, 'p2BF', 6, 0) && !bgSetFinishScore(g, 'p2BF', 6, 31) && !bgSetFinishScore(g, 'p2BF', 6, 'x'));
+    // force-finish path: auto pick-up, logged, carried in g.t2 for the manager RPC patch, then materialised on read
+    const g2 = mk('BF2'); g2.t2 = { tournamentId: 'qa-t', day: 1, groupId: 'grp-BF2' };
+    const done = bgAutoPickupBlanks(g2, 'admin-uid');
+    check(BF, 'force-finish: every blank picked up automatically and logged (auto, by)', done.length === 1 && g2.pickedUp.p2BF2[6].auto === true && g2.pickedUp.p2BF2[6].by === 'admin-uid' && bgFinishCanComplete(g2));
+    check(BF, 'force-finish: the pick-up rides in g.t2.pickedUp (the only key the manager RPC can patch)', g2.t2.pickedUp && g2.t2.pickedUp.p2BF2 && g2.t2.pickedUp.p2BF2[6].v === 7);
+    const stored = JSON.parse(JSON.stringify(mk('BF2'))); stored.t2 = JSON.parse(JSON.stringify(g2.t2)); stored.finishedAt = 1786820000000;   // server row: old scores + patched t2
+    bgMaterializePickups(stored);
+    check(BF, 'a finished round read back from the server gets the pick-up written into the card', stored.scores.p2BF2[6] === 7 && bgIsPickedUp(stored, 'p2BF2', 6));
+    const m3 = quiet(() => computeAllGameMoney(JSON.parse(JSON.stringify(Object.assign(mk('BF3'), { finishedAt: 1786820000000 })))));
+    check(BF, 'unresolved blank on a finished round is never what the engines see once a pick-up exists (computeAllGameMoney materialises)', (() => { const x = JSON.parse(JSON.stringify(stored)); x.scores.p2BF2[6] = null; const r = quiet(() => computeAllGameMoney(x)); return x.scores.p2BF2[6] === 7 && r && r.combined; })());
+    check(BF, 'merge rule registered for pickedUp (holeMap)', qa.fn('BG_MERGE_RULES') && qa.fn('BG_MERGE_RULES').pickedUp === 'holeMap');
+    check(BF, 'team-ball rounds (scramble) are not blocked by empty individual cards', (() => { const x = mk('BF4'); x.games = { scramble: { value: 1 } }; return bgFinishBlanks(x).length === 0; })());
+    void m3;
   }
   // Low Net 3-way tie of 4 -> pot 40 split 3 ways (13.33) -> whole-unit totals zero-sum
   {

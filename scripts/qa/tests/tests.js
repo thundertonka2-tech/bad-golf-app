@@ -102,21 +102,24 @@ section('Handicap allocation (strokesOnHole / netHoleScore / effectiveHcp / bgFu
 // gatherSetup's basis/pct block (main.js 29967-29977) extracted verbatim and run on a roster.
 section('Handicap basis lowest / pct (gatherSetup block, extracted verbatim)');
 {
+  // v2002 (DECISIONS "Lowest" basis): the block now calls bgApplyHcpBasis (WHS order: % on each course
+  // handicap, round, then subtract the lowest). Extracted the same way, with the real helper in scope.
   const src = require('fs').readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8').split('\n');
-  const _i0 = src.findIndex(l => /const minHcp = Math\.min/.test(l));
-  const block = src.slice(_i0, _i0 + 11).join('\n');   // the 11-line basis/pct block, anchored by content
-  check('extracted block starts at minHcp', /const minHcp = Math\.min/.test(block.split('\n')[0]), true);
-  const fn = new Function('players', 'hcpBasis', 'hcpPct', block + '\nreturn players;');
-  const ps = fn([{ hcp: 12, index: 12.4 }, { hcp: 4, index: 3.9 }, { hcp: 20, index: 21.1 }], 'lowest', 100);
+  const _i0 = src.findIndex(l => /const _basisOut = bgApplyHcpBasis\(players\.map/.test(l));
+  const block = src.slice(_i0, _i0 + 9).join('\n');   // the basis/pct block, anchored by content
+  check('extracted block starts at bgApplyHcpBasis', /const _basisOut = bgApplyHcpBasis/.test(block.split('\n')[0]), true);
+  const fn = new Function('players', 'hcpBasis', 'hcpPct', 'bgApplyHcpBasis', block + '\nreturn players;');
+  const _ab = E.bgApplyHcpBasis;
+  const ps = fn([{ hcp: 12, index: 12.4 }, { hcp: 4, index: 3.9 }, { hcp: 20, index: 21.1 }], 'lowest', 100, _ab);
   check('basis lowest: low man plays off 0', ps[1].hcp, 0);
   check('basis lowest: 12 - 4 = 8', ps[0].hcp, 8);
   check('basis lowest: 20 - 4 = 16', ps[2].hcp, 16);
   check('basis lowest: baseHcp holds the pre-% value', ps[2].baseHcp, 16);
   check('rawHcp keeps the index', ps[0].rawHcp, 12.4);
-  const ps2 = fn([{ hcp: 12 }, { hcp: 4 }, { hcp: 20 }], 'lowest', 80);
-  check('lowest + 80%: round(8*0.8)=6', ps2[0].hcp, 6);
-  check('lowest + 80%: round(16*0.8)=13', ps2[2].hcp, 13);
-  const ps3 = fn([{ hcp: 13 }, { hcp: 4 }], 'full', 50);
+  const ps2 = fn([{ hcp: 12 }, { hcp: 4 }, { hcp: 20 }], 'lowest', 80, _ab);
+  check('lowest + 80% (WHS): round(12*0.8)-round(4*0.8) = 10-3 = 7', ps2[0].hcp, 7);
+  check('lowest + 80% (WHS): round(20*0.8)-round(4*0.8) = 16-3 = 13', ps2[2].hcp, 13);
+  const ps3 = fn([{ hcp: 13 }, { hcp: 4 }], 'full', 50, _ab);
   check('full + 50%: round(6.5)=7', ps3[0].hcp, 7);
   check('full + 50%: round(2)=2', ps3[1].hcp, 2);
 }
