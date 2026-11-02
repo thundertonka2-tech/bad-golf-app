@@ -44,3 +44,8 @@
 - **Stroke-day cup point when a player left:** the leaver forfeits the point.
 - **CTP when flights are on:** CTP stays whole-field. The flight split applies to the other pools only, and the board says so.
 - **Flights:** points are scored on the full cart round first, then split by flight.
+- **How .5 course handicaps round (core OPEN-1):** one rule everywhere, the WHS reading: .5 rounds up toward the higher handicap, so +10.5 plays as +10. The only change is removing floating-point noise (CORE-3). This **supersedes** the earlier "round the magnitude, keep the sign" default for TOURNEY-9, so plus handicaps at an allowance % follow the same rule.
+- **A non-leaver with a blank box on a finished round:** covered by Tyler's Block Finish call.
+- **"Lowest" handicap basis with an allowance %:** follows WHS. Apply the % to each course handicap, round, then subtract the lowest.
+- **A leaver in a pool when the group ends on his hole:** he pays, and the best full-card non-leaver wins. Stroke and Low Net work the same way.
+- **Who absorbs a whole-unit remainder:** the current rule stays (larger balance, then a fixed order). Noted for Tyler.
