@@ -11,11 +11,11 @@ SCORECARD
 • Phones show the front and back nine stacked so nothing is squeezed; wider screens show all 18 across.
 • Playing more than one match? Each one gets its own line, labelled with who it's against.
 • The Match / Strokes / Units chips stay put when you swipe to the back nine.
-• The GPS scorecard has a ✕ in the corner, and a stray pinch can't push "Back to map" off the screen.
+• The GPS scorecard has a close button in the corner, and a stray pinch can't push "Back to map" off the screen.
 
 ROUND RATINGS
 • After a round, give the course 1–5 stars and a note. Stars show beside every course in the pickers and on the course preview; tap them to see the breakdown and what other players said.
-• Not a fan of end-of-round prompts? Turn them off in Settings › Additional settings.
+• Not a fan of end-of-round prompts? Turn them off in Settings > Additional settings.
 
 GPS
 • Hole yardages for your tee on the GPS readout for every course we've matched to its scorecard, with more courses filling in nightly.
