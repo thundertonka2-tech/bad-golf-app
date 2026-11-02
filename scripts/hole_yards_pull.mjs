@@ -75,12 +75,16 @@ function parsePage(html) {
   }
   return { loc, pars, sis, tees };
 }
+// 2026-11-01 (Tyler, after Cedar Crest came back "pars differ" -- its card has a par typo on one
+// hole): same name, city and state with at most TWO holes' par differing is still this course;
+// the yardage is what we take and the card's pars are never touched.
 function parsMatch(cardPars, gpPars) {
   if (!Array.isArray(cardPars) || !Array.isArray(gpPars)) return false;
   const n = cardPars.length; if (n !== 9 && n !== 18) return false;
   if (gpPars.length < n) return false;
-  for (let i = 0; i < n; i++) if (Number(cardPars[i]) !== Number(gpPars[i])) return false;
-  return true;
+  let diff = 0;
+  for (let i = 0; i < n; i++) if (Number(cardPars[i]) !== Number(gpPars[i])) diff++;
+  return diff <= 2;
 }
 async function pullOne(c) {
   const cands = await candidates(c);
