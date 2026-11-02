@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.1995-->
+<!--BGVER=v2026.11.1996-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12209,7 +12209,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.1995';
+const BG_BUILD = 'v2026.11.1996';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -27402,6 +27402,23 @@ async function persistCourseScorecard(courseId, name, pars, sis, tees, opts) {
             return true;
           }
           if ((!Array.isArray(tees) || !tees.length) && Array.isArray(cur.tees) && cur.tees.length) tees = cur.tees;
+          /* v1996 (Tyler, 11/2: Buffalo Creek's tee rows vanished): the setup form carries label / rating /
+             slope / yards per tee and nothing else, so this write replaced the card's tees and dropped
+             the per-hole yardage (yds), the women's ratings and the GolfPass source stamp that the
+             hole-yards fill had added. Carry every field the form does not know over from the saved tee
+             with the same label. */
+          try {
+            if (Array.isArray(tees) && Array.isArray(cur.tees)) {
+              const _nl = x => String(x || '').trim().toLowerCase();
+              tees = tees.map(t => {
+                if (!t || !t.label) return t;
+                const prev = cur.tees.find(p => p && _nl(p.label) === _nl(t.label)); if (!prev) return t;
+                const out = Object.assign({}, t);
+                ['yds', 'yardage', 'ratingW', 'slopeW', 'pars', 'sis'].forEach(k => { if ((out[k] == null || out[k] === '' || (Array.isArray(out[k]) && !out[k].length)) && prev[k] != null) out[k] = prev[k]; });
+                return out;
+              });
+            }
+          } catch (e) {}
           /* v1944 SHRINK GUARD (Tyler, Sat 10/24: "I don't see all the par 3's listed" at Buffalo
              Creek). Fri 9:55 a front-9-only round (DIVOT11) wrote its 9-hole card - 9 pars, 9 SIs
              and halved 9-hole ratings - back over the course, so setup offered CTP on 4 and 8 only.
@@ -27443,6 +27460,7 @@ async function persistCourseScorecard(courseId, name, pars, sis, tees, opts) {
     pars: pars.slice(),
     sis: sis.slice(),
     tees: Array.isArray(tees) ? tees.slice() : [],
+    ...((saves[courseId] && saves[courseId].holeYardsSrc) ? { holeYardsSrc: saves[courseId].holeYardsSrc } : {}),   // v1996: keep the fill's source stamp
     updatedAt: Date.now(),
     // Mark this as a real, human-made save so the seed-scorecard bootstrap never
     // force-restores over it on the next launch. Without this, editing a par on a
@@ -63974,17 +63992,18 @@ function bgScEnsureTeeYards(g) {
     // v1992: a round reopened from Completed rounds is a fresh object -- give it the card read earlier, synchronously
     if (_bgScTeeYardsByCourse[g.courseId]) { g.teeYards = _bgScTeeYardsByCourse[g.courseId]; return; }
     if (_bgScTyTried[g.courseId]) return; _bgScTyTried[g.courseId] = 1;
-    if (typeof _bgGetCourseCardFromShard !== 'function') return;
+    if (typeof _bgGetCourseCardFromShard !== 'function') { _bgScTyTried[g.courseId] = 0; return; }
     Promise.resolve(_bgGetCourseCardFromShard(g.courseId)).then(card => {
-      if (!card || !Array.isArray(card.tees)) return;
+      // v1996: a read that came back empty (offline, shard not yet cached) must not block every later open
+      if (!card || !Array.isArray(card.tees)) { _bgScTyTried[g.courseId] = 0; return; }
       const n = (Array.isArray(g.pars) && g.pars.length) ? g.pars.length : 18, out = {}; let any = false;
       card.tees.forEach(t => { if (t && t.label && Array.isArray(t.yds) && t.yds.length >= n && t.yds.slice(0, n).every(v => Number(v) > 0)) { out[t.label] = t.yds.slice(0, n); any = true; } });
-      if (!any) return;
+      if (!any) { _bgScTyTried[g.courseId] = 0; return; }
       _bgScTeeYardsByCourse[g.courseId] = out;
       g.teeYards = out;   // local only; a round's saved data is never rewritten for a cosmetic row
       try { if (state && state.game && state.game.code === g.code) state.courseTeeYards = out; } catch (e) {}
       try { bgScRepaintAll(g); } catch (e) {}
-    }).catch(() => {});
+    }).catch(() => { _bgScTyTried[g.courseId] = 0; });
   } catch (e) {}
 }
 // v1987: stamp tee yardage onto rounds that pre-date v1985 (no g.teeYards) from their course card,
@@ -73200,6 +73219,10 @@ async function openRoundBetsSheet(code, courseName, opts) {
     if (_c && _c.finishedAt) { g = _c; _rbFromCache = true; }
   } catch (e) {}
   if (!g) { try { g = await loadGame(code); } catch (e) {} }
+  // v1996 (Tyler, LIP15 10/27: "why does this round not show the tee lines?"): the round was created with an
+  // empty teeYards map, so the sheet drew without tee rows and relied on a background read to patch them in.
+  // Read the course card first (memoised per course; a signed-out REST fallback), then build the card.
+  try { if (g && g.courseId && !(g.teeYards && Object.keys(g.teeYards).length)) { if (_bgScTeeYardsByCourse[g.courseId]) g.teeYards = _bgScTeeYardsByCourse[g.courseId]; else { await bgScBackfillTeeYards([g]); if (g.teeYards && Object.keys(g.teeYards).length) _bgScTeeYardsByCourse[g.courseId] = g.teeYards; } } } catch (e) {}
   try { if (g && g.finishedAt) _bgFinishedRoundCache.set(code, g); } catch (e) {}
   // Served from memory: confirm against the cloud without holding up the paint. If
   // the round genuinely changed underneath us, drop the stale copy and reopen once.
