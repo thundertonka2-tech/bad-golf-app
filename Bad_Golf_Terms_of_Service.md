@@ -1,6 +1,6 @@
-# Bad Golf — Terms of Service
+# Bad Golf App — Terms of Service
 
-**Effective date:** September 3, 2026  **Last updated:** September 13, 2026
+**Effective date:** September 3, 2026  **Last updated:** November 2, 2026
 
 Welcome to Bad Golf. These Terms of Service ("Terms") are a contract between you and **KRWellsGolf LLC, doing business as Bad Golf** ("Bad Golf," "we," "us," or "our"), and they govern your use of the Bad Golf mobile application and web app (collectively, the "Service"). By using the Service, you agree to these Terms. If you don't agree, don't use the Service.
 
@@ -75,7 +75,7 @@ You acknowledge that:
 
 ## 8. Intellectual property
 
-The Bad Golf app, its design, code, name, logo, and content are owned by Bad Golf and protected by copyright, trademark, and other intellectual property laws. You receive a limited, non-exclusive, non-transferable license to use the app for personal, non-commercial purposes.
+The Bad Golf app, its design, code, name, logo, and content are owned by KRWellsGolf LLC (doing business as Bad Golf) and protected by copyright, trademark, and other intellectual property laws. You receive a limited, non-exclusive, non-transferable license to use the app for personal, non-commercial purposes.
 
 You retain ownership of the data you enter (player names, scores, courses, notes). By using shared features, you grant us a license to store and display that data as necessary to operate the Service.
 
@@ -155,4 +155,4 @@ These Terms, together with the Privacy Policy, constitute the entire agreement b
 
 Questions about these Terms:
 
-Bad Golf — Email: support@officialbadgolf.com
+KRWellsGolf LLC, doing business as Bad Golf — Email: support@officialbadgolf.com

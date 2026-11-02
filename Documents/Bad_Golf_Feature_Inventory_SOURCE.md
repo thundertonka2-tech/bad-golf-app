@@ -177,7 +177,7 @@ The fix for a genuine duplicate is an **admin account merge** (see Admin → Use
 
 **There is no Games tab in the bottom bar.** The 💵 Games screen still exists and every other route to it works — the units bubble and match chips on the GPS screen, the Games buttons on the Rounds list, the end-of-round summary. It was removed because the same numbers now live on the scoring sheets, and a fifth item appearing and disappearing mid-round made the bar jump under your thumb.
 
-**Side wagering is gone.** The old Wager tab — game slips, a proposal ledger, incoming and outgoing offers, an over/under line — has been removed from the app entirely, along with the one-tap payment buttons. Deleted, not hidden. The last traces went with it: the wager block on the admin dashboard, the wager branch in the **Inbox** invite list (every invite is a round invite now) and the wager icon. **Side games themselves — Skins, Nassau, Wolf, Vegas, Banker, Ryder Cup and the rest — are untouched.** The Get Started **"Side games"** card now carries a trophy icon in place of the old coin.
+**Side games are scored in units.** Skins, Nassau, Wolf, Vegas, Banker, Ryder Cup and the rest keep every tally in units, and the **Inbox** invite list holds round invites only. The Get Started **"Side games"** card now carries a trophy icon in place of the old coin.
 
 **Smack-talk voice is gone.** The spoken roasts and hype, the voice engine, the per-hole trigger, the system-voice picker, both **Round settings** rows and Roland's Spanish round-start announcement have all been removed, and the app clears the old saved settings off your phone by itself. If a guide or a screenshot still shows a "Smack-talk voice" toggle, it's out of date.
 
@@ -228,7 +228,7 @@ A pass across the whole app put every button on one system. You won't find a new
 
 You'll see a small gold **PRO** pill next to a lot of games and features. Here's exactly what it means today:
 
-**Nothing is locked.** Every game with a PRO badge is fully selectable and fully playable right now, for everyone. The badge is **informational** — it marks the features that will belong to **Bad Golf Pro** when paid plans launch later. There are no in-app purchases and nothing is billable.
+**Nothing is locked.** Every game with a PRO badge is fully selectable and fully playable right now, for everyone. The badge is **informational** — it marks the features that will belong to **Bad Golf Pro** when Bad Golf Pro launches later. There are no in-app purchases and nothing is billable.
 
 **Tap any PRO pill** and a short explainer opens:
 
@@ -412,7 +412,7 @@ Tap **View** on any completed round (on Home, **Rounds**, **Crew** or the Tourne
 - **📋 Every game — who won what** and **📲 Text Final Standings**
 - **🔓 Reopen round** on a finished round
 
-> **Why the event block matters.** The sheet's final standings used to be group-only. On an event where all the units sat in event prize pools, it could cheerfully say *"All square — nobody owes anybody. 🍻"* while real units were owed across the field. Now the group block is labelled **Final standings — this group** and the event block sits right under it, so the two read as group-then-event. While other groups are still playing, the whole-event final standings carries a **"Provisional — N of M groups finished"** note.
+> **Why the event block matters.** The sheet's final standings used to be group-only. On an event where all the units sat in event prize pools, it could cheerfully say *"All square — nobody trails anybody. 🍻"* while real units were still outstanding across the field. Now the group block is labelled **Final standings — this group** and the event block sits right under it, so the two read as group-then-event. While other groups are still playing, the whole-event final standings carries a **"Provisional — N of M groups finished"** note.
 
 ### Find a Course — Moved
 
@@ -528,19 +528,19 @@ _See [Games](#games-35) for complete rules and options._
 - **☂️ Umbrella (4 players, 2v2)** — 5 points a hole, each worth the hole number
 - **🪙 Pot of Gold** — a prize pool on every hole, weighted by difficulty
 - **🎯 Closest to the Pin** — per-hole awards, or pool mode for one prize pool
-- **🐾 Animals** — penalty animals pass around; only the last holder pays
+- **🐾 Animals** — penalty animals pass around; only the last holder gives units
 - **⭐ Marks** — most highlight-reel plays wins, not lowest score
 - **🥔 Hot Potato** — one token that doubles every time it changes hands (capped)
-- **Low Net Pool** — everyone pays the entry, lowest net over 18 takes the prize pool; its own handicap allowance slider
-- **GIR Pool** — everyone pays the entry, most greens in regulation takes the prize pool
-- **Fewest Putts Pool** — everyone pays the entry, fewest total putts takes the prize pool
+- **Low Net Pool** — everyone puts in the entry, lowest net over 18 takes the prize pool; its own handicap allowance slider
+- **GIR Pool** — everyone puts in the entry, most greens in regulation takes the prize pool
+- **Fewest Putts Pool** — everyone puts in the entry, fewest total putts takes the prize pool
 
 > **⚠️ Ten of these are unavailable inside a tournament.** **Banker, Splix 6's, Bingo Bango Bongo, Wolf, Hammer, Umbrella, Pot of Gold, Animals, Marks and Hot Potato** can't be set as a tournament day game *or* as a foursome's own group game inside an event. (Animals, Marks and Hot Potato used to leak through into group games because their tiles sit in the Side Games section, so a group could switch on a game the director could never offer.) **Normal rounds are unaffected — all eleven still work there.** Junk, Snake, Greenie, Long Putt and Birdie Bump are untouched.
 
 **Side games (enable/disable independently):**
 - **⛳ Par 3 Greenie (with Hero Tax)** — closest to pin on par 3s; optional "3-putts still win" mode
-- **📏 Long Putt** — everyone pays the entry; longest putt of the round takes the prize pool
-- **💥 Long Drive** — everyone pays the entry; longest drive on the designated hole takes the prize pool
+- **📏 Long Putt** — everyone puts in the entry; longest putt of the round takes the prize pool
+- **💥 Long Drive** — everyone puts in the entry; longest drive on the designated hole takes the prize pool
 - **🐦 Birdie Bump** — awards for birdie / eagle / hole-in-one
 - **Junk** — 🟢 GIR, 🏖️ Sandy, 🍫 Rolo, 🌳 Barkie, 📏 Polie, 🐍 Snake, ⛳ Arnie, 🎯 Chip-In (per-game toggle & amount)
 
@@ -602,7 +602,7 @@ Backing out of round setup doesn't wipe what you picked.
 - Reopen a fresh setup **within 30 minutes** and the course, players, games and options come back — with the toast **"↩️ Picked up your round setup."**
 - Drafts older than 30 minutes are thrown away so you always start clean.
 - The draft is cleared the moment you actually **create** something — starting a round, saving a scheduled round, or saving a template.
-- **Your game selections are deliberately not part of the draft.** A brand-new round always starts with nothing ticked, even if you played Skins + Nassau + Junk yesterday. The per-game *values* are remembered, so ticking Skins again recalls your stake.
+- **Your game selections are deliberately not part of the draft.** A brand-new round always starts with nothing ticked, even if you played Skins + Nassau + Junk yesterday. The per-game *values* are remembered, so ticking Skins again recalls your unit value.
 
 **Invite players (any time during setup or scoring)**
 
@@ -779,7 +779,7 @@ Notes worth knowing:
 **Par 3 Greenie** (on par 3s only, if enabled):
 - Tap chips for each player to mark the closest to pin
 - If **Hero Tax** is on and a winner is marked, a sub-row asks "Did the greenie winner 3-putt?" — tap to mark, and the greenie chip crosses out (forfeit) with the Hero Tax penalty applied
-- If the **"3-putts still win"** option is on, none of that appears — the greenie pays regardless and the header says so
+- If the **"3-putts still win"** option is on, none of that appears — the greenie counts regardless and the header says so
 
 **Closest to the Pin:** tap the winner's name, punch in **feet + inches**. A CTP winner logged with no distance still wins the hole — a player from another group who *does* log a measured distance beats them.
 
@@ -811,7 +811,7 @@ In a live tournament round, **birdies, eagles, long putt, long drive and lead ch
 
 ### A Player Leaves Mid-Round
 
-Every player's row carries **"· left the round?"** on its HCP line. Tap it, confirm the last hole they played, and the button reads **"Steve is out"**. Through that hole every game settles with them in; from the next hole they get no scores, are out of every per-hole game (banker, skins and carries, junk, greenie, birdie bump, CTP, BBB, wolf, pot of gold, hammer), out of the banker rotation, and don't hold the hole open. The row then shows **"🚶 left after hole 12 · bring back"** — **bring back** undoes it. Anyone in the round can mark it.
+Every player's row carries **"· left the round?"** on its HCP line. Tap it, confirm the last hole they played, and the button reads **"Steve is out"**. Through that hole every game settles with them in; from the next hole they get no scores, are out of every per-hole game (banker, skins and carries, junk, greenie, birdie bump, CTP, BBB, wolf, Pot of Gold, hammer), out of the banker rotation, and don't hold the hole open. The row then shows **"🚶 left after hole 12 · bring back"** — **bring back** undoes it. Anyone in the round can mark it.
 
 ### Match View on Every Scorecard
 
@@ -860,7 +860,7 @@ It still appears only when the round actually has games on it, and every old way
 
 ### Whole Numbers Everywhere
 
-Every printed units figure is a **whole number**: fractions of .50 and under round down, over .50 round up (2.33 → 2, 8.75 → 9, 2.5 → 2, 2.51 → 3). That is display only — the settle math underneath stays exact. It applies to the boards, Unit Totals, share images, leaderboards, league money, lifetime games and Stats.
+Every printed units figure is a **whole number**: fractions of .50 and under round down, over .50 round up (2.33 → 2, 8.75 → 9, 2.5 → 2, 2.51 → 3). That is display only — the settle math underneath stays exact. It applies to the boards, Unit Totals, share images, leaderboards, league units, lifetime games and Stats.
 
 ### What's On It, Top to Bottom
 
@@ -926,10 +926,10 @@ While a round is unfinished, the **Unit Totals** heading carries a **"Running to
 ### Games & Units Chips
 
 **Per-game breakdown table:**
-- **Games that actually paid units sort to the front** of the horizontally-scrolling table; configured-but-empty prize pools move to the end. Nothing is dropped — *"the table is missing games we played"* was almost always games scrolled off to the right
+- **Games that actually gave out units sort to the front** of the horizontally-scrolling table; configured-but-empty prize pools move to the end. Nothing is dropped — *"the table is missing games we played"* was almost always games scrolled off to the right
 - Each group side game gets **its own named column** (Nassau, Birdie Bump, Stroke play…). The old catch-all **"Group games"** column only appears if there's group units that can't be attributed to a named game — so if you see it, it means something
 - **"Skins won"** shows your **net** (unit totals minus entry) with the skin count in parentheses, e.g. `+13.33 units (2)`
-- **A prize pool that's configured but hasn't paid anyone yet shows as 0.00 units** instead of disappearing
+- **A prize pool that's configured but hasn't awarded anyone yet shows as 0.00 units** instead of disappearing
 - **Prize Pools that can't settle until everyone finishes say so.** Skins, Closest to the Pin, Long Putt and tournament Nassau show a **still live** sub-label under the header and **not settled** in the cells, instead of a bare `—` that looked identical to "nobody won it"
 - **0 units friendly games still show who won** — a green **W**, red **L**, or **AS** in each player's cell
 
@@ -939,7 +939,7 @@ While a round is unfinished, the **Unit Totals** heading carries a **"Running to
 
 ### 📋 Every Game — Who Won What
 
-On the final standings card, **"📋 Every game — who won what"** opens a read-only, document-style page listing every prize pool, every winner and every payment on one screen with no horizontal scrolling. A line underneath reads *"This is exactly what goes out with the texted final standings."*
+On the final standings card, **"📋 Every game — who won what"** opens a read-only, document-style page listing every prize pool, every winner and every unit total on one screen with no horizontal scrolling. A line underneath reads *"This is exactly what goes out with the texted final standings."*
 
 **It respects the scope chip.** Opened under **🏆 Tournament total** it shows the event prize pools plus every group's side games. Opened under **👥 Group total** it shows **this group only**, titled `👥 <course> — Group N — this group's games` with the subtitle *"This group only · switch to 🏆 Tournament total for the whole event."* It used to always show the whole event no matter which chip was lit.
 
@@ -989,26 +989,26 @@ There is now **one** share button, with **one** label, in all three places it ap
 
 **It always attaches the images** — the scorecard image and the games card — on every game type. (The Games sheet's version used to send bare text with no images and, on a tournament, none of the event units.)
 
-**The message body is deliberately short:** a title line, the **⚠️ PROVISIONAL** banner when it applies, the **Final standings:** who-trails-who lines, and the **payment links**. The old `Standings:` list and per-game `Breakdown:` text were dropped from the message — that detail is on the attached image, and long texts were being split in ways that broke a URL in half.
+**The message body is deliberately short:** a title line, the **⚠️ PROVISIONAL** banner when it applies, and the **Final standings:** who-trails-who lines. The old `Standings:` list and per-game `Breakdown:` text were dropped from the message — that detail is on the attached image, and long texts were being split in ways that broke a URL in half.
 
 **Retired labels** — if you see these in an old screenshot or an old support note, they no longer exist: `📲 Text Final Standings — with images`, `📲 Text everyone — with images`, `📤 Text this breakdown`, `💬 Text the numbers — auto-fill my crew`, and `📣 Brag to crew`. *(System-generated brag posts to the crew feed are a separate feature and still happen.)*
 
 **Other final standings behaviour:**
-- **Payment links are tappable.** Each pay line starts at the left margin with the URL last, and carries **one** link — the payee's preferred method only
-- **The Mark paid checkbox was removed.** Rounds still carrying that old flag simply don't display it any more
+- **One line per transfer.** Each who-trails-who line names both players and the units, with a blank line between transfers so it reads easily
+- **There is no settled checkbox.** The app only keeps score; older rounds carrying that old flag simply don't show it
 - **Sending before everyone has finished warns you first** — the app confirms, naming the count ("1 of 2 groups have finished… send anyway?"), and the message carries a **⚠️ PROVISIONAL** banner
 - On a tournament round the text **always sends the combined event total**, no matter which scope is on screen
 - Final standings scales to any group size — the old 100-transfer ceiling that silently left debts unassigned is gone, and anything still outstanding is called out on screen
 
 ### Squaring Up
 
-**No units ever move through Bad Golf.** The app works out who trails who and prints the arithmetic — it never takes, holds, tracks or forwards a payment of any kind. Square up between yourselves however you already do.
+**No units ever move through Bad Golf.** The app works out who trails who and prints the arithmetic — it never takes, holds, tracks or forwards anything of value. Square up between yourselves however you already do.
 
 - The **Unit Totals** card gives you the exact who-trails-who lines
 - **📲 Text Final Standings** sends those lines, with the scorecard image and the every-game card attached, so everybody has the same numbers
 - A line reads like **"You trail Mike by 12.50 units"** — what you do about it is between you and Mike
 
-*The one-tap payment buttons that used to sit on each line, and the "Payment handles" setting that fed them, have both been removed from the app.*
+*Units are for keeping score only. They can't be bought, redeemed or exchanged.*
 
 *The three-line store footer that used to be appended to every settle-up text — "Scored & settled free with the Bad Golf app ⛳" and the two store links — is gone. A settle-up message is now just the numbers.*
 
@@ -1275,7 +1275,7 @@ A round cached with no activity for 12 hours is dropped at launch, and opening t
 
 This section details every game with rules, setup, and award logic. Four games are free forever — **Skins, Nassau, Match Play, and Stroke Play Prize Pool** — everything else carries a gold **PRO** badge and is still completely unlocked.
 
-> **A general rule that changed:** several games used to hand the current leader the whole prize pool from hole 1, or pay nothing at all if you stopped early. Both are fixed. Pool-style games show points (or a "still live" marker) during play and settle at the end, and games that used to require a full 18 settle correctly on a nine or an early finish.
+> **A general rule that changed:** several games used to hand the current leader the whole prize pool from hole 1, or award nothing at all if you stopped early. Both are fixed. Pool-style games show points (or a "still live" marker) during play and settle at the end, and games that used to require a full 18 settle correctly on a nine or an early finish.
 
 > **⚠️ Ten games are unavailable in tournament mode:** Banker, Splix 6's, Bingo Bango Bongo, Wolf, Hammer, Umbrella, Pot of Gold, Animals, Marks and Hot Potato. That applies to both the director's Configure Day list and a foursome's own group games. **Normal rounds are unaffected.**
 
@@ -1285,7 +1285,7 @@ This section details every game with rules, setup, and award logic. Four games a
 - **Players:** 2+
 - **How it works:** The lowest score on a hole wins the "skin". If two or more players tie for low, no one wins — the skin either **carries over** or is **split**, depending on your tie rule.
 - **Par-or-better requirement (optional):** the low score must also be at par or better — **net par** or **gross par**, your choice. *(On a course with per-tee pars, this is measured against each player's own tee par.)*
-- **Two formats, one switch — "Play a pool":** off, each skin has a fixed unit value (**default 5**); on, everyone pays the entry and the prize pool divides by skins won.
+- **Two formats, one switch — "Play a pool":** off, each skin has a fixed unit value (**default 5**); on, everyone puts in the entry and the prize pool divides by skins won.
   - **With the pool on, the tie rule is locked to "No skin"** and the control greys out with a note explaining why — a tied hole simply dies and the prize pool splits only among skins actually won. Switch the pool off and your tie rule returns.
   - In **Pool** mode, no unit figures show mid-round (a pool skin is worth prize pool ÷ total skins won, which isn't knowable until the last hole). The breakdown reads a muted count like **"2 skins"** and the units shows at the end. Per-skin mode shows units live as always.
 - **Its own handicap allowance.** A slider (0–100%, steps of 5, default 100%) labelled **"Handicap for skins"** sets how much handicap counts in Skins. **0% = skins played gross.** It **replaces** the round's handicap percentage rather than stacking on it — a round at 90% with Skins at 80% means 80% of full course handicap, not 72%. Rounds set to "No handicaps", and players marked "plays gross", still get zero strokes.
@@ -1294,19 +1294,19 @@ This section details every game with rules, setup, and award logic. Four games a
 - **Award math:** prize pool ÷ number of skins won = per-skin value; each player nets unit totals minus their entry share, shown as `+13.33 units (2)`.
 - **A carry left at the end of a finished round** goes to the player with the **lowest net total** — among the players who played the most holes. Tied on total, it's **void**. The Games screen header reads e.g. *"5 won · 1 void"* (or *"carrying"* while the round is live), and the row reads *"Carry-over — ‹name› on low total"* or *"Carry-over of N void — tied on total"*. It doesn't count as a skin for badges or scorecard circles.
 - **The saved round card prints the setup**, e.g. `Pool — split by skins won · 80% hcp · All players`.
-- **In tournaments:** the tie setting is exactly **"No carry overs" / "Carry overs"**. With only one group on the course, Skins settle **live on the leaderboard** as you play — a hole pays as soon as every player in the field has posted a score for it, so a late-entered score can't take a skin back.
+- **In tournaments:** the tie setting is exactly **"No carry overs" / "Carry overs"**. With only one group on the course, Skins settle **live on the leaderboard** as you play — a hole settles as soon as every player in the field has posted a score for it, so a late-entered score can't take a skin back.
 
 #### **⛳ Nassau (with Huckle)** *(free)*
 - **Players:** 2–5 per Nassau. With 2 it's head-to-head; with 3+ it's group stroke. Add as many Nassaus as you want, each with its own pair/group and game value. There's a **Select all** on the Nassau card, like every other picker.
 - **Three separate games in one:** front 9, back 9, and overall 18 — each worth the same unit value.
 - **Two scoring formats:** **Stroke play** (lowest total wins each segment) or **Match play** (holes won, e.g. "3&2").
-- **⚠️ Ties CARRY, in every format.** There is one Nassau rule: lowest net wins each segment, and if a segment ties, nothing settles and the units **rolls onto the next segment**. Any carry left over after the Overall is forfeited. *Exception: in a field of more than 10 players where the prize pool pays 2–3 places, ties still split.*
-- **Special-score bonuses:** every **birdie, eagle, and hole-in-one** pays a bonus from each other player (Albatross pays at the eagle rate).
+- **⚠️ Ties CARRY, in every format.** There is one Nassau rule: lowest net wins each segment, and if a segment ties, nothing settles and the units **rolls onto the next segment**. Any carry left over after the Overall is forfeited. *Exception: in a field of more than 10 players where the prize pool awards 2–3 places, ties still split.*
+- **Special-score bonuses:** every **birdie, eagle, and hole-in-one** earns a bonus from each other player (Albatross counts at the eagle rate).
 - **📣 Huckle (the press):** if you're **down 2+** in any segment — strokes in stroke play, holes in match play — you can call a **Huckle**: a fresh side game for the same amount, between you and the current leader, from that hole to the end of the segment. The original segment game plays out separately.
   - **How you call one:** nothing pops up on its own. When someone is eligible, the Score screen shows a highlighted **"📣 Huckle available"** banner (*"N player(s) down 2+ — tap to see the options"*) with a **"📣 Call Huckle"** button that opens the options. No Huckle is offered on a finished round, or on the last hole once its scores are in.
   - A **cart's own Nassau** in a tournament gets the same banner.
   - **Huckles are available on stroke-play Nassau again** (they'd been restricted to match play since v683). Cross-group Nassau still shows the "Huckles off" note.
-- **Quit-early rules:** a stroke segment only settles when **both players completed it** — a player who walks off after 12 holes can no longer win the back or the overall. A fully played front still pays normally; an unfinished segment is void. Group Nassau (3–5 players) pays out on an early finish too; it used to pay nobody.
+- **Quit-early rules:** a stroke segment only settles when **both players completed it** — a player who walks off after 12 holes can no longer win the back or the overall. A fully played front still settles normally; an unfinished segment is void. Group Nassau (3–5 players) settles on an early finish too; it used to award nobody.
 
 #### **💰 Stroke Play Prize Pool** *(free)*
 - **Players:** 2+
@@ -1360,7 +1360,7 @@ This section details every game with rules, setup, and award logic. Four games a
 - **Players:** exactly 3. **Not available in tournaments.**
 - **How it works:** **6 points per hole** — **4 best, 2 middle, 0 worst**. Ties split evenly (two tie for best = 3-3-0; two tie for second = 4-1-1; all tie = 2-2-2).
 - **Game mode 1 — Per-point value:** settled per hole against the field; the average is always 2 points.
-- **Game mode 2 — Entry pool:** everyone pays the entry; most points after 18 wins. **Winner takes all** (split on tie) or **80/20**. **The pool doesn't pay out mid-round** — it shows points while you play and settles when the round ends.
+- **Game mode 2 — Entry pool:** everyone puts in the entry; most points after 18 wins. **Winner takes all** (split on tie) or **80/20**. **The pool doesn't settle mid-round** — it shows points while you play and settles when the round ends.
 - **The banner shows a per-hole line**, e.g. `H15: Tyler 4 +2.00 units · Kevin 2 · Matt 0`.
 
 #### **🌙 Niners (5-3-1) — the 9-Point Game**
@@ -1379,14 +1379,14 @@ Three points per hole: **Bingo** (first on the green), **Bango** (closest once a
 #### **🐺 Captain (Wolf)**
 - **Players:** exactly 4. **Not available in tournaments.**
 - The **Wolf rotates each hole.** After watching the others tee off, the Wolf either **picks a partner** (1v1 against the other two) or goes **Lone Wolf** against all three (**2x**). **Blind Lone Wolf**, called before anyone tees off, is **3x**.
-- **Example:** 2 units Wolf game, you go Lone Wolf (4 units). Win → each opponent owes you 4 units (12 units for the hole). Lose → you owe 4 units to each.
+- **Example:** 2 units Wolf game, you go Lone Wolf (4 units). Win → each opponent gives you 4 units (12 units for the hole). Lose → you give 4 units to each.
 - *The captain rotation order has been reviewed and is deliberately as written.*
 
 #### **🔨 Hammer**
 - **Players:** 2+ (any number in Individual; exactly 4 for Team). **Not available in tournaments.**
-- **How it works:** match play with a **doubling cube.** At any time a player can **throw the hammer** to double the stake; the opponent **accepts** (game doubles, they get the hammer next) or **declines** and concedes the hole at the current game. Low score wins the hole and the prize pool; halved holes can carry (optional).
-- **Format:** **Team (2v2)** *(default)* — two fixed sides, best ball, winners split the prize pool, declining concedes for both partners — or **Individual**, where every player declines for themselves and pays the current stake, split among whoever is still in.
-- **Team 2v2 pays the same as 1v1 at the same setting.** It used to pay half.
+- **How it works:** match play with a **doubling cube.** At any time a player can **throw the hammer** to double the hole's value; the opponent **accepts** (game doubles, they get the hammer next) or **declines** and concedes the hole at the current game. Low score wins the hole and the prize pool; halved holes can carry (optional).
+- **Format:** **Team (2v2)** *(default)* — two fixed sides, best ball, winners split the prize pool, declining concedes for both partners — or **Individual**, where every player declines for themselves and gives the current hole value, split among whoever is still in.
+- **Team 2v2 is worth the same as 1v1 at the same setting.** It used to be worth half.
 - **Watch how it works:** the Info tab's Hammer card leads with a **"▶ Watch how it works"** button that plays a short vertical how-to video in the app.
 - **⚠️ Setup gotcha:** the **net-match checkbox defaults to checked (net scoring ON).** Tapping it turns net **off**.
 
@@ -1412,7 +1412,7 @@ A scramble off the tee, then real golf. **Everyone on the team tees off, the tea
 
 > **Example:** 5 units per player, best 1 net ball, 50% allowance. Team A's best net balls add up to **71**, Team B's to **74**. Team A wins by 3 — **each Team A player +5, each Team B player −5.**
 
-**In a tournament:** on **Configure games**, Shamble plays as **each cart is a team** against the whole field. The A/B team picker is hidden and a note explains the rules: every player puts in the amount set, the **winning cart splits it**, and a tie for first is a push. Carts are ranked on the **Event Leaderboard**, and the payout waits until every cart is in. Each cart taps its own drives on its score screen.
+**In a tournament:** on **Configure games**, Shamble plays as **each cart is a team** against the whole field. The A/B team picker is hidden and a note explains the rules: every player puts in the amount set, the **winning cart splits it**, and a tie for first is halved. Carts are ranked on the **Event Leaderboard**, and the award waits until every cart is in. Each cart taps its own drives on its score screen.
 
 **Setup options:** Units per player · Balls that count per hole (1 or 2) · Net or gross · Shamble handicap allowance (%) · Minimum drives per player · team picker.
 
@@ -1436,13 +1436,13 @@ Even teams; **team total = sum of each member's (points − quota)**. Higher tot
 - **A withdrawal is expensive** — unplayed holes score 0 against that player's full quota
 - **Individual Quota is untouched** and still offers both pool and per-point
 
-**In a tournament**, Team Quota is a **field-wide prize pool** with three award shapes — **winner takes all**, **top 2 at 70/30**, or **top 3 at 50/30/20** — and the maths shows live. *16 players at 20 units = a 320 units prize pool; winner-takes-all pays the winning pair 160 units each; 50/30/20 pays 160 units / 96 units / 64 units.* See [Tourney Tab](#tourney-tab-events--tournaments).
+**In a tournament**, Team Quota is a **field-wide prize pool** with three award shapes — **winner takes all**, **top 2 at 70/30**, or **top 3 at 50/30/20** — and the maths shows live. *16 players at 20 units = a 320 units prize pool; winner-takes-all gives the winning pair 160 units each; 50/30/20 gives 160 units / 96 units / 64 units.* See [Tourney Tab](#tourney-tab-events--tournaments).
 
 **Three honest messages replace the old blanket "teams are uneven":**
 
 | Message | What it means |
 |---------|---------------|
-| **🏹 Team Quota — settles event-wide** | Normal on a tournament round. It pays out once across the whole field; the units shows on Tournament Results, not your group's board |
+| **🏹 Team Quota — settles event-wide** | Normal on a tournament round. It settles once across the whole field; the units shows on Tournament Results, not your group's board |
 | **🏹 Team Quota — not settling** | The teams genuinely are uneven, and it names the counts (e.g. 9 v 7). The "even the teams up in round settings" advice only appears on a live, editable round. **Nothing has been charged** |
 | **🏹 Team Quota — didn't settle** | *"The teams look even (2 v 2), so this needs a look."* No invented reason |
 
@@ -1457,7 +1457,7 @@ Even teams; **team total = sum of each member's (points − quota)**. Higher tot
 
 #### **🏌️ Scramble**
 - **How it works:** both (or all) players hit, the team picks the best shot, and everyone plays from that spot. One team score per hole. *A scramble is scored against the **card** par, not per-tee par.*
-- **Game value:** match play (most holes won) or stroke play (lowest total). **Match-play scrambles closed out early pay** — a match won 6&5 used to settle 0 units — and **9-hole scrambles pay too.**
+- **Game value:** match play (most holes won) or stroke play (lowest total). **Match-play scrambles closed out early settle** — a match won 6&5 used to settle 0 units — and **9-hole scrambles settle too.**
 - **⚠️ Picking Scramble switches off the games that can't work.** A scramble team plays one ball, so there's no individual score for Skins, Low Net, Most GIRs, Fewest Putts, Nassau, Stroke, Banker and the rest to settle on. Ticking **Scramble** disables and dims **30** game toggles, unchecks them, shows a tooltip explaining why, and toasts once saying how many were switched off.
   - **Survivors that still work with a scramble:** Scramble, Closest to the Pin, Long Putt, Long Drive and Greenies (a team birdie still counts for the birdie pool).
 - **Team handicap allowance:** a checkbox (plus an optional custom percentage) on both the Scramble and Ryder Cup option panels, off by default. Defaults are the USGA standards — **2-man scramble 35% of the lower handicap + 15% of the higher; alternate shot 50/50.** "No handicaps" still overrides it.
@@ -1472,31 +1472,31 @@ Five points a hole, **each worth the hole number** — 1 apiece on hole 1, 18 ap
 *The two GIR points need GIR tracking turned on for the round.*
 
 #### **🪙 Pot of Gold**
-- **A separate prize pool rides on every hole**, and the low score wins that hole's pot. You decide the 18 values before the round: bulk-set one flat amount, hand-edit any hole, or tap **Auto-weight** to size each pot by difficulty — the hardest hole (stroke index 1) is worth 18, down to 1 on the easiest. On a nine the weights scale to the nine.
-- **One pot per hole.** Each hole's value is one pot that everyone chips into equally — an **8 pot in a four-ball is 2 from each of the other three, so the winner nets +6**. Want bigger stakes? Raise the base value. *(The old "per player" option was removed; rounds saved before v1605 still settle the old way.)*
-- **🐦 Birdie bonus (optional):** winning a hole with a **gross** birdie pays **2×** that hole's pot (carry included); an eagle or better pays **3×**. A net birdie doesn't count. The GPS bubble shows "· 🐦×2 🦅×3" when it's on.
-- **Carryover (optional):** a tied hole's pot rolls onto the next hole until someone wins it outright. Off, a tie splits that hole's pot. A carry left at the end settles on low total, and voids if the total is still tied.
+- **A separate prize pool rides on every hole**, and the low score wins that hole's prize pool. You decide the 18 values before the round: bulk-set one flat amount, hand-edit any hole, or tap **Auto-weight** to size each hole's prize pool by difficulty — the hardest hole (stroke index 1) is worth 18, down to 1 on the easiest. On a nine the weights scale to the nine.
+- **One prize pool per hole.** Each hole's value is one prize pool that everyone chips into equally — an **8-unit hole in a four-ball is 2 from each of the other three, so the winner nets +6**. Want a bigger game? Raise the base value. *(The old "per player" option was removed; rounds saved before v1605 still settle the old way.)*
+- **🐦 Birdie bonus (optional):** winning a hole with a **gross** birdie is worth **2×** that hole's prize pool (carry included); an eagle or better is worth **3×**. A net birdie doesn't count. The GPS bubble shows "· 🐦×2 🦅×3" when it's on.
+- **Carryover (optional):** a tied hole's prize pool rolls onto the next hole until someone wins it outright. Off, a tie splits that hole's prize pool. A carry left at the end settles on low total, and voids if the total is still tied.
 - Play it gross or net, any number of players (2+). Pot of Gold sits under **Single games**.
 
 #### **🐾 Animals**
-A running side game of penalty **animals**: **Gorilla** (OB) · **Snake** (3-putt) · **Shark** (water) · **Camel** (bunker) · **Jackal** (shank) · **Dolphin** (two waters) · **Crab** (two bunkers). Each animal **passes to the last player who did it**, so only the **final holder** pays. Birdies, eagles and albatrosses cancel penalties out. *Animals and Long Putt can't run at the same time.* **Not available in tournaments.**
+A running side game of penalty **animals**: **Gorilla** (OB) · **Snake** (3-putt) · **Shark** (water) · **Camel** (bunker) · **Jackal** (shank) · **Dolphin** (two waters) · **Crab** (two bunkers). Each animal **passes to the last player who did it**, so only the **final holder** gives units. Birdies, eagles and albatrosses cancel penalties out. *Animals and Long Putt can't run at the same time.* **Not available in tournaments.**
 
 #### **⭐ Marks**
 A **highlight-reel game — most marks wins, not lowest score.** Earn a mark for GIRs · sandies · chip-ins · **fishies** (par after a penalty) · **darts** (closest on a par 3) · **muscles** (longest drive) — plus birdies, eagles and albatrosses off the card. **Not available in tournaments.**
 
 #### **🥔 Hot Potato**
-**One token nobody wants.** Pick a **trigger** at setup — 3-putt, double bogey, OB, or water — and tap who just did it; the potato moves to them **and doubles every time it changes hands.** Whoever holds it after the 18th **pays the current value**, split among everyone else. **Not available in tournaments.**
+**One token nobody wants.** Pick a **trigger** at setup — 3-putt, double bogey, OB, or water — and tap who just did it; the potato moves to them **and doubles every time it changes hands.** Whoever holds it after the 18th **gives the current value**, split among everyone else. **Not available in tournaments.**
 
 **⚠️ The doubling is capped** — at **64× (six doubles)**, with **one move per hole** (last tap wins). It used to be uncapped: 12 passes on a 1 units game reached 2,048 units, and a single hole could double the prize pool twice.
 
 ### Round Pools (whole-group prize pools)
 
-Three pools where everyone pays the same entry and the single best result takes the whole prize pool; **ties split it evenly.**
+Three pools where everyone puts in the same entry and the single best result takes the whole prize pool; **ties split it evenly.**
 
 **How all three behave:**
-- Nothing pays out until **every player in the pool has all their holes entered** (9-hole rounds work too), so no units shows mid-round. **They do settle on a round you finish early** — they used to return nothing at all and the units just disappeared with no row and no message
+- Nothing settles until **every player in the pool has all their holes entered** (9-hole rounds work too), so no units shows mid-round. **They do settle on a round you finish early** — they used to return nothing at all and the units just disappeared with no row and no message
 - If **nobody qualifies**, the prize pool is **void** and no units moves
-- **Player picker:** each pool **pre-selects everyone** the first time you switch it on — you only tap to take someone *out*, and players added mid-round are auto-included. A deliberate "Clear all" stays cleared. A player left out neither pays nor can win, and his unfinished card doesn't hold up the award
+- **Player picker:** each pool **pre-selects everyone** the first time you switch it on — you only tap to take someone *out*, and players added mid-round are auto-included. A deliberate "Clear all" stays cleared. A player left out neither puts in nor can win, and his unfinished card doesn't hold up the award
 - **In a tournament:** these three are hidden from the director's Configure Day screen (the Event Prize Pools cover that), but each foursome can run them as their **own group game**
 
 #### **Low Net Pool**
@@ -1509,7 +1509,7 @@ Three pools where everyone pays the same entry and the single best result takes 
 The **most greens in regulation over 18** takes the prize pool. **Turning this on switches GIR tracking on automatically**, and a toast tells you it did. If nobody makes a single GIR, the prize pool is void.
 
 #### **Fewest Putts Pool**
-The **fewest total putts over 18** takes the prize pool. **Turning this on switches putt tracking on automatically.** **Blank putts count as 0 once the round is finished.** On any hole you scored with the putts box left empty, the app treats it as **0 putts** (a chip-in or hole-out) — as long as you logged putts at least once that round. There are no mid-round warnings. A player who logged **no putts at all** can't win it but still pays his entry.
+The **fewest total putts over 18** takes the prize pool. **Turning this on switches putt tracking on automatically.** **Blank putts count as 0 once the round is finished.** On any hole you scored with the putts box left empty, the app treats it as **0 putts** (a chip-in or hole-out) — as long as you logged putts at least once that round. There are no mid-round warnings. A player who logged **no putts at all** can't win it but still puts in his entry.
 
 ### Side Games
 
@@ -1517,8 +1517,8 @@ The **fewest total putts over 18** takes the prize pool. **Turning this on switc
 - **Applies to:** par 3 holes only. *The par-3 list comes from the course card, not from each player's tee — it's one shared contest.*
 - Mark the player **closest to the pin** on the green. Default 5 units per other player.
 - **Must make par or better to win** — unless you turn on the option below.
-- **Hero Tax (optional penalty):** if the Greenie winner **3-putts**, they **forfeit the award** and **pay each other player a fixed Hero Tax** (default 5 units). A sub-row on the scorecard asks "Did the greenie winner 3-putt?" and the chip crosses out.
-- **"3-putts still win" (default OFF):** turn it on and you no longer need par or better to collect, a 3-putt doesn't forfeit, and **Hero Tax is switched off entirely** — its row disappears from the score screen and the game header reads "pays no matter what."
+- **Hero Tax (optional penalty):** if the Greenie winner **3-putts**, they **forfeit the award** and **give each other player a fixed Hero Tax** (default 5 units). A sub-row on the scorecard asks "Did the greenie winner 3-putt?" and the chip crosses out.
+- **"3-putts still win" (default OFF):** turn it on and you no longer need par or better to collect, a 3-putt doesn't forfeit, and **Hero Tax is switched off entirely** — its row disappears from the score screen and the game header says the greenie counts no matter what.
 - **Birdie Override — somebody has to tap it.** If the option is on, a birdie can take the greenie away from the closest-to-the-pin player, **but only when a person taps the birdie chip.** Nothing changes hands on its own any more.
   - The score screen walks it in two labelled steps: **"Step 1 — was the birdie on the green?"**, shown only for the players the app can't call on its own, then **"Step 2 — tap the birdie that takes the greenie."** The chip that wins reads **"Name 🐦 — takes it"**.
   - A player the app reads as a **chip-in** is drawn struck through, and is still tappable if you disagree.
@@ -1530,33 +1530,33 @@ The **fewest total putts over 18** takes the prize pool. **Turning this on switc
 
 #### **🎯 Closest to the Pin**
 - **Applies to:** any holes you choose (usually the par 3s)
-- **Per-hole mode (default):** every player pays the entry; the group marks who stuck it closest (ball must be on the green) and logs the distance in **feet and inches**. Closest takes that hole's prize pool. **A winner logged with no distance still wins the hole** — someone from another group with a measured distance beats them.
-- **Pool mode (toggle in the CTP options panel):** CTP becomes **one single prize pool** — everyone pays the entry once, the player with the **most CTPs takes the prize pool**, ties split, settling at the end.
+- **Per-hole mode (default):** every player puts in the entry; the group marks who stuck it closest (ball must be on the green) and logs the distance in **feet and inches**. Closest takes that hole's prize pool. **A winner logged with no distance still wins the hole** — someone from another group with a measured distance beats them.
+- **Pool mode (toggle in the CTP options panel):** CTP becomes **one single prize pool** — everyone puts in the entry once, the player with the **most CTPs takes the prize pool**, ties split, settling at the end.
 - **Units example:** 4 players at 5 units, A wins 2 CTPs to B's 1. **Pool mode:** A +15 units, everyone else −5 units. **Per-hole:** A +25 units, B +5 units, C −15 units.
 - **CTP sits in the main games list**, not buried in Side Games, with its hole picker, pool-mode toggle and participant picker.
 - **With one group on the course, CTP settles live** as you play, recomputing if someone logs a closer shot later.
 - **Tournament rounds:** entries combine across groups. A CTP added *after* a day has launched reaches the groups — each group's round heals itself when opened.
 
 #### **📏 Long Putt**
-Everyone pays the entry; the **longest putt of the round** wins the prize pool. Tap who holds it and log the distance; update any time someone drains a longer one. The **📏 bubble** on GPS jumps you straight there. **With one group on the course it settles live.** In tournaments, the longest putt across the **entire field** wins one prize pool — and **every group is included**.
+Everyone puts in the entry; the **longest putt of the round** wins the prize pool. Tap who holds it and log the distance; update any time someone drains a longer one. The **📏 bubble** on GPS jumps you straight there. **With one group on the course it settles live.** In tournaments, the longest putt across the **entire field** wins one prize pool — and **every group is included**.
 
 *Switching Long Putt on mid-round now reaches every phone.* The repair check used to run once per session and treat a failed read as "the prize pool is off", so a device that looked at the wrong moment never looked again; it re-checks every couple of minutes now.
 
 #### **💥 Long Drive**
-Everyone pays the entry; the **longest drive on the designated hole** wins the prize pool. The organizer marks the winner and an optional yardage — **there's no auto-measure.** Available in normal rounds, not just tournaments.
+Everyone puts in the entry; the **longest drive on the designated hole** wins the prize pool. The organizer marks the winner and an optional yardage — **there's no auto-measure.** Available in normal rounds, not just tournaments.
 
 #### **🐦 Birdie Bump**
-- Pays per great shot with **no tracking required** — it reads straight off your scorecard. Configure **three unit values: birdie, eagle, and hole-in-one.** Any participant who makes one **collects that amount from every other participant.**
+- Awards units per great shot with **no tracking required** — it reads straight off your scorecard. Configure **three unit values: birdie, eagle, and hole-in-one.** Any participant who makes one **collects that amount from every other participant.**
 - **Example:** 10 units birdie, 4 players → a birdie collects 10 units × 3 = **+30 units.**
-- **An eagle can never pay less than a birdie.** If you left Eagle blank an eagle used to pay 0 units — the player who made it actually *lost* units to the birdie makers. Same for an ace with no hole-in-one amount, which falls back to the eagle rate.
-- **Birdie Bump pays during play**, like every other group game — it used to sit at 0 units in running totals, the GPS units bubble and the group board all day and only appear at the end.
-- **In a tournament, it now actually pays.** Birdie Bump on a tournament group round used to appear on the games list and then settle **0 units for everyone** — the prize pool never reached group totals, group games or who-trails-who. On a tournament group round, a missing participant list is read as **"this group"**, and the units lands where it should. *There is no field-wide Birdie Bump — it's a group-level game only.*
+- **An eagle can never be worth less than a birdie.** If you left Eagle blank an eagle used to be worth 0 units — the player who made it actually *lost* units to the birdie makers. Same for an ace with no hole-in-one amount, which falls back to the eagle rate.
+- **Birdie Bump settles during play**, like every other group game — it used to sit at 0 units in running totals, the GPS units bubble and the group board all day and only appear at the end.
+- **In a tournament, it now actually settles.** Birdie Bump on a tournament group round used to appear on the games list and then settle **0 units for everyone** — the prize pool never reached group totals, group games or who-trails-who. On a tournament group round, a missing participant list is read as **"this group"**, and the units lands where it should. *There is no field-wide Birdie Bump — it's a group-level game only.*
 - **On a casual round, Birdie Bump still refuses to settle with no participant list.** That's deliberate: there, an empty list means the setup was never finished.
 - *(This is the game formerly called "Birdie Pool" — only the display name changed; old rounds still resolve correctly.)*
 
 #### **Junk Games (toggle each independently)**
 
-Each junk game pays **X units from every other player** to whoever earns it. Multiple players can earn the same junk on a hole, and one player can earn several junks on one hole.
+Each junk game earns **X units from every other player** to whoever earns it. Multiple players can earn the same junk on a hole, and one player can earn several junks on one hole.
 
 | Game | Trigger | Auto-fill |
 |-----|---------|-----------|
@@ -1565,7 +1565,7 @@ Each junk game pays **X units from every other player** to whoever earns it. Mul
 | **🍫 Rolo** | Par or better **after taking a penalty stroke** | ⚡ with **Penalties** tracking on |
 | **🌳 Barkie** | Par or better **after hitting a tree** | manual |
 | **📏 Polie** | Make a **long putt** — typically 10+ feet (group sets the standard) | manual |
-| **🐍 Snake** | Whoever **3-putts gets the snake**; holder at the end pays out (defaults to 0.50 units) | manual |
+| **🐍 Snake** | Whoever **3-putts gets the snake**; holder at the end gives units (defaults to 0.50 units) | manual |
 | **⛳ Arnie** | Par **without hitting the fairway or the green in regulation** | manual — **needs Putts tracking on to award at all** |
 | **🎯 Chip-In** | **Hole out from off the green for par or better** | ⚡ with **Putts** tracking on (putts = 0, par or better; an ace is excluded) |
 
@@ -1622,10 +1622,10 @@ The **Info** tab (More → 💡 Info) is the app's built-in **rulebook and help 
 
 **What's inside, top to bottom:**
 
-- **Single games · Team games · Junk · Extras** — one tile per game with **How it works · Example · Setup options**, the same four groups and the same icons as the round-setup screen. Vegas lists its four rotations (Dynamic included); Skins covers the **Play a pool** switch; Banker carries the one-move-per-hole and gross-birdie rules; Pot of Gold covers the one-pot-per-hole and birdie-bonus rules.
+- **Single games · Team games · Junk · Extras** — one tile per game with **How it works · Example · Setup options**, the same four groups and the same icons as the round-setup screen. Vegas lists its four rotations (Dynamic included); Skins covers the **Play a pool** switch; Banker carries the one-move-per-hole and gross-birdie rules; Pot of Gold covers the one-prize-pool-per-hole and birdie-bonus rules.
 - **🍀 Side games** — Par 3 Greenie (with Hero Tax), Closest to the Pin, Low Net / GIR / Fewest Putts pools, Birdie Bump, GIR, Sandy, Rolo, Barkie, Polie, Snake, Arnie, Chip-In, Long Putt, Long Drive. Rolo and Chip-In carry an "⚡ Auto-fill" note explaining which tracking toggle powers them.
 - **Handicap rules** and **📊 How handicaps work** — basis, percentage, no strokes on par 3s, what gets stored, the math, tee selection per player, the weather adjustment and **"🏷️ The 'TEMP' badge"**.
-- **🏆 Tournaments** — *new in this edition.* Six tiles: **What a tournament is** (Team / Individual / Bracket Play, the commissioner and the "Commissioner is a player" switch) · **Setting one up** (every wizard step in order, from Team names & logos to Review & start, and the automatic pairing for a 2-v-2) · **Tournament games vs. group games** (field formats and pools vs. each cart's own action, one format at a time, what pays when both are on) · **Inviting the field** (the send-invites prompt, Personal invites, the "Is this you?" card, the Times calendar) · **Playing a day** (▶ Start Day N, scorekeepers, the Event Leaderboard tabs, Awards, Text Final Standings, where finished events file) · **Deleting one** (commissioner only; removes the event and every round it launched — scores, units, stats and badges — for everyone).
+- **🏆 Tournaments** — *new in this edition.* Six tiles: **What a tournament is** (Team / Individual / Bracket Play, the commissioner and the "Commissioner is a player" switch) · **Setting one up** (every wizard step in order, from Team names & logos to Review & start, and the automatic pairing for a 2-v-2) · **Tournament games vs. group games** (field formats and pools vs. each cart's own action, one format at a time, what settles when both are on) · **Inviting the field** (the send-invites prompt, Personal invites, the "Is this you?" card, the Times calendar) · **Playing a day** (▶ Start Day N, scorekeepers, the Event Leaderboard tabs, Awards, Text Final Standings, where finished events file) · **Deleting one** (commissioner only; removes the event and every round it launched — scores, units, stats and badges — for everyone).
 - **🏅 Leagues** — seven tiles: what a league is (6–12 weeks, the two formats, playoff weeks are extra) · joining one · weeks and missing one (the daily 9 am reminder, auto-close, no excused week, subs) · scoring and handicaps · side games in a league (the seven pools) · **League fees and prize pools** (units, the held-back share) · running one (**+ Create a League**, the non-playing commissioner, ⚙️ Edit settings, 🛺 Configure carts, 🔁 Update players, 📨 Text everyone the link).
 - **🧭 Good to know** — per-game participants, **🚶 A player leaves mid-round**, **🗑️ Deleting a round, tournament or league** (remove from my list vs. delete for everyone), and ending a round early.
 - **Documentation & legal** — links to this Player Guide PDF, the Admin Guide (admins only), the Privacy Policy and the Terms of Service. All four are served from **officialbadgolf.com** and open in a new page (on the phone, an in-app browser sheet with **Done**).
@@ -2110,7 +2110,7 @@ Brackets, and tournaments created before the quick setup, use the full create sc
 
 | Type | What it is |
 |------|-----------|
-| **Team** | Two or more sides (up to 8) scoring cup points against each other, with an optional tournament pot |
+| **Team** | Two or more sides (up to 8) scoring cup points against each other, with an optional tournament prize pool |
 | **Individual** | Everybody on one combined leaderboard |
 | **Bracket Play** | A knockout — pick an **Elimination** style; the Days box becomes a line such as *"8 players → 3 rounds, one per day…"* |
 
@@ -2126,7 +2126,7 @@ Setup runs one step at a time and **saves as it goes** — a green *"✓ Everyth
 2. **Add players** — pick Bad Golf users (with a ⭐ Friends filter) or **"Add a player (guest)"**: First name, Last name, HCP. Adding sixteen players takes about three seconds.
 3. **🤝 Pick the teams** *(team events)* — one column per side; tap a name to move it (with three or more teams: tap a name, then a team). **⚖️ Balance by handicap** or **🔀 Shuffle** does it for you; the status line reads *"✓ 2 v 2 — tap Next…"*.
 4. **📊 Handicap rules** — set **once for the whole event**: handicap basis, percentage, strokes on par 3s, max score (defaults: own handicap, 100%, strokes on par 3s, no max). The step auto-saves ("Saving… / Saved ✓"). Handicaps are entered as xx.x (−9 to 54).
-5. **💰 Tournament pot** *(team events)* — a checkbox and a **buy-in per player**, with a live sum ("8 players × 20 = 160 in the pot"). The side with the most cup points across every day takes the pot, split among its players; a tie splits it. A **fee reserve** — a percent or a flat amount per player, with a label — can be held back off the top, and the summary then reads *"… held back for X · N to the winners"*.
+5. **💰 Tournament prize pool** *(team events)* — a checkbox and a **buy-in per player**, with a live sum ("8 players × 20 = 160 in the prize pool"). The side with the most cup points across every day takes the prize pool, split among its players; a tie splits it. A **fee reserve** — a percent or a flat amount per player, with a label — can be held back off the top, and the summary then reads *"… held back for X · N to the winners"*.
 6. **Then, for each day:** **Pick the course** (titled "Pick the course — Day 2" on later days) → **Set the date** (Day 2+ defaults to the day after Day 1) → **Configure games** → **Assign tees** → **Carts & teams** → **Add scorekeepers** → **Review & start**.
 
 **Carts & teams** builds the carts from the matchups you made on Configure games — two matches per cart, unmatched pairs seated team-vs-team as four-man carts — and each group header carries a **Time** field (AM/PM shown in full on the phone). **Groups hold up to 5** (*"Cart is full (5 max)"*); **"👥 One group"** seats a field of up to 5 together. Older events with bigger carts are rebuilt when you open them. The add-player picker opens one at a time, shows *"Loading players…"* on a slow connection, and the button reads **"Adding…"** while it saves. **A blocked step tells you why** — Next stays greyed but names what's missing: *"2 groups still need a scorekeeper: Group 2 and Group 4."*
@@ -2138,9 +2138,9 @@ Setup runs one step at a time and **saves as it goes** — a green *"✓ Everyth
 Two clearly separate ideas:
 
 - **Tournament games** are set by the commissioner on **Configure games** and settle across the **whole field**. The main format — **Stroke play, Stableford, Quota, Match play, Team match play (2v2), Team Quota, Team low ball, Shamble, Scramble** or **Ryder Cup** — is **one at a time**: ticking one greys the others with *"Already playing ‹X› — one format at a time."* Team formats offer **2-man teams (2 v 2 in each cart)** or **4-man teams (each cart is a team)**. Individual and Bracket events hide the team formats. **A bracket sets the format for you:** whatever you picked for *Matches are* (Match play or Stroke play) is ticked on Configure games, and the other formats are greyed out with *"Set by the bracket — Match play."*
-- **The field prize pools** — **Tournament Skins, Low Net, Most GIRs, Fewest Putts, Long Putt, Closest to the Pin, Long Drive** — sit under **Extras**. With Ryder Cup or Scramble on, the individual pools grey out: *"Ryder Cup plays a shared ball — no individual scores or stats to pay this on."* Stroke play and the Low Net pool grey each other out — *"Stroke play already runs the Low Net prize pool."*
-- **Main formats carry no units of their own** — they're paid from the tournament fee; the pools and extras keep units.
-- **Group games** are each cart's own action — Nassau, Banker, Wolf, junk and the rest — set on the cart's round exactly like an ordinary round and settled inside that cart. A pool switched on for the whole event is what pays; the same game inside a cart is suppressed so nothing settles twice. A cart's group games never pre-tick Long Putt when the event runs the Long Putt pool.
+- **The field prize pools** — **Tournament Skins, Low Net, Most GIRs, Fewest Putts, Long Putt, Closest to the Pin, Long Drive** — sit under **Extras**. With Ryder Cup or Scramble on, the individual pools grey out: a shared ball leaves no individual scores or stats to settle them on. Stroke play and the Low Net pool grey each other out — *"Stroke play already runs the Low Net prize pool."*
+- **Main formats carry no units of their own** — they're settled from the tournament entry; the pools and extras keep units.
+- **Group games** are each cart's own action — Nassau, Banker, Wolf, junk and the rest — set on the cart's round exactly like an ordinary round and settled inside that cart. A pool switched on for the whole event is what settles; the same game inside a cart is suppressed so nothing settles twice. A cart's group games never pre-tick Long Putt when the event runs the Long Putt pool.
 
 **Tap-to-pair matchups.** For team games, tap a player, then a teammate → a pair; tap a pair, then a pair on the other side → a match. **⚖️ Auto-pair by handicap** / **🔀 Shuffle** do it for you. Ryder Cup uses the same builder. **Match play** in an event has one **"Units per match — every match"** and one **"Net or gross — every match"** header instead of per-match fields.
 
@@ -2166,7 +2166,7 @@ Configure Day starts clean for every new event and every new day — no carried-
 ### Join Requests and Who's Paid
 
 - **🙋 Join link** — one link anyone can open to **ask to join**: no account needed, just first name, last name and handicap. You **approve or decline** each request. Approved players are asked to sign in so their spot ties to their account. If someone asks under a name you already typed onto the roster, approving **links them to that spot** (*"✓ Already on your roster — approving links them"*) — no duplicates to clean up.
-- **💵 Who's paid** — a tick per player (*"6 of 10 paid"*). It's a **reminder only**: it never blocks starting a day or a pool, and nothing moves money.
+- **💵 Who's paid** — a tick per player (*"6 of 10 paid"*). It's a **reminder only**: it never blocks starting a day or a pool, and nothing moves through the app.
 
 ### 🧳 Trip — Lodging, Rooms & Itinerary
 
@@ -2213,7 +2213,7 @@ Every tournament has a shared **📸 Photos** album (leagues too — see Leagues
 
 ### 🤝 Sponsors
 
-**Settings → 🤝 Sponsors** — the commissioner adds each sponsor's **name**, **logo** (pick a picture; it's resized on your phone) and an optional **website**, and can give a sponsor **holes**. Deals and payments happen outside the app.
+**Settings → 🤝 Sponsors** — the commissioner adds each sponsor's **name**, **logo** (pick a picture; it's resized on your phone) and an optional **website**, and can give a sponsor **holes**. Sponsor arrangements happen outside the app.
 
 - Logos show on the **event page**, along the bottom of the **📺 TV board**, and on every **printable** (*"Thank you to our sponsors"*).
 - A **sponsored hole** shows *"Sponsored by Acme Golf"* under the hole number on every scorecard in the event, and the printed scorecard lists the hole sponsors.
@@ -2266,9 +2266,9 @@ Each event on the Tourney tab is one card: the name, date and tee time, then a s
 - **Each cart has to fit the day's games** — Vegas and Ryder Cup need exactly 4, a 2-man scramble needs 4. If some carts don't fit, you're asked *"Launch the others anyway?"* and those carts stay unstarted until they're re-paired. If none fit, **"Nothing launched"** tells you which to fix. Moving a player into a cart whose round has already opened is blocked — swap instead.
 - **Games a cart set up for itself** (its own Nassau, Skins, Greenie, Birdie Bump…) get their own cards on the Games screen, tagged **(your group)**, alongside the field games.
 - Starting a day lands the commissioner in their own group's round. Each group is its own round; its **scorekeeper** keeps the card the way any round is scored. The Score tab's **"· left the round?"** works here too.
-- **The Event Leaderboard** — the 🏆 icon on the card — tabs by **Day N · Group M** (a sideways-scrolling pill strip on phones) with a **Strokes | ⚔️ Matches (N)** pair on match days, cross-group matches included. The Long Drive pot row names the winner and the day.
+- **The Event Leaderboard** — the 🏆 icon on the card — tabs by **Day N · Group M** (a sideways-scrolling pill strip on phones) with a **Strokes | ⚔️ Matches (N)** pair on match days, cross-group matches included. The Long Drive prize pool row names the winner and the day.
 - **Cup standings** (team events) are kept per real side; at three or more teams the cup card becomes a ranked table.
-- **💰 Awards** on the leaderboard shows what every pool paid. **📲 Text Final Standings** and the summary share attach the **whole field's scorecard**, not just your cart's. All units figures print as whole numbers.
+- **💰 Awards** on the leaderboard shows what every pool awarded. **📲 Text Final Standings** and the summary share attach the **whole field's scorecard**, not just your cart's. All units figures print as whole numbers.
 - Closing a finished tournament round lands you on the Tourney tab (no leaderboard pop-up); **"🏆 Full standings & awards"** on the summary opens it on demand.
 - **Every tournament card has a "▴ Collapse" bar**; your own group's fold opens by default. The Review step shows the real game count — *"🏆 Prize pools: Skins 5 · Long Putt 1 · Low Net 1 · Most GIRs 1 · Fewest Putts 1"* and per day *"🎮 Games: CTP 1 (hole 17)"*.
 
@@ -2284,7 +2284,7 @@ A Bracket Play event has a real **Carts** screen — rows labelled **Group N**, 
 
 - **Official (not playing)** — a co-commissioner who tracks the games but isn't in the field: full manage rights, never in a pool or the standings. Everyone sees a *"📋 Officials (not playing): [name]"* line on the event home screen.
 - **Sitting a player out of one game** — per-player opt-outs, set by the commissioner under **"🎯 Who's in each prize pool"**; an opted-out player isn't charged and doesn't grow the pool. Closest to the Pin and Long Putt never charge a no-show.
-- **Removing a player** who already has scores clears them from every launched card and money pool, after a warning.
+- **Removing a player** who already has scores clears them from every launched card and prize pool, after a warning.
 
 ### Finished Events
 
@@ -2304,7 +2304,7 @@ Only the commissioner (or an admin) can delete a tournament — **🗑️ Delete
 
 **Two places explain leagues without leaving the app:**
 
-- **More → Info** has its own **Leagues** section — seven drop-down explainers covering what a league is, joining one, weeks and missed weeks, scoring and handicaps, side games, how the money works, and running one. It sits right after the two handicap explainers on purpose, because a league week is scored net and the handicap sections come first.
+- **More → Info** has its own **Leagues** section — seven drop-down explainers covering what a league is, joining one, weeks and missed weeks, scoring and handicaps, side games, how the units work, and running one. It sits right after the two handicap explainers on purpose, because a league week is scored net and the handicap sections come first.
 - **The welcome tour** has a **"Leagues — play a season"** card, fifth of six, after Side games and before the closing help card. It points at the **More** tab, the same place the card after it points, so the two read as one thought: here's the feature, and here's where it lives.
 
 ### What a League Is
@@ -2414,9 +2414,9 @@ If a player can't make a week, the seat is filled directly — there's no invite
 - **"Update players"** sits on the Schedule screen next to "Change the day", on any unplayed week. **Sit out** on a player opens the sub picker immediately, and the seat then reads **"Out · ‹sub› is in"**. **Back in** reverses it.
 - The scoring rules for a sub are fixed, and worth knowing before an argument starts:
   - **League points go to the side being subbed for** — the match and the standings credit the absent player's seat, not the sub
-  - **Weekly pools charge the sub** — whoever actually posted the card pays into, and can win, that week's skins, low net and the rest
+  - **Weekly pools charge the sub** — whoever actually posted the card puts into, and can win, that week's skins, low net and the rest
   - **Stats save under the sub** — their own handicap and round history record the round, because they played it
-- A designated sub never counts toward the pairing math, never appears in the standings or field weeks, and **never pays the season entry** — but does pay into the weekly pools on nights they play.
+- A designated sub never counts toward the pairing math, never appears in the standings or field weeks, and **never puts in the season entry** — but does put into the weekly pools on nights they play.
 - **In a team league** a missing player's seat is settled by a **sub** or a **forfeit** only — the "Out this week" card doesn't offer a blind draw or "play the course" for teams.
 - **A member removed mid-season:** their remaining one-on-one matches become **byes** for their opponents instead of forfeits.
 
@@ -2440,7 +2440,7 @@ If a player can't make a week, the seat is filled directly — there's no invite
 
 **Ties for the week's lowest net go to a card-off** (back 9, back 6, back 3, then the 18th hole, handicap-adjusted) — only a tie that survives all of that splits. Weeks finalized before this change keep their old result.
 
-**Most GIRs** and **Fewest Putts** are the two newest. Like the other computed pools they tie-split evenly, and **only players whose card can actually be ranked are charged into them** — if your card has no putts recorded, you're not in the putts pool and you don't pay for it.
+**Most GIRs** and **Fewest Putts** are the two newest. Like the other computed pools they tie-split evenly, and **only players whose card can actually be ranked are charged into them** — if your card has no putts recorded, you're not in the putts pool and you aren't charged into it.
 
 *Wolf, Banker and Nassau are deliberately not offered as league pools — they're built around a group of four negotiating hole by hole, which doesn't survive being scored across a whole league night.*
 
@@ -2448,22 +2448,22 @@ If a player can't make a week, the seat is filled directly — there's no invite
 
 - **Claimed pools** are asserted by someone tapping "I've got it"; a later claim on the same hole displaces an earlier one, and any member can challenge before the week finalizes. **Computed pools** come straight from the cards.
 - **Everyone on the roster is in every pool that's switched on** by default. The commissioner can uncheck players for a specific week; an opted-out player isn't charged and the pool shrinks by exactly their share.
-- **A pool with no winner recorded charges nobody.** A closest-to-the-pin nobody claimed, a longest drive the commissioner never picked, a skins week where every hole tied, a low net where no card qualified — all of those used to collect everyone's buy-in and pay nothing out, permanently. Record the winner later and the charge and the payout appear together.
-- **A manual pool splits across the winners actually recorded**, not across the number of holes it was set up for. Four CTP holes with two winners recorded pays those two half each, instead of paying a quarter twice and stranding the rest.
+- **A pool with no winner recorded charges nobody.** A closest-to-the-pin nobody claimed, a longest drive the commissioner never picked, a skins week where every hole tied, a low net where no card qualified — all of those used to collect everyone's entry and award nothing, permanently. Record the winner later and the charge and the award appear together.
+- **A manual pool splits across the winners actually recorded**, not across the number of holes it was set up for. Four CTP holes with two winners recorded gives those two half each, instead of giving a quarter twice and stranding the rest.
 
 **How the pools read on the awards and units screens:**
 
 - **Closest to the pin gets one row per hole**, each with its own winner — *"Closest to the pin · hole 5"*, *"· hole 12"* — rather than four holes merged into a single row carrying three names and one arbitrary hole number.
 - **Skins shows each winner's own skin count and the week's true total** — *"12 skins · 2.50 a skin"* — instead of borrowing the first winner's "1 skin" as everybody's label.
 
-> **What an ordinary member sees vs. what the commissioner sees.** On the standings and money screens a **non-commissioner's** prize-pool cards are titled **"…what you won"** and carry the line *"Only your own winnings are shown here — the commissioner sees the whole field."* The card only ever listed the viewer's own ledger lines; without that title it read like the whole field's results, so a member who won one pool looked to himself like he'd won every pool. **Commissioners see the wording unchanged.**
+> **What an ordinary member sees vs. what the commissioner sees.** On the standings and units screens a **non-commissioner's** prize-pool cards are titled **"…what you won"** and carry the line *"Only your own winnings are shown here — the commissioner sees the whole field."* The card only ever listed the viewer's own ledger lines; without that title it read like the whole field's results, so a member who won one pool looked to himself like he'd won every pool. **Commissioners see the wording unchanged.**
 
 **Worked example — a scramble team's weekly pool.** A 5-unit skins pool, 8 players, 4 scramble teams. A scramble side plays one ball, so it enters **once**: the pool collects **4 × 5 = 20 units** that week, not 40. The units screen says so out loud — *"5 units each team, each week · 4 teams — a scramble side plays one ball, so it enters once."*
 
 ### Season Standings
 
 - **Head-to-head and team leagues** rank on points: weeks played, wins/losses/ties, with a countback tiebreak (back 9, then 6, then 3, then 1).
-- **Playoff weeks don't count** toward the regular-season table or the season pot, and the season pot pays out only once every regular-season week is final.
+- **Playoff weeks don't count** toward the regular-season table or the season prize pool, and the season prize pool settles only once every regular-season week is final.
 - **Individual field leagues** run a **to-par season race**: every posted card's net score, converted to strokes against the par of the holes actually played, adds to a running total. **Lowest total wins.**
 
 > **A field league is strict about attendance.** Miss a week with no card posted and you're marked **OUT** for the season. There is no "best N of M" cushion. The only way back in is the commissioner entering your card by hand — which brings its own real strokes with it, not a free pass.
@@ -2491,12 +2491,12 @@ After the commissioner enters Charlie's missing card — a real +9 round — Cha
 
 Bad Golf tracks and reports league units. It does not collect or hold anything.
 
-- **One season entry, in units**, paid into the season pool and distributed at the end. Set on the create screen.
-- **Distribution structures:** **All to first**, **80/20**, or **70/30** — all three save correctly now. A tie for a paid place **splits that place evenly** — never a coin flip.
+- **One season entry, in units**, put into the season pool and distributed at the end. Set on the create screen.
+- **Distribution structures:** **All to first**, **80/20**, or **70/30** — all three save correctly now. A tie for a prize place **splits that place evenly** — never a coin flip.
 - **Weekly pools settle every week; the season pool settles at the end of the season.**
 - The units screen shows a card per week naming that week's pools, a season card, and a running season total, with **Unit Totals** as the live who-trails-who summary.
 
-**Worked example.** 8 paying players (of 9 on the roster — one is a designated sub) × 75 units = a **600-unit season pool**. Two teams tie for first under **All to first**: the 600 units split evenly across those 4 players — **150 units each**.
+**Worked example.** 8 entered players (of 9 on the roster — one is a designated sub) × 75 units = a **600-unit season pool**. Two teams tie for first under **All to first**: the 600 units split evenly across those 4 players — **150 units each**.
 
 ### Running a League (Commissioner)
 
@@ -2529,7 +2529,7 @@ Tap **"+ Create a League"** under **More → ⛳ League**. **The create screen a
 
 **The week, for the commissioner.** **Start Week / Open the week** on the week card; **[Pick a round] [Enter card]** beside every "No card yet" row (you can pick a round for any member); **Finalize** names anyone still missing a score — *"Dana Griffin and Marcus Deleon are missing a score for week 3. Finalize anyway?"* → **Finalize without them** / Wait. A finalized week reads *"This week is finished…"* with **Week N results**. Leagues where players post their own rounds get a **daily 9 am reminder** until the card is in and **close the week automatically** once every card is posted; everyone gets *"Week N is final. Tap to see the standings."* The last week flips the season to **complete**: the league card collapses to **🏆 League Standings**, and **Full schedule** shows the read-only season.
 
-**The standings screen** shows **Final standings** with a green "final · N weeks" pill on a complete season; a **Playoffs** card with three states (not built / built with "▶ Open week N — start it there" / 🏆 Champions) and the prize pool as fee × payers − reserve; the money card as *League fees → Held back — ‹label› → Season prize pool (net)*; the **Matches** card with team names, net, 🏆 and a hole-by-hole **Scorecard**; and **Scorecards by week** — a team picker for team leagues, or per-week leaderboards with a player picker, "T5" ties, **Card** and **View all N cards — Week N** for field leagues.
+**The standings screen** shows **Final standings** with a green "final · N weeks" pill on a complete season; a **Playoffs** card with three states (not built / built with "▶ Open week N — start it there" / 🏆 Champions) and the prize pool as fee × entrants − reserve; the units card as *League fees → Held back — ‹label› → Season prize pool (net)*; the **Matches** card with team names, net, 🏆 and a hole-by-hole **Scorecard**; and **Scorecards by week** — a team picker for team leagues, or per-week leaderboards with a player picker, "T5" ties, **Card** and **View all N cards — Week N** for field leagues.
 
 **Deleting a league voids every round it launched — completely.** Those rounds come out of everyone's **Rounds** list, out of the shared recent-games and crew feed, out of every player's **Stats** and score history, and any **badges** they earned go with them. The confirmation says so: *"The rounds it launched are voided too, so nothing from this league is left in anyone's Rounds or Stats."*
 
@@ -2573,7 +2573,7 @@ The Friends tab is your player roster and your friend network. It's free — the
 
 ### 👀 Live Now
 
-The **Live now** card on **Home** (directly above Your rounds) is where you watch a friend play — one row per live round, with a **👀 Spectate** button. A round you're playing in shows **▶ Join** instead. *(It moved from this tab to Home. The old Wager button is gone with the rest of the wagering feature.)*
+The **Live now** card on **Home** (directly above Your rounds) is where you watch a friend play — one row per live round, with a **👀 Spectate** button. A round you're playing in shows **▶ Join** instead. *(It moved from this tab to Home.)*
 
 ### Player Stats — All Eight Tiles Tap Through
 
@@ -3174,8 +3174,8 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 ### Settling Up
 
 1. On the **💵 Games** screen, the final standings card is the first thing you see
-2. Tap **📲 Text Final Standings** — it always attaches the scorecard image and the games card, and the message carries the who-trails-who lines and everyone's payment links
-3. Each pay line carries one tappable link — the payee's preferred method
+2. Tap **📲 Text Final Standings** — it always attaches the scorecard image and the games card, and the message carries the who-trails-who lines
+3. Each who-trails-who line names both players and the units
 4. If groups are still out, the app warns you and the message carries a **⚠️ PROVISIONAL** banner
 5. On a tournament round the text sends the combined event total no matter which scope is on screen
 
@@ -3311,34 +3311,34 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 | **Best Ball** | Team format; each player plays their own ball, the team takes the lower score per hole |
 | **Scramble** | Team format; everyone hits, the team picks the best, repeat (one team score per hole). Scored against the **card** par |
 | **Shamble** | Team format; everyone drives, the team picks the best drive, then each player plays their own ball in. The team counts its best 1 or 2 net scores per hole, with a reduced **Shamble allowance** on handicaps |
-| **Scramble Prize Pool** | The field-wide scramble prize pool, set under Event Prize pools — every player pays the entry and cart groups are the teams |
+| **Scramble Prize Pool** | The field-wide scramble prize pool, set under Event Prize pools — every player puts in the entry and cart groups are the teams |
 | **Nassau** | Three separate games (front, back, overall). **Ties carry** to the next segment |
 | **Huckle** | The Nassau press — available when you're down 2+ in a segment, in stroke play or match play |
 | **Skins** | Lowest score on each hole wins that hole's prize pool. A fixed value per skin, or the **Play a pool** switch |
 | **Badges** | The 50 Bad Golf Badges, earned automatically from posted rounds; ×N for repeats, levels on a few. Deleted rounds take theirs with them |
 | **Commissioner** | Whoever created a tournament or league; can run it without playing ("Commissioner is a player" off) |
-| **Fee reserve** | A share of a tournament pot or league fee held back off the top, with a label, before the prize pool pays out |
+| **Fee reserve** | A share of a tournament prize pool or league fee held back off the top, with a label, before the prize pool is awarded |
 | **Field league** | An "Individual — against the field" league: everyone posts a score, no schedule, optionally any course |
 | **Delete for all** | The host / commissioner / admin delete: removes a round (or every round an event launched) from everyone — units, stats, badges and feeds included |
 | **Field skin** | A tournament-wide skin — circled **gold** on the scorecard (a group's own skin circles blue) |
 | **Vegas** | 2v2 format; scores paired (low digit first) not added; tie-doubling is capped. Teams can rotate every 6, stay fixed, or **switch at the turn** |
 | **Hammer** | Match play with a doubling cube — throw the hammer to double; accept or fold. Team (2v2) or Individual |
 | **High & Low** | 2v2; a point for the better low ball and a point for the better high ball each hole. Needs an even field |
-| **Animals** | Penalty animals (Gorilla, Snake, Shark, Camel, Jackal, Dolphin, Crab) pass to the last offender; only the final holder pays |
+| **Animals** | Penalty animals (Gorilla, Snake, Shark, Camel, Jackal, Dolphin, Crab) pass to the last offender; only the final holder gives units |
 | **Marks** | Highlight-reel game — most marks wins (GIRs, sandies, chip-ins, fishies, darts, muscles, birdies) |
-| **Hot Potato** | One token that doubles each time it changes hands, **capped at 64×**; whoever holds it after 18 pays |
+| **Hot Potato** | One token that doubles each time it changes hands, **capped at 64×**; whoever holds it after 18 gives units |
 | **Umbrella** | 2v2 points game; five points a hole, each worth the hole number; sweeping all five doubles the hole |
 | **Pot of Gold** | A prize pool on every hole, `base × (19 − stroke index)`. **A 1-unit base totals 171 units per opponent over 18** |
 | **Team Quota** | Teams play (points − quota); an **entry prize pool**, not a per-point game. In a tournament it settles once across the whole field |
-| **Round pool** | A whole-group prize pool — **Low Net Pool**, **GIR Pool**, or **Fewest Putts Pool**. Everyone pays the entry; best result takes it; ties split |
+| **Round pool** | A whole-group prize pool — **Low Net Pool**, **GIR Pool**, or **Fewest Putts Pool**. Everyone puts in the entry; best result takes it; ties split |
 | **Junk** | Side games triggered by specific outcomes (GIR, Sandy, Rolo, Barkie, Polie, Snake, Arnie, Chip-In) |
 | **Rolo** | Par or better after taking a penalty stroke. Auto-fills when the round tracks Penalties |
 | **Chip-In** | Holing out from off the green for par or better. Auto-fills when putts = 0 and the score is par or better (an ace doesn't count) |
 | **Par 3 Greenie** | Closest to pin on par 3s; optional **Hero Tax**, or the **"3-putts still win"** mode that removes both |
-| **Hero Tax** | Penalty: if the Greenie winner 3-putts, they forfeit the award AND pay each player |
+| **Hero Tax** | Penalty: if the Greenie winner 3-putts, they forfeit the award AND give each player |
 | **Birdie Bump** | Automatic award for birdie/eagle/ace from each player. A **group-level game only** — there's no field-wide version |
 | **Closest to the Pin** | Mark the winner on qualifying holes; log distance in feet & inches. Optional **pool mode** |
-| **Long Putt / Long Drive** | Everyone pays the entry; the longest putt of the round / longest drive on the designated hole takes the prize pool |
+| **Long Putt / Long Drive** | Everyone puts in the entry; the longest putt of the round / longest drive on the designated hole takes the prize pool |
 | **PRIZE POOL / WINNER / WINS** | The award row format. **WINS is what the winner collects**, not the prize pool size |
 | **Still live / not settled** | A prize pool that can't decide until every group in the event finishes — not "nobody won it" |
 | **Provisional** *(awards)* | An event total shown before every group has finished; Skins, CTP and Long Putt are withheld, so it won't sum to zero |
@@ -3399,7 +3399,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 - **The 💵 Games screen leads with final standings** — it's the first thing on the page now
 - **The scope chips drive the whole screen** (🏆 Tournament total / 👥 Group total), not just the unit rows
 - **Tap "📋 Every game — who won what"** when someone disputes a number — it's exactly what the texted final standings sends, and it respects the chip you're on
-- **One share button.** **📲 Text Final Standings** always attaches the scorecard and the games card, and includes everyone's payment links
+- **One share button.** **📲 Text Final Standings** always attaches the scorecard and the games card
 - **Tap an image to zoom it** — use the **−  +  Fit** buttons; a normal pinch won't work
 - **Don't compare a PROVISIONAL total to a final one** — Skins, CTP and Long Putt are deliberately withheld until every group finishes
 - **Junk auto-settles** — don't calculate greenies, sandies and Rolos by hand
@@ -3412,7 +3412,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 - **A greyed-out game tells you why** — read the line underneath rather than assuming it's broken
 - **Team Quota needs an even field** (8 v 8, not 9 v 7), and the standings are on the Event Leaderboard
 - **Send name-only players their own invite link** so the event shows up on their phone
-- **The event prize pool is what pays** when a prize pool is on as both a day game and an event prize pool — the day game is suppressed so it can't settle twice
+- **The event prize pool is what settles** when a prize pool is on as both a day game and an event prize pool — the day game is suppressed so it can't settle twice
 
 ### Be an Admin
 

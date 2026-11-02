@@ -40,7 +40,7 @@ export const GAMES = {
   'rolo': { search: 'rolo golf side game', players: 'any number', intro: 'A Rolo is making par or better on a hole where you took a penalty stroke. Bad Golf App tracks Rolos as junk, fills them in automatically when penalties are tracked, and even hands out a badge for it.' },
   'barkie': { search: 'barkie golf', players: 'any number', intro: 'A barkie is par after hitting a tree. Bad Golf App counts it in the junk tally, because it deserves to be.' },
   'polie': { search: 'polie golf side game', players: 'any number', intro: 'A polie is a made putt longer than the flagstick. Bad Golf App tags it and counts it as junk.' },
-  'snake': { search: 'snake golf game three putt', players: '2–4 players', intro: 'The Snake goes to the last player to three-putt, and it bites whoever holds it at the end. Bad Golf App tracks the three-putts and the running snake pot.' },
+  'snake': { search: 'snake golf game three putt', players: '2–4 players', intro: 'The Snake goes to the last player to three-putt, and it bites whoever holds it at the end. Bad Golf App tracks the three-putts and the running Snake tally.' },
   'arnie': { search: 'arnie golf term', players: 'any number', intro: 'An Arnie is par without ever finding the fairway, named for Arnold Palmer\'s escapes. Bad Golf App counts it in junk.' },
   'chip-in': { search: 'chip in golf side game', players: 'any number', intro: 'Chip-ins are junk points for holing out from off the green. Bad Golf App tags them and adds them to the unit totals.' },
   'long-putt': { search: 'long putt contest golf', players: 'any number', intro: 'Long putt goes to whoever holes the longest putt on a chosen hole, or through the round. Bad Golf App records it and folds it into the round.' },

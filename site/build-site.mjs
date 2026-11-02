@@ -29,19 +29,35 @@ copyDir(path.join(here, 'static'), OUT);
 
 // ---- data
 const data = JSON.parse(fs.readFileSync(COURSES, 'utf8'));
-const courses = data.courses.filter(c => c && c.id && c.name && /^[a-z0-9-]+$/.test(c.id));
+// v2000 (audit WEB-12): one page per state + name + city. Duplicate library rows for the same course
+// made near-duplicate pages; keep the row carrying the most data (card, tees, GPS, ratings, pin).
+const _rich = c => (c.pars && c.pars.length ? 4 : 0) + (c.tees ? c.tees.length : 0) + (c.greens ? 2 : 0) + (c.rr ? 1 : 0) + (c.lat != null ? 1 : 0);
+const _dupKey = c => [String(c.st || '').toUpperCase(), String(c.name).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(), String(c.city || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()].join('|');
+const courses = (() => {
+  const all = data.courses.filter(c => c && c.id && c.name && /^[a-z0-9-]+$/.test(c.id));
+  const best = new Map();
+  for (const c of all) { const k = _dupKey(c), b = best.get(k); if (!b || _rich(c) > _rich(b)) best.set(k, c); }
+  const keep = new Set(best.values());
+  return all.filter(c => keep.has(c));
+})();
+// v2000 (audit WEB-12): every "U.S. courses" figure counts only courses in a U.S. state (the library
+// also holds Canadian, Irish and state-less rows; those publish under /courses/other/).
+const usCount = courses.filter(c => STATES[c.st]).length;
 const byState = {};
 courses.forEach(c => { const k = STATES[c.st] ? c.st : '__'; (byState[k] = byState[k] || []).push(c); });
 const stateCount = Object.keys(byState).filter(k => k !== '__').length;
 const games = gameList();
 const urls = [];
-const add = (loc, priority = 0.5, changefreq = 'monthly') => urls.push({ loc, priority, changefreq });
+const add = (loc, priority = 0.5, changefreq = 'monthly', lastmod = null) => urls.push({ loc, priority, changefreq, lastmod });
+// v2000 (audit WEB-15): <lastmod> only where the content has a real date (a course card's updatedAt);
+// stamping every URL with the build date told crawlers everything changed on every deploy.
+const dayOf = v => { if (v == null || v === '') return null; const d = new Date(typeof v === 'string' && /^\d+$/.test(v) ? +v : v); return isNaN(d) || d > new Date() ? null : d.toISOString().slice(0, 10); };
 
 // ---- static pages
 const topSlugs = ['skins', 'nassau', 'wolf-captain', 'vegas', 'banker', 'stableford', 'quota', 'match-play', 'scramble', 'shamble', 'hammer', 'bingo-bango-bongo', 'ryder-cup', 'par-3-greenie', 'snake', 'closest-to-the-pin', 'umbrella'];
 const topGames = topSlugs.map(s => games.find(g => g.slug === s)).filter(Boolean);
-write('index.html', home({ courseCount: courses.length, gameCount: games.length, topGames, stateCount })); add('/', 1.0, 'weekly');
-write('features/index.html', features({ courseCount: courses.length, gameCount: games.length })); add('/features/', 0.8);
+write('index.html', home({ courseCount: usCount, gameCount: games.length, topGames, stateCount })); add('/', 1.0, 'weekly');
+write('features/index.html', features({ courseCount: usCount, gameCount: games.length })); add('/features/', 0.8);
 write('download/index.html', download()); add('/download/', 0.9);
 write('get/index.html', getRedirect());
 write('404.html', notFound());
@@ -55,7 +71,7 @@ write('tournaments/index.html', tournamentsPage()); add('/tournaments/', 0.8);
 write('handicaps/index.html', handicapsPage()); add('/handicaps/', 0.7);
 
 // ---- courses
-write('courses/index.html', coursesIndex(byState, courses.length)); add('/courses/', 0.9, 'weekly');
+write('courses/index.html', coursesIndex(byState, usCount)); add('/courses/', 0.9, 'weekly');
 // st|id|name|city|rating  (rating = "avg~n", avg blank until 3 ratings; empty when unrated) - read by course-search.js
 write('courses/index.txt', courses.map(c => [STATES[c.st] ? c.st : '', c.id, c.name.replace(/[|\n]/g, ' '), (c.city || '').replace(/[|\n]/g, ' ').replace(/,\s*[A-Za-z]{2}\.?$/, ''), c.rr ? ((c.rr.avg != null ? c.rr.avg.toFixed(1) : '') + '~' + c.rr.n) : ''].join('|')).join('\n'));
 const km = (a, b) => { const R = 6371, dLat = (b.lat - a.lat) * Math.PI / 180, dLng = (b.lng - a.lng) * Math.PI / 180; const s = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(s)); };
@@ -72,7 +88,7 @@ for (const st of Object.keys(byState)) {
       nearby = list.filter(o => o !== c && o.lat != null).map(o => ({ ...o, km: km(c, o) })).sort((a, b) => a.km - b.km).slice(0, 6).filter(o => o.km < 120);
     }
     write(coursePath(c) + 'index.html', coursePage(c, nearby));
-    su.push({ loc: coursePath(c), priority: 0.6, changefreq: 'monthly' });
+    su.push({ loc: coursePath(c), priority: 0.6, changefreq: 'monthly', lastmod: dayOf(c.updatedAt) });
   }
 }
 
@@ -86,6 +102,9 @@ for (const st of Object.keys(byState)) {
   const fileOf = p => p === '/' ? 'index.html' : (p.endsWith('/') ? p.slice(1) + 'index.html' : p.slice(1));
   const srcOf = p => { const f = path.join(OUT, fileOf(p)); if (fs.existsSync(f)) return f; const r = path.join(here, '..', fileOf(p)); return fs.existsSync(r) ? r : null; };
   const pages = I18N_PAGES.filter(p => srcOf(p));
+  // v2000 (audit WEB-15): the English support, legal and account-deletion pages belong in the sitemap
+  // (their courtesy translations stay out of it).
+  for (const p of ['/support.html', '/privacy.html', '/terms.html', '/delete-account.html']) if (pages.includes(p)) add(p, 0.3, 'yearly');
   const local = new Set(pages);
   const LEGAL = new Set(['/terms.html', '/privacy.html']);
   const ext = opt('--extract-i18n', null);
@@ -133,12 +152,12 @@ for (const st of Object.keys(byState)) {
 }
 
 // ---- robots + sitemaps (index + one per state so no file gets huge)
-const today = new Date().toISOString().slice(0, 10);
-const urlset = list => `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${list.map(u => `<url><loc>${SITE}${u.loc}</loc><lastmod>${today}</lastmod><changefreq>${u.changefreq}</changefreq><priority>${u.priority}</priority></url>`).join('\n')}\n</urlset>`;
+const urlset = list => `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${list.map(u => `<url><loc>${SITE}${u.loc}</loc>${u.lastmod ? `<lastmod>${u.lastmod}</lastmod>` : ''}<changefreq>${u.changefreq}</changefreq><priority>${u.priority}</priority></url>`).join('\n')}\n</urlset>`;
+const newest = list => list.reduce((m, u) => (u.lastmod && (!m || u.lastmod > m) ? u.lastmod : m), null);   // v2000 (audit WEB-15)
 write('sitemaps/pages.xml', urlset(urls));
-const maps = ['/sitemaps/pages.xml'];
-for (const st of Object.keys(stateUrls)) { const f = `sitemaps/courses-${stateSlug(st === '__' ? '' : st)}.xml`; write(f, urlset(stateUrls[st])); maps.push('/' + f); }
-write('sitemap.xml', `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${maps.map(m => `<sitemap><loc>${SITE}${m}</loc><lastmod>${today}</lastmod></sitemap>`).join('\n')}\n</sitemapindex>`);
+const maps = [{ loc: '/sitemaps/pages.xml', lastmod: newest(urls) }];
+for (const st of Object.keys(stateUrls)) { const f = `sitemaps/courses-${stateSlug(st === '__' ? '' : st)}.xml`; write(f, urlset(stateUrls[st])); maps.push({ loc: '/' + f, lastmod: newest(stateUrls[st]) }); }
+write('sitemap.xml', `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${maps.map(m => `<sitemap><loc>${SITE}${m.loc}</loc>${m.lastmod ? `<lastmod>${m.lastmod}</lastmod>` : ''}</sitemap>`).join('\n')}\n</sitemapindex>`);
 write('robots.txt', `User-agent: *\nAllow: /\nDisallow: /get/\nSitemap: ${SITE}/sitemap.xml\n`);
 
 const total = urls.length + Object.values(stateUrls).reduce((n, l) => n + l.length, 0);

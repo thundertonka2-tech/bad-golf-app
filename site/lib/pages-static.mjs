@@ -30,6 +30,7 @@ const FAQ = [
 ];
 const faqLd = { '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: FAQ.map(([q, a]) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })) };
 
+// v2000 (audit WEB-12/13): courseCount is the U.S.-state count; shorter titles/descriptions below.
 export function home({ courseCount, gameCount, topGames, stateCount }) {
   const body = `
 <section class="hero"><div class="wrap">
@@ -180,7 +181,7 @@ export function home({ courseCount, gameCount, topGames, stateCount }) {
   return page({
     headFirst: forwarder,
     path: '/', title: 'Bad Golf App — Golf Scorecard, GPS & Side Games for Your Group', h1: '',
-    description: `Free golf app for your regular group: one shared live scorecard, GPS yardages, real handicaps, leagues, tournaments and ${gameCount}+ side games scored automatically. ${courseCount.toLocaleString()} U.S. courses. iPhone & Android.`,
+    description: `Free golf app for your group: a shared live scorecard, GPS, real handicaps, leagues, tournaments and ${gameCount}+ side games, scored automatically.`,
     body, jsonld: [appLd, orgLd, faqLd], extraHead: `<script defer src="/course-search.js"></script>`
   });
 }
@@ -211,7 +212,7 @@ export function features({ courseCount, gameCount }) {
   <div class="grid" style="margin-top:28px">${rows.map(([i, h, p]) => `<div class="feat"><div class="ico">${i}</div><h3>${esc(h)}</h3><p>${esc(p)}</p></div>`).join('')}</div>
   ${ctaBox('Ready to play?', 'Free download. Invite your group by text and your next round scores itself.')}
 </div></section>`;
-  return page({ path: '/features/', title: 'Bad Golf App Features — Live Scorecard, GPS, Handicaps, Leagues & Side Games', description: `Every feature in the free Bad Golf App: shared live scorecard, GPS rangefinder, ${gameCount}+ side games scored automatically, handicaps, leagues, tournaments, stats and badges.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Features', path: '/features/' }])] });
+  return page({ path: '/features/', title: 'Bad Golf App Features — Scorecard, GPS, Handicaps & Leagues', description: `Every feature in the free Bad Golf App: live shared scorecard, GPS, ${gameCount}+ side games scored automatically, handicaps, leagues, tournaments and stats.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Features', path: '/features/' }])] });
 }
 
 export function download() {
@@ -234,7 +235,7 @@ export function download() {
     <p>Email <a href="mailto:support@officialbadgolf.com">support@officialbadgolf.com</a> or see the <a href="/support.html">support page</a>. The <a href="/Bad_Golf_Player_Guide.pdf">Player Guide</a> walks through every screen.</p>
   </div>
 </div></section>`;
-  return page({ path: '/download/', title: 'Download Bad Golf App — Free for iPhone & Android', description: 'Get the free Bad Golf App on the App Store or Google Play. QR codes for your clubhouse, league sheet or group chat. Live scorecard, GPS, handicaps and side games.', body, jsonld: [appLd, breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Download', path: '/download/' }])] });
+  return page({ path: '/download/', title: 'Download Bad Golf App — Free for iPhone & Android', description: 'Get the free Bad Golf App on the App Store or Google Play. QR codes for your clubhouse, league sheet or group chat.', body, jsonld: [appLd, breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Download', path: '/download/' }])] });
 }
 
 // /get/ — one QR code for every phone. Sends iOS to the App Store, Android to Play,

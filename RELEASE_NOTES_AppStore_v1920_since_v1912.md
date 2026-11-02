@@ -1,4 +1,4 @@
-# Bad Golf — App Store text, builds 1913 → 1920 (live build: 1912)
+# Bad Golf — App Store text, builds 1913 to 1920 (live build: 1912)
 
 ## Promotional text
 Preview any course before you play: hole-by-hole maps, a flyover and green slopes, now on 10,000+ courses. Plus a heads-up to check the course before your tee time.
@@ -16,7 +16,7 @@ COURSE PREVIEW
 
 TEE TIMES
 • About 1–2 hours before a tee time you're on, Bad Golf sends a reminder. Tap it to preview the course.
-• Don't want it? Turn it off in Settings → Notifications → "Course preview before my tee time."
+• Don't want it? Turn it off in Settings > Notifications > "Course preview before my tee time."
 • Opening and accepting a tee time is much faster.
 
 GREEN MAPS

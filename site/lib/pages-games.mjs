@@ -19,8 +19,12 @@ const firstPara = html => { const m = html.match(/<p>\s*<strong>How it works:<\/
 export function gamePage(g, all) {
   const path = `/games/${g.slug}/`;
   const kind = g.side ? 'side game' : 'golf game';
-  const title = `${g.name} — Golf Game Rules & How to Score It | Bad Golf App`;
-  const desc = `How to play ${g.name} in golf: rules, scoring, an example and setup options. ${g.players ? 'Best with ' + g.players + '. ' : ''}Bad Golf App scores ${g.name} automatically for your group.`.slice(0, 300);
+  // v2000 (audit WEB-13): titles <= 65 and descriptions <= 160 characters. A long one drops the brand
+  // suffix / the closing "Bad Golf App scores X" sentence; site/i18n carries both forms.
+  const title0 = `${g.name} — Golf Game Rules & How to Score It | Bad Golf App`;
+  const title = title0.length > 65 ? title0.replace(/ \| Bad Golf App$/, '') : title0;
+  const desc0 = `How to play ${g.name} in golf: rules, scoring, an example and setup options. ${g.players ? 'Best with ' + g.players + '. ' : ''}Bad Golf App scores ${g.name} automatically for your group.`;
+  const desc = desc0.length > 160 ? desc0.slice(0, desc0.lastIndexOf(' Bad Golf App scores ')) : desc0;
   const pool = all.filter(x => x.side === g.side); const at = pool.findIndex(x => x.slug === g.slug);
   const rel = Array.from({ length: Math.min(6, pool.length - 1) }, (_, i) => pool[(at + 1 + i) % pool.length]);
   const faq = { '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: [
@@ -56,7 +60,7 @@ export function gamesIndex(all) {
   <div class="gamegrid">${side.map(card).join('')}</div>
   ${ctaBox('Stop keeping score on a napkin', 'Bad Golf App scores every one of these on a shared live card. Free on iPhone and Android.')}
 </div></section>`;
-  return page({ path: '/games/', title: `${all.length} Golf Games & Side Games — Rules and Scoring | Bad Golf App`, description: `Rules and scoring for ${all.length} golf games your group plays: Skins, Nassau, Wolf, Vegas, Banker, Stableford, Quota, Hammer, Bingo Bango Bongo, greenies, sandies, snake and more. All scored automatically in the free Bad Golf App.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Games', path: '/games/' }])] });
+  return page({ path: '/games/', title: `${all.length} Golf Games & Side Games — Rules and Scoring | Bad Golf App`, description: `Rules and scoring for ${all.length} golf games: Skins, Nassau, Wolf, Vegas, Banker, Stableford, Quota, snake and more, scored automatically in the free Bad Golf App.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Games', path: '/games/' }])] });
 }
 
 // Long-form pages built from the other reference sections (Leagues, Tournaments, Handicaps).
@@ -77,24 +81,24 @@ export const leaguesPage = () => sectionPage({
   title: 'Golf League App — Run Your Weekly League in Bad Golf App',
   h1: 'Run your golf league in Bad Golf App',
   lede: 'A golf league app for the commissioner who is tired of the spreadsheet. Create a season, invite the players, and Bad Golf App builds the weekly matchups, flights, handicaps, standings, side games and playoffs. Everyone scores on their own phone; the standings update as the cards come in.',
-  description: 'Free golf league app: schedules, matchups, flights, league handicaps, weekly scorecards, standings, prize pools and playoffs, all run from your phone. Individual, team and scramble leagues.',
+  description: 'Free golf league app: schedules, matchups, flights, league handicaps, standings, prize pools and playoffs, run from your phone.',
   cta: ['Create your league', 'Free in the Bad Golf App on iPhone and Android. Set up a season in five minutes.']
 });
 
 export const tournamentsPage = () => sectionPage({
   path: '/tournaments/', sections: ['Tournaments'],
-  title: 'Golf Tournament App — Buddies Trips, Member-Guests & Events | Bad Golf App',
+  title: 'Golf Tournament App — Buddies Trips & Events | Bad Golf App',
   h1: 'Run a golf tournament or buddies trip in Bad Golf App',
   lede: 'Multi-day events with groups and pairings, tee times, field-wide side games and a live event leaderboard the whole field can watch. Built for buddies trips, member-guests, charity scrambles and the annual grudge match.',
-  description: 'Free golf tournament app: multi-day events, pairings and cart groups, tee times, closest-to-the-pin and long-drive across the field, and a live event leaderboard on every phone.',
+  description: 'Free golf tournament app: multi-day events, pairings, tee times, field-wide closest-to-the-pin and long drive, and a live event leaderboard.',
   cta: ['Set up your event', 'Free in the Bad Golf App. Invite the field by text and let the leaderboard run itself.']
 });
 
 export const handicapsPage = () => sectionPage({
   path: '/handicaps/', sections: ['How handicaps work', 'Handicap rules'],
-  title: 'How Golf Handicaps Work in Bad Golf App — Index, Course Handicap & Strokes',
+  title: 'How Handicaps Work in Bad Golf App — Index & Strokes',
   h1: 'How handicaps work in Bad Golf App',
   lede: 'Bad Golf App keeps a handicap index from the rounds you post, turns it into a course handicap for the tees you play, and hands out strokes hole by hole by stroke index. Here is exactly how the math works and the settings your group can change.',
-  description: 'How the Bad Golf App calculates your golf handicap index, course handicap per tee, strokes per hole, handicap percentages and temporary handicaps for new players.',
+  description: 'How Bad Golf App calculates your handicap index, course handicap per tee, strokes per hole, handicap percentages and temporary handicaps.',
   cta: ['Get a real handicap', 'Post your rounds in Bad Golf App and your index updates automatically. Free on iPhone and Android.']
 });

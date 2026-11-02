@@ -8,6 +8,8 @@ export const stateSlug = st => (STATES[st] ? st.toLowerCase() : 'other');
 export const coursePath = c => `/courses/${stateSlug(c.st)}/${c.id}/`;
 
 const sum = a => a.reduce((x, y) => x + (+y || 0), 0);
+// v2000 (audit WEB-13): meta descriptions stay under ~160 characters (cut at a word, never mid-word).
+const clip = (s, n) => (s.length <= n ? s : s.slice(0, s.lastIndexOf(' ', n - 1)).replace(/[\s,;:·—-]+$/, '') + '…');
 // Round Rating chip (players' 1-5 stars; NOT the USGA course rating). Average only at 3+ ratings.
 export const rrChip = c => (c && c.rr && c.rr.n) ? `<span class="rr" title="Round Rating from Bad Golf App players">\u2605 ${c.rr.avg != null ? c.rr.avg.toFixed(1) + ' ' : ''}<small>(${c.rr.n})</small></span>` : '';
 export function courseFacts(c) {
@@ -81,12 +83,14 @@ export function coursePage(c, nearby) {
   const { holes, par, tees, top, full } = courseFacts(c);
   const st = stateName(c.st), path = coursePath(c);
   const loc = [c.city, STATES[c.st] ? c.st : ''].filter(Boolean).join(', ');
-  const title = `${c.name} — Scorecard, Slope & Rating, GPS Yardages${loc ? ' | ' + loc : ''}`;
+  // v2000 (audit WEB-13): was ~85 characters; the location is dropped when it would push past 65.
+  const title0 = `${c.name} Scorecard, Slope & GPS`, title = (loc && (title0 + ' | ' + loc).length <= 65) ? title0 + ' | ' + loc : title0;
   const bits = [];
   if (par) bits.push(`par ${par}`); bits.push(`${holes} holes`);
   if (tees.length) bits.push(`${tees.length} tee${tees.length > 1 ? 's' : ''}`);
   if (top && top.rating) bits.push(`rating ${top.rating} / slope ${top.slope}${top.yards ? ' from ' + top.yards.toLocaleString() + ' yards' : ''}`);
-  const description = `${c.name}${loc ? ' in ' + loc.replace(/, ([A-Z]{2})$/, (m, s) => ', ' + STATES[s]) : ''}: ${bits.join(', ')}. Full scorecard, tee ratings and ${full ? 'GPS yardages to every green' : 'GPS'} in the free Bad Golf App.`;
+  const descBase = `${c.name}${loc ? ' in ' + loc.replace(/, ([A-Z]{2})$/, (m, s) => ', ' + STATES[s]) : ''}: ${bits.join(', ')}.`, descTail = ' Scorecard, tee ratings and GPS in the free Bad Golf App.';
+  const description = (descBase + descTail).length <= 160 ? descBase + descTail : clip(descBase, 158);   // v2000 (audit WEB-13)
   const maps = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(c.name + (loc ? ', ' + loc : ''))}`;
   const ld = { '@context': 'https://schema.org', '@type': 'GolfCourse', name: c.name, url: SITE + path,
     address: { '@type': 'PostalAddress', ...(c.address ? { streetAddress: c.address } : {}), addressLocality: c.city || undefined, addressRegion: STATES[c.st] ? c.st : undefined, addressCountry: STATES[c.st] ? 'US' : undefined },
@@ -133,13 +137,14 @@ export function statePage(st, courses) {
   const mapped = courses.filter(c => courseFacts(c).full).length;
   const body = `<section class="page wide"><div class="wrap">
   ${crumbs([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: name, path }])}
-  <h1>Golf courses in ${esc(name)}</h1>
+  <h1>${STATES[st] ? 'Golf courses in ' + esc(name) : 'Other golf courses: outside the U.S. or no state on file'}</h1>
   <p class="lede" style="max-width:46rem">${courses.length.toLocaleString()} ${esc(name)} golf courses in the Bad Golf App, ${mapped.toLocaleString()} with GPS-mapped greens. Every course has its scorecard, tee ratings and slope, and a live shared scorecard for your group.</p>
   <div class="stats" style="max-width:520px"><div class="stat"><b>${courses.length.toLocaleString()}</b><small>Courses</small></div><div class="stat"><b>${mapped.toLocaleString()}</b><small>GPS mapped</small></div><div class="stat"><b>${cities.length.toLocaleString()}</b><small>Cities</small></div></div>
   ${cities.map(city => `<h2 id="${attr(city.toLowerCase().replace(/[^a-z0-9]+/g, '-'))}" style="font-size:1.2rem;margin-top:28px">${esc(city)}</h2><ul class="list">${byCity[city].sort((a, b) => a.name.localeCompare(b.name)).map(c => { const f = courseFacts(c); return `<li><a href="${coursePath(c)}">${esc(c.name)}</a> ${rrChip(c)}<small>${f.holes} holes${f.par ? ' · par ' + f.par : ''}${f.top && f.top.slope ? ' · slope ' + f.top.slope : ''}</small></li>`; }).join('')}</ul>`).join('')}
   ${ctaBox(`Play ${name} golf with Bad Golf App`, 'Free on iPhone and Android. GPS yardages, live scorecard, handicaps and side games on every course above.')}
 </div></section>`;
-  return page({ path, title: `${name} Golf Courses — Scorecards, Slope, Rating & GPS | Bad Golf App`, description: `${courses.length.toLocaleString()} golf courses in ${name} with scorecards, course rating and slope by tee, and GPS-mapped greens in the free Bad Golf App. Browse by city.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: name, path }])] });
+  // v2000 (audit WEB-12/13): shorter title; the state-less bucket says what it is instead of "Other".
+  return page({ path, title: `${STATES[st] ? name + ' Golf Courses' : 'Other Golf Courses (Outside the U.S.)'}: Scorecards, Slope & GPS`, description: clip(`${courses.length.toLocaleString()} golf courses ${STATES[st] ? 'in ' + name : 'outside the U.S. or without a state'} with scorecards, course rating and slope by tee, and GPS-mapped greens in the free Bad Golf App. Browse by city.`, 160), body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }, { name: name, path }])] });
 }
 
 export function coursesIndex(byState, total) {
@@ -152,7 +157,7 @@ export function coursesIndex(byState, total) {
   <div class="states">${sts.map(st => `<a href="/courses/${stateSlug(st)}/">${esc(stateName(st))}<small>${byState[st].length.toLocaleString()}</small></a>`).join('')}</div>
   ${ctaBox('Your course, your group, one scorecard', 'Free on iPhone and Android. If your course is missing, add it in the app in a couple of minutes.')}
 </div></section>`;
-  return page({ path: '/courses/', title: `Golf Course Scorecards, Slope & GPS — ${total.toLocaleString()} U.S. Courses | Bad Golf App`, description: `Scorecards, course rating and slope by tee, and GPS-mapped greens for ${total.toLocaleString()} U.S. golf courses. Find your course, then score your round in the free Bad Golf App.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }])], extraHead: `<script defer src="/course-search.js"></script>` });
+  return page({ path: '/courses/', title: `Golf Course Scorecards, Slope & GPS — ${total.toLocaleString()} U.S. Courses`, description: `Scorecards, course rating and slope by tee, and GPS-mapped greens for ${total.toLocaleString()} U.S. golf courses. Find your course, then score your round in the free Bad Golf App.`, body, jsonld: [breadcrumbLd([{ name: 'Home', path: '/' }, { name: 'Courses', path: '/courses/' }])], extraHead: `<script defer src="/course-search.js"></script>` });
 }
 
 // Client-side search over /courses/index.txt (st|id|name|city|rating). 2026-10-30 (Tyler:

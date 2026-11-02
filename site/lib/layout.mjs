@@ -5,6 +5,7 @@ export const APPSTORE = 'https://apps.apple.com/app/id6779399027';
 export const PLAY = 'https://play.google.com/store/apps/details?id=com.simplisticfishing.badgolf';
 export const SUPPORT = 'support@officialbadgolf.com';
 export const TAGLINE = 'Bad Golf, Better Times';
+// v2000 (audit WEB-11): the footer line reads exactly "All rights reserved © <year> KRWellsGolf, LLC" (owner wording).
 
 export const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const attr = esc;
@@ -82,7 +83,7 @@ ${body}
     <div><h4>Courses</h4><a href="/courses/">Find a course</a><a href="/courses/tx/">Texas</a><a href="/courses/fl/">Florida</a><a href="/courses/ca/">California</a><a href="/courses/mi/">Michigan</a><a href="/courses/ny/">New York</a></div>
     <div><h4>Help</h4><a href="/support.html">Support</a><a href="mailto:${SUPPORT}">${SUPPORT}</a><a href="/Bad_Golf_Player_Guide.pdf">Player guide (PDF)</a><a href="/privacy.html">Privacy</a><a href="/terms.html">Terms</a><a href="/delete-account.html">Delete account</a></div>
   </div>
-  <div class="fine"><span>© ${new Date().getFullYear()} KRWellsGolf, LLC. All rights reserved. Bad Golf App is a product of KRWellsGolf, LLC.</span><span>Already have the app? <a href="/app/" style="display:inline;padding:0">Open the web version</a></span></div>
+  <div class="fine"><span>All rights reserved © ${new Date().getFullYear()} KRWellsGolf, LLC</span><span>Already have the app? <a href="/app/" style="display:inline;padding:0">Open the web version</a></span></div>
 </div></footer>
 <script>(function(){var b=document.querySelector('.menu-btn'),n=document.getElementById('mainnav');if(!b||!n)return;b.addEventListener('click',function(){var o=n.classList.toggle('open');b.setAttribute('aria-expanded',o?'true':'false');});document.addEventListener('click',function(e){if(n.classList.contains('open')&&!n.contains(e.target)&&!b.contains(e.target)){n.classList.remove('open');b.setAttribute('aria-expanded','false');}});})();</script>
 </body>

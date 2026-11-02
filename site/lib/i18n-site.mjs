@@ -59,10 +59,39 @@ export function extractStrings(html) {
   return found;
 }
 
+// v2000 (audit WEB-7): course and game counts change every build, so a string holding a number
+// ("12,092 U.S. courses") never matched its dictionary key ("11,070 U.S. courses") and the
+// translated page shipped English. Exact match first; on a miss, retry with the numbers masked and
+// put the new numbers into the translation by value (gives up if a number is not found in it).
+const NUM_RE = /\d[\d,.]*\d|\d/g;
+const _numIdx = new WeakMap();
+function numIndex(dict) {
+  let ix = _numIdx.get(dict);
+  if (!ix) {
+    ix = new Map();
+    for (const k of Object.keys(dict)) if (/\d/.test(k)) { const mk = k.replace(NUM_RE, '#'); if (!ix.has(mk)) ix.set(mk, k); }
+    _numIdx.set(dict, ix);
+  }
+  return ix;
+}
+function lookup(dict, k) {
+  if (dict[k] != null) return dict[k];
+  if (!/\d/.test(k)) return null;
+  const src = numIndex(dict).get(k.replace(NUM_RE, '#'));
+  if (src == null || dict[src] == null) return null;
+  const oldN = src.match(NUM_RE), newN = k.match(NUM_RE);
+  if (!oldN || !newN || oldN.length !== newN.length) return null;
+  const map = new Map();
+  for (let i = 0; i < oldN.length; i++) { if (map.has(oldN[i]) && map.get(oldN[i]) !== newN[i]) return null; map.set(oldN[i], newN[i]); }
+  const t = String(dict[src]);
+  for (const o of map.keys()) if (!t.includes(o)) return null;
+  return t.replace(NUM_RE, m => (map.has(m) ? map.get(m) : m));
+}
+
 function trText(dict, raw) {
   const k = norm(decode(raw));
   if (!HAS_WORD.test(k)) return null;
-  const t = dict[k];
+  const t = lookup(dict, k);
   if (t == null) return null;
   const lead = raw.match(/^\s*/)[0], trail = raw.match(/\s*$/)[0];
   return lead + t + trail;
