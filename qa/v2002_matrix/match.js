@@ -2,8 +2,10 @@
 // qa/v2002_matrix/match.js — v2002 calculation matrix, family "match".
 // Games: calcNassau (+Huckles = presses), calcMatch, calcTeamMatch, calcTeamLowball (+High&Low
 // high-ball / Combo aggregate), calcRyderCup, calcHammer, calcScramble, calcShamble, calcComboScore.
-// REPORT ONLY. Every expected value below is computed by an INDEPENDENT oracle in this file
-// (standard golf rules + Tyler's house rules in BRIEF.md); app helpers are used only to load the
+// Every expected value below is computed by an INDEPENDENT oracle in this file
+// (standard golf rules + Tyler's house rules in BRIEF.md, as decided in DECISIONS.md for the v2002
+// fix build: Nassau/Shamble leaver rule, match-play blank = still to play, uneven teams = dropped
+// row, own-tee par for the birdie double); app helpers are used only to load the
 // app and, in two targeted cases, to build inputs (bgPurgePlayerFromRound = the real "remove player").
 //   node qa/v2002_matrix/match.js golf-app.html
 const path = require('path');
@@ -140,12 +142,27 @@ function oNassau(g) {
     // a nine "was played" if 2+ still-active players and every still-active player scored some hole there
     const ninePlayed = (lo, hi) => { for (let h = lo; h <= hi; h++) { const act = ids.filter(id => active(g, id, h)); if (act.length >= 2 && act.every(id => gross(g, id, h - 1) != null)) return true; } return false; };
     const overallPushed = () => fin && nH !== 9 && !(ninePlayed(1, 9) && ninePlayed(10, 18));
+    // DECISIONS #2 (Tyler): a leaver pays every side he didn't finish as a loser. "Didn't finish" = a
+    // marked leaver who was out on some hole of the range (play order). "Finished" = every hole scored.
+    const leftIn = (id, a, b) => { if (leftAfter(g, id) == null) return false; for (let h = a; h <= b; h++) if (!active(g, id, h)) return true; return false; };
+    const done = (id, a, b) => { for (let h = a; h <= b; h++) if (gross(g, id, h - 1) == null) return false; return true; };
+    const forfeit = (x, y, a, b) => { if (!hasLeavers(g)) return null; const lx = leftIn(x, a, b), ly = leftIn(y, a, b); if (lx === ly) return null; const st = lx ? y : x; if (!done(st, a, b)) return null; return { open: false, w: st }; };
     if (ids.length >= 3) {
       let carry = 0;
       segs.forEach((seg, si) => {
         const [a, b] = rng(seg); const len = b - a + 1;
+        const stOf = list => list.map(id => { let n = 0, hp = 0; for (let h = a; h <= b; h++) { const x = netI(g, id, h - 1, useNet); if (x == null) continue; hp++; n += x; } return { id, n, hp }; });
+        // leaver rule: the side goes to the best of the finishers; the leavers are added as losers
+        const lv = hasLeavers(g) ? ids.filter(id => leftIn(id, a, b)) : [];
+        const stay = ids.filter(id => !lv.includes(id));
+        if (lv.length && stay.length && stay.every(id => done(id, a, b))) {
+          const se = stOf(stay); const lo = Math.min(...se.map(s => s.n)); const w = se.filter(s => s.n === lo);
+          if (w.length === 1) { const k = 1 + carry; ids.forEach(id => { if (id !== w[0].id) { money[id] -= k * v; money[w[0].id] += k * v; } }); carry = 0; }
+          else carry++;
+          return;
+        }
         if (seg === 'overall' && overallPushed()) return;
-        const st = ids.map(id => { let n = 0, hp = 0; for (let h = a; h <= b; h++) { const x = netI(g, id, h - 1, useNet); if (x == null) continue; hp++; n += x; } return { id, n, hp }; });
+        const st = stOf(ids);
         const allC = st.every(s => s.hp === len);
         let elig = st;
         if (!allC) {
@@ -177,8 +194,10 @@ function oNassau(g) {
     };
     const res = {};
     segs.forEach(seg => {
-      if (seg === 'overall' && overallPushed()) { res[seg] = { open: false, w: null, pushed: true }; return; }
-      const [a, b] = rng(seg); let r = side(a, b);
+      const [a, b] = rng(seg); const fo = forfeit(A, B, a, b);
+      if (!fo && seg === 'overall' && overallPushed()) { res[seg] = { open: false, w: null, pushed: true }; return; }
+      let r = side(a, b);
+      if (fo && r.open) r = fo;   // leaver rule; a side already decided before he left stands
       if (seg === 'overall' && r.open && !r.none && res.front && !res.front.open && !res.front.none && res.back && !res.back.open && !res.back.none) {
         // app design (documented): front AND back both decided -> force-settle the overall on holes played
         let aw = 0, bw = 0, as = 0, bs = 0; for (let h = 1; h <= 18; h++) { const x = netI(g, A, h - 1, useNet), y = netI(g, B, h - 1, useNet); if (x == null || y == null) continue; as += x; bs += y; if (x < y) aw++; else if (y < x) bw++; }
@@ -192,9 +211,11 @@ function oNassau(g) {
       const end = rng(hk.segment)[1]; const save = [A, B];
       let aw = 0, bw = 0, as = 0, bs = 0, hp = 0; const len = end - hk.callHole + 1;
       for (let h = hk.callHole; h <= end; h++) { const x = netI(g, hk.callerId, h - 1, useNet), y = netI(g, hk.opponentId, h - 1, useNet); if (x == null || y == null) continue; hp++; as += x; bs += y; if (x < y) aw++; else if (y < x) bw++; }
-      if (!hp) return; let w = null;
-      if (fmt === 'match') { const lead = Math.abs(aw - bw); if (!(lead > len - hp || hp === len)) return; w = aw > bw ? hk.callerId : bw > aw ? hk.opponentId : null; }
-      else { if (hp < len) return; w = as < bs ? hk.callerId : bs < as ? hk.opponentId : null; }
+      let w = null;
+      const decided = hp && (fmt === 'match' ? (Math.abs(aw - bw) > len - hp || hp === len) : hp === len);
+      if (!decided) { const fo = forfeit(hk.callerId, hk.opponentId, hk.callHole, end); if (!fo) return; w = fo.w; }   // leaver loses a press he didn't finish
+      else if (fmt === 'match') w = aw > bw ? hk.callerId : bw > aw ? hk.opponentId : null;
+      else w = as < bs ? hk.callerId : bs < as ? hk.opponentId : null;
       if (w) { const l = w === hk.callerId ? hk.opponentId : hk.callerId; money[w] += v; money[l] -= v; }
       void save;
     });
@@ -283,8 +304,14 @@ function oShamble(g) {
   const balls = Math.max(1, Math.min(cfg.balls === 2 ? 2 : 1, a.length)); const pct = cfg.hcpPct != null ? Number(cfg.hcpPct) : 50;
   const sh = id => { const p = P(g, id); return Math.round(fullHcp(g, p) * pct / 100); };
   const nH = nHof(g); let at = 0, bt = 0, played = 0, complete = true;
+  // DECISIONS #2: a leaver's missing ball counts as net double bogey (own-tee par + 2; on a gross
+  // shamble the gross score that is net double bogey = par + 2 + his strokes at the round allowance).
+  const ndb = (id, i) => { const p = P(g, id); const par = parOf(g, p, i); return par + 2 + (cfg.net ? 0 : Math.max(0, strokes(ehcp(g, p), siOf(g, p, i), par, g.hcpRules, nHof(g)))); };
   const teamHole = (ids, i) => { let blank = false; const v = ids.map(id => { const x = netI(g, id, i, !!cfg.net, sh(id)); if (x == null && active(g, id, i + 1)) blank = true; return x; }).filter(x => x != null).sort((x, y) => x - y);
-    if (blank || !v.length) return null; return v.slice(0, balls).reduce((s, x) => s + x, 0); };
+    if (blank || !v.length) return null;
+    const miss = ids.filter(id => gross(g, id, i) == null && !active(g, id, i + 1)).map(id => ndb(id, i)).sort((x, y) => x - y);
+    while (v.length < balls && miss.length) v.push(miss.shift());
+    return v.slice(0, balls).reduce((s, x) => s + x, 0); };
   for (let i = 0; i < nH; i++) { const x = teamHole(a, i), y = teamHole(b, i); if (x == null || y == null) { complete = false; continue; } played++; at += x; bt += y; }
   if (!complete && g.finishedAt && played) complete = true;
   if (complete) { if (at < bt) { a.forEach(id => money[id] += cfg.value); b.forEach(id => money[id] -= cfg.value); } else if (bt < at) { b.forEach(id => money[id] += cfg.value); a.forEach(id => money[id] -= cfg.value); } }
@@ -477,7 +504,26 @@ const NAS = (g, o) => { const i = inst(g, o); return { nassau: Object.assign({},
 { const s = [flat(18, 4), flat(18, 5), flat(18, 5), flat(18, 3)]; for (let h = 12; h < 18; h++) s[3][h] = null;
   const g = mkRound('T7', sp([0, 0, 0, 0], s), { leftRound: {} }); g.leftRound = { byId: { [g.players[3].id]: 12 } }; g.games = NAS(g);
   const r = compare('nassau.leaver', 'T7 group Nassau, 4th player leaves after 12', g, 'nassau');
-  _l('  T7 info: leaver money = ' + (r && r.am[g.players[3].id]) + ' (wins front, excluded from back/overall — see OPEN RULE Q1)'); }
+  // DECISIONS #2: Steve wins the front (+15); he pays the back and the overall to Tyler, the best finisher.
+  const [q0, q1, q2, q3] = g.players.map(p => p.id);
+  check('nassau.leaver', 'T7 leaver pays back + overall: Tyler +25, Kevin -15, Hoon -15, Steve +5', r && r.am[q0] === 25 && r.am[q1] === -15 && r.am[q2] === -15 && r.am[q3] === 5, JSON.stringify(r && r.am)); }
+// T7b Nassau 1v1 stroke: Kevin leaves after 12, Tyler finishes. Front decided normally; back and overall lost by Kevin.
+{ const a = flat(18, 5), b = flat(18, 4); for (let h = 12; h < 18; h++) b[h] = null;   // Kevin was BETTER on every hole he played
+  const g = mkRound('T7b', sp([0, 0], [a, b])); g.leftRound = { byId: { [g.players[1].id]: 12 } }; g.games = NAS(g);
+  const r = compare('nassau.leaver', 'T7b 1v1 leaver loses the sides he did not finish', g, 'nassau');
+  check('nassau.leaver', 'T7b Kevin +5 front, -5 back, -5 overall = -5', r && r.am[g.players[1].id] === -5, JSON.stringify(r && r.am)); }
+// T7c whole round ended early for everyone (no leaver): unfinished sides stay "no bet"
+{ const a = flat(18, 4), b = flat(18, 5); for (let h = 12; h < 18; h++) { a[h] = null; b[h] = null; }
+  const g = mkRound('T7c', sp([0, 0, 0], [a, b, flat(18, 6).map((x, i) => i < 12 ? x : null)])); g.games = NAS(g);
+  const r = compare('nassau.leaver', 'T7c group, round ended early for everyone: back/overall no bet', g, 'nassau');
+  check('nassau.leaver', 'T7c only the front pays (+10 to Tyler)', r && r.am[g.players[0].id] === 10, JSON.stringify(r && r.am)); }
+// T7d press (Huckle) the leaver didn't finish is lost by him
+{ const a = flat(18, 4), b = flat(18, 4); b[9] = 6; b[10] = 6; for (let h = 13; h < 18; h++) b[h] = null;   // Kevin 2 down after 11, presses at 12, leaves after 13
+  const g = mkRound('T7d', sp([0, 0], [a, b])); g.leftRound = { byId: { [g.players[1].id]: 13 } }; g.games = NAS(g);
+  const [A, B] = g.players.map(p => p.id);
+  g.huckleData = { huckles: [{ id: 'h1', nassauIdx: 0, callerId: B, opponentId: A, segment: 'back', callHole: 12 }] };
+  const r = compare('nassau.leaver', 'T7d press the leaver did not finish', g, 'nassau');
+  check('nassau.leaver', 'T7d Kevin pays back + overall + press = -15', r && r.am[B] === -15, JSON.stringify(r && r.am)); }
 // T8 Huckle (press) 1v1 stroke, and a stacked press-on-press
 { const a = flat(18, 4), b = flat(18, 4); b[0] = 5; b[1] = 5; a[4] = 6; a[5] = 6; a[6] = 6;   // B down 2 after 2 -> calls at 3; A falls behind later
   const g = mkRound('T8', sp([0, 0], [a, b])); g.games = NAS(g);
@@ -498,7 +544,12 @@ const NAS = (g, o) => { const i = inst(g, o); return { nassau: Object.assign({},
 { const a = flat(18, 4), b = flat(18, 4); for (let h = 0; h < 3; h++) a[h] = 3; for (let h = 16; h < 18; h++) { a[h] = null; b[h] = null; } a[4] = null; b[4] = null;
   const g = mkRound('T12', sp([0, 0], [a, b]), { unfinished: true }); g.games = { match: { instances: [{ value: 7, net: true, participants: g.players.map(p => p.id) }] } };
   const r = compare('match.blank', 'T12 money', g, 'match');
-  check('match.blank', 'T12 3 up with 3 still to play (holes 5,17,18) is DORMIE, not closed', r && r.app.matches[0].closedHole == null, 'app closedHole=' + (r && r.app.matches[0].closedHole) + ' label=' + (r && r.app.matches[0].closedScore)); }
+  check('match.blank', 'T12 3 up with 3 still to play (holes 5,17,18) is DORMIE, not closed', r && r.app.matches[0].closedHole == null, 'app closedHole=' + (r && r.app.matches[0].closedHole) + ' label=' + (r && r.app.matches[0].closedScore));
+  // later fill-in: hole 5 won by B, 17 and 18 won by B -> all square, the match must follow the late entry
+  const g2 = JSON.parse(JSON.stringify(g)); const [A, B] = g2.players.map(p => p.id);
+  g2.scores[A][4] = 5; g2.scores[B][4] = 4; g2.scores[A][16] = 5; g2.scores[B][16] = 4; g2.scores[A][17] = 5; g2.scores[B][17] = 4; g2.finishedAt = 1786820000000;
+  const r2 = compare('match.blank', 'T12b money after the blank hole is filled in', g2, 'match');
+  check('match.blank', 'T12b filled-in hole 5 counts: match ends AS', r2 && r2.app.matches[0].finalUp === 0 && r2.am[A] === 0, JSON.stringify(r2 && { up: r2.app.matches[0].finalUp, lbl: r2.app.matches[0].closedScore })); }
 // T13 Match play 9-hole round all 9 played, unfinished flag: must read complete, not provisional
 { const a = flat(9, 4), b = flat(9, 4); a[8] = 3; const g = mkRound('T13', sp([0, 0], [a, b]), { holeMode: 'nine', unfinished: true }); g.games = { match: { instances: [{ value: 7, net: true, participants: g.players.map(p => p.id) }] } };
   const r = compare('match.nine', 'T13 money', g, 'match');
@@ -672,9 +723,9 @@ function buildCase(key, opt, cond, code) {
     g.games = { hammer: Object.assign({ value: val }, opt) };
   } else g.games = { [key]: Object.assign({ value: val }, opt, t) };
   fillBlobs(g, key, opt);
-  // shamble best-2 + leaver is the known T16 finding; keep it out of the fuzz so it doesn't flood
-  if (key === 'shamble' && opt.balls === 2 && cond.chaos === 'leaver') return null;
-  if (key === 'hammer' && opt.mode === 'individual' && cond.chaos === 'blank') return null;   // T17 finding
+  // v2002: MATCH-1 (shamble best-2 + leaver) and MATCH-2 (hammer individual + blank) are fixed, so
+  // those combinations are back in the matrix. The High & Low own-tee birdie (MATCH-6) is F2's fix;
+  // it stays out of the matrix and is covered by T22.
   if (key === 'highLow' && cond.tees === 'mixed' && opt.birdieDouble) return null;            // T22 finding
   return g;
 }
@@ -714,7 +765,7 @@ for (let k = 0; k < FUZZ; k++) {
   const mi = [{ value: 2, net: rnd() < .7, participants: [ids[0], ids[n - 1]] }]; games.match = Object.assign({}, mi[0], { instances: mi });
   const hm = pick(GAME_OPTS.hammer()); if (!(hm.mode === 'team' && (n === 3 || n === 5))) games.hammer = Object.assign({ value: 1 }, hm);
   if (n % 2 === 0) { games.teamMatch = Object.assign({ value: 3, net: rnd() < .7 }, t); games.teamLowball = Object.assign({ value: 3, net: rnd() < .7, teamMode: '2man' }, t);
-    const sh = pick(GAME_OPTS.shamble()); if (!(sh.balls === 2 && cond.chaos === 'leaver')) games.shamble = Object.assign({ value: 2 }, sh, t); }
+    const sh = pick(GAME_OPTS.shamble()); games.shamble = Object.assign({ value: 2 }, sh, t); }
   if (n === 4) { games.comboScore = Object.assign({ value: 2, net: rnd() < .7, teamMode: '2man' }, t); games.scramble = Object.assign({ value: 1 }, pick(GAME_OPTS.scramble()), t);
     games.ryderCup = Object.assign({ value: 1 }, pick(GAME_OPTS.ryderCup()), t);
     const hl = pick(GAME_OPTS.highLow()); if (!(cond.tees === 'mixed' && hl.birdieDouble)) games.highLow = Object.assign({ value: 1 }, hl, t); }

@@ -54129,6 +54129,52 @@ function nassauHalvesPlayed(g, ids) {
   return { front: f, back: b };
 }
 
+/* v2002 (matrix Q1, Tyler 11/2): THE LEAVER RULE for Nassau. A player who left mid-round pays every
+   side (and press) he did not finish as a loser and can't win it. The side goes to the best of the
+   players who finished it. "Left early in a range" = a marked leaver (bgLeftAfter) who was not in on
+   at least one hole of it (play-order aware, bgActiveOnHole). "Finished" = a score on every hole of it.
+   A side nobody finished (the whole round ended early) keeps "unfinished = no bet": these helpers only
+   fire when someone still in has finished the side. */
+function _bgLeftEarlyIn(g, pid, from, to) {
+  try {
+    if (bgLeftAfter(g, pid) == null) return false;
+    for (let h = from; h <= to; h++) if (!bgActiveOnHole(g, pid, h)) return true;
+  } catch (e) {}
+  return false;
+}
+function _bgFinishedRange(g, pid, from, to) {
+  const arr = (g.scores && g.scores[pid]) || [];
+  for (let h = from; h <= to; h++) if (arr[h - 1] == null) return false;
+  return true;
+}
+// 1v1 (a side or a press): exactly one of the two left before the end of the range and the other
+// finished it -> the leaver loses. Anything else -> null (settle as before).
+function _bgNassauForfeit(g, aId, bId, from, to) {
+  try {
+    if (!bgHasLeavers(g)) return null;
+    const aL = _bgLeftEarlyIn(g, aId, from, to), bL = _bgLeftEarlyIn(g, bId, from, to);
+    if (aL === bL) return null;
+    const leaver = aL ? aId : bId, stayer = aL ? bId : aId;
+    if (!_bgFinishedRange(g, stayer, from, to)) return null;
+    return { winnerId: stayer, loserId: leaver, status: 'left early \u2014 forfeit', open: false, forfeit: true };
+  } catch (e) { return null; }
+}
+// Group side: everyone still in has finished the side and at least one player left before its end ->
+// the side is judged among the finishers; the leavers are added as losers.
+function _bgNassauGroupLeaverSide(g, ids, from, to, useNet) {
+  try {
+    if (!bgHasLeavers(g)) return null;
+    const left = ids.filter(id => _bgLeftEarlyIn(g, id, from, to));
+    if (!left.length) return null;
+    const stay = ids.filter(id => left.indexOf(id) < 0);
+    if (!stay.length || !stay.every(id => _bgFinishedRange(g, id, from, to))) return null;
+    const st = groupStrokeStandings(g, stay, from, to, useNet);
+    if (!st || !st.allComplete) return null;
+    const lp = left.map(id => { const p = g.players.find(x => x.id === id); return { id, name: p ? p.name : '?', net: null, holesPlayed: 0, left: true }; });
+    return { players: st.players.concat(lp), winners: st.winners.slice(), holesPlayed: to - from + 1, allComplete: true, leaverSide: true };
+  } catch (e) { return null; }
+}
+
 function calcNassau(g) {
   if (!g.games.nassau) return null;
   const cfg = g.games.nassau;
@@ -54152,7 +54198,12 @@ function calcNassau(g) {
     // the Event Leaderboard — never in-group, even when 2+ members are local
     // (settling the local subset would double-pay part of the game).
     if (Array.isArray(inst.participantNames) && inst.participantNames.length > players.length) return;
-    if (players.length < 2) return;
+    if (players.length < 2) {
+      // v2002 (matrix MATCH-5): a 1v1 Nassau whose pair lost a player (removed mid-round) used to vanish
+      // silently. Show the same "game dropped" row the team games show.
+      if (players.length === 1 && (partIds.length >= 2 || (Array.isArray(g.removedPlayerIds) && g.removedPlayerIds.length))) _bgDropBet('nassau', 'a player in the Nassau was removed mid-round');
+      return;
+    }
     const v = inst.value || 0;
     const format = inst.format || 'stroke';
     const useNet = inst.net !== false;   // v636: net (default) or gross
@@ -54177,13 +54228,14 @@ function calcNassau(g) {
 
       _segsForLabel.forEach(seg => {
         const [from, to] = segmentRange(seg, roundHoles(g));
+        const _lvS = _bgNassauGroupLeaverSide(g, players.map(p => p.id), from, to, useNet);   // v2002 (matrix Q1): leaver pays a side he didn't finish
         // v1802: on a NINE the overall IS the only bet (no front/back to double-charge), so the
         // one-nine-played push can never apply — it silently zeroed every finished 9-hole Nassau.
-        if (seg === 'overall' && g.finishedAt && roundHoles(g) !== 9) {
+        if (!_lvS && seg === 'overall' && g.finishedAt && roundHoles(g) !== 9) {
           const hp = nassauHalvesPlayed(g, players.map(p => p.id));
           if (!hp.front || !hp.back) { m.overall = 'pushed — only one nine played'; return; }
         }
-        const s = groupStrokeStandings(g, players.map(p => p.id), from, to, useNet);
+        const s = _lvS || groupStrokeStandings(g, players.map(p => p.id), from, to, useNet);
         if (!s) return;
         // Segment settles when complete — or, if the round was finished
         // early, on whatever holes were played in it.
@@ -54228,7 +54280,8 @@ function calcNassau(g) {
         const opponents = players.filter(p => p.id !== huck.callerId);
         const settledOpponents = [];
         opponents.forEach(opp => {
-          const r = settleMatch(g, huck.callerId, opp.id, huck.callHole, segEnd, 'stroke', useNet);
+          let r = settleMatch(g, huck.callerId, opp.id, huck.callHole, segEnd, 'stroke', useNet);
+          if (!r || r.open) r = _bgNassauForfeit(g, huck.callerId, opp.id, huck.callHole, segEnd) || r;   // v2002 (matrix Q1): a leaver loses a press he didn't finish
           if (!r || r.open) {
             settledOpponents.push({ id: opp.id, name: opp.name, status: 'in progress', winnerId: null });
             return;
@@ -54270,12 +54323,14 @@ function calcNassau(g) {
     const _openLbl = {};   // v1903 (audit #2 P2): "unfinished — no bet" labels, applied AFTER the loop so the overall force-settle still sees front/back as unsettled
     _nassauSegs(g, inst).forEach(seg => {
       const [from, to] = segmentRange(seg, roundHoles(g));
+      const _lvF = _bgNassauForfeit(g, a.id, b.id, from, to);   // v2002 (matrix Q1): a 1v1 side the leaver didn't finish is lost by him
       // v1802: same as group mode — a nine has only the overall, never push it for lacking a back nine.
-      if (seg === 'overall' && g.finishedAt && roundHoles(g) !== 9) {
+      if (!_lvF && seg === 'overall' && g.finishedAt && roundHoles(g) !== 9) {
         const hp = nassauHalvesPlayed(g, [a.id, b.id]);
         if (!hp.front || !hp.back) { m.overall = 'pushed — only one nine played'; return; }
       }
       let r = settleMatch(g, a.id, b.id, from, to, format, useNet);
+      if (_lvF && (!r || r.open)) r = _lvF;   // v2002 (matrix Q1): a side already decided (closed out) before he left stands
 
       // Match play overall: if front AND back are both settled but the overall
       // is still "open" (lead ≤ remaining unplayed holes), force-settle it.
@@ -54352,7 +54407,8 @@ function calcNassau(g) {
     });
     myHuckles.forEach(huck => {
       const [, segEnd] = segmentRange(huck.segment, roundHoles(g));
-      const r = settleMatch(g, huck.callerId, huck.opponentId, huck.callHole, segEnd, format, useNet);
+      let r = settleMatch(g, huck.callerId, huck.opponentId, huck.callHole, segEnd, format, useNet);
+      if (!r || r.open) r = _bgNassauForfeit(g, huck.callerId, huck.opponentId, huck.callHole, segEnd) || r;   // v2002 (matrix Q1)
       if (!r || r.open) {
         huckleResults.push(Object.assign({}, huck, { instanceIdx: instIdx, status: 'in progress', winnerName: null }));
         return;
@@ -56460,9 +56516,11 @@ function calcScramble(g) {
   if (!allComplete && g && g.finishedAt && holesComplete > 0) allComplete = true;
   let _scClosed = false;
   if (!allComplete && cfg.scoring === 'match' && holesComplete > 0) {
-    let _lastH = 0;
-    holeResults.forEach(hr => { if (hr && hr.result != null) _lastH = hr.hole; });
-    const _rem = Math.max(0, _scNH - _lastH);
+    // v2002 (matrix MATCH-4): holes still to play = the holes of the round (in play order) with no team
+    // score yet. Was "roundHoles - highest hole number scored", so a start on 10 (or a shotgun / picked
+    // start) closed the match the moment hole 18 had a score, with the front nine still to play.
+    const _done = new Set(holeResults.filter(hr => hr && hr.result != null).map(hr => hr.hole));
+    const _rem = _bgPlaySeqOr(g, _scNH).filter(hh => !_done.has(hh)).length;
     if (Math.abs(aHolesWon - bHolesWon) > _rem) { allComplete = true; _scClosed = true; }
   }
 
@@ -56596,7 +56654,12 @@ function calcMatch(g) {
   instances.forEach((inst, instIdx) => {
     const partIds = Array.isArray(inst.participants) ? inst.participants : [];
     const pair = partIds.map(id => g.players.find(p => p.id === id)).filter(Boolean);
-    if (pair.length !== 2) return; // skip incomplete instances
+    if (pair.length !== 2) {
+      // v2002 (matrix MATCH-5): a match whose pair lost a player (removed mid-round) used to be skipped
+      // silently. A pair that was set up and then lost someone now shows a "game dropped" row.
+      if (pair.length === 1 && (partIds.length >= 2 || (Array.isArray(g.removedPlayerIds) && g.removedPlayerIds.length))) _bgDropBet('matchPlay', 'a player in the match was removed mid-round');
+      return; // skip incomplete instances
+    }
     const a = pair[0], b = pair[1];
     const useNet = inst.net !== false; // default to net
     const value = inst.value || 0;
@@ -56638,7 +56701,14 @@ function calcMatch(g) {
       // hole it was 0 and a 1-up win rendered as "1&0" instead of "1 up"; and if
       // any hole was left blank, `played` under-counted and a 2-up win at 18 read
       // "2&1". Count what's actually LEFT in the round after this hole.
-      const remaining = _mHoles - (k + 1);   // v1467: position in PLAY order, not hole index
+      // v2002 (matrix MATCH-7): a hole skipped earlier (blank for either player) is still to play, so
+      // it counts as remaining: 3 up with 17, 18 AND a blank 5 left is dormie, not 3&2. A later
+      // fill-in of that hole then updates the result instead of being cut off by a false close-out.
+      let remaining = _mHoles - (k + 1);   // v1467: position in PLAY order, not hole index
+      for (let _j = 0; _j < k; _j++) {
+        const _hj = _seq[_j] - 1;
+        if (!(g.scores[a.id] && g.scores[a.id][_hj] != null) || !(g.scores[b.id] && g.scores[b.id][_hj] != null)) remaining++;
+      }
       if (Math.abs(aUp) > remaining) {
         closedHole = h + 1;
         closedScore = (remaining > 0) ? (Math.abs(aUp) + '&' + remaining) : (Math.abs(aUp) + ' up');
@@ -56700,7 +56770,8 @@ function calcMatch(g) {
 function calcTeamMatch(g) {
   if (!g.games.teamMatch) return null;
   const cfg = g.games.teamMatch;
-  if (!cfg.teamA || !cfg.teamB || cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return null;
+  if (!cfg.teamA || !cfg.teamB || (cfg.teamA.length === 0 && cfg.teamB.length === 0)) return null;
+  if (cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return _bgDropBet('teamMatch', 'uneven teams \u2014 a player was probably removed mid-round');   // v2002 (matrix MATCH-5): was a bare return null, so the game vanished with no "game dropped" row
 
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
@@ -56841,7 +56912,8 @@ function calcComboScore(g) {
   if (!g.games.comboScore) return null;
   const cfg = g.games.comboScore;
   if (cfg.teamMode === '4man') return calcComboScore4man(g, cfg);
-  if (!cfg.teamA || !cfg.teamB || cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return null;
+  if (!cfg.teamA || !cfg.teamB || (cfg.teamA.length === 0 && cfg.teamB.length === 0)) return null;
+  if (cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return _bgDropBet('comboScore', 'uneven teams \u2014 a player was probably removed mid-round');   // v2002 (matrix MATCH-5): was a bare return null, so the game vanished with no "game dropped" row
 
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
@@ -56914,7 +56986,8 @@ function calcTeamLowball(g) {
   if (!g.games.teamLowball) return null;
   const cfg = g.games.teamLowball;
   if (cfg.teamMode === '4man') return calcTeamLowball4man(g, cfg);
-  if (!cfg.teamA || !cfg.teamB || cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return null;
+  if (!cfg.teamA || !cfg.teamB || (cfg.teamA.length === 0 && cfg.teamB.length === 0)) return null;
+  if (cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return _bgDropBet('teamLowball', 'uneven teams \u2014 a player was probably removed mid-round');   // v2002 (matrix MATCH-5): was a bare return null, so the game vanished with no "game dropped" row
 
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
@@ -57037,7 +57110,8 @@ function calcShamble(g) {
   if (!g.games.shamble) return null;
   const cfg = g.games.shamble;
   if (cfg.teamMode === '4man') return calcShamble4man(g, cfg);
-  if (!cfg.teamA || !cfg.teamB || cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return null;
+  if (!cfg.teamA || !cfg.teamB || (cfg.teamA.length === 0 && cfg.teamB.length === 0)) return null;
+  if (cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return _bgDropBet('shamble', 'uneven teams \u2014 a player was probably removed mid-round');   // v2002 (matrix MATCH-5): was a bare return null, so the game vanished with no "game dropped" row
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
   const teamA = cfg.teamA.map(id => g.players.find(p => p.id === id)).filter(Boolean);
@@ -57058,7 +57132,23 @@ function calcShamble(g) {
       return (cfg.net && g.sis) ? netHoleScore(s, bgShambleHcp(g, cfg, p), siFor(g, p.id, h), parFor(g, p.id, h), g.hcpRules, rh) : s;
     }).filter(v => v !== null).sort((x, y) => x - y);
     if (blankActive || !vals.length) return null;
-    // a team with fewer scores in than `balls` counts what it has (a walked-in partner)
+    /* v2002 (matrix MATCH-1, Tyler's leaver rule): a team short of `balls` because a partner LEFT
+       used to count what it had, so best-2 summed ONE ball against the other team's two and the
+       short-handed team won. Each missing ball now counts as the leaver's net double bogey: his own
+       tee par + 2 on a net shamble; on a gross shamble the gross score that is net double bogey
+       (par + 2 + his strokes). Never fewer balls against more. */
+    if (vals.length < balls) {
+      const _ndb = [];
+      team.forEach(p => {
+        const s = (g.scores[p.id] && g.scores[p.id][h] != null) ? g.scores[p.id][h] : null;
+        if (s !== null || bgActiveOnHole(g, p.id, h + 1)) return;
+        const par = parFor(g, p.id, h);
+        const st = (cfg.net && g.sis) ? 0 : Math.max(0, strokesOnHole(effectiveHcp(p, g.hcpRules), siFor(g, p.id, h), par, g.hcpRules, rh));
+        _ndb.push(par + 2 + st);
+      });
+      _ndb.sort((x, y) => x - y);
+      while (vals.length < balls && _ndb.length) vals.push(_ndb.shift());
+    }
     return vals.slice(0, balls).reduce((t, v) => t + v, 0);
   };
   for (let h = 0; h < 18; h++) {
@@ -58082,7 +58172,8 @@ function calcNiners(g) {
 function calcHighLow(g) {
   if (!g.games.highLow) return null;
   const cfg = g.games.highLow;
-  if (!cfg.teamA || !cfg.teamB || cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return null;
+  if (!cfg.teamA || !cfg.teamB || (cfg.teamA.length === 0 && cfg.teamB.length === 0)) return null;
+  if (cfg.teamA.length !== cfg.teamB.length || cfg.teamA.length === 0) return _bgDropBet('highLow', 'uneven teams \u2014 a player was probably removed mid-round');   // v2002 (matrix MATCH-5): was a bare return null, so the game vanished with no "game dropped" row
   const money = {};
   g.players.forEach(p => money[p.id] = 0);
   const teamA = cfg.teamA.map(id => g.players.find(p => p.id === id)).filter(Boolean);
@@ -58784,9 +58875,13 @@ function calcHammer(g) {
   };
 
   if (mode === 'team') {
-    if (players.length !== 2 && players.length !== 4) return null;
+    // v2002 (matrix MATCH-5): uneven sides (a player removed from a 2v2 leaves 3) were a bare return null,
+    // so the game vanished from the board. Same "game dropped" row every other team game shows.
+    // (only when a player was removed: a 6- or 8-player team Hammer is a setup choice the entry card already explains)
+    const _hmLost = Array.isArray(g.removedPlayerIds) && g.removedPlayerIds.length > 0;
+    if (players.length !== 2 && players.length !== 4) return (_hmLost && players.length ? _bgDropBet('hammer', 'uneven teams \u2014 a player was probably removed mid-round') : null);
     const sides = _hammerSides(g, players);   // v1998
-    if (!sides) return null;
+    if (!sides) return (_hmLost ? _bgDropBet('hammer', 'uneven teams \u2014 a player was probably removed mid-round') : null);   // v2002 (matrix MATCH-5)
     const money = {}; (g.players || []).forEach(p => money[p.id] = 0);   // v1998: every player on the card has a (possibly 0) line
     const holeResults = [];
     const sideNet = (side, h) => {
@@ -58870,14 +58965,17 @@ function calcHammer(g) {
       holeResults.push({ hole: h, winner: displayFirst(active[0]), winnerIds: [active[0].id], amt: amt * foldedIds.size, stake: stake, folded: Array.from(foldedIds) });   // v1903 (audit #2 #26): ids for the badge
       continue;
     }
-    let best = null, bestIds = [];
+    let best = null, bestIds = [], _hiBlank = false;
     active.forEach(p => {
       const n = netFor(p.id, h);
-      if (n == null) return;
+      if (n == null) { _hiBlank = true; return; }
       if (best == null || n < best) { best = n; bestIds = [p.id]; }
       else if (n === best) { bestIds.push(p.id); }
     });
-    if (best == null) continue;   // remaining players haven't all finished the hole yet
+    // v2002 (matrix MATCH-2): the hole is decided only when EVERY active, unfolded player has a score
+    // (team mode already waits). It used to settle among whoever had posted, so the first scorer won a
+    // live hole and a forgotten cell on a finished round cut that player out of the hole.
+    if (best == null || _hiBlank) continue;   // remaining players haven't all finished the hole yet
     if (bestIds.length > 1) {
       if (cfg.carry) carry += stake;   // tie among the active players — push, game value carries
       holeResults.push({ hole: h, winner: null, amt: 0, stake: stake, folded: Array.from(foldedIds) });
