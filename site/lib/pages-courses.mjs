@@ -19,9 +19,14 @@ export function courseFacts(c) {
 
 // Tee colour bands for the scorecard rows -- the printed card's look. Unknown labels stay neutral.
 const TEE_COLORS = [
-  [/\b(black|championship|tips)\b/i, '#1f2933', '#fff'], [/\bgold\b/i, '#d4a72c', '#1f2933'], [/\bblue\b/i, '#2c5aa0', '#fff'],
-  [/\bwhite\b/i, '#ffffff', '#1f2933'], [/\bgreen\b/i, '#6b8f3a', '#fff'], [/\bred\b/i, '#b23a3a', '#fff'], [/\bsilver|grey|gray\b/i, '#9aa4ae', '#1f2933'],
-  [/\borange|copper\b/i, '#d97a2b', '#fff'], [/\byellow\b/i, '#e3c030', '#1f2933'], [/\bpurple\b/i, '#6a4c93', '#fff'], [/\bbrown|tan\b/i, '#8a6a3f', '#fff'], [/\bteal\b/i, '#2a8f8f', '#fff']
+  // 2026-11-01 (Tyler: "make the row color match the tee color if it's named a color") -- every colour name a card uses
+  [/\b(black|onyx|ebony|charcoal|championship|tips)\b/i, '#1f2933', '#ffffff'], [/\b(gold|golden|champagne|amber)\b/i, '#d4a72c', '#1f2933'],
+  [/\b(blue|navy|sapphire|royal|cobalt|azure)\b/i, '#2c5aa0', '#ffffff'], [/\b(white|pearl|ivory)\b/i, '#ffffff', '#1f2933'],
+  [/\b(green|emerald|jade|forest|olive)\b/i, '#6b8f3a', '#ffffff'], [/\b(red|ruby|crimson|burgundy|maroon|cardinal|scarlet|garnet|cherry)\b/i, '#b23a3a', '#ffffff'],
+  [/\b(silver|grey|gray|platinum|pewter|slate)\b/i, '#9aa4ae', '#1f2933'], [/\b(orange|copper|rust|tangerine)\b/i, '#d97a2b', '#ffffff'],
+  [/\b(yellow|lime|citrine)\b/i, '#e3c030', '#1f2933'], [/\b(purple|violet|plum|lavender|amethyst)\b/i, '#6a4c93', '#ffffff'],
+  [/\b(brown|tan|bronze|khaki|sand|beige|chocolate|mocha)\b/i, '#8a6a3f', '#ffffff'], [/\b(teal|aqua|turquoise|cyan)\b/i, '#2a8f8f', '#ffffff'],
+  [/\b(pink|rose|coral|magenta|salmon)\b/i, '#d4689a', '#ffffff']
 ];
 function teeStyle(label) {
   const hit = TEE_COLORS.find(([re]) => re.test(label || ''));
