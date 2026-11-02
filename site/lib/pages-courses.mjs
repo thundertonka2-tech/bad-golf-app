@@ -54,7 +54,7 @@ function scorecard(c) {
   let body = '';
   upper.forEach(t => { body += row(t.label || 'Tee', t.yds, { totals: true, style: teeStyle(t.label), cls: 'sc-tee' }); });
   if (gps) body += row('Yards (GPS)' + (gpsTee ? ' · ' + gpsTee : ''), gps, { totals: true, cls: 'sc-tee sc-gps' });
-  if (sis.length) body += row('Handicap', sis, { cls: 'sc-hcp' });
+  if (sis.length) body += row('HCP', sis, { cls: 'sc-hcp' });   // Tyler, 11/1: HCP
   body += row('Par', c.pars, { totals: true, bold: true, cls: 'sc-par' });
   // Tyler (11/1): the forward tee's own Handicap line only when its stroke index differs -- the library carries one index per course, so none here.
   if (forward) body += row(forward.label || 'Tee', forward.yds, { totals: true, style: teeStyle(forward.label), cls: 'sc-tee sc-forward' });
