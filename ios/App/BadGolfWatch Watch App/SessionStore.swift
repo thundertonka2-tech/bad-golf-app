@@ -5,6 +5,43 @@
 // shared Keychain access group — see the iOS-companion notes.)
 
 import Foundation
+import Security
+
+// v2000 (audit UX-8): the login token lives in the watch Keychain, not in plain UserDefaults
+// (which ends up unencrypted in device backups). The project has no App Group entitlement, so
+// the "shared" suite was only ever this device's own defaults anyway. An old token found in
+// defaults is moved into the Keychain on first read and removed from defaults.
+private enum WatchKeychain {
+    static let service = "com.simplisticfishing.badgolf.watch.session"
+
+    static func get(_ key: String) -> String? {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var out: AnyObject?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func set(_ key: String, _ value: String?) {
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+        ]
+        SecItemDelete(base as CFDictionary)
+        guard let value = value, !value.isEmpty, let data = value.data(using: .utf8) else { return }
+        var add = base
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        SecItemAdd(add as CFDictionary, nil)
+    }
+}
 
 final class SessionStore {
     static let shared = SessionStore()
@@ -16,8 +53,20 @@ final class SessionStore {
     private init() {}
 
     var accessToken: String? {
-        get { defaults.string(forKey: "bg_access_token") }
-        set { defaults.set(newValue, forKey: "bg_access_token") }
+        get {
+            if let t = WatchKeychain.get("bg_access_token") { return t }
+            // one-time move of a token saved by an older build
+            if let old = defaults.string(forKey: "bg_access_token"), !old.isEmpty {
+                WatchKeychain.set("bg_access_token", old)
+                defaults.removeObject(forKey: "bg_access_token")
+                return old
+            }
+            return nil
+        }
+        set {
+            WatchKeychain.set("bg_access_token", newValue)
+            defaults.removeObject(forKey: "bg_access_token")
+        }
     }
     var playerId: String? {
         get { defaults.string(forKey: "bg_player_id") }

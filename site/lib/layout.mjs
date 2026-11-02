@@ -22,7 +22,9 @@ export const storeButtons = (cls = '') => `
 export function page({ path, title, description, h1, body, ogImage, jsonld = [], noindex = false, extraHead = '', headFirst = '', bodyClass = '' }) {
   const url = SITE + path;
   const img = ogImage || SITE + '/img/og-badgolf.jpg';
-  const ld = jsonld.length ? `<script type="application/ld+json">${JSON.stringify(jsonld.length === 1 ? jsonld[0] : jsonld)}</script>` : '';
+  // v2000 (audit WEB-1): JSON.stringify does not escape </script>, so a course name could break out of
+  // the structured-data block. \u003c/\u003e/\u0026 are valid JSON and inert inside <script>.
+  const ld = jsonld.length ? `<script type="application/ld+json">${JSON.stringify(jsonld.length === 1 ? jsonld[0] : jsonld).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')}</script>` : '';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>

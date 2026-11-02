@@ -192,6 +192,7 @@ struct GpsInfo: Codable, Equatable {
     var measured: [String: Int]   // club -> measured median yards (5+ tracked shots)
     var group: [GroupDot]
     var cb: Bool? = nil           // v1943: phone's "Color-blind friendly" setting (optional so a cached round still decodes)
+    var metric: Bool? = nil       // v2000 (audit UX-3): phone's yards/meters setting (optional for the same reason)
 }
 
 // v1910: the final card shown on the wrist when the round finishes.

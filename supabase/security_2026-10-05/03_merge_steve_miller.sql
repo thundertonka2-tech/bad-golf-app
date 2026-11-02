@@ -4,7 +4,7 @@
 --
 --   KEEP   3cf4b5b8-2768-4623-b016-29fd0face620  Apple sign-in, active today, 20-round
 --          handicap (6.5), stats, phone, linked roster player.
---   REMOVE 2ea0ac2c-dc83-4fb2-a0a9-e23947190565  stevenbrettmiller@gmail.com, signed in
+--   REMOVE 2ea0ac2c-dc83-4fb2-a0a9-e23947190565  <email removed>, signed in
 --          once on 6/14 and never again. Owns nothing but an empty recent-rounds row.
 --
 -- Why it matters: with two accounts under the same full name, 9 round invites from
@@ -52,7 +52,7 @@ delete from public.games where code in ('recent:2ea0ac2c-dc83-4fb2-a0a9-e2394719
                                         'myptomb:2ea0ac2c-dc83-4fb2-a0a9-e23947190565');
 -- old identity-backfill note (7/25) points at the profile and would block the delete
 delete from public.identity_backfill_review where account_id = '2ea0ac2c-dc83-4fb2-a0a9-e23947190565';
-delete from auth.users where id = '2ea0ac2c-dc83-4fb2-a0a9-e23947190565' and email = 'stevenbrettmiller@gmail.com';
+delete from auth.users where id = '2ea0ac2c-dc83-4fb2-a0a9-e23947190565' /* v2000 (audit BE-12): email removed from the public repo; the id is enough */;
 
 commit;
 

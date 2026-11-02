@@ -343,7 +343,7 @@ struct HoleMapView: View {
         var rings: [(yards: Int, label: String, bold: Bool)] = []
         if arcsMode == 1 {
             let step = Arcs.step(pointsPerYard: ppy)
-            rings = Arcs.yards(target: d, step: step).map { (yards: $0, label: "\($0)", bold: abs(Double($0) - d) < Double(step) / 2) }
+            rings = Arcs.yards(target: d, step: step).map { (yards: $0, label: "\(DistUnit.show($0))", bold: abs(Double($0) - d) < Double(step) / 2) }
         } else {
             rings = Arcs.clubs(store.clubs, measured: gps?.measured ?? [:], target: d)
                 .map { (yards: $0.yards, label: $0.label, bold: false) }
@@ -389,16 +389,16 @@ struct HoleMapView: View {
             } else {
                 VStack(spacing: 1) {
                     HStack(spacing: 6) {
-                        Text("\(toT)").font(.system(size: 20, weight: .bold, design: .rounded)).monospacedDigit()
+                        Text("\(DistUnit.show(toT))").font(.system(size: 20, weight: .bold, design: .rounded)).monospacedDigit()
                         if let p = plays, p != toT {
-                            Text("plays \(p)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.badGolfAmber)
+                            Text("plays \(DistUnit.show(p))").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.badGolfAmber)
                         }
                         if let c = store.suggestedClub(for: (store.watchPlaysAs ? plays : nil) ?? toT) {
                             Text(c).font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.85))
                         }
                     }
                     if GeoMath.meters(m.target, m.pin) > 3 {
-                        Text("then \(tToPin) to pin").font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.85))
+                        Text("then \(DistUnit.show(tToPin)) to pin").font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.85))
                     }
                 }
                 .padding(.horizontal, 8).padding(.vertical, 3)
@@ -617,13 +617,13 @@ struct GreenDetailView: View {
         let hole = store.hole
         VStack(spacing: 2) {
             if let me = me, let p = pin {
-                Text("\(Int(GeoMath.yards(me, p).rounded())) to pin")
+                Text("\(DistUnit.show(GeoMath.yards(me, p))) to pin")
                     .font(.system(size: 15, weight: .bold, design: .rounded)).monospacedDigit()
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Color.black.opacity(0.55), in: Capsule())
             }
             if let me = me, let fr = hole?.front, let bk = hole?.back {
-                Text("F \(Int(GeoMath.yards(me, fr).rounded())) · B \(Int(GeoMath.yards(me, bk).rounded()))")
+                Text("F \(DistUnit.show(GeoMath.yards(me, fr))) · B \(DistUnit.show(GeoMath.yards(me, bk)))")
                     .font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.9))
             }
             Spacer()

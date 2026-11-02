@@ -138,7 +138,7 @@ struct DistanceView: View {
 
             // Plays-as line (only when the phone toggle is on) + suggested club.
             if store.watchPlaysAs, showPlaysLike, let pl = playsLike {
-                Text("plays \(pl)" + (suggestedClub.map { " · " + $0 } ?? ""))
+                Text("plays \(DistUnit.show(pl))" + (suggestedClub.map { " · " + $0 } ?? ""))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.badGolfAmber)
                     .padding(.top, 1)
@@ -181,7 +181,7 @@ struct DistanceView: View {
 
     private var fullGreens: some View {
         VStack(spacing: 0) {
-            Text(shownDistances?.center.map(String.init) ?? "—")
+            Text(shownDistances?.center.map { String(DistUnit.show($0)) } ?? "—")
                 .font(.system(size: 64, weight: .bold, design: .rounded))
                 .foregroundStyle(showingLastKnown ? Color.white.opacity(0.55) : .white)
                 .minimumScaleFactor(0.6)
@@ -198,7 +198,7 @@ struct DistanceView: View {
 
     private var centerOnly: some View {
         VStack(spacing: 2) {
-            Text(shownDistances?.center.map(String.init) ?? "—")
+            Text(shownDistances?.center.map { String(DistUnit.show($0)) } ?? "—")
                 .font(.system(size: 60, weight: .bold, design: .rounded))
                 .foregroundStyle(showingLastKnown ? Color.white.opacity(0.55) : .white)
                 .monospacedDigit()
@@ -235,7 +235,7 @@ struct DistanceView: View {
     }
 
     private func label(_ tag: String, _ v: Int?) -> some View {
-        Text("\(tag) \(v.map(String.init) ?? "—")")
+        Text("\(tag) \(v.map { String(DistUnit.show($0)) } ?? "—")")
     }
 
     // Small wind chip: arrow rotated to where the wind blows TO + mph. Hidden

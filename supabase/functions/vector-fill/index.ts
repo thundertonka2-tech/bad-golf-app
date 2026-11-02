@@ -14,7 +14,7 @@
 //
 // Auth: the pg_cron job sends header x-bg-cron-key = Vault secret bg_cron_key; the function reads
 // the same secret through bg_cron_key() (service_role only) and compares. No dashboard step needed.
-// (A service-role bearer token is accepted too; an optional BG_CRON_KEY function secret overrides.)
+// (An optional BG_CRON_KEY function secret overrides. v2000: bearer tokens are no longer accepted.)
 // Deployed with verify_jwt=false because the key is the auth.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -28,17 +28,11 @@ const UA           = "BadGolfApp/1.0 (support@officialbadgolf.com)";
 // overpass-api.de answers 406 to every request from the edge runtime (its IP range is blocked - probed 10/17
 // with five header shapes), so the job uses the two mirrors that do answer. kumi's data runs a few
 // weeks behind main but that is fine for course shapes.
-const MIRRORS      = ["https://overpass.kumi.systems/api/interpreter", "https://overpass.private.coffee/api/interpreter"];
+// v2000 (audit BE-10): both mirrors timed out from the edge runtime from 2026-11-01 on; mail.ru is tried
+// as a third world-coverage mirror before a run gives up.
+const MIRRORS      = ["https://overpass.kumi.systems/api/interpreter", "https://overpass.private.coffee/api/interpreter",
+                      "https://maps.mail.ru/osm/tools/overpass/api/interpreter"];   // openstreetmap.fr is whitelist-only (403)
 const KEEP = new Set(["fairway", "rough", "bunker", "green", "water_hazard", "lateral_water_hazard", "tee", "penalty_area"]);
-
-function callerRole(req: Request): string {
-  try {
-    const tok = (req.headers.get("authorization") || "").replace(/^bearer\s+/i, "").trim();
-    const part = tok.split(".")[1] || "";
-    const c = JSON.parse(atob(part.replace(/-/g, "+").replace(/_/g, "/").padEnd(part.length + (4 - part.length % 4) % 4, "=")));
-    return String(c.role || "");
-  } catch (_) { return ""; }
-}
 
 type Feat = { type: "Feature"; properties: { k: string; ref: string }; geometry: any };
 
@@ -91,11 +85,10 @@ async function overpass(lat: number, lng: number): Promise<any | null> {
     + `way["landuse"="forest"](around:${RADIUS_M},${lat},${lng});relation["landuse"="forest"](around:${RADIUS_M},${lat},${lng});`
     + `way["natural"="scrub"](around:${RADIUS_M},${lat},${lng});way["natural"="tree_row"](around:${RADIUS_M},${lat},${lng});`
     + `node["natural"="tree"](around:${RADIUS_M},${lat},${lng}););out geom;`;
-  for (let round = 0; round < 2; round++) {
-    if (round) await new Promise(r => setTimeout(r, 12_000));   // both mirrors said no: one more go after a pause
+  for (let round = 0; round < 1; round++) {   // v2000: one pass over four mirrors keeps a run inside the 3-minute tick
     for (const url of MIRRORS) {
     try {
-      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 45_000);
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 40_000);
       const res = await fetch(url, { method: "POST", headers: { "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded" }, body: "data=" + encodeURIComponent(q), signal: ctl.signal });
       clearTimeout(t);
       if (!res.ok) { const tx = await res.text().catch(() => ""); console.error("overpass", url, res.status, tx.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300)); continue; }
@@ -112,7 +105,9 @@ Deno.serve(async (req) => {
   const key = req.headers.get("x-bg-cron-key") || "";
   let want = CRON_KEY;
   if (!want) { try { const { data } = await supa.rpc("bg_cron_key"); want = String(data || ""); } catch (_) {} }
-  if (!(want && key === want) && callerRole(req) !== "service_role") return new Response("forbidden", { status: 403 });
+  // v2000 (audit BE-5): verify_jwt is off for this function, so an unverified token payload must never
+  // grant access. Only the Vault cron key (or the BG_CRON_KEY secret) is accepted.
+  if (!(want && key === want)) return new Response("forbidden", { status: 403 });
   const started = Date.now();
   const out: any[] = [];
   let limit = 50;
@@ -128,11 +123,12 @@ Deno.serve(async (req) => {
 
     const d = await overpass(c.lat, c.lng);
     if (!d) {
-      const st = c.attempts + 1 >= 3 ? "error" : "pending";
-      await supa.from("course_vector_queue").update({ status: st, note: "OSM request failed (" + new Date().toISOString().slice(0, 16) + ")", updated_at: new Date().toISOString() }).eq("course_id", c.course_id);
-      out.push({ id: c.course_id, result: st });
-      await new Promise(r => setTimeout(r, 15000));   // Overpass said no - give it a moment
-      continue;
+      // v2000 (audit BE-10): every mirror failing is an outage, not a problem with this course. Give the
+      // attempt back and stop this run; the next cron tick tries again. (Before, one outage night marched
+      // through 1,648 courses and three would have retired good courses as 'error'.)
+      await supa.from("course_vector_queue").update({ attempts: c.attempts, note: "OSM unavailable (" + new Date().toISOString().slice(0, 16) + ") - will retry", updated_at: new Date().toISOString() }).eq("course_id", c.course_id);
+      out.push({ id: c.course_id, result: "osm-unavailable" });
+      break;
     }
     const feats = toFeatures(d);
     const counts: Record<string, number> = {};

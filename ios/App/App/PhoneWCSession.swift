@@ -42,7 +42,10 @@ final class PhoneWCSession: NSObject, WCSessionDelegate {
     /// Called from JS (via the WatchBridge plugin) on login and round changes.
     /// `roundJSON` is a RoundHandoff-shaped dictionary already built in JS.
     func sync(token: String?, playerId: String?, handoffData: Data?) {
-        if let t = token { group?.set(t, forKey: "bg_access_token") }
+        // v2000 (audit UX-8): the phone no longer keeps a copy of the login token in plain defaults
+        // (nothing on the phone read it; the watch gets the token in each handoff). Clear any old copy.
+        _ = token
+        group?.removeObject(forKey: "bg_access_token")
         if let p = playerId { group?.set(p, forKey: "bg_player_id") }
 
         guard let data = handoffData else { return }

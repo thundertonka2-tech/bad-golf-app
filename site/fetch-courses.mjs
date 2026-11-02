@@ -93,6 +93,8 @@ for (const c of [...seed, ...lib]) {
   const o = { id: c.id, name: c.name, city: c.city || '', st: (c.st || '').toUpperCase(), lat: c.lat, lng: c.lng, holes: c.holes };
   if (nameOvr && nameOvr[c.id]) o.name = nameOvr[c.id];
   const d = detOvr && detOvr[c.id]; if (d) { if (d.name) o.name = d.name; if (d.city != null) o.city = d.city; if (d.st) o.st = d.st.toUpperCase(); }
+  // v2000 (audit WEB-1): course names come from player-submitted data; markup characters never reach a page
+  o.name = String(o.name).replace(/[<>]/g, ''); o.city = String(o.city || '').replace(/[<>]/g, '');
   if (!o.st && /,\s*([A-Z]{2})$/.test(o.city)) { o.st = RegExp.$1; o.city = o.city.replace(/,\s*[A-Z]{2}$/, ''); }
   const k = cards[c.id];
   // 2026-11-01 (Tyler: "Why is the yardage for Buffalo Creek missing on the website?"): the

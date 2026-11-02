@@ -179,6 +179,24 @@ Deno.serve(async (req) => {
     } catch (e) { report[table] = "FAILED: " + (e as Error).message; }
   }
 
+  // 1c) v2000 (audit WEB-6): the user's uploaded FILES. Deleting photo rows never removed the files, so
+  //     feedback screenshots and event photos (incl. thumbnails) stayed reachable by URL after the account
+  //     was gone. List them in SQL and remove them through the storage API, which deletes the files.
+  try {
+    const { data: objs, error: lErr } = await admin.rpc("bg_user_storage_paths", { p_uid: uid });
+    if (lErr) throw lErr;
+    const byBucket: Record<string, string[]> = {};
+    for (const o of (objs || []) as { bucket: string; path: string }[]) (byBucket[o.bucket] ||= []).push(o.path);
+    let removed = 0; const fails: string[] = [];
+    for (const [bucket, paths] of Object.entries(byBucket)) {
+      for (let i = 0; i < paths.length; i += 100) {
+        const { data: gone, error: rmErr } = await admin.storage.from(bucket).remove(paths.slice(i, i + 100));
+        if (rmErr) fails.push(bucket + ": " + rmErr.message); else removed += (gone || []).length;
+      }
+    }
+    report["storage_files"] = fails.length ? "FAILED: " + fails.join("; ") : ("removed " + removed + " file(s)");
+  } catch (e) { report["storage_files"] = "FAILED: " + ((e as Error).message || String(e)); }
+
   // 2) Revoke the Apple token if the user used Sign in with Apple.
   const usedApple = (user.identities || []).some((i) => i.provider === "apple");
   if (usedApple) {

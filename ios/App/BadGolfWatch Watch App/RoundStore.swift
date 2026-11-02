@@ -11,7 +11,7 @@ import WatchKit
 
 @MainActor
 final class RoundStore: ObservableObject {
-    @Published var round: Round?
+    @Published var round: Round? { didSet { DistUnit.metric = round?.gps?.metric ?? false } }   // v2000 (audit UX-3)
     @Published var course: Course?
     @Published var currentHole: Int = 1
     @Published var syncState: SyncState = .idle

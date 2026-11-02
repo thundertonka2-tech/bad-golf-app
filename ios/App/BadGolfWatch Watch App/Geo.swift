@@ -19,6 +19,14 @@ extension Color {
     static let badGolfAmber = Color(red: 1.0, green: 0xd3/255, blue: 0x4d/255)
 }
 
+// v2000 (audit UX-3): GPS readouts follow the phone's yards/meters setting, like the phone's own map.
+// Bag distances and tracked shots stay in yards (the owner's v1841 rule). Set from the round handoff.
+enum DistUnit {
+    static var metric = false
+    static func show(_ yards: Int) -> Int { metric ? Int((Double(yards) / Geo.metersToYards).rounded()) : yards }
+    static func show(_ yards: Double) -> Int { metric ? Int((yards / Geo.metersToYards).rounded()) : Int(yards.rounded()) }
+}
+
 enum Geo {
     static let metersToYards = 1.09361
 
