@@ -78,21 +78,20 @@ def split_even(cents, ids):
     return out
 PAYOUT = {'winner_take_all': [1.0], '80_20': [.8, .2], '70_30': [.7, .3], '60_40': [.6, .4], '50_30_20': [.5, .3, .2], '40_30_20_10': [.4, .3, .2, .1]}
 def season_payout(pot_cents, ranks, payout, members_of=None):
-    """ranks: {eid: rank}. Truncate the structure to the number of distinct ranks and renormalise so the whole pot pays
-       (tied entrants pool the shares of the places they occupy). Each entrant's share split evenly over its members.
-       Returns {member: cents}. Leftover cents to the lowest-id member ranked 1."""
+    """ranks: {eid: rank}. Places = entrants (a tie pools the shares of the places it OCCUPIES, as the client
+       projection and standard golf payouts do); renormalise only when there are fewer entrants than paid places.
+       Each entrant's share is split evenly over its members (odd cents to the lowest id). Leftover cents go to the
+       lowest-id rank-1 member. Returns {member: cents}."""
     fr = PAYOUT.get(payout or '', [.6, .4])
-    distinct = sorted(set(ranks.values()))
-    places = min(len(distinct), len(fr)); ef = fr[:places]; s = sum(ef)
-    if s != 1.0: ef = [round(x / s, 6) for x in ef]
-    out = {}; paid = 0
-    for rk in distinct:
-        if rk > len(ef): break
-        grp = sorted(e for e in ranks if ranks[e] == rk)
-        frac = sum(ef[rk - 1:min(rk - 1 + len(grp), len(ef))])
+    n = len(ranks); ef = fr[:min(n, len(fr))]; s = sum(ef)
+    if s and abs(s - 1.0) > 1e-12: ef = [round(x / s, 6) for x in ef]
+    order = sorted(ranks, key=lambda e: (ranks[e], e)); out = {}; paid = 0; place = 0
+    for rk in sorted(set(ranks.values())):
+        grp = [e for e in order if ranks[e] == rk]
+        frac = sum(ef[place:place + len(grp)]); place += len(grp)
+        if frac <= 0: continue
         mem = sorted(set(m for e in grp for m in (members_of(e) if members_of else [e])))
-        amt = int(round(pot_cents * frac / 100.0 + 1e-9, 2) * 100 + (0.5 if pot_cents * frac >= 0 else -0.5)) if False else pg_round(pot_cents * frac)
-        for m, c in split_even(amt, mem).items(): out[m] = out.get(m, 0) + c; paid += c
+        for m, c in split_even(pg_round(pot_cents * frac), mem).items(): out[m] = out.get(m, 0) + c; paid += c
     left = pot_cents - paid
     if left:
         r1 = sorted(m for e in ranks if ranks[e] == 1 for m in (members_of(e) if members_of else [e]))[0]

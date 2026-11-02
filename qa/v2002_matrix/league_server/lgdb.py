@@ -8,7 +8,7 @@ def psql(sql, rollback=True):
     p = subprocess.run(['psql', '-h', HOST, '-p', PORT, '-U', 'postgres', '-d', DB, '-AtqX', '-v', 'ON_ERROR_STOP=1'],
                        input=body, capture_output=True, text=True)
     if p.returncode != 0:
-        raise RuntimeError(p.stderr.strip().split('\n')[-1][:600])
+        raise RuntimeError(p.stderr.strip()[-900:])
     return [l for l in p.stdout.split('\n') if l.strip() != '']
 
 def q1(sql):
