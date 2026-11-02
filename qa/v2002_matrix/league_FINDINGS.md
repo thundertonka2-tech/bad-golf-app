@@ -181,3 +181,180 @@ Each cell is cases run / failed. "Strokes" includes the player-card checks; "Uni
 | Standings points table, tiebreakers, flights, playoffs, rollover, weekly pots, blind draw / forfeit, leaver week | server RPCs | BLOCKED | n/a |
 
 **Totals: 27,959 checks run, 27,931 passed, 28 failed.** The fuzz is 2,000 seeded league nights, each compared to the oracle player by player.
+
+---
+
+# Server half (added after the schema export unblocked it)
+
+**Setup.** A local, throwaway PostgreSQL 16 was loaded with the baseline export, with stub `auth`, `storage`, `vault`, `net` and `cron` schemas and Supabase roles (`league_server/00_bootstrap.sql`, `league_server/load.sh`). `auth.uid()` reads a settable value (`qa.uid`).
+- **Load errors:** the only statements that failed were the PG17-only `GRANT MAINTAIN` lines. All functions and tables loaded.
+- **Live project:** never touched.
+- **Isolation:** every scenario runs in one transaction and is rolled back.
+- **How the tests drive the server:** cards are posted through the real `league_card_place`. Weeks are closed with the real `league_finalize_week`, which runs pool-winner sync, standings rebuild, money recompute and season completion.
+- **How results are judged:** every number is compared with `league_server/oracle.py`, which is written from the rules and does not read the SQL.
+- **Run it:** `league_server/run_all.sh [seeds]`, or `coverage.py` for the table below.
+- **Server suite:** 1,816 checks, 1,805 passed, 11 failed. 200 random seasons (1,600 checks) found no money, scoring or standings errors. The 11 failures are the edge cases below.
+
+## LEAGUE-4: resolved (the server pays winner-take-all)
+With no `money.payout` saved, `league_money_recompute` uses `coalesce(nullif(payout,''),'winner_take_all')`. The server and the payout picker agree. Only the standings projection (`_FR['60_40']` fallback, client ~line 112107) is wrong.
+
+`_league_payout_fracs(NULL)` on its own still returns 60/40, but the recompute never passes it NULL.
+
+**Fix:** client-side only. Change the projection fallback to `LG_PAYOUT_DEFAULT`. OPEN-L4 is answered: winner-take-all.
+
+## LEAGUE-3: also present in `league_money_settle`
+Settle-up transfers are amounts to the cent, not whole units.
+- **Repro:** a 3.33 Low Net pot, P00 and P01 tie on the card-off, P02 loses. Settle returns P02 → P00 **1.67** and P02 → P01 **1.66**.
+- **What the screen shows:** the Unit Totals card (`bgSettleCardsHtml`, `bgWhole` per row) prints "gives 2" and "gives 2". That is 4 units from someone who owes 3.33, and 4 to two people owed 3.33 between them.
+- **Fix:** round member balances with largest remainder (as `bgSettleNets` does) before the greedy match in `league_money_settle`. Or apply `bgNetsWhole` to the transfer list on the client.
+
+## LEAGUE-8 · P1 · Season prize pool: tied lower places are paid nothing (or too little), and the winners take their share
+- **Where:** `league_money_recompute`, the season-payout block: `v_places := least(count(distinct rank), array_length(v_fracs,1))`.
+- **Cause:** the payout structure is cut down to the number of *distinct* ranks and then rescaled to 100%. A tie therefore removes paid places from the bottom and hands their money to the places above.
+- **Repro:** fee 100, one week finalized, standings forced, then recompute.
+
+| Payout | Ranks | Pot | Server pays | Oracle (tied entrants pool the shares of the places they occupy) |
+|---|---|---|---|---|
+| 40/30/20/10 | 1,1,3,3,5 | 500 | 194.45 / 194.44 / 55.56 / 55.55 | 175 / 175 / 75 / 75 |
+| 40/30/20/10 | 1,1,3,3,3 | 500 | 250 / 250 / 0 / 0 / 0 | 175 / 175 / 50 / 50 / 50 |
+| 50/30/20 | 1,1,3,3 | 400 | 200 / 200 / 0 / 0 | 160 / 160 / 40 / 40 |
+
+- The ledger still sums to zero. The money just goes to the wrong people.
+- The "If the season ended today" card already pays places the way the oracle does, so on the final week the screen and the ledger disagree.
+- Untied tables and every winner-take-all, 80/20, 70/30 and 60/40 case match exactly: 75 season-payout checks, plus flights, reserve and team splits.
+- **Fix:** `v_places := least(count(*) of ranked entrants in the flight, array_length(v_fracs,1))`. Ranks are already competition-style (1,1,3), so `efracs[rank .. rank+k-1]` then lines up with places.
+
+## LEAGUE-9 · P1 · A blind-draw or "play the course" card is charged into, and can win, the weekly pots for a player who wasn't there
+- **Where:** `league_resolve_absence` writes the drawn or par card with `member_id = the absent player`. `league_money_recompute` builds each week's pot from `distinct league_cards.member_id`, so that card is a real entry in skins, low net, GIRs and putts.
+- **Repros (pots of 5):**
+  - **Low net, blind draw:** absent P02 draws P00's card, the low round of the week. P02 is charged 5 and **splits low net with P00**: P00 +2.50, P02 +2.50, P01 −5. Oracle: P00 +5, P01 −5, P02 untouched.
+  - **Skins, blind draw:** P02's drawn card is an exact copy of another player's, so it ties that player on all 18 holes. **The copied player can't win a single skin.** In one run the player who should have won 17 skins got 0. P02 is charged 5 for a round he didn't play.
+  - **Play the course:** absent P02 is scored net par on every hole. P00 and P01 played bogey golf, so P02 **wins both pots (+10 each)** while sitting at home.
+- **Fix:** leave cards with `source in ('blind_draw','course','forfeit')` out of the pot entrants (`v_parts`) and out of every ranking in `league_money_recompute`. They exist to settle the match or standings points (§11.4). This matches Tyler's leaver rule (a leaver can't win Low Net) and the v1403 note ("side pots are charged off the cards people actually played"). See OPEN-L7.
+
+## LEAGUE-10 · P2 · An 8-team playoff bracket re-pairs the semi-finals 1 v 2 and 3 v 4
+- **Where:** `league_advance_playoffs`.
+- **Cause:** winners are collected `order by (result_json->>'seed_a')::int`, which gives seeds 1, 2, 3, 4. Consecutive winners are then paired. `league_build_playoffs` laid out the quarter-finals in bracket order (1v8, 4v5 | 2v7, 3v6), so the halves are thrown away.
+- **Repro:** 9 entrants, 8 qualifiers, every higher seed wins its quarter-final. The semis come out 1 v 2 and 3 v 4. Oracle: 1 v 4 and 2 v 3.
+- 2- and 4-team brackets are correct. Tied playoff matches fall back to net total, then the higher seed; that is verified.
+- **Fix:** store each match's bracket position at build time (e.g. `result_json.slot = i`) and order by it when advancing.
+
+## LEAGUE-11 · P2 · `league_assign_flights` puts subs in flights
+- **Cause:** both the head count and the loop read every `status='active'` member, including `role='sub'`.
+- **Repro:** 5 players (handicaps 2–10) plus a sub on 1, two flights. Server: sub → flight 1, and the 3rd-best player is pushed into flight 2 (flights of 3 + 3). Oracle: 3 + 2, with the sub in no flight.
+- A sub has no standings row, so he is never paid. But the flight lines, and so who competes for which flight's half of the pot, are wrong.
+- **Fix:** add `and coalesce(role,'player') <> 'sub'` to both queries, as `league_generate_schedule`, `league_rebuild_standings` and `league_money_recompute` already do.
+
+## Server: verified correct (matches the oracle exactly; ledger sums to 0; every weekly pot pays out exactly what it collected; settle pays every creditor exactly and "owed to the league" matches)
+- **Handicap helpers:**
+  - `league_strokes_on_hole`: 2,457 cells; handicap −30 to 60 × every stroke index × 9 and 18 holes, including 3+ strokes and plus handicaps.
+  - `league_week_course_handicap` and `league_week_rules_handicap`: 385 cases; percentage, lowest basis including a plus-handicap low man, no handicaps, the older `allowance_pct`.
+  - `league_week_max_score`: 384 cases.
+  - `league_adjusted_gross` (net double bogey): 300 cards.
+  - `league_stableford_points` and `league_to_par`: 200 cards, default and custom points tables.
+- **Money helpers:**
+  - `league_split_evenly`: zero-sum to the cent, odd pennies to the lowest (or highest) id, negative amounts too.
+  - `_league_reserve_amount`: identical to the client's `bgReserveAmount`.
+  - `_league_payout_fracs`: identical to the client `_FR` table.
+  - `league_bracket_order`.
+- **`league_finalize_week` and `league_matchup_points` (both overloads agree):** field position points with the card-off (last 9/6/3/1) and tied places pooled; head-to-head point a hole plus 3 bonus, scaled to the week's points possible, on 9 and 18 holes; net stroke; Stableford; one-sided forfeit (full points vs 0); byes; team best ball and aggregate (two cards a side).
+  - 200 seeded seasons: 2–8 entrants, field and head-to-head, all four points systems, 9 and 18 holes, six handicap-rule sets, every payout structure including unset, percentage and flat reserves, about 15% missing cards.
+- **`league_rebuild_standings`:** points, points possible, percentage; tiebreak order (percentage → points → weeks played → low net → wins → card-off) and two-way head-to-head; forfeit wins and losses; weeks absent; a leaver's weeks after `left_week` not counted; split season h1/h2/full; to-par race (a missed week puts you out).
+- **`league_money_recompute`:**
+  - Skins: per skin won outright; tied holes are dead and nothing carries; an all-tied week charges nobody; 9.99 / 7 skins pays exact pennies.
+  - Low net: card-off, otherwise split.
+  - CTP and long putt synced from the round (`league_sync_pool_winners`); a 0-ft mark is ignored; the pot is split over the winners actually recorded; an unwon pot charges nobody.
+  - Commissioner override (`league_set_pool_winner`) recomputes, and an opted-out player is refused as a winner and not charged.
+  - Season payout untied, by flight (pot split per flight, remainder kept), and for teams (an entrant's share split over its members).
+- **Absences:** `league_resolve_week_absences` defaults are verified. The forfeit path is correct.
+- **`league_generate_schedule`:** 2–8 entrants × two cycles. Everyone appears once a week, each pair meets exactly twice, byes are even, and sides swap in the second cycle.
+- **`league_rollover_season`:** active members, team and sub are carried, withdrawn members are not; the latest handicap is carried to week 1; the same number of weeks; no money carried.
+
+## OPEN RULE QUESTIONS (server)
+**OPEN-L6. A player removed mid-season still holds a field slot in later weeks.**
+- **What the server does:** `league_remove_member` turns head-to-head opponents into byes, but a field (`vs_field`) week keeps the removed player's slot. He gets a 0-point forfeit row and still counts in the field size.
+- **Example:** week 2 of 3 with P02 gone: P00 10, P01 6.67, P02 0 with a forfeit. If the field shrinks instead: P00 10, P01 5.
+- **Options:**
+  - (a) Delete the removed player's non-final field slots, so the field shrinks.
+  - (b) Keep them, as today (everyone else is ranked against a full field).
+  - (c) Keep the size but don't record a forfeit against him.
+
+**OPEN-L7. What a blind-draw or "play the course" card counts for (behind LEAGUE-9).**
+- **Options:**
+  - (a) Match and standings points only; never the weekly pots, and no charge. (Recommended.)
+  - (b) The absent player is charged and can win, as today.
+  - (c) The absent player is charged but can't win.
+
+## Server coverage (generated by `league_server/coverage.py 200`)
+| Area | Axis | Checks | Fail |
+|---|---|---|---|
+| OPEN-RULE probe | leaver field size | 1 | 1 |
+| Server absences | blind draw | 1 | 0 |
+| Server absences | blind draw x low net | 1 | 1 |
+| Server absences | blind draw x skins | 1 | 1 |
+| Server absences | blind draw x weekly pots | 2 | 1 |
+| Server absences | course x weekly pots | 1 | 1 |
+| Server absences | forfeit | 1 | 0 |
+| Server flights | assign | 5 | 0 |
+| Server flights | assign x subs | 1 | 1 |
+| Server flights | flight payout | 2 | 0 |
+| Server hcp | adjusted_gross | 1 | 0 |
+| Server hcp | course_handicap | 1 | 0 |
+| Server hcp | max_score | 1 | 0 |
+| Server hcp | rules_handicap | 1 | 0 |
+| Server hcp | rules_handicap lowest + plus low man | 1 | 0 |
+| Server hcp | strokes_on_hole | 1 | 0 |
+| Server money | absence x pots | 15 | 0 |
+| Server money | 200 seeded seasons (field/position, match per hole, net stroke, Stableford; 2–8 entrants; 9/18; rules; payouts; reserves; absences) | 1200 | 0 |
+| Server money | flights | 10 | 0 |
+| Server money | low net tie | 1 | 0 |
+| Server money | payout fracs | 1 | 0 |
+| Server money | pennies | 5 | 0 |
+| Server money | pools | 10 | 0 |
+| Server money | reserve | 1 | 0 |
+| Server money | season payout | 75 | 0 |
+| Server money | season payout (unset) | 1 | 0 |
+| Server money | season payout + reserve | 1 | 0 |
+| Server money | season payout 40_30_20_10 | 3 | 2 |
+| Server money | season payout 50_30_20 | 3 | 1 |
+| Server money | season payout 60_40 | 1 | 0 |
+| Server money | season payout 70_30 | 2 | 0 |
+| Server money | season payout 80_20 | 3 | 0 |
+| Server money | season payout winner_take_all | 2 | 0 |
+| Server money | settle | 5 | 0 |
+| Server money | settle whole units | 1 | 1 |
+| Server money | skins all tie | 1 | 0 |
+| Server money | skins carry (rollover) | 1 | 0 |
+| Server money | skins pennies | 1 | 0 |
+| Server money | split_evenly | 1 | 0 |
+| Server money | teams | 5 | 0 |
+| Server money | ties | 10 | 0 |
+| Server playoffs | advance | 1 | 0 |
+| Server playoffs | advance 8 | 1 | 1 |
+| Server playoffs | bracket order | 1 | 0 |
+| Server playoffs | build | 4 | 0 |
+| Server points | stableford + to_par | 1 | 0 |
+| Server pools | ctp sync | 1 | 0 |
+| Server pools | long putt opt-out | 1 | 0 |
+| Server pools | set winner | 1 | 0 |
+| Server pools | set winner opt-out | 1 | 0 |
+| Server rollover | rollover | 1 | 0 |
+| Server schedule | round robin | 7 | 0 |
+| Server scoring | field tie | 2 | 0 |
+| Server scoring | 200 seeded seasons (field/position, match per hole, net stroke, Stableford; 2–8 entrants; 9/18; rules; payouts; reserves; absences) | 200 | 0 |
+| Server scoring | h2h forfeit | 1 | 0 |
+| Server scoring | h2h match_per_hole 9 | 1 | 0 |
+| Server scoring | leaver | 1 | 0 |
+| Server scoring | matchup_points overloads | 1 | 0 |
+| Server standings | 200 seeded seasons (field/position, match per hole, net stroke, Stableford; 2–8 entrants; 9/18; rules; payouts; reserves; absences) | 200 | 0 |
+| Server standings | forfeit record | 1 | 0 |
+| Server standings | leaver | 1 | 0 |
+| Server standings | split season | 1 | 0 |
+| Server standings | to_par race | 1 | 0 |
+| Server teams | team aggregate | 1 | 0 |
+| Server teams | team bestball | 1 | 0 |
+| Server teams | team payout | 1 | 0 |
+| Server teams | team standings | 2 | 0 |
+| **Server total** | | **1816** | **11** |
+
+**Grand total: client 27,959 checks (28 failed) plus server 1,816 checks (11 failed) = 29,775 checks, 39 failed.**

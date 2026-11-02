@@ -49,3 +49,6 @@
 - **"Lowest" handicap basis with an allowance %:** follows WHS. Apply the % to each course handicap, round, then subtract the lowest.
 - **A leaver in a pool when the group ends on his hole:** he pays, and the best full-card non-leaver wins. Stroke and Low Net work the same way.
 - **Who absorbs a whole-unit remainder:** the current rule stays (larger balance, then a fixed order). Noted for Tyler.
+- **League OPEN-L6, a removed player's later field weeks:** drop his unfinished field slots so the field shrinks. Weeks already played are untouched.
+- **League OPEN-L7, blind-draw / "play the course" / forfeit cards:** they count for match and standings points only. They never enter a weekly pot and are never charged.
+- **League OPEN-L4, confirmed:** a season with no saved payout pays winner-take-all on the server, so only the projection card changes.
