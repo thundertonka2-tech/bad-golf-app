@@ -47,7 +47,7 @@ sec('1. t2LaunchDayRounds — a failed roster read must abort the launch');
 {
   const f = grab('async function t2LaunchDayRounds(courseId) {', '\n}\n');
   ok('members read goes through _bgRead', /_bgRead\(\(\) => supa\.from\('tournament_group_members'\)[\s\S]{0,200}?'t2LaunchDayRounds:members'\)/.test(f));
-  ok('a failed read returns instead of launching', /if \(!_lmRead\.ok\)[\s\S]{0,300}?return;/.test(f));
+  ok('a failed read returns instead of launching', /if \(!_lmRead\.ok\)[\s\S]{0,300}?return( false)?;/.test(f));   // v1811 (audit D5): returns false so the caller knows
   ok('  ...and clears the in-flight latch first', /if \(!_lmRead\.ok\)[\s\S]{0,120}?_t2LaunchInFlight = false;/.test(f));
   ok('  ...and tells the user nothing was launched', /nothing was launched/.test(f));
   ok('no bare members read survives', !/const \{ data \} = await supa\.from\('tournament_group_members'\)/.test(f));
@@ -159,16 +159,24 @@ sec('10. toggleFistBump — a failed read must not double-insert');
 
 // ── 11. visibility conversions — fail-soft, but no longer silent ────────────
 sec('11. visibility conversions (fail-soft on purpose, now traceable)');
-for (const label of ['t2Create:dupGuard', 'renderTourneyList:codes', 'openEditProfile:phone',
-                     'renderT2List:dates', 't2ListPublicJoinable:mine']) {
+// v1998: 'openEditProfile:phone' is gone on purpose -- v1802 (M12) stopped reading phone
+// numbers from profiles at all; 'renderT2List:dates' became 'renderT2List:days' when the read
+// moved to tournament_days. Both deletions are asserted AS deletions below so they stay gone.
+for (const label of ['t2Create:dupGuard', 'renderTourneyList:codes',
+                     'renderT2List:days', 't2ListPublicJoinable:mine']) {
   ok(label + ' routed through _bgRead', js.includes("'" + label + "'"));
 }
+ok('v1802 (M12): the profile phone read is gone, not just unlabelled', !js.includes("'openEditProfile:phone'") &&
+   /phoneInput\.value = '';\s*\/\/ v1802/.test(js));
+ok('renderT2List reads days through _bgRead (was :dates)', /_bgRead\(\(\) => supa\.from\('tournament_days'\)[^\n]{0,160}'renderT2List:days'\)/.test(js));
 ok('t2Create wraps the WHOLE 3-line chain (wrapping one line leaves _bgRead unclosed)',
   /_bgRead\(\(\) => supa\.from\('tournaments'\)\.select\('\*'\)[\s\S]{0,320}?\.limit\(1\), 't2Create:dupGuard'\)/.test(js));
 
 // ── 12. the build, and what was deliberately left alone ────────────────────
 sec('12. build stamp and deliberate non-changes');
-ok('BG_BUILD is v2026.11.1138', /BG_BUILD = 'v2026\.11\.1138'/.test(js));
+// v1998: was pinned to the build that introduced the contract (v1138); the contract outlives
+// the build, so assert the stamp is well-formed and at least that build.
+ok('BG_BUILD is v2026.11.1138 or later', (() => { const m = /BG_BUILD = 'v2026\.11\.(\d+)'/.exec(js); return !!m && Number(m[1]) >= 1138; })());
 // statsReset was audited and left alone ON PURPOSE. Its cloudCount stays null on a
 // failed read, so "CONFIRMED on the server" (which requires === 0) cannot fire.
 // If someone "fixes" it to default 0, that message starts lying.

@@ -27,23 +27,31 @@ for (let i = 0; i < 64; i += 16) {
 }
 const gps = {};
 const gpsYds = {};   // course_id -> [18] GPS hole lengths in yards
-// 2026-09-25 health check: 1,000 rows of full hole JSON per page was hitting the database's
-// statement timeout (31 x 500 in a day), so each deploy leaned on retries. 250 per page, ordered
-// so paging is stable.
-for (let off = 0; ; off += 250) {
-  const rows = await get(`/course_gps?select=course_id,holes&order=course_id&limit=250&offset=${off}`);
+// v1998 (audit 06 P1-b, 2026-11-02): this used to page the FULL course_gps.holes jsonb
+// (85 MB, 51 pages of 250 at 1.0-1.7 s each, 31 x 500/day) just to count greens and read
+// hole lengths. bg_gps_counts() returns one small row per course (greens, fwc, need, yds,
+// center) from a counts table the database keeps current on every GPS write. One call, ~3 MB.
+// greens = holes with any of tee/front/back/mid (the app's bgCountGps rule; the old site loop
+// counted only `mid`, which under-counted a handful of hand-mapped courses).
+{
+  // bg_gps_counts_all returns ONE jsonb array (PostgREST's 1000-row cap applies to
+  // set-returning RPCs only), so this is a single ~3 MB call instead of 51 pages.
+  const r = await fetch(URL_ + '/rpc/bg_gps_counts_all', { method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_with_dig: false }) });
+  if (!r.ok) throw new Error('bg_gps_counts_all ' + r.status);
+  const rows = await r.json();
+  if (!Array.isArray(rows) || rows.length < 1000) throw new Error('gps counts look wrong: ' + (rows && rows.length));
   rows.forEach(r => {
-    let n = 0; for (const k in (r.holes || {})) if (r.holes[k] && r.holes[k].mid) n++; if (n) gps[r.course_id] = n;
+    if (!r || !r.course_id) return;
+    if (r.greens > 0) gps[r.course_id] = r.greens;
     // 2026-11-01 (Tyler): the website scorecard shows each hole's yardage. The library holds no
     // per-hole yardage per tee, so this is the GPS length (mapped tee box -> green center) the
     // app itself plays from. Keep only courses where most holes carry one.
     try {
-      const L = []; let have = 0;
-      for (let h = 1; h <= 18; h++) { const v = r.holes && r.holes[String(h)] && Number(r.holes[String(h)].length); if (v > 0) { L[h - 1] = Math.round(v); have++; } else L[h - 1] = null; }
-      if (have >= 9) gpsYds[r.course_id] = L;
+      const L = Array.isArray(r.yds) ? r.yds.slice(0, 18).map(v => (v > 0 ? Math.round(v) : null)) : [];
+      while (L.length < 18) L.push(null);
+      if (L.filter(v => v != null).length >= 9) gpsYds[r.course_id] = L;
     } catch (e) {}
   });
-  if (rows.length < 250) break;
 }
 const contact = {};
 for (let off = 0; ; off += 1000) {

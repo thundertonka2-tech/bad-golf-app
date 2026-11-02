@@ -195,7 +195,7 @@ function seedEvent(opts) {
   const ROWS = [
     ['date', 'Date'], ['course', 'Courses'], ['players', 'Players'], ['tees', 'Tees'],
     ['carts', 'Cart Configuration'], ['teetimes', 'Tee Times'], ['games', 'Games'],
-    ['sidebets', 'Side Bets'], ['eventpots', 'Event Pots'], ['admins', 'Assign Admins'],
+    ['sidebets', 'Side Games'], ['eventpots', 'Event Prize pools'], ['admins', 'Assign Admins'],   // v1998: labels renamed in the de-gambling pass (Side Bets -> Side Games, Event Pots -> Event Prize pools)
     ['scorer', 'Assign Scorekeepers'],
   ];
   ROWS.forEach(([act, label]) => {
@@ -384,7 +384,7 @@ function seedEvent(opts) {
   check('an EMPTY Group bets column is no longer force-shown by the caller',
     !src.includes("_alwaysShowGameLabels.add('Group bets')"), 'force-show removed');
   check('the catch-all bump is still there (money can never be orphaned)',
-    src.includes("bumpGame('Group bets', k, _rest)"), 'catch-all kept');
+    src.includes("bumpGame('Group games', k, _rest)"), 'catch-all kept');   // v1998: column renamed 'Group bets' -> 'Group games'
   check('a column WITH money still renders', html1.includes('Nassau'));
   const html2 = bd([{ key: 'Skins won', money: {}, pending: true }], rows);
   check('a pending pot says "not settled" instead of a bare dash', html2.includes('not settled') && html2.includes('still live'));
@@ -411,7 +411,8 @@ function seedEvent(opts) {
   check('the event summary settle-up button exists', src.includes('summary-text-combined'));
   check('the Bets sheet settle-up button exists', src.includes('id="rb-share"'));
 
-  check('v1109: one name on every surface', (src.match(/Text settle-up/g) || []).length >= 3);
+  // v1998: the de-gambling pass renamed the button 'Text settle-up' -> 'Text Final Standings' on every surface.
+  check('v1109: one name on every surface', (src.match(/Text Final Standings/g) || []).length >= 3);
   check('v1109: the old labels are gone',
     !src.includes('with images') && !src.includes('Text this breakdown'));
 
@@ -425,10 +426,14 @@ function seedEvent(opts) {
     /shareCombinedSettleUp\([^)]*mode:\s*'images'[^)]*\)/.test(src));
   check('the Bets sheet button is wired', /querySelector\('#rb-share'\)/.test(src));
 
-  // v1109: the scorecard + bets-card pair is built by ONE helper, used by all three.
-  check('_bgSettleShareFilesFor exists', /function _bgSettleShareFilesFor\(/.test(src));
+  // v1109: the scorecard + bets-card pair was built by ONE helper, used by all three.
+  // v1998: that helper (_bgSettleShareFilesFor) was replaced by the text-only
+  // _bgShareSettlePayload(text, files, {key}) + _bgSettleShareKey(g, kind) pair; files
+  // are ignored and the share is de-duplicated by key. Every share path goes through it.
+  check('_bgShareSettlePayload exists', /async function _bgShareSettlePayload\(/.test(src));
+  check('_bgSettleShareKey exists', /function _bgSettleShareKey\(/.test(src));
   check('  ...and every share path goes through it',
-    (src.match(/_bgSettleShareFilesFor\(/g) || []).length >= 4);
+    (src.match(/_bgShareSettlePayload\(/g) || []).length >= 4);
 
   // v1106 removed the UI but deliberately left the helper defined (additive-removal
   // house style) so re-wiring it later is one line. Assert both halves of that.

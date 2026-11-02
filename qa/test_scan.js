@@ -3,7 +3,7 @@
 // the walk, and the dashboard then reported thousands of mapped courses as
 // incomplete behind a small "partial read" warning.
 const fs = require('fs');
-const src = fs.readFileSync('/home/claude/bg/golf-app.html', 'utf8');
+const src = fs.readFileSync(process.argv[2] || require('path').join(__dirname, '..', 'golf-app.html'), 'utf8')   /* v1998: argv[2], not a hard-coded path */;
 function grab(name) {
   const i = src.indexOf('function ' + name + '(');
   const s = src.indexOf('async function ' + name + '(') >= 0

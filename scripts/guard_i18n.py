@@ -24,6 +24,11 @@ LANGS = ['es', 'ko', 'ja', 'zh']
 STR = re.compile(r"'((?:[^'\\\n]|\\.){6,300})'|\"((?:[^\"\\\n]|\\.){6,300})\"|`((?:[^`\\]|\\.){6,400})`")
 SENTENCE = re.compile(r"^[\s\"'(¡¿✓•·…—–\-]*[A-Z0-9☀-➿\U0001F300-\U0001FAFF][^<>{}]*[a-z]{2,}")
 CODEY = re.compile(r"(=>|function\s*\(|\breturn\b|===|!==|&&|\|\||\bconst\b|px;|:\s*\d+px|^https?:|^[\w.-]+@)")
+# v1998: a CSS font shorthand ('800 12px ' + SC_FONT) reads like "a sentence" to SENTENCE; it is code.
+CSS_FONT = re.compile(r"^(?:(?:normal|italic|oblique|bold|bolder|lighter|\d{3})\s+)+\d+(?:\.\d+)?(?:px|pt|em|rem|%)\b")
+# v1998: course-data labels ("_label": "Butler's Golf Course", _label: 'Medinah Country Club') are
+# proper nouns; the glossary says proper nouns stay as they are, so they are not "untranslated".
+LABEL_KEY = re.compile(r"""["']?_label["']?\s*:\s*$""")
 
 
 def norm(s):
@@ -52,6 +57,8 @@ def candidates(src):
     body = re.sub(r'([;{}(),\]])[ \t]*//[^\n]*', r'\1', body)
     out = set()
     for mm in STR.finditer(body):
+        if LABEL_KEY.search(body[max(0, mm.start() - 12):mm.start()]):
+            continue                                   # v1998: course _label — a proper noun
         s = next(g for g in mm.groups() if g is not None)
         s = s.replace("\\'", "'").replace('\\"', '"')
         s = re.sub(r'\\u\{([0-9a-fA-F]+)\}', lambda m: chr(int(m.group(1), 16)), s)
@@ -67,6 +74,8 @@ def candidates(src):
             p = norm(p)
             if len(p) < 6 or not SENTENCE.search(p) or CODEY.search(p) or ' ' not in p:
                 continue
+            if CSS_FONT.search(p):
+                continue                               # v1998: CSS font shorthand
             out.add(p)
     return out
 

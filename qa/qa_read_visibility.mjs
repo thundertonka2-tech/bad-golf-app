@@ -47,14 +47,19 @@ const LABELS = [
   't2ListMine:hydrate',
   't2AllGroupsFinished:groups', 't2AllGroupsFinished:games',
 ];
+// v1998: 't2AllGroupsFinished:games' is used TWICE on purpose -- v1725 PERF reads only
+// finishedAt first and falls back to the whole blob when that select is rejected. Same label,
+// same read, two shapes.
+const EXPECTED_COUNT = { 't2AllGroupsFinished:games': 2 };
 for (const l of LABELS) {
   const n = js.split("'" + l + "'").length - 1;
-  ok(`label ${l} present exactly once`, n === 1, 'count=' + n);
+  const want = EXPECTED_COUNT[l] || 1;
+  ok(`label ${l} present exactly ${want === 1 ? 'once' : want + 'x'}`, n === want, 'count=' + n);
 }
 
 // ---- structural: no bare swallowing reads left in the two functions ----------
 for (const [fn, marker] of [['t2ListMine', 'async function t2ListMine()'],
-                            ['t2AllGroupsFinished', 'async function t2AllGroupsFinished(t)']]) {
+                            ['t2AllGroupsFinished', 'async function t2AllGroupsFinished(t, opts)']]) {   // v1998: gained opts
   const a = js.indexOf(marker);
   ok(`${fn} found`, a > 0);
   // bound the body at the next top-level `async function` / `function` declaration

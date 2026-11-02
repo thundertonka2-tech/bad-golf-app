@@ -37,7 +37,7 @@ const grab = (a, b) => {
   return js.slice(i, j + b.length);
 };
 
-const src = grab('async function _bgRead(mk, label) {', '\n}\n')
+const src = grab('async function _bgRead(mk, label, feedFn) {', '\n}\n')   // v1998: _bgRead gained a feedFn parameter
   + '\n' + grab('async function _t2PruneGroupGames(tid) {', '\n}\n')
   + '\n' + grab('async function t2RemovePlayer(playerId) {', '\n}\n');
 

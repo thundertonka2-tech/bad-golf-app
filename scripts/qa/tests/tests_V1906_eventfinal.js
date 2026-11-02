@@ -46,9 +46,12 @@ E.showToast = () => {};
   section('Last group finishes - the event is final');
   E._bgEventMoney = eventMoney('event');
   try { await E.archiveScoresFromRound(g); } catch (e) {}
-  check('payout frozen with the real totals', g.settledMoney && g.settledMoney.net, FINAL);
-  check('bound to the finish', g.settledMoney && g.settledMoney.at, g.finishedAt);
-  check('tagged as an event payout', g.settledMoney && g.settledMoney.source, 'event');
+  // v1998 (audit 05 F-4): the phone no longer freezes an event round's payout itself; the
+  // whole-event map is published once through bg_t2_publish_settled (see
+  // qa/qa_v1998_sync_events.js for the publish/CAS/conflict checks). Locally the round stays
+  // unstamped so a later correction can never be shut out by a finish-bound map.
+  check('event round is not frozen by the phone (server publish carries the map)', g.settledMoney === undefined, true);
+  check('the real totals are what the event computation reports', (await E._bgEventMoney()).net['frank lonigro'], FINAL.f);
 
   section('A plain (non-event) round still freezes at finish');
   E._bgEventMoney = async () => null;

@@ -34,7 +34,7 @@ const grab = (a, b) => {
   if (j < 0) throw new Error('end not found for: ' + a);
   return js.slice(i, j + b.length);
 };
-const src = grab('async function _bgRead(mk, label) {', '\n}\n')
+const src = grab('async function _bgRead(mk, label, feedFn) {', '\n}\n')   // v1998: _bgRead gained a feedFn parameter
           + '\n'
           + grab('async function _bgReadList(mk, label, opts) {', '\n}\n');
 
@@ -94,7 +94,9 @@ for (const name of ['rls denied', 'genuinely empty']) {
 
 // ---- the five readers are actually routed through it ------------------------
 for (const fn of ['t2GetDays', 't2GetGroups', 't2GetGroupMembers', 't2GetMatches', 't2GetStandings', 't2GetPlayers']) {
-  const re = new RegExp('async function ' + fn + '\\([^)]*\\)\\s*\\{[\\s\\S]{0,400}?_bgReadList\\(\\(\\) =>');
+  // v1998: t2GetPlayers grew two early returns before the read (v1736 feed cache, v1946 public
+  // event page), so its _bgReadList call sits ~700 chars in. Widen the window to the function body.
+  const re = new RegExp('async function ' + fn + '\\([^)]*\\)\\s*\\{[\\s\\S]{0,900}?_bgReadList\\(\\(\\) =>');
   ok(`${fn}() routed through _bgReadList`, re.test(js));
   ok(`${fn}() accepts opts`, new RegExp('async function ' + fn + '\\([^)]*opts\\)').test(js));
 }

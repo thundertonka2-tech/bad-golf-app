@@ -1,15 +1,24 @@
 // Behaviour test for the v1236 nine picker: labels, default steering, warning text.
 const fs = require('fs');
-const src = fs.readFileSync('/home/claude/bg/golf-app.html', 'utf8');
+const src = fs.readFileSync(process.argv[2] || require('path').join(__dirname, '..', 'golf-app.html'), 'utf8')   /* v1998: argv[2], not a hard-coded path */;
 const blk = src.slice(src.indexOf('async function tnNineGreenCounts'),
                       src.indexOf('function applyNineCombo'));
 
 // --- minimal DOM ------------------------------------------------------------
 const els = {};
-function mk(id){ return els[id] = { id, value:'', innerHTML:'', textContent:'', checked:false,
+// v1998: v1982 relabels <option> elements IN PLACE (el.options[i].textContent) instead of rewriting
+// innerHTML, and v1811 binds the change handler via el.onchange. The stub select therefore parses
+// its innerHTML into `options` and re-serialises them, so the regex assertions below still read
+// the current labels; fire('change') also calls onchange.
+const OPT = /<option value="([^"]*)">([^<]*)<\/option>/g;
+function mk(id){ const el = { id, value:'', _html:'', textContent:'', checked:false, onchange:null, options:[],
   style:{display:''}, classList:{add(){},remove(){}}, _h:{},
   addEventListener(e,f){ (this._h[e]=this._h[e]||[]).push(f); },
-  fire(e){ (this._h[e]||[]).forEach(f=>f()); } }; }
+  fire(e){ (this._h[e]||[]).forEach(f=>f()); if (e === 'change' && typeof this.onchange === 'function') this.onchange(); } };
+  Object.defineProperty(el, 'innerHTML', {
+    get(){ return el.options.length ? el.options.map(o => '<option value="' + o.value + '">' + o.textContent + '</option>').join('') : el._html; },
+    set(v){ el._html = v; el.options = []; let m; OPT.lastIndex = 0; while ((m = OPT.exec(v))) el.options.push({ value: m[1], textContent: m[2] }); } });
+  return els[id] = el; }
 ['nine-picker-modal','nine-front','nine-back','nine-picker-warn','nine-gps-note',
  'nine-single-toggle','nine-single-row','nine-back-row','nine-front-label',
  'nine-picker-sub','nine-confirm','nine-cancel'].forEach(mk);
@@ -17,6 +26,7 @@ global.$ = id => els[id] || null;
 
 let GPS = {};
 global.ensureSupa = async () => true;
+global.supaReady = true; global.initSupabase = async () => true;   // v1998: v1811 inlined ensureSupa as `if (!supaReady) await initSupabase()`
 global.supa = { from: () => ({ select: () => ({ in: async (col, ids) => ({
   data: ids.filter(i => GPS[i]).map(i => ({ course_id: i, holes: GPS[i] })) }) }) }) };
 
@@ -26,6 +36,7 @@ const NINES = { _label:'Test Club',
   c:{name:'Charlie',pars:[4,4,4,4,4,4,4,4,4]} };
 global.THREE_NINE_COURSES = { tc: NINES };
 global._pendingNineCourseId = null;
+global.window = global; global.document = { getElementById: id => els[id] || null, querySelector: () => null, querySelectorAll: () => [] };   // v1998: the block now stamps window._bgNineGpsRefresh (v1982)
 global.applyNineCombo = () => {}; global.applySingleNine = () => {};
 eval(blk);
 

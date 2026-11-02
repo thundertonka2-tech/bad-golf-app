@@ -31,7 +31,7 @@ const grab = (a, b) => {
   if (j < 0) throw new Error('end not found for: ' + a);
   return js.slice(i, j + b.length);
 };
-const src = grab('async function _bgRead(mk, label) {', '\n}\n')
+const src = grab('async function _bgRead(mk, label, feedFn) {', '\n}\n')   // v1998: _bgRead gained a feedFn parameter
   + '\n' + grab('async function t2GetX(id) {', '\n}\n')
   + '\n' + grab('async function t2Get(id) {', '\n}\n');
 
@@ -77,21 +77,37 @@ mode = 'throw';   ok('t2Get[throw] still returns null, does not propagate', (awa
 
 // ---- every marking site is guarded ------------------------------------------
 const all = [...js.matchAll(/bgMarkEventGone\(/g)].map(m => m.index);
-ok('bgMarkEventGone appears 6x (1 definition + 4 call sites + 1 comment)', all.length === 6, 'n=' + all.length);
+// v1998: the count moved from 6 to 10 -- v1140/v1181 added three marks inside _t2DeleteInner
+// (after a CONFIRMED delete: server RPC ok, soft-delete ok, or row gone) and v1483 one in
+// lgDelete (after league_delete_season returned without error). Those are "confirmed delete"
+// guards, the read-side sites keep the "confirmed empty read" guard. The definition is async now.
+ok('bgMarkEventGone appears 10x (1 definition + 8 call sites + 1 comment)', all.length === 10, 'n=' + all.length);
 // Drop occurrences that sit inside a // comment — they are prose, not calls.
 const lineOf = (i) => js.slice(js.lastIndexOf('\n', i) + 1, i);
 const marks = all.filter(i => !lineOf(i).trimStart().startsWith('//'));
-ok('4 real call sites + 1 definition once comments are excluded', marks.length === 5, 'n=' + marks.length);
-const defs = marks.filter(i => lineOf(i).trimStart().startsWith('function '));
+ok('8 real call sites + 1 definition once comments are excluded', marks.length === 9, 'n=' + marks.length);
+const defs = marks.filter(i => /^(async )?function $/.test(lineOf(i).trimStart()));
 ok('exactly one definition', defs.length === 1, 'n=' + defs.length);
 const calls = marks.filter(i => !defs.includes(i));
-ok('exactly four call sites', calls.length === 4, 'n=' + calls.length);
+ok('exactly eight call sites', calls.length === 8, 'n=' + calls.length);
+const DELETE_FNS = ['_t2DeleteInner', 'lgDelete'];
+const enclosingFn = (i) => { const k = Math.max(js.lastIndexOf('\nasync function ', i), js.lastIndexOf('\nfunction ', i)); return js.slice(k + 1, js.indexOf('(', k)).replace(/^(async )?function /, ''); };
+let readSites = 0, deleteSites = 0;
 for (const i of calls) {
-  const seg = js.slice(Math.max(0, i - 420), i);
-  const guarded = /_r\.ok|_fr\.ok|Only a CONFIRMED|confirmed empty read/.test(seg);
-  ok('bgMarkEventGone call at ' + i + ' is behind a confirmed-read guard', guarded,
-     JSON.stringify(seg.slice(-110)));
+  const fn = enclosingFn(i);
+  if (DELETE_FNS.includes(fn)) {
+    deleteSites++;
+    const seg = js.slice(Math.max(0, i - 1400), i);
+    const guarded = /_rpc\.data\.ok|_t2LastDeleteScope = 'everyone'|row is gone|res\.error/.test(seg);
+    ok('bgMarkEventGone call at ' + i + ' (' + fn + ') is behind a confirmed-DELETE guard', guarded, JSON.stringify(seg.slice(-110)));
+  } else {
+    readSites++;
+    const seg = js.slice(Math.max(0, i - 420), i);
+    const guarded = /_r\.ok|_fr\.ok|Only a CONFIRMED|confirmed empty read/.test(seg);
+    ok('bgMarkEventGone call at ' + i + ' (' + fn + ') is behind a confirmed-read guard', guarded, JSON.stringify(seg.slice(-110)));
+  }
 }
+ok('4 read-side sites + 4 delete-side sites', readSites === 4 && deleteSites === 4, readSites + '/' + deleteSites);
 ok('no site calls t2Get and then marks in the same breath',
    !/await t2Get\([^)]*\);[\s\S]{0,160}?bgMarkEventGone\(/.test(js));
 

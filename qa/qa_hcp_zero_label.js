@@ -1,5 +1,5 @@
 'use strict';
-const { w, bootErr } = require('./dom.js');
+const { w, bootErr, FILE } = require('./dom.js');
 let fails=0; const ok=(n,c,d='')=>{console.log((c?'  PASS  ':'  FAIL  ')+n+(d?'   '+d:''));if(!c)fails++;};
 console.log('boot:', bootErr?bootErr.message:'clean');
 const G=(rules)=>({hcpRules:rules||{pct:100,basis:'full',noHandicaps:false}});
@@ -28,7 +28,7 @@ ok('no game / no player is safe', w.bgHcpWhy(null,null)==='' && w.bgHcpWhy(G(),n
 
 console.log('\n-- it is wired into the score row --');
 const fs=require('fs');
-const src=fs.readFileSync(process.env.HOME+'/mnt/bad-golf-app/golf-app.html','utf8');
+const src=fs.readFileSync(FILE,'utf8');   // v1998: the html the loader booted (argv[2]), not a hard-coded Mac path
 ok('the meta row calls it', /HCP \$\{p\.hcp\}\$\{bgHcpWhy\(g, p\)\}/.test(src));
 ok('bgHcpTag still exists untouched', /function bgHcpTag\(g, p\) \{/.test(src));
 console.log('\n'+(fails? fails+' FAILURE(S)':'ALL HCP-LABEL CHECKS PASSED'));

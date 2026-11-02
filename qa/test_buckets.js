@@ -1,7 +1,7 @@
 // Regression test for v1233: a course RESOLVED in code review must leave the
 // Incomplete bucket and count as Complete — the same treatment v1078 gave rejected.
 const fs=require('fs');
-const src=fs.readFileSync('golf-app.html','utf8');
+const src=fs.readFileSync(process.argv[2] || require('path').join(__dirname, '..', 'golf-app.html'),'utf8');   /* v1998: argv[2] */
 
 // --- pull the real crBucketByCourse out of the shipped file ---
 function grabFn(name){

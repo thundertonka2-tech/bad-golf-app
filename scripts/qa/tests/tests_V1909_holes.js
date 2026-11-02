@@ -84,7 +84,7 @@ const by = (saved, gid) => saved.find(g => g.t2 && g.t2.groupId === gid) || {};
   section('tournament day: back 9 only');
   r = await launch({ dayHoles: { 1: { mode: 'back9' } } });
   check('9 pars, back', by(r.saved, 'G1').pars, PARS.slice(9));
-  check('sis back', by(r.saved, 'G1').sis, SIS.slice(9));
+  check('sis back', by(r.saved, 'G1').sis, E._bg9RankCompress(SIS.slice(9))); // v1998 (05 F-6): sliced nine is rank-compressed like regular rounds
 
   section('tournament day: front 9 twice');
   r = await launch({ dayHoles: { 1: { mode: 'f9x2' } } });

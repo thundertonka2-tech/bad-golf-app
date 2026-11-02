@@ -1,6 +1,7 @@
 'use strict';
 const { w, doc, bootErr } = require('./dom.js');
-const src = require('fs').readFileSync('audit.js','utf8');
+// v1998: the audit round lives in qa/audit_round.js (it used to be read from a scratch audit.js that never shipped).
+const src = require('fs').readFileSync(require('path').join(__dirname, 'audit_round.js'),'utf8');
 const g = (new w.Function('ctx', src.slice(src.indexOf('const P ='), src.indexOf('const holes =')) + '; return g;'))(w);
 let fails=0; const ok=(n,c,d='')=>{console.log((c?'  PASS  ':'  FAIL  ')+n+(d?'   '+d:''));if(!c)fails++;};
 console.log('boot:', bootErr?bootErr.message:'clean');

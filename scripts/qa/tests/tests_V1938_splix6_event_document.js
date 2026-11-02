@@ -43,9 +43,15 @@ const strip = h => String(h).replace(/<[^>]+>/g, ' ').replace(/&#39;|&apos;/g, "
 
   section('Settle-up document');
   const txt = await E.buildCombinedSettleUpText(D.t, pay);
-  check('text names the group game', txt.indexOf("Group 1 (Splix 6's): Ann Able +34 · Bob Baker -4 · Cal Cole -30") >= 0, true);
-  check('text names the other group game', txt.indexOf("Group 2 (6's):") >= 0, true);
+  // v1952 moved the per-cart breakdown out of the SMS text (every player's net, one award list,
+  // then the event page link) and onto the event page. The v1938 group label still has to
+  // name the games -- it now comes from bgEventBreakdownLines / bgGroupBetRows (the Games
+  // sheet + page), so assert it there and assert the text keeps the totals + award list.
+  check('text carries every player\u2019s net', txt.indexOf('RESULTS') >= 0 && txt.indexOf('Ann Able') >= 0 && /FINAL STANDINGS/.test(txt), true);
   const raw = await E.loadTourneyRawRounds(D.t);
+  const bl = E.bgEventBreakdownLines(pay, raw).join('\n');
+  check('breakdown names the group game', bl.indexOf("Group 1 (Splix 6's): Ann Able +34 · Bob Baker -4 · Cal Cole -30") >= 0, true);
+  check('breakdown names the other group game', bl.indexOf("Group 2 (6's):") >= 0, true);
   const ev = E.bgPotRowsForEvent(D.t, raw);
   check('image has the field Quota row', ev.map(x => [x.pot, x.winner, x.wins]), [['Quota — whole field', 'Ann Able', 120]]);
   check('Quota detail', ev[0].detail, 'Ann Able 32 pts (+4 vs quota) · prize pool 140');

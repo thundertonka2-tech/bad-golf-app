@@ -19,10 +19,13 @@ const tbl    = grab('function _bgPotTableHtml(rows, heading) {', '\n}\n');
 const R=[]; const ok=(n,c,d='')=>R.push({n,pass:!!c,d});
 
 // --- the new block's own wiring, checked statically against the shipped text ---
-const block = grab("    try {\n      const _fieldRows = (bgPotRowsForEvent(t, _rawRounds) || [])", "    } catch (e) {}\n");
+// v1998: the v1321 comment now sits between the `try {` and the declaration, so anchor on the
+// declaration itself and walk back to the enclosing `try {` on its own line.
+const block = (() => { const d = js.indexOf("      const _fieldRows = (bgPotRowsForEvent(t, _rawRounds) || [])"); if (d < 0) throw new Error('missing _fieldRows block');
+  const i = js.lastIndexOf("    try {\n", d); const j = js.indexOf("    } catch (e) {}\n", d); return js.slice(i, j + "    } catch (e) {}\n".length); })();
 ok('new block present exactly once', js.split('const _fieldRows = (bgPotRowsForEvent(t, _rawRounds)').length-1 === 1);
 ok('calls the shared builder', /bgPotRowsForEvent\(t, _rawRounds\)/.test(block));
-ok('renders through the shared table', /_bgPotTableHtml\(_fieldRows, 'Field pots — who won what'\)/.test(block));
+ok('renders through the shared table', /_bgPotTableHtml\(_fieldRows, 'Tournament Summary'\)/.test(block));   // v1998: heading renamed in the de-gambling pass
 for (const dep of ['bgPotRowsForEvent','_bgPotTableHtml'])
   ok(`top-level function exists: ${dep}`, new RegExp('function\\s+'+dep+'\\s*\\(').test(js), dep);
 // _rawRounds is destructured out of a Promise.all inside openEventLeaderboard.

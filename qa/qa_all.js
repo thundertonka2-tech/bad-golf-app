@@ -281,6 +281,11 @@ console.log('\n=== 3. CROSS-GROUP BETS — 1v1 matches and Nassaus between cart 
   const b = mkRound('EVB', 4, { skins:{mode:'perskin',value:2,tieRule:'carry',require:'none',hcpPct:100} }, {t2:true, groupId:'grp-B'});
   b.players.forEach((p,i)=>{ const r=NAMES[4+i]; p.name=r[0]; p.firstName=r[0].split(' ')[0]; p.hcp=r[1]; p.rawHcp=r[1]; p.baseHcp=r[1]; });
   [a,b].forEach(g=>{ g.games.ctp = {holes:[17],value:5,fieldOnly:true}; g.games.longPutt = {value:0,fieldOnly:true}; });
+  // v1998 (audit F-5): mkRound stamps finishedAt/updatedAt in Aug 2026, so every field pot here used
+  // to settle through _t2DayFieldComplete's "yesterday" fallback and the v1984 live gate
+  // (cards > 0 && !cardsShort) was never exercised. Stamp the event rounds NOW so the live gate is
+  // what settles them; one explicit "yesterday" round below keeps the fallback branch covered.
+  { const NOW = Date.now(); [a,b].forEach(g=>{ g.finishedAt = NOW; g.updatedAt = NOW; g.createdAt = NOW - 5*3600*1000; }); }
   HG.S.rounds = [a,b];
   const T = { id:TID, name:'QA Event', commissioner_id:'qa',
     settings:{ type:'oneday',
@@ -303,6 +308,34 @@ console.log('\n=== 3. CROSS-GROUP BETS — 1v1 matches and Nassaus between cart 
     check('both cart groups reached the event settlement', pay.roundsTotal===2, 'roundsTotal='+pay.roundsTotal);
     check('every player in the event appears on the board', (pay.rows||[]).length===8, 'rows='+(pay.rows||[]).length);
     check('event-wide money is zero-sum across the field', Math.abs(total)<0.005, 'total='+total.toFixed(2));
+    try {
+      const sk = (pay.byGame||[]).find(x=>/skins/i.test(String(x.key||'')));
+      check('v1984 live gate: event pots settle today on full cards (no "yesterday" fallback needed)', !!sk && Object.keys(sk.money||{}).some(k=>Math.abs(sk.money[k])>=0.005), sk ? 'skins money keys='+Object.keys(sk.money||{}).length : 'no skins column');
+    } catch(e){ check('v1984 live gate probe ran', false, e.message); }
+  }
+
+  // ── 4b. the v1984 gate itself, on the day-complete helper, plus the one explicit "yesterday" case ──
+  {
+    const DFC = F('_t2DayFieldComplete'), NOTE = F('_t2NoteDayCards');
+    if (typeof DFC !== 'function' || typeof NOTE !== 'function') check('_t2DayFieldComplete/_t2NoteDayCards exist', false);
+    else {
+      const NOW = Date.now();
+      const live = (short) => {
+        seed(9100);
+        const x = mkRound('LVA', 4, {}, {t2:true, groupId:'grp-LA'}), y = mkRound('LVB', 4, {}, {t2:true, groupId:'grp-LB'});
+        [x,y].forEach(g=>{ g.finishedAt = NOW; g.updatedAt = NOW; });
+        y.finishedAt = null;                       // one cart never tapped Finish
+        if (short) y.scores[y.players[3].id][17] = null;   // ...and one card is a hole short
+        const d = { rounds: 2, finished: 1, cards: 0, cardsShort: false, lastTouch: NOW };
+        [x,y].forEach(g=>{ try { NOTE(d, g); } catch(e){} });
+        return DFC(d);
+      };
+      check('v1984: two carts, one without Finish but every card full -> day complete today', live(false)===true);
+      check('v1984: the same day with one card a hole short -> NOT complete today', live(true)===false);
+      // the "yesterday" branch (v1115): a short card from a day that is over still settles
+      const yd = { rounds: 2, finished: 1, cards: 2, cardsShort: true, lastTouch: NOW - 2*86400*1000 };
+      check('v1115 yesterday fallback: a day whose last touch was 2 days ago settles even with a short card', DFC(yd)===true);
+    }
   }
 
   console.log('\n=== 5. FUZZ — randomised rounds with every compatible bet stacked ===');

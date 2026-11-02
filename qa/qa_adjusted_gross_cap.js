@@ -1,5 +1,5 @@
 'use strict';
-const { w, bootErr } = require('./dom.js');
+const { w, bootErr, FILE } = require('./dom.js');
 let fails=0; const ok=(n,c,d='')=>{console.log((c?'  PASS  ':'  FAIL  ')+n+(d?'   '+d:''));if(!c)fails++;};
 console.log('boot:', bootErr?bootErr.message:'clean');
 
@@ -45,8 +45,7 @@ ok('computeCourseHcp(null) is null so a player with no index gets par+5', w.comp
 
 // the shipped source actually reads the new variable
 const fs=require('fs');
-const FILE = process.argv[2] || (process.env.HOME+'/mnt/bad-golf-app/golf-app.html');
-const whole=fs.readFileSync(FILE,'utf8');
+const whole=fs.readFileSync(FILE,'utf8');   // v1998: FILE comes from dom.js (argv[2]), not a hard-coded Mac path
 // Scope every source assertion to archiveScoresFromRound. recalcMyDifferentials has a
 // near-identical cap block, but its `p` is the ROSTER entry, not a round player, so it
 // never carried the allowance bug -- and it rewrites historical differentials, which
@@ -57,8 +56,12 @@ const src=whole.slice(_a, _b>_a?_b:whole.length);
 ok('archive uses _capHcp, not p.hcp, for the cap', /const _hcpN = \(typeof _capHcp === 'number'/.test(src));
 ok('the old allowance-adjusted cap line is gone from the archive',
    src.indexOf("_hcpN = (typeof p.hcp === 'number' && isFinite(p.hcp)) ? p.hcp : null") < 0);
-ok('recalcMyDifferentials was deliberately left alone',
-   whole.indexOf("_hcpN = (typeof p.hcp === 'number' && isFinite(p.hcp)) ? p.hcp : null") > 0);
+// v1903 (audit #2 #11) later gave recalcMyDifferentials its own course-handicap cap (derived from the
+// index the player carried that day), so the old roster-hcp line is gone from BOTH functions now.
+// What still matters: recalc derives its cap from the index, and never reads the roster's manual p.hcp.
+ok('recalcMyDifferentials was deliberately left alone (v1903: caps from the index, not p.hcp)',
+   whole.indexOf("_hcpN = (typeof p.hcp === 'number' && isFinite(p.hcp)) ? p.hcp : null") < 0 &&
+   /async function recalcMyDifferentials[\s\S]{0,12000}?_cap = \(_hcpN == null\) \? \(_par \+ 5\)/.test(whole));
 ok('course handicap is derived from the index', /computeCourseHcp\(_idxC, tee, _parTotalC, _pg\)/.test(src));
 console.log('\n'+FILE.split('/').pop()+': '+(fails? fails+' FAILURE(S)':'ALL CAP CHECKS PASSED'));
 process.exit(fails?1:0);

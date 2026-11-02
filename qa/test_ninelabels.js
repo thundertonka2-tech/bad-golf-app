@@ -3,7 +3,7 @@
 // complete." He was right about what he saw -- the two mapped nines ARE finished.
 // Nothing on the screen said a third nine existed and was empty.
 const fs = require('fs');
-const src = fs.readFileSync('/home/claude/bg/golf-app.html', 'utf8');
+const src = fs.readFileSync(process.argv[2] || require('path').join(__dirname, '..', 'golf-app.html'), 'utf8')   /* v1998: argv[2], not a hard-coded path */;
 
 // Lift the two helpers out of openCourseDetail by name.
 function lift(name) {
