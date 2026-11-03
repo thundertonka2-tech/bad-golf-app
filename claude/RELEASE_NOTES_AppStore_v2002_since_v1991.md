@@ -1,4 +1,4 @@
-# Bad Golf — App Store text, builds 1992 → 2002 (last notes: 1991)
+# Bad Golf — App Store text, builds 1992 → 2003 (last notes: 1991)
 
 ## Promotional text
 Every bet, side game and pool now checked to the unit, in rounds, tournaments and leagues. Ties split, leavers handled, and no round finishes with a missing score.
@@ -34,7 +34,7 @@ FIXES
 • Other small fixes and polish.
 
 ## Notes
-- Covers v1992 to v2002 (main at v2002 as of 2026-11-02). The headline is the v2002 calculation matrix (claude/HANDOFF_v2002_CalcMatrix_FixAll_2026-11-02.md); v1997 to v2001 were the full-app audit builds.
+- Covers v1992 to v2003 (main at v2003 as of 2026-11-02). The headline is the v2002 calculation matrix (claude/HANDOFF_v2002_CalcMatrix_FixAll_2026-11-02.md); v1997 to v2001 were the full-app audit builds.
 - Plain characters only: bullets and dashes are fine, but no ✕ or › (App Store Connect rejected those on 11/1).
 - Promo text is 163 characters (Apple's limit is 170). What's New is well under 4,000.
 - The wording follows the de-gambled rules: units, settle, prize, and no payment terms.

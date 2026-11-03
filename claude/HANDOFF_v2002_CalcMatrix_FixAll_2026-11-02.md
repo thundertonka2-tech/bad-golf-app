@@ -99,3 +99,39 @@ In scripts/qa/tests:
 Fix agents ran in worktrees, and one started BEFORE the stage-1 commit. Applying its patch against the stage-1 base silently reverted stage 1. The "web vs iOS" sync then copied the revert to both files, and the per-file suites passed because each one ran before that merge. It was caught by running every suite on the final files.
 
 **Rule:** diff each worktree from its OWN merge-base (`git merge-base <stage> <branch>`), and rerun every matrix suite after the last merge.
+
+---
+
+## Follow-up: v2003 (2026-11-02 evening)
+
+**League server migration:** applied by Tyler in the SQL editor at 18:38 CT and verified live. All 12 functions are updated and smoke-tested:
+- A missing payout means winner-take-all.
+- 12.5 rounds to 13 and +2.5 to +2.
+- Lowest basis at 80%, a 14 against a 3: 9 strokes.
+- Helper grants are correct.
+
+**Last tournament oracles** (tourney.js is now at 38,640 checks):
+- **TOURNEY-20:** a 2v2 side whose players all left forfeits the cup point.
+- **TOURNEY-21:** a cart with no shared hole scores nothing.
+- **TOURNEY-22:** 4-man Team Quota "vs the field" now settles. It uses the new `t2ComputeFieldTeamQuota4` and shows as a "Team Quota (teams)" column with its cup point.
+- **TOURNEY-23:** the event pot shows "pending" instead of vanishing.
+- **TOURNEY-24:** the event pot no longer waits on a no-show group.
+
+**Live end-to-end test** (qa/v2002_matrix/live/LIVE_RESULTS.md). It used only the 5 flagged test users (Big Bets, IDrive Bombs, John User, Ovalcollier Golfapp, Renee Test account) plus "QA2002 Guest" names, and ran:
+- 8 rounds;
+- a 2-day, 6-cart event, including a no-show that later posts and a leaver;
+- a 2-week league with a blind draw and a tie for 1st, driven through the real RPCs.
+
+Every units figure matched the engine and the oracles to the cent. It found 3 non-money bugs, all fixed:
+- **App and server:** a no-show group now counts as finished, so the event can go final and publish. The app side is `roundsFinished`; the server side is `bg_t2_publish_settled`.
+- **Server:** `bg_settled_round_to_stats` expected only 9 holes on b9first / f9x2 / b9x2 rounds, so a partial card was published as complete. It now expects 9 only on front9 / back9 rounds or a 9-hole card.
+- **Server:** `league_suggest_handicaps` now ignores stand-in cards.
+
+The server patches went in through apply_migration "v2002c_live_test_fixes" as in-place, exactly-once replaces. They are recorded in supabase/migrations_v2002/v2002c_live_test_fixes.sql.
+
+**Pending for Tyler:**
+- supabase/SQL_v2002_live_test_cleanup.sql removes everything the live test created. It previews first, then deletes by exact id inside one transaction and verifies before COMMIT.
+- Two push-service log rows clear themselves.
+- Only 5 test users are flagged, not 8.
+
+**Final gauntlet on v2003:** 93 of 93 steps pass on both files, and the guard is all clear.
