@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.2005-->
+<!--BGVER=v2026.11.2006-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -2341,6 +2341,9 @@
   :root[data-theme="dark"] tr.sc-tee[style*="background:#ffffff"] td { background: #f3f4f6 !important; color: #1f2933 !important; }
   /* v1978 (Tyler, 10/30): Round Rating - 1-5 stars per player per course. The chip is one glyph,
      the average and the count, so it fits beside a course name on a 320px row. */
+  /* v2006: the pencil that renames a guest on the event rosters */
+  .t2-rename-btn { cursor: pointer; display: inline-block; padding: 2px 5px; margin-right: 3px; border-radius: 6px; font-size: 13px; line-height: 1.2; flex: 0 0 auto; }
+  .t2-rename-btn:active { background: var(--surface-3); }
   :root { --rr-gold: #FFB800; }   /* v1979 (Tyler): "my stars look brown on the phone, make them a gold color that pops" */
   .bg-rr-chip { display:inline-flex; align-items:center; gap:3px; flex:0 0 auto; font-size:12px; font-weight:700; color:#B8860B; white-space:nowrap; cursor:pointer; padding:2px 6px; border-radius:99px; background:rgba(255,184,0,0.16); line-height:1.2; }
   :root[data-theme="dark"] .bg-rr-chip { color:var(--rr-gold); }
@@ -12245,7 +12248,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.2005';
+const BG_BUILD = 'v2026.11.2006';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -84658,6 +84661,132 @@ async function t2ToggleWithdraw(pid) {
   await renderT2Home();
 }
 
+/* v2006 (Tyler, 11/3 - Kevin added "Fred Guest" to Bad Wednesday and could not fix the name once he
+   had the last name): the organiser (commissioner / co-admin) can rename a GUEST -- an event player
+   with no account attached -- right up until that player signs in and claims the slot. Rounds and
+   the event's pools match players by NAME, so the rename goes everywhere the old name lives:
+   the event player row (only while user_id is still null), the event settings (who's-in lists,
+   flights names, ...), each day's settings, group captains, and every round in this event that
+   seats him (live or finished) through the same organiser write path a handicap edit uses. */
+function _bgRenameDeep(obj, oldName, newName) {
+  const nk = s => normalizeNameSegment(String(s == null ? '' : s));
+  const ok = nk(oldName), nn = nk(newName);
+  if (!ok) return obj;
+  const swap = s => (typeof s === 'string' && s && nk(s) === ok) ? ((s === ok && s !== oldName) ? nn : newName) : s;
+  const walk = (o, depth) => {
+    if (!o || typeof o !== 'object' || depth > 12) return o;
+    if (Array.isArray(o)) { for (let i = 0; i < o.length; i++) { if (typeof o[i] === 'string') o[i] = swap(o[i]); else walk(o[i], depth + 1); } return o; }
+    Object.keys(o).forEach(k => {
+      const v = o[k];
+      if (typeof v === 'string') o[k] = swap(v); else walk(v, depth + 1);
+      const k2 = swap(k);
+      if (k2 !== k && !Object.prototype.hasOwnProperty.call(o, k2)) { o[k2] = o[k]; delete o[k]; }
+    });
+    return o;
+  };
+  return walk(obj, 0);
+}
+async function t2RenameGuestPlayer(t, pid, newName) {
+  try {
+    if (!t || !t.id || !pid) return { ok: false, why: 'Player not found' };
+    if (!(typeof t2CanManage === 'function' && t2CanManage(t))) return { ok: false, why: 'Only the event organiser can rename a guest' };
+    const nm = String(newName || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    if (!nm) return { ok: false, why: 'Enter a name' };
+    const nk = s => normalizeNameSegment(String(s || ''));
+    let players = [];
+    try { players = await t2GetPlayers(t.id, { strict: true }); } catch (e) { return { ok: false, why: 'Couldn’t load the players — try again' }; }
+    const tp = players.find(p => p && p.id === pid);
+    if (!tp) return { ok: false, why: 'Player not found' };
+    if (tp.user_id) return { ok: false, why: (tp.display_name || 'This player') + ' has signed in, so they set their own name' };
+    const old = String(tp.display_name || '');
+    if (old === nm) return { ok: true, same: true };
+    if (players.some(p => p && p.id !== pid && nk(p.display_name) === nk(nm))) return { ok: false, why: 'Someone in this event is already called ' + nm };
+    // 1. the event player -- only while no account is attached (a claim in the meantime wins)
+    let w = null; try { w = await supa.from('tournament_players').update({ display_name: nm }).eq('id', pid).is('user_id', null).select('id'); } catch (e) { w = null; }
+    if (!_bgWrote(w)) return { ok: false, why: 'Couldn’t rename — they may have just signed in. Try again.' };
+    try { tp.display_name = nm; } catch (e) {}
+    // 2. event settings
+    try { await t2MergeSettings(t.id, s => { _bgRenameDeep(s, old, nm); }); } catch (e) {}
+    // 3. each day's settings + group captains
+    let days = []; try { days = await t2GetDays(t.id, { strict: true }); } catch (e) { days = []; }
+    const groupIds = [];
+    for (const d of days) {
+      try {
+        if (d && d.settings && JSON.stringify(d.settings).toLowerCase().indexOf(nk(old)) >= 0) {
+          const ds = _bgRenameDeep(JSON.parse(JSON.stringify(d.settings)), old, nm);
+          await supa.from('tournament_days').update({ settings: ds }).eq('id', d.id);
+        }
+      } catch (e) {}
+      let gs = []; try { gs = await t2GetGroups(d.id, { strict: true }); } catch (e) { gs = []; }
+      for (const g of gs) {
+        if (!g) continue; groupIds.push(g.id);
+        if (g.captain && nk(g.captain) === nk(old)) { try { await supa.from('tournament_groups').update({ captain: nm }).eq('id', g.id); } catch (e) {} }
+      }
+    }
+    // 4. every round in this event that seats him (live or finished)
+    let codes = [];
+    try {
+      const { data: mem } = await supa.from('tournament_group_members').select('group_id').eq('tournament_player_id', pid);
+      const gids = (mem || []).map(m => m.group_id).filter(Boolean);
+      if (gids.length) { const { data: grps } = await supa.from('tournament_groups').select('game_code').in('id', gids); codes = (grps || []).map(g => g.game_code).filter(Boolean); }
+    } catch (e) {}
+    let rounds = 0;
+    const parts = nm.split(' ');
+    for (const code of Array.from(new Set(codes))) {
+      try {
+        let g = null;
+        if (state.game && state.game.code === code) g = state.game;
+        else { try { g = await loadGame(code); } catch (e) { g = null; } }
+        if (!g || !Array.isArray(g.players)) continue;
+        const before = JSON.stringify({ p: g.players, g: g.games || null });
+        g.players.forEach(p => {
+          if (!p) return;
+          if (p.t2pid === pid || nk(p.name) === nk(old)) { p.name = nm; p.firstName = parts[0] || nm; p.lastName = parts.slice(1).join(' '); }
+        });
+        _bgRenameDeep(g.players, old, nm);
+        if (g.games) _bgRenameDeep(g.games, old, nm);
+        if (JSON.stringify({ p: g.players, g: g.games || null }) === before) continue;
+        try { state._configEditedAt = Date.now(); } catch (e) {}   // local players win the merge for 60s (same as a handicap push)
+        if (await bgT2SaveRoundPatch(g, { players: g.players, games: g.games })) rounds++;
+        try { if (state.game && state.game.code === code) renderScoreEntry(); } catch (e) {}
+      } catch (e) {}
+    }
+    try { _bgHomeFeedDrop(); } catch (e) {}
+    try { _t2InvalidateFieldRounds(t.id); } catch (e) {}
+    return { ok: true, old: old, name: nm, rounds: rounds };
+  } catch (e) { try { console.warn('t2RenameGuestPlayer', e); } catch (e2) {} return { ok: false, why: 'Couldn’t rename — try again' }; }
+}
+// One tap handler for every roster that shows the pencil (event home, setup wizard, the host sheet).
+try {
+  document.addEventListener('click', async function (e) {
+    const b = e.target && e.target.closest ? e.target.closest('.t2-rename-btn') : null;
+    if (!b || b._busy) return;
+    try { e.preventDefault(); e.stopPropagation(); } catch (e2) {}
+    const pid = b.dataset.pid, tid = b.dataset.tid;
+    let t = (typeof _t2Current !== 'undefined' && _t2Current && (!tid || _t2Current.id === tid)) ? _t2Current : null;
+    if (!t && tid) { try { t = await t2Get(tid); } catch (e2) { t = null; } }
+    const cur = b.dataset.name || '';
+    const nn = await uiPrompt('Change the name everywhere in this event, including any rounds already played. Once ' + (cur.split(' ')[0] || 'they') + ' signs in, they set their own name.', { title: 'Rename guest', value: cur, okLabel: 'Rename', placeholder: 'First Last' });
+    if (nn == null) return;
+    if (String(nn).replace(/\s+/g, ' ').trim() === cur) return;
+    b._busy = true;
+    try { showToast('Renaming…'); } catch (e2) {}
+    const r = await t2RenameGuestPlayer(t, pid, nn);
+    b._busy = false;
+    if (!r || !r.ok) { try { showToast((r && r.why) || 'Couldn’t rename — try again'); } catch (e2) {} return; }
+    if (r.same) return;
+    try { showToast('Renamed to ' + r.name + (r.rounds ? ' · ' + r.rounds + ' round' + (r.rounds === 1 ? '' : 's') + ' updated' : '') + ' ✓'); } catch (e2) {}
+    // repaint this row in place, then the screen behind it
+    try {
+      const row = b.closest('.t2he-row');
+      if (row) { const s = row.querySelector('.t2he-nm'); if (s) { s.textContent = r.name; s.title = r.name; } }
+      const nmEl = b.parentElement && b.parentElement.querySelector('.t2-pl-nm-txt'); if (nmEl) nmEl.textContent = r.name;
+      b.dataset.name = r.name;
+    } catch (e2) {}
+    try { if (!b.closest('.t2he-row') && typeof renderT2Home === 'function' && document.getElementById('t2-home-body') && document.getElementById('t2-home-body').offsetParent && !(typeof _t2WizActive !== 'undefined' && _t2WizActive)) await renderT2Home(); } catch (e2) {}
+  }, true);
+} catch (e) {}
+
 function t2PlayerRow(p, amCommish, od, teeLabel, opts) {
   if (typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p)) { return ''; }
   // v1086: at two teams "the other one" is unambiguous and the single button stays.
@@ -84678,7 +84807,8 @@ function t2PlayerRow(p, amCommish, od, teeLabel, opts) {
   let row = '<div style="padding:' + (_oneLine ? '6px 0' : '8px 0') + ';border-top:1px solid var(--border)' + (wd ? ';opacity:0.55' : '') + '">';
   if (_oneLine) row += '<div class="t2-pl-ctrls" style="display:flex;flex-wrap:nowrap;align-items:center;gap:8px">';
   row += '<div class="t2-pl-name" style="min-width:0;font-weight:500;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis' + (_oneLine ? ';flex:1 1 auto' : (amCommish ? ';margin-bottom:6px' : '')) + (wd ? ';text-decoration:line-through' : '') + '">' +
-    t2esc(p.display_name) + (wd ? ' <span class="small-text" style="color:var(--danger-text)">WD</span>' : '') +
+    ((amCommish && !p.user_id) ? '<span role="button" tabindex="0" class="t2-rename-btn" data-pid="' + t2esc(String(p.id)) + '" data-tid="' + t2esc(String(p.tournament_id || '')) + '" data-name="' + t2esc(String(p.display_name || '')) + '" aria-label="Rename ' + t2esc(String(p.display_name || 'guest')) + '" title="Rename">✏️</span>' : '') +   // v2006: rename a guest
+    '<span class="t2-pl-nm-txt">' + t2esc(p.display_name) + '</span>' + (wd ? ' <span class="small-text" style="color:var(--danger-text)">WD</span>' : '') +
     (!amCommish && p.handicap != null ? ' <span class="small-text" style="color:var(--text-muted)">(' + bgHcpTxt(p.handicap) + ')</span>' : '') +
     (teeLabel ? ' <span class="small-text" style="color:var(--accent)">⛳ ' + t2esc(teeLabel) + '</span>' : '') +
     claimed + _guestTag + _testTag +
@@ -87898,7 +88028,8 @@ async function openT2HcpEditor(t) {
       const rm = canEdit ? '<button type="button" class="bg-btn bg-btn--danger bg-btn--ghost bg-btn--icon t2he-rm" data-pid="' + t2esc(String(p.id)) + '" data-nm="' + t2esc(_fmtNm(p.display_name)) + '" aria-label="Remove" style="flex:0 0 30px;width:30px;height:30px">×</button>' : '';
       /* v1493: the name is the thing you came here to read, so it gets the row's
          spare width, one line, and its full form in a tooltip / long-press. */
-      return '<div class="t2he-row"><span class="t2he-nm" title="' + t2esc(String(p.display_name || '')) + '">' + t2esc(_fmtNm(p.display_name)) + '</span>' + right + rm + '</div>';
+      const _rn = (canEdit && !p.user_id) ? '<span role="button" tabindex="0" class="t2-rename-btn" data-pid="' + t2esc(String(p.id)) + '" data-tid="' + t2esc(String(t.id || '')) + '" data-name="' + t2esc(String(p.display_name || '')) + '" aria-label="Rename" title="Rename">✏️</span>' : '';   // v2006
+      return '<div class="t2he-row">' + _rn + '<span class="t2he-nm" title="' + t2esc(String(p.display_name || '')) + '">' + t2esc(_fmtNm(p.display_name)) + '</span>' + right + rm + '</div>';
     }).join('');
     if (canEdit) {
       list.querySelectorAll('.t2he-input').forEach(inp => {
