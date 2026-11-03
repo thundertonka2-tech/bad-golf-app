@@ -5,6 +5,7 @@
 //
 //   node scripts/hole_yards_pull.mjs --courses site-data/courses.json --limit 300 [--priority 1]
 //        [--ids buffalo-creek,texas-star] [--out hole-yards-batch.json] [--concurrency 2]
+//        [--replay hole-yards-batch.json] [--apply-chunk 2]   (write a saved batch again, no pulling)
 //
 // Reads the pending rows of public.course_hole_yards_queue (anon key, read-only), looks each course up
 // on GolfPass (search by name + city + state), parses the scorecard rows (GolfPass markup as of
@@ -113,37 +114,45 @@ async function pullOne(c) {
   return { id: c.id, status: 'done', gp: best.gp, apply: { id: c.id, shard: shardOf(c.id), gp: best.gp, tees } };
 }
 
+// --replay <batch.json>: write an existing batch file again without pulling (2026-11-03). Writes are idempotent:
+// bg_apply_hole_yards only fills yds / women's ratings a card does not have yet, so a re-run skips what landed.
+let out;
+if (args.replay) {
+  out = JSON.parse(fs.readFileSync(args.replay, 'utf8'));
+  console.error(`replay ${args.replay}: ${out.apply.length} to apply, ${out.mark.length} marks`);
+} else {
 const coursesFile = args.courses || 'site-data/courses.json';
-const all = JSON.parse(fs.readFileSync(coursesFile, 'utf8')).courses;
-const byId = new Map(all.map(c => [c.id, c]));
-let queue;
-if (args.ids) queue = args.ids.split(',').map(id => ({ course_id: id.trim() }));
-else {
-  const lim = Math.max(1, parseInt(args.limit || '300', 10));
-  const pr = args.priority ? '&priority=eq.' + args.priority : '';
-  queue = await supaGet(`/course_hole_yards_queue?select=course_id,priority,attempts&status=eq.pending${pr}&attempts=lt.3&order=priority.desc,course_id.asc&limit=${lim}`);
-}
-const todo = queue.map(q => byId.get(q.course_id)).filter(c => c && c.st && Array.isArray(c.pars) && c.pars.length && Array.isArray(c.tees) && c.tees.length);
-const missing = queue.filter(q => !byId.get(q.course_id) || !byId.get(q.course_id).st || !(byId.get(q.course_id).pars || []).length || !(byId.get(q.course_id).tees || []).length).map(q => ({ id: q.course_id, status: 'skipped', note: 'card has no state/pars/tees in courses.json' }));
-console.error(`queue ${queue.length} -> ${todo.length} to pull, ${missing.length} unusable`);
-const out = { apply: [], mark: missing.slice() };
-const conc = Math.max(1, parseInt(args.concurrency || '2', 10));
-let i = 0, done = 0;
-async function worker() {
-  while (i < todo.length) {
-    const c = todo[i++];
-    let r; try { r = await pullOne(c); } catch (e) { r = { id: c.id, status: 'error', note: String(e.message || e).slice(0, 200) }; }
-    if (r.apply) out.apply.push(r.apply);
-    out.mark.push({ id: r.id, status: r.status, gp: r.gp || null, note: r.note || null });
-    done++; if (done % 25 === 0) console.error(`${done}/${todo.length} (${out.apply.length} matched)`);
-    await sleep(400);
+  const all = JSON.parse(fs.readFileSync(coursesFile, 'utf8')).courses;
+  const byId = new Map(all.map(c => [c.id, c]));
+  let queue;
+  if (args.ids) queue = args.ids.split(',').map(id => ({ course_id: id.trim() }));
+  else {
+    const lim = Math.max(1, parseInt(args.limit || '300', 10));
+    const pr = args.priority ? '&priority=eq.' + args.priority : '';
+    queue = await supaGet(`/course_hole_yards_queue?select=course_id,priority,attempts&status=eq.pending${pr}&attempts=lt.3&order=priority.desc,course_id.asc&limit=${lim}`);
   }
+  const todo = queue.map(q => byId.get(q.course_id)).filter(c => c && c.st && Array.isArray(c.pars) && c.pars.length && Array.isArray(c.tees) && c.tees.length);
+  const missing = queue.filter(q => !byId.get(q.course_id) || !byId.get(q.course_id).st || !(byId.get(q.course_id).pars || []).length || !(byId.get(q.course_id).tees || []).length).map(q => ({ id: q.course_id, status: 'skipped', note: 'card has no state/pars/tees in courses.json' }));
+  console.error(`queue ${queue.length} -> ${todo.length} to pull, ${missing.length} unusable`);
+  out = { apply: [], mark: missing.slice() };
+  const conc = Math.max(1, parseInt(args.concurrency || '2', 10));
+  let i = 0, done = 0;
+  async function worker() {
+    while (i < todo.length) {
+      const c = todo[i++];
+      let r; try { r = await pullOne(c); } catch (e) { r = { id: c.id, status: 'error', note: String(e.message || e).slice(0, 200) }; }
+      if (r.apply) out.apply.push(r.apply);
+      out.mark.push({ id: r.id, status: r.status, gp: r.gp || null, note: r.note || null });
+      done++; if (done % 25 === 0) console.error(`${done}/${todo.length} (${out.apply.length} matched)`);
+      await sleep(400);
+    }
+  }
+  await Promise.all(Array.from({ length: conc }, worker));
+  const outFile = args.out || 'hole-yards-batch.json';
+  fs.writeFileSync(outFile, JSON.stringify(out));
+  const tally = {}; out.mark.forEach(m => { tally[m.status] = (tally[m.status] || 0) + 1; });
+  console.error(`done: ${JSON.stringify(tally)} -> ${outFile}`);
 }
-await Promise.all(Array.from({ length: conc }, worker));
-const outFile = args.out || 'hole-yards-batch.json';
-fs.writeFileSync(outFile, JSON.stringify(out));
-const tally = {}; out.mark.forEach(m => { tally[m.status] = (tally[m.status] || 0) + 1; });
-console.error(`done: ${JSON.stringify(tally)} -> ${outFile}`);
 // With HOLE_YARDS_TOKEN set (never committed; it lives in the scheduled task + project runbook) the
 // batch is written straight through public.bg_hole_yards_rpc: cards get their yds, the queue is marked.
 const token = process.env.HOLE_YARDS_TOKEN;
@@ -153,10 +162,23 @@ if (token && !args['dry-run']) {
     if (!r.ok) throw new Error('rpc ' + r.status + ' ' + (await r.text()).slice(0, 200));
     return r.json();
   };
-  const applied = {}; let marked = 0;
-  // ~1 s per course server-side; the anon statement timeout allows about five per call
-  for (let i = 0; i < out.apply.length; i += 5) { const res = await post(out.apply.slice(i, i + 5), []); (res.applied || []).forEach(a => { applied[a.status] = (applied[a.status] || 0) + 1; }); }
+  const applied = {}; let marked = 0; const failed = [];
+  const sleep2 = ms => new Promise(r => setTimeout(r, ms));
+  // 2026-11-03: chunks of 5 hit the anon statement timeout (57014) mid-run and the script died with
+  // ~40% of the batch unwritten (replayed by hand). Two courses per call, three tries with back-off, and a
+  // failed chunk no longer stops the run: it is reported and the batch file still holds it for a replay.
+  const tryPost = async (apply, mark) => {
+    for (let k = 0; k < 3; k++) { try { return await post(apply, mark); } catch (e) { console.error(`rpc try ${k + 1} failed: ${String(e.message || e).slice(0, 120)}`); await sleep2(3000 * (k + 1)); } }
+    return null;
+  };
+  const AP = Math.max(1, parseInt(args['apply-chunk'] || '2', 10));
+  for (let i = 0; i < out.apply.length; i += AP) {
+    const part = out.apply.slice(i, i + AP); const res = await tryPost(part, []);
+    if (!res) { part.forEach(a => failed.push(a.id)); continue; }
+    (res.applied || []).forEach(a => { applied[a.status] = (applied[a.status] || 0) + 1; });
+  }
   const marks = out.mark.filter(m => m.status !== 'done');
-  for (let i = 0; i < marks.length; i += 300) { const res = await post([], marks.slice(i, i + 300)); marked += res.marked || 0; }
+  for (let i = 0; i < marks.length; i += 100) { const res = await tryPost([], marks.slice(i, i + 100)); if (res) marked += res.marked || 0; else marks.slice(i, i + 100).forEach(m => failed.push('mark:' + m.id)); }
+  if (failed.length) console.error(`NOT written (${failed.length}): ${failed.slice(0, 40).join(',')} -- rerun with the same batch file to retry`);
   console.error(`written: ${JSON.stringify(applied)}, ${marked} marked`);
 } else if (!token) console.error('HOLE_YARDS_TOKEN not set -- nothing written (batch file only)');
