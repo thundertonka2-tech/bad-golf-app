@@ -59,3 +59,5 @@
 - A whole-unit rounding remainder goes to the larger balance first.
 - A stand-in card in a league counts for points but never for pots.
 - CTP stays whole-field when flights are on.
+- **League stand-in cards and handicaps (live test, default):** a blind-draw, play-the-course or forfeit card is not the player's own golf, so it never feeds his handicap.
+- **A no-show group (live test):** the group counts as finished, so the event goes final and publishes.
