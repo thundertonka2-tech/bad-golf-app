@@ -325,7 +325,9 @@ function oTeamSpread(g, cfg, a, b, kind) {
   const DEF = { scramble2: [35, 15], altshot: [50, 50] };
   const pcts = (kind !== 'altshot' && Array.isArray(cfg.teamHcpPcts) && cfg.teamHcpPcts.length >= a.length) ? cfg.teamHcpPcts : DEF[kind];
   const tot = ids => ids.map(id => fullHcp(g, P(g, id))).sort((x, y) => x - y).reduce((s, h, i) => s + h * (pcts[i] || 0) / 100, 0);
-  const A = tot(a), B = tot(b); const d = Math.round(Math.abs(A - B));
+  // v2008 (Tyler, 11/3): USGA order -- round EACH team's allowance (exact .5 up), THEN take the gap
+  const r5 = x => Math.round(Math.round(x * 1e6) / 1e6);
+  const A = r5(tot(a)), B = r5(tot(b)); const d = Math.abs(A - B);
   return A > B ? { a: d, b: 0 } : { a: 0, b: d };
 }
 const teamNet = (g, sc, st, i) => (sc == null || !st) ? sc : sc - strokes(st, g.sis[i], g.pars[i], g.hcpRules, nHof(g));
@@ -597,9 +599,10 @@ for (const key of ['teamMatch', 'teamLowball', 'comboScore', 'shamble', 'highLow
 { const g = mkRound('T19', sp([2, 10, 20, 24], [flat(18, null), flat(18, null), flat(18, null), flat(18, null)]));
   g.games = { scramble: Object.assign({ value: 1, scoring: 'stroke', teamMode: '2man', teamHcp: true }, teamsFor(g)) };
   g.scrambleData = {}; for (let h = 1; h <= 18; h++) g.scrambleData[h] = { teamA: 4, teamB: 4 };
-  // A: 0.35*2 + 0.15*10 = 2.2 ; B: 0.35*20 + 0.15*24 = 10.6 ; diff round(8.4)=8 strokes to B on SI 1-8 -> B wins by 8 strokes -> 8 u each
-  const r = compare('scramble.hcp', 'T19 35/15 allowance: B receives 8', g, 'scramble');
-  check('scramble.hcp', 'T19 teamAllowance {a:0,b:8}', r && r.app.teamAllowance && r.app.teamAllowance.b === 8, JSON.stringify(r && r.app.teamAllowance)); }
+  // A: 0.35*2 + 0.15*10 = 2.2 -> 2 ; B: 0.35*20 + 0.15*24 = 10.6 -> 11 ; v2008 (Tyler): each team rounded first, then the gap
+  // = 9 strokes to B on SI 1-9 -> B wins by 9 strokes -> 9 u each (was round(8.4) = 8 under the old difference-first order)
+  const r = compare('scramble.hcp', 'T19 35/15 allowance: B receives 9', g, 'scramble');
+  check('scramble.hcp', 'T19 teamAllowance {a:0,b:9}', r && r.app.teamAllowance && r.app.teamAllowance.b === 9, JSON.stringify(r && r.app.teamAllowance)); }
 // T19b same at 80% round allowance: allowance measured from FULL course handicap (replaces, not compounds)
 { const g = mkRound('T19b', sp([2, 10, 20, 24], [[], [], [], []]), { pct: 80 });
   g.games = { scramble: Object.assign({ value: 1, scoring: 'stroke', teamMode: '2man', teamHcp: true }, teamsFor(g)) };

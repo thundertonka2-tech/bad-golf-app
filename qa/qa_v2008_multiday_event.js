@@ -256,12 +256,8 @@ function checkCartGames(g, added, lbl, axis) {
     const zero = {}; ids.forEach(id => zero[id] = 0);
     const A = am || zero, E = exp || zero;
     let eq = ids.every(id => Math.abs((Number(A[id]) || 0) - (Number(E[id]) || 0)) < 0.011);
-    if (!eq && (a.key === 'scramble' || a.key === 'ryderCup')) {   // classify: is the team spread exactly on a .5?
-      try { const c = view.games[a.key]; const tA = (c.teamA || []).map(id => view.players.find(p => p.id === id)), tB = (c.teamB || []).map(id => view.players.find(p => p.id === id));
-        const sp = MA.F('teamHcpSpread')(view, c, tA, tB, a.key === 'ryderCup' ? 'altshot' : 'scramble2'); const d = Math.abs(sp.aRaw - sp.bRaw); const half = Math.abs(d - Math.floor(d) - 0.5) < 1e-6;
-        chk('FINDING F2: team-handicap spread exactly .5', lbl + ' :: ' + a.key + ' spread ' + (Math.round(d * 1e6) / 1e6) + ' -> app gives ' + sp.a + '/' + sp.b + ' strokes', false, 'A ' + sp.aRaw + ' B ' + sp.bRaw + ' exact .5: ' + half);
-        if (half) { eq = true; } } catch (e) {}
-    }
+    // v2008 (F2 fixed): team allowances are rounded per team (USGA order); match.js's oracle does the same, so any
+    // scramble / ryder cup mismatch is a real failure again.
     if (!eq && process.env.MD_DUMP === a.key) fs.writeFileSync(process.env.MD_DUMP_FILE || '/tmp/md_dump.json', JSON.stringify({ round: g, view: viewOf(g), app: A, exp: E }));
     chk(cat, lbl + ' :: ' + a.key + ' = oracle [' + axis + ']', eq, 'opt=' + JSON.stringify(a.opt || g.groupGames[a.key]).slice(0, 220) + ' start=' + g.startHole + ' holes=' + nHof(g) + ' app=' + JSON.stringify(A) + ' exp=' + JSON.stringify(E));
     chk(cat, lbl + ' :: ' + a.key + ' zero-sum', Math.abs(sum(ids.map(id => A[id] || 0))) < 0.011, JSON.stringify(A));
@@ -373,11 +369,8 @@ async function runEvent(cfg, ci, tag) {
     const o = oPoints(ev.rounds, ev.t, kind); const bad = mapEq(A, o, allKeys(A, o));
     chk('Field: ' + (kind === 'quota' ? 'Quota' : 'Stableford') + ' pool', lbl + ' :: field ' + kind + ' pool = oracle', !bad.length, bad.slice(0, 4).join('; '));
     chk('Field: ' + (kind === 'quota' ? 'Quota' : 'Stableford') + ' pool', lbl + ' :: field ' + kind + ' zero-sum', Math.abs(sumv(A)) < 0.011, '');
-    // FINDING F1: event totals add the field points pool only when EVERY day of the event is complete
-    // (fieldQuota.complete / fieldStableford.complete). A finished day's pool is held while a later day is out.
-    const held = !(a && a.complete) && Object.values(o).some(v => Math.abs(v) > 0.001);
-    chk('FINDING F1: points pool held until the last day', lbl + ' :: a finished day\'s field ' + kind + ' pool shows in event totals', !held, 'pool settled by the engine per day, but loadTourneyMoney only adds it when every day is complete');
-    if (a && a.complete) Object.keys(o).forEach(k => extra[k] = (extra[k] || 0) + o[k]);
+    // v2008 (F1 fixed): every finished day's pool posts to the event totals, whatever later days are doing
+    Object.keys(o).forEach(k => extra[k] = (extra[k] || 0) + o[k]);
   });
   parts.cross = Object.assign({}, parts.cross || {}); Object.keys(extra).forEach(k => parts.cross[k] = (parts.cross[k] || 0) + extra[k]);
   // EVENT TOTALS: combined payout = every field game + cross-group + each cart's own games; zero-sum; whole units
