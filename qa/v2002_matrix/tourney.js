@@ -1021,7 +1021,26 @@ async function checkCombined(ev, label, axis, parts) {
         if (!pl) return; let ab = up > 0 ? [1, 0] : up < 0 ? [0, 1] : [.5, .5]; if (sa === 'b') ab = [ab[1], ab[0]];
         M.push({ a: ab[0], b: ab[1], dec: closed || pl >= nH || fin });
       });
-      if (!M.length && !g.games.match && !oneDay) {
+      // 2v2 Team Match (holes won) / Team Low Ball (lower best-ball total) — one point per cart. A hole counts
+      // when each side has at least one ball (a partner who picked up or left is covered by the other ball).
+      // DECISIONS (leaver rule, as on a stroke day): a side whose EVERY player left forfeits the point.
+      ['teamMatch', 'teamLowball'].forEach(KEY => {
+        const cfg = g.games[KEY]; if (!cfg || cfg.teamMode === '4man') return;
+        const A = g.players.filter(p => (cfg.teamA || []).includes(p.id)), B = g.players.filter(p => (cfg.teamB || []).includes(p.id));
+        if (!A.length || A.length !== B.length) return;
+        let aw = 0, bw = 0, at = 0, bt = 0, pl = 0, comp = true;
+        const sc = (p, h) => cfg.net ? netOf(p, h) : ((g.scores[p.id] || [])[h] == null ? null : g.scores[p.id][h]);
+        for (let h = 0; h < nH; h++) { const av = A.map(p => sc(p, h)).filter(x => x != null), bv = B.map(p => sc(p, h)).filter(x => x != null);
+          if (!av.length || !bv.length) { comp = false; continue; } pl++; const x = Math.min(...av), y = Math.min(...bv); at += x; bt += y; if (x < y) aw++; else if (y < x) bw++; }
+        const allLeft = S => S.every(p => leftAfter(g, p) != null);
+        const la = allLeft(A), lb = allLeft(B);
+        let ab;
+        if (la !== lb) ab = la ? [0, 1] : [1, 0];
+        else { if (!pl) return; ab = KEY === 'teamMatch' ? (aw > bw ? [1, 0] : bw > aw ? [0, 1] : [.5, .5]) : (at < bt ? [1, 0] : bt < at ? [0, 1] : [.5, .5]); }
+        const local = cfg.teamAKey && cfg.teamAKey === gk[1] ? [ab[1], ab[0]] : ab;
+        M.push({ a: local[0], b: local[1], dec: comp || fin });
+      });
+      if (!M.length && !g.games.match && !g.games.teamMatch && !g.games.teamLowball && !oneDay) {
         const A = g.players.filter(p => side(p) === 'a').sort((x, y) => tb[x.t2pid].slot - tb[y.t2pid].slot), B = g.players.filter(p => side(p) === 'b').sort((x, y) => tb[x.t2pid].slot - tb[y.t2pid].slot);
         for (let i = 0; i < Math.min(A.length, B.length); i++) { const ha = scoredN(g, A[i]), hb = scoredN(g, B[i]); if (!ha || !hb) continue;   // app: a pairing where either player has no card yet is not a match
           let na = 0, nb = 0; for (let h = 0; h < 18; h++) { const x = netOf(A[i], h), y = netOf(B[i], h); if (x != null) na += x; if (y != null) nb += y; }
@@ -1032,7 +1051,8 @@ async function checkCombined(ev, label, axis, parts) {
       }
       let decided = M.length > 0 && M.every(m => m.dec);
       const wdm = mem.filter(m => wd.has(m.tournament_player_id)); const anyS = g.players.some(p => scoredN(g, p));
-      if (wdm.length && !decided && !fin && (M.length || !anyS)) { const ts = new Set(wdm.map(m => m.team)); const n = Math.max(1, M.length);
+      const h2h = ['teamMatch', 'teamLowball'].some(k => g.games[k] && g.games[k].teamMode !== '4man');
+      if (wdm.length && !decided && !fin && (M.length || !anyS || h2h)) { const ts = new Set(wdm.map(m => m.team)); const n = Math.max(1, M.length);
         const fa = ts.size > 1 ? .5 : (ts.has(gk[0]) ? 0 : 1); M.length = 0; M.push({ a: fa * n, b: (1 - fa) * n, dec: true }); if (ts.size > 1) M[0].b = .5 * n; }
       M.forEach(m => { bump(gk[0], m.a, m.dec || fin); bump(gk[1], m.b, m.dec || fin); });
     }));
@@ -1078,6 +1098,7 @@ async function checkCombined(ev, label, axis, parts) {
         if (fam === 'points') return { stableford: { mode: 'pool', net: true, buyin: 5, payout: cfg.payout, _t2field: true, participants: ids }, quota: { mode: 'pool', basis: 'auto', buyin: 5, payout: cfg.payout, _t2field: true, participants: ids } };
         if (fam === 'bb') return { teamLowball: { teamMode: '4man', net: ci % 3 !== 0, value: 5, fieldOnly: true, teamA: ids, teamB: [] }, shamble: { teamMode: '4man', net: true, balls: ci % 2 ? 2 : 1, hcpPct: [50, 25, 100][ci % 3], value: 4, fieldOnly: true, teamA: ids, teamB: [] } };
         if (fam === 'scr') return { scramble: { teamMode: '4man', value: 0, teamA: ids, teamB: [] } };
+        if (fam === 'tq4') return { teamQuota: { mode: 'pool', basis: 'auto', buyin: 5, teamMode: '4man', _t2field: true, teamA: ids, teamB: [] } };
         return { teamQuota: { mode: 'pool', basis: 'auto', buyin: 5, payout: ci % 2 ? 'winner' : '502030', _t2field: true, teamA: players.filter(p => teamOf[p.name] === 'A').map(p => p.id), teamB: players.filter(p => teamOf[p.name] === 'B').map(p => p.id), teamAKey: 'A', teamBKey: 'B' } };
       } });
     if (cfg.ties === 'allpar') ev.rounds.forEach(g => g.players.forEach(p => { const a = g.scores[p.id]; for (let h = 0; h < a.length; h++) if (a[h] != null) a[h] = oPar(g, p, h); }));
@@ -1243,15 +1264,252 @@ async function checkCombined(ev, label, axis, parts) {
     const bad = []; ['A', 'B'].forEach(k => { const ap = (st.points || {})[k] || { final: 0, proj: 0 }, op = o[k] || { final: 0, proj: 0 };
       if (!near(ap.final, op.final) || !near(ap.proj, op.proj)) bad.push(k + ' app f/p=' + ap.final + '/' + ap.proj + ' exp=' + op.final + '/' + op.proj); });
     const axis = fuzz ? 'fuzz' : ('fmt=' + fmt + ',holes=' + holesMode + ',chaos=' + chaos);
-    if (fmt === 'bestball') {   // oracle has no team-match branch: check conservation only (1 point per cart match)
-      const tot = ['A', 'B'].reduce((s, k) => s + (((st.points || {})[k] || {}).proj || 0), 0);
-      check('CUP' + ci + ' [' + axis + ' carts=' + nCarts + ' days=' + daysN + '] :: best-ball cup points conserve (1 per cart-day with play)', near(tot, Math.round(tot * 2) / 2) && tot <= nCarts * daysN + 0.001, 'proj total=' + tot, 'Cup standings', axis);
-      return;
-    }
     check('CUP' + ci + ' [fmt=' + fmt + ' holes=' + holesMode + ' chaos=' + chaos + ' carts=' + nCarts + ' days=' + daysN + (oneDay ? ' oneday' : '') + '] :: cup points = oracle', !bad.length, bad.join('; '), 'Cup standings', axis);
   }
   for (let i = 0; i < 60; i++) await runCup(i, false);
   for (let i = 60; i < 60 + Number(process.env.TOURNEY_CUPFUZZ || 600); i++) await runCup(i, true);
+
+  // ---- D5. 2v2 TEAM MATCH / BEST BALL cup points (t2ComputeStandings -> _t2CartCupMatches) --------------
+  // Pairwise over game x holes x chaos x carts x days x side order, then seeded fuzz. Exact points per cart.
+  const AX5 = { key: ['teamMatch', 'teamLowball'], holes: ['18', '9', 'shotgun', 'pick'], chaos: ['none', 'leaver', 'sideLeft', 'unfinished', 'withdrawn', 'allpar', 'pickup'],
+    carts: [1, 2, 3, 4], days: [1, 2, 3], swap: [false, true], net: [true, false] };
+  const k5 = Object.keys(AX5); const need5 = new Set();
+  for (let i = 0; i < k5.length; i++) for (let j = i + 1; j < k5.length; j++) AX5[k5[i]].forEach((_, a) => AX5[k5[j]].forEach((_, b) => need5.add(i + ':' + a + '|' + j + ':' + b)));
+  const combos5 = []; seed(5150);
+  while (need5.size && combos5.length < 200) { let best = null, bc = -1; for (let tr = 0; tr < 80; tr++) { const c = k5.map(k => Math.floor(rnd() * AX5[k].length)); let cv = 0;
+      for (let i = 0; i < k5.length; i++) for (let j = i + 1; j < k5.length; j++) if (need5.has(i + ':' + c[i] + '|' + j + ':' + c[j])) cv++; if (cv > bc) { bc = cv; best = c; } }
+    for (let i = 0; i < k5.length; i++) for (let j = i + 1; j < k5.length; j++) need5.delete(i + ':' + best[i] + '|' + j + ':' + best[j]); combos5.push(best); }
+  async function runCup2v2(c, ci, fuzz) {
+    const cfg = {}; k5.forEach((k, i) => cfg[k] = AX5[k][c[i]]);
+    const nCarts = cfg.carts, daysN = cfg.days, KEY = cfg.key, chaos = cfg.chaos;
+    const names = NAMES.slice(0, nCarts * 4); const hcp = {}; names.forEach((n, i) => hcp[n] = pick([0, 3, 8, 14, -2, 20, 5, 11]));
+    const teamOf = {}; names.forEach((n, i) => teamOf[n] = (i % 4) < 2 ? 'A' : 'B');
+    const days = []; for (let d = 0; d < daysN; d++) { const nH = cfg.holes === '9' ? 9 : 18; const groups = groupsFor(names, Array(nCarts).fill(4));
+      groups.forEach((G, gi) => { if (cfg.holes === 'shotgun') G.start = 1 + ((gi * 5) % nH); if (cfg.holes === 'pick') G.start = 6; });
+      if (d === daysN - 1) { const G = groups[groups.length - 1];
+        if (chaos === 'leaver') G.leave = { [G.names[ri(0, 3)]]: ri(3, nH - 2) };
+        if (chaos === 'sideLeft') { const s = ri(0, 1) * 2; G.leave = { [G.names[s]]: ri(3, nH - 3), [G.names[s + 1]]: ri(3, nH - 3) }; }
+        if (chaos === 'unfinished') { G.unfinished = true; G.holesPlayed = {}; G.names.forEach(n => G.holesPlayed[n] = ri(2, nH - 1)); }
+        if (chaos === 'withdrawn') { G.unfinished = true; G.holesPlayed = {}; G.names.forEach(n => G.holesPlayed[n] = ri(0, 5)); } }
+      days.push({ nH, groups }); }
+    const ev = buildEvent({ hcp, days, tSettings: { type: 'multiday', teamCount: 2 },
+      dayGames: (d, G, players) => { const A = players.filter(p => teamOf[p.name] === 'A'), B = players.filter(p => teamOf[p.name] === 'B');
+        const sw = cfg.swap && (G.names.length && names.indexOf(G.names[0]) % 8 === 4 || (nCarts === 1 && d % 2 === 0));
+        return { [KEY]: sw ? { value: 0, net: cfg.net, teamMode: '2man', teamA: B.map(p => p.id), teamB: A.map(p => p.id), teamAKey: 'B', teamBKey: 'A' }
+                           : { value: 0, net: cfg.net, teamMode: '2man', teamA: A.map(p => p.id), teamB: B.map(p => p.id), teamAKey: 'A', teamBKey: 'B' } }; } });
+    if (chaos === 'allpar') ev.rounds.forEach(g => g.players.forEach(p => { const a = g.scores[p.id]; for (let h = 0; h < a.length; h++) if (a[h] != null) a[h] = oPar(g, p, h) + (cfg.net ? 0 : 0); }));
+    if (chaos === 'pickup') ev.rounds.forEach(g => { const p = g.players[ri(0, 3)]; for (let k = 0; k < 4; k++) g.scores[p.id][ri(0, nHof(g) - 1)] = null; });   // a partner picks up: the other ball stands
+    const daysArr = [], groupsByDay = {}, membersByGroup = {};
+    ev.rounds.forEach(g => { const dn = g.t2.day; if (!daysArr.find(x => x.day_number === dn)) daysArr.push({ id: 'day' + dn, day_number: dn, format: 'bestball' });
+      const gid = g.t2.groupId; (groupsByDay[dn] || (groupsByDay[dn] = [])).push({ id: gid, game_code: g.code, group_number: g.t2.group });
+      g.players.forEach((p, i) => { p.t2pid = 'tp-' + nk(p.name).replace(/ /g, ''); (membersByGroup[gid] || (membersByGroup[gid] = [])).push({ group_id: gid, tournament_player_id: p.t2pid, team: teamOf[p.name], slot: i + 1 }); }); });
+    if (chaos === 'withdrawn') ev.t.settings.withdrawn = [ev.rounds.filter(g => g.t2.day === daysN).slice(-1)[0].players[0].t2pid];
+    install(ev);
+    let st = null; try { st = await STAND(ev.t, daysArr, groupsByDay, [], membersByGroup); } catch (e) { st = { err: e.message }; }
+    const o = oCup(ev, membersByGroup, groupsByDay, false);
+    const bad = []; ['A', 'B'].forEach(k => { const ap = (st.points || {})[k] || { final: 0, proj: 0 }, op = o[k] || { final: 0, proj: 0 };
+      if (!near(ap.final, op.final) || !near(ap.proj, op.proj)) bad.push(k + ' app f/p=' + ap.final + '/' + ap.proj + ' exp=' + op.final + '/' + op.proj); });
+    // per-cart exactness: each line is worth exactly 1 point (½-½ on a halve)
+    const linesOk = (st.lines || []).every(l => near(l.a + l.b, 1) && [0, .5, 1].some(v => near(l.a, v)));
+    const axis = fuzz ? 'fuzz' : ('key=' + KEY + ',holes=' + cfg.holes + ',chaos=' + chaos);
+    const lbl = (fuzz ? 'FZC2' : 'C2') + ci + ' [' + k5.map(k => k + '=' + cfg[k]).join(' ') + ']';
+    if (process.env.TDBG === lbl.split(' ')[0]) { console.log('DBG lines', JSON.stringify(st.lines)); ev.rounds.forEach(g => console.log('DBG rd', g.t2.day, JSON.stringify(g.leftRound), g.players.map(p => p.name + ':' + scoredN(g, p) + ':' + teamOf[p.name]).join(','), g.finishedAt ? 'F' : 'U')); }
+    check(lbl + ' :: 2v2 ' + KEY + ' cup points = oracle', !bad.length, bad.join('; '), 'Cup 2v2 Team Match / Best Ball', axis);
+    check(lbl + ' :: 2v2 ' + KEY + ' each cart line is one point (1-0 / ½-½)', linesOk, JSON.stringify((st.lines || []).map(l => [l.a, l.b, l.label])), 'Cup 2v2 Team Match / Best Ball', axis);
+  }
+  for (let i = 0; i < combos5.length; i++) { seed(15000 + i); await runCup2v2(combos5[i], i, false); }
+  for (let i = 0; i < Number(process.env.TOURNEY_CUP2FUZZ || 500); i++) { seed(16000 + i); const c = k5.map(k => Math.floor(rnd() * AX5[k].length)); await runCup2v2(c, i, true); }
+  console.log('   2v2 cup pairwise combos: ' + combos5.length);
+
+  // ---- D6. TEAM QUOTA 4-man "vs the field" (t2ComputeFieldTeamQuota4 -> combined "Team Quota (teams)") ------
+  // Oracle: each cart = one team; team total = sum over its players of (quota points - quota target), quota
+  // points gross on own-tee par (bogey 1, par 2, birdie 4, eagle 6, albatross 8), target 36 - hcp (18 - hcp/2 on
+  // an event nine). Every player pays the buy-in; the highest full-card total(s) split the pool per head; all
+  // tied = push; a cart that tapped Finish early pays but cannot win (DECISIONS TOURNEY-14); pays when every
+  // launched cart is finished. Cup: on a team event a whole-team cart adds its total to its team; higher wins.
+  const qpts = d => d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0;
+  function oTQ4(rounds) {
+    const money = {}; const totals = {};
+    Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
+      const inR = rs.filter(g => g.games.teamQuota && g.games.teamQuota.teamMode === '4man');
+      const buy = Number((inR.find(g => +g.games.teamQuota.buyin > 0) || { games: { teamQuota: {} } }).games.teamQuota.buyin) || 0;
+      const sides = [];
+      inR.forEach(g => { const nH = nHof(g); let tot = 0, pl = 0;
+        for (let h = 0; h < 18; h++) if (g.players.some(p => (g.scores[p.id] || [])[h] != null)) pl++;
+        g.players.forEach(p => { let pts = 0; for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; if (s != null) pts += qpts(s - oPar(g, p, h)); }
+          tot += pts - ((nH === 9 ? 18 : 36) - Math.round(p.hcp * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1))); });
+        totals[day + ':' + g.code] = tot;
+        if (pl) sides.push({ tot, ks: g.players.map(p => nk(p.name)), full: pl >= nH, code: g.code }); });
+      if (!(inR.length && inR.every(g => g.finishedAt) && sides.length >= 2) || !(buy > 0)) return;
+      const R = sides.some(s => s.full) ? sides.filter(s => s.full) : sides;
+      const best = Math.max(...R.map(s => s.tot)); const W = R.filter(s => s.tot === best); if (W.length === sides.length) return;
+      const heads = sides.reduce((a, s) => a + s.ks.length, 0), wh = W.reduce((a, s) => a + s.ks.length, 0);
+      sides.forEach(s => s.ks.forEach(k => money[k] = (money[k] || 0) - buy)); W.forEach(s => s.ks.forEach(k => money[k] += heads * buy / wh));
+    });
+    return { money, totals };
+  }
+  const TQ4 = F('t2ComputeFieldTeamQuota4');
+  async function runTQ4(c, ci, fuzz) {
+    const { ev, cfg } = buildTeamEvent(c, ci, 'tq4');
+    const axis = fuzz ? 'fuzz' : ('holes=' + cfg.holes + ',chaos=' + cfg.chaos);
+    const lbl = (fuzz ? 'FZtq4#' : 'Dtq4#') + ci + ' [' + k2.map(k => k + '=' + (Array.isArray(cfg[k]) ? cfg[k].join('/') : cfg[k])).join(' ') + ']';
+    const o = oTQ4(ev.rounds);
+    const a = TQ4(clone(rowsOf(ev)), ev.t); const A = appMoneyKeyed(a);
+    const bad = mapEq(A, o.money, allKeys(A, o.money));
+    check(lbl + ' :: 4-man Team Quota vs the field = oracle', !bad.length, bad.slice(0, 4).join('; '), 'Team Quota 4-man (field)', axis);
+    check(lbl + ' :: 4-man Team Quota zero-sum', Math.abs(sumv(A)) < 0.011, 'sum=' + c2(sumv(A)), 'Team Quota 4-man (field)', axis);
+    // the cart totals the standings show (loadTourneyTeamStandings) = oracle
+    install(ev); let ts = null; try { ts = await F('loadTourneyTeamStandings')(ev.t); } catch (e) {}
+    const sb = []; ((ts && ts.days) || []).forEach(d => (ts.byDay[d].teams || []).forEach(tm => { const g = ev.rounds.find(r => r.t2.day === d && r.t2.group === tm.group); const ex = g && o.totals[d + ':' + g.code]; if (ex != null && !near(tm.total, ex)) sb.push('day ' + d + ' G' + tm.group + ' app=' + tm.total + ' exp=' + ex); }));
+    check(lbl + ' :: 4-man Team Quota standings totals = oracle', !sb.length, sb.join('; '), 'Team Quota 4-man (field)', axis);
+    // and it reaches the combined board (column "Team Quota (teams)"), pending until every cart is in
+    let pay = null; try { pay = await COMB(ev.t); } catch (e) {}
+    const col = ((pay && pay.byGame) || []).find(b => b.key === 'Team Quota (teams)');
+    const done = a && a.complete;
+    const cm = (col && col.money) || {};
+    const cb = done ? mapEq(cm, o.money, allKeys(cm, o.money)) : [];
+    check(lbl + ' :: 4-man Team Quota column on the event board (' + (done ? 'paid' : 'pending') + ')', !!col && (done ? !cb.length : col.pending === true), (col ? JSON.stringify({ p: col.pending }) : 'no column') + ' ' + cb.slice(0, 3).join('; '), 'Team Quota 4-man (field)', axis);
+  }
+  for (let i = 0; i < combos2.length; i++) { seed(3000 + i); await runTQ4(combos2[i], i, false); }
+  for (let i = 0; i < Number(process.env.TOURNEY_FUZZ2 || 300); i++) { seed(71000 + i); const c = k2.map(k => Math.floor(rnd() * AX2[k].length)); await runTQ4(c, i, true); }
+  {
+    // D6b: 4 v 4 Team Quota on a TEAM event scores the cup like 4 v 4 best ball (higher team total takes the point)
+    const names = NAMES.slice(0, 8); const hcp = {}; names.forEach((n, i) => hcp[n] = [0, 4, 8, 12, 2, 6, 10, 20][i]);
+    seed(6161);
+    const ev = buildEvent({ hcp, days: [{ nH: 18, groups: groupsFor(names, [4, 4]) }], tSettings: { teamCount: 2 },
+      dayGames: (d, G, P) => ({ teamQuota: { mode: 'pool', basis: 'auto', buyin: 0, teamMode: '4man', _t2field: true, teamA: P.map(p => p.id), teamB: [] } }) });
+    const o = oTQ4(ev.rounds); const tA = o.totals['1:' + ev.rounds[0].code], tB = o.totals['1:' + ev.rounds[1].code];
+    const mem = {}; ev.rounds.forEach((g, gi) => { mem[g.t2.groupId] = g.players.map((p, i) => { p.t2pid = 'tp' + gi + i; return { group_id: g.t2.groupId, tournament_player_id: p.t2pid, team: gi ? 'B' : 'A', slot: i + 1 }; }); });
+    install(ev);
+    const st = await STAND(ev.t, [{ id: 'd1', day_number: 1, format: 'teamquota' }], { 1: ev.rounds.map(g => ({ id: g.t2.groupId, game_code: g.code, group_number: g.t2.group })) }, [], mem);
+    const exA = tA > tB ? 1 : tA < tB ? 0 : .5;
+    check('D6b 4 v 4 Team Quota team day: higher team total takes the cup point (A ' + tA + ' v B ' + tB + ')', near((st.points.A || {}).final, exA) && near((st.points.B || {}).final, 1 - exA), JSON.stringify(st.points), 'Team Quota 4-man (field)', 'cup point');
+  }
+
+  // ---- D7. EVENT-WIDE TOURNAMENT POT (_t2ApplyTourneyPot via t2ComputeCombinedPayouts) --------------------
+  // The cup standings it reads come from t2LoadCupStandings, so the fake Supabase serves tournament_days /
+  // tournament_groups / tournament_group_members / tournament_matches from here (harness_globals untouched).
+  const TBL = { tournament_days: [], tournament_groups: [], tournament_group_members: [], tournament_matches: [] };
+  { const _from = HG.supa.from;
+    HG.supa.from = name => { if (!TBL[name]) return _from(name); const f = [];
+      const api = { select() { return api; }, order() { return api; }, in(c, v) { f.push(['in', c, v]); return api; }, eq(c, v) { f.push(['eq', c, v]); return api; },
+        then(res) { return Promise.resolve({ data: TBL[name].filter(r => f.every(x => x[0] === 'eq' ? String(r[x[1]]) === String(x[2]) : x[2].map(String).includes(String(r[x[1]])))), error: null }).then(res); } };
+      return api; }; }
+  // Oracle: every roster player on a team pays the buy-in; once EVERY round is finished, the team(s) with the
+  // most FINAL cup points split (pot - reserve) per head; level teams split; until then the pot is pending.
+  // collected == paid to the cent.
+  function oPot(evPlayers, pts, buyin, reserve, allFin, keys) {
+    const payers = evPlayers.filter(p => p.team && keys.includes(p.team)); const money = {};
+    if (payers.length < 2 || !allFin) return { money, pending: payers.length >= 2 && !allFin };
+    const best = Math.max(...keys.map(k => pts[k] || 0)); const W = keys.filter(k => Math.abs((pts[k] || 0) - best) < 0.001);
+    const wp = payers.filter(p => W.includes(p.team)); const total = buyin * payers.length;
+    let rsv = 0; if (reserve && reserve.value > 0) rsv = reserve.mode === 'flat' ? Math.min(reserve.value, total / payers.length) * payers.length : total * Math.min(100, reserve.value) / 100;
+    rsv = Math.round(rsv * 100) / 100;
+    payers.forEach(p => money[nk(p.display_name)] = -buyin); wp.forEach(p => money[nk(p.display_name)] += (total - rsv) / wp.length);
+    return { money, pending: false, rsv };
+  }
+  let POT_NOSHOW = false;
+  async function runPot(ci, fuzz) {
+    seed(18000 + ci);
+    const nTeams = pick([2, 2, 2, 3, 4]), nCarts = POT_NOSHOW ? 3 : ri(1, 4), daysN = ri(1, 3), fmt = pick(['singles', 'bestball', 'stroke']);
+    let chaos = pick(['none', 'none', 'late', 'leaver', 'unfinished', 'withdrawn', 'allpar', 'flights']); if (POT_NOSHOW) chaos = 'noshow';
+    const holesMode = pick(['18', '9', 'shotgun', 'pick']);
+    const buyin = pick([5, 10, 20, 7.5]), reserve = rnd() < 0.3 ? pick([{ mode: 'pct', value: 10 }, { mode: 'flat', value: 2 }]) : null;
+    const names = NAMES.slice(0, nCarts * 4); const hcp = {}; names.forEach(n => hcp[n] = pick([0, 3, 8, 14, -2, 20, 5]));
+    const TK = ['A', 'B', 'C', 'D'].slice(0, nTeams);
+    // each cart holds two teams (2 + 2); with 3+ teams the pairs rotate cart by cart
+    const teamOf = {}; names.forEach((n, i) => { const cart = Math.floor(i / 4), s = (i % 4) < 2 ? 0 : 1; teamOf[n] = TK[(cart * 2 + s) % nTeams === ((cart * 2 + 1 - s) % nTeams) ? s : (cart * 2 + s) % nTeams]; });
+    const days = []; for (let d = 0; d < daysN; d++) { const nH = holesMode === '9' ? 9 : 18; const groups = groupsFor(names, Array(nCarts).fill(4));
+      groups.forEach((G, gi) => { if (holesMode === 'shotgun') G.start = 1 + ((gi * 5) % nH); if (holesMode === 'pick') G.start = 6; });
+      if (d === daysN - 1) { const G = groups[groups.length - 1];
+        if (chaos === 'late' || chaos === 'noshow') G.noCard = true;
+        if (chaos === 'leaver') G.leave = { [G.names[1]]: ri(4, nH - 3) };
+        if (chaos === 'unfinished') { G.unfinished = true; G.holesPlayed = {}; G.names.forEach(n => G.holesPlayed[n] = ri(3, nH - 1)); } }
+      days.push({ nH, groups }); }
+    const ev = buildEvent({ hcp, days, tSettings: { type: 'multiday', teamCount: nTeams, tourneyPot: Object.assign({ on: true, buyin: buyin, set: true }, reserve ? { reserve } : {}) },
+      dayGames: (d, G, players) => { const ks = [...new Set(players.map(p => teamOf[p.name]))]; const A = players.filter(p => teamOf[p.name] === ks[0]), B = players.filter(p => teamOf[p.name] === ks[1]);
+        if (fmt === 'singles') { const inst = A.map((a, i) => B[i] ? { value: 0, net: true, participants: [a.id, B[i].id], participantNames: [a.name, B[i].name], pair: [a.name, B[i].name] } : null).filter(Boolean); return inst.length ? { match: Object.assign({}, inst[0], { instances: inst }) } : {}; }
+        if (fmt === 'bestball' && B.length) return { teamMatch: { value: 0, net: true, teamMode: '2man', teamA: A.map(p => p.id), teamB: B.map(p => p.id), teamAKey: ks[0], teamBKey: ks[1] } };
+        return {}; } });
+    if (chaos === 'allpar') ev.rounds.forEach(g => g.players.forEach(p => { const a = g.scores[p.id]; for (let h = 0; h < a.length; h++) if (a[h] != null) a[h] = oPar(g, p, h); }));
+    if (chaos === 'noshow') ev.rounds.filter(g => g.t2.day === daysN).slice(-1)[0].t2.noShow = true;
+    // tables
+    TBL.tournament_days = []; TBL.tournament_groups = []; TBL.tournament_group_members = []; TBL.tournament_matches = [];
+    const groupsByDay = {}, membersByGroup = {}, daysArr = [];
+    ev.rounds.forEach(g => { const dn = g.t2.day; if (!daysArr.find(x => x.day_number === dn)) { const dr = { id: 'day-' + ev.tid + '-' + dn, tournament_id: ev.tid, day_number: dn, format: fmt }; daysArr.push(dr); TBL.tournament_days.push(dr); }
+      const gid = g.t2.groupId + '-' + ev.tid; const gr = { id: gid, day_id: 'day-' + ev.tid + '-' + dn, game_code: g.code, group_number: g.t2.group };
+      TBL.tournament_groups.push(gr); (groupsByDay[dn] || (groupsByDay[dn] = [])).push(gr);
+      g.players.forEach((p, i) => { p.t2pid = 'tp-' + nk(p.name).replace(/ /g, ''); const m = { group_id: gid, tournament_player_id: p.t2pid, team: teamOf[p.name], slot: i + 1 }; TBL.tournament_group_members.push(m); (membersByGroup[gid] || (membersByGroup[gid] = [])).push(m); }); });
+    install(ev);
+    HG.S.players[ev.tid].forEach(p => { p.id = 'tp-' + nk(p.display_name).replace(/ /g, ''); p.team = teamOf[p.display_name]; });
+    // a roster player with no team never pays; a withdrawn player still paid in (he is on a team)
+    if (chaos === 'withdrawn') ev.t.settings.withdrawn = [HG.S.players[ev.tid][0].id];
+    if (chaos === 'flights') { ev.t.settings.flights = { n: 2, names: Object.fromEntries(names.map((n, i) => [nk(n), 1 + (i % 2)])), per: { all: true } }; F('bgFlightsRegister')(ev.t); }
+    F('_t2InvalidateFieldRounds')();
+    const evPlayers = HG.S.players[ev.tid];
+    const lbl0 = () => (fuzz ? 'FZPOT' : 'POT') + ci + ' [teams=' + nTeams + ' carts=' + nCarts + ' days=' + daysN + ' fmt=' + fmt + ' chaos=' + chaos + ']';
+    let st = null; try { st = await STAND(ev.t, daysArr, groupsByDay, [], membersByGroup); } catch (e) {}
+    // cup points from the suite's own oracle (oCup), not the app's standings
+    const oc = oCup(ev, membersByGroup, groupsByDay, false);
+    const pts = {}; TK.forEach(k => pts[k] = (oc[k] || {}).final || 0);
+    const appPts = {}; TK.forEach(k => appPts[k] = ((st && st.points && st.points[k]) || {}).final || 0);
+    check(lbl0() + ' :: cup standings feeding the pot = cup oracle', TK.every(k => near(pts[k], appPts[k])), JSON.stringify({ app: appPts, exp: pts }), 'Tournament pot', fuzz ? 'fuzz' : ('teams=' + nTeams + ',chaos=' + chaos));
+    const allFin = ev.rounds.every(g => g.finishedAt || (g.t2.noShow && !g.players.some(p => scoredN(g, p))));
+    const o = oPot(evPlayers, pts, buyin, reserve, allFin, TK);
+    let pay = null; try { pay = await COMB(ev.t); } catch (e) {}
+    const col = ((pay && pay.byGame) || []).find(b => b.key === 'Tournament prize pool');
+    const A = (col && col.money) || {};
+    const lbl = (fuzz ? 'FZPOT' : 'POT') + ci + ' [teams=' + nTeams + ' carts=' + nCarts + ' days=' + daysN + ' fmt=' + fmt + ' holes=' + holesMode + ' chaos=' + chaos + ' buyin=' + buyin + (reserve ? ' rsv=' + reserve.mode + reserve.value : '') + ']';
+    const axis = fuzz ? 'fuzz' : ('teams=' + nTeams + ',chaos=' + chaos);
+    if (process.env.TDBG === lbl.split(' ')[0]) { console.log('DBG pts', JSON.stringify(pts), JSON.stringify(st && st.lines)); console.log('DBG col', JSON.stringify(col)); console.log('DBG o', JSON.stringify(o)); }
+    const bad = mapEq(A, o.money, allKeys(A, o.money));
+    check(lbl + ' :: tournament pot per player = oracle', !!col && !bad.length, (col ? '' : 'no column ') + bad.slice(0, 4).join('; '), 'Tournament pot', axis);
+    check(lbl + ' :: tournament pot ' + (o.pending ? 'pending until every group is in' : 'settled'), !!col && (!!col.pending === !!o.pending), 'pending=' + (col && col.pending), 'Tournament pot', axis);
+    const collected = -Object.values(A).filter(v => v < 0).reduce((s, v) => s + v, 0), paid = Object.values(A).filter(v => v > 0).reduce((s, v) => s + v, 0);
+    check(lbl + ' :: tournament pot collected == paid + reserve (cents)', Math.abs(collected - paid - (o.rsv || 0)) < 0.011, 'collected=' + c2(collected) + ' paid=' + c2(paid) + ' rsv=' + (o.rsv || 0), 'Tournament pot', axis);
+    // the event board as a whole stays zero-sum apart from the reserve the pot keeps back
+    const rows = (pay && pay.rows) || []; const tot = rows.reduce((s, r) => s + (r.net || 0), 0);
+    check(lbl + ' :: event board zero-sum net of the pot reserve', Math.abs(tot + (o.rsv || 0)) < 0.011, 'sum=' + c2(tot) + ' rsv=' + (o.rsv || 0), 'Tournament pot', axis);
+  }
+  POT_NOSHOW = true;
+  await runPot(9001, false);   // D7b: the late group is marked a no-show -> the pot settles without it (DECISIONS: late groups)
+  POT_NOSHOW = false;
+  for (let i = 0; i < 40; i++) await runPot(i, false);
+  for (let i = 40; i < 40 + Number(process.env.TOURNEY_POTFUZZ || 260); i++) await runPot(i, true);
+
+  // ---- D8. QUOTA POOL PER FLIGHT (shares the TOURNEY-11 fix: points on the full cart, then split) ----------
+  async function runQuotaFlights(ci, fuzz) {
+    seed(21000 + ci);
+    const nF = ri(2, 4), sizes = pick([[4, 4, 4], [3, 4, 5, 2], [4, 4], [5, 5, 5, 3], [2, 3]]), total = sizes.reduce((a, b) => a + b, 0);
+    const names = NAMES.slice(0, total), hcp = {}; names.forEach((n, i) => hcp[n] = HCP_POOL[(i * 7 + ci) % HCP_POOL.length]);
+    const holesMode = pick(['18', '9', 'shotgun']), chaos = pick(['none', 'leaver', 'unfinished', 'late', 'none']), payout = pick(['winner', '8020']);
+    const groups = groupsFor(names, sizes); groups.forEach((G, gi) => { if (holesMode === 'shotgun') G.start = 1 + gi * 4; });
+    if (chaos === 'leaver') groups[0].leave = { [groups[0].names[1]]: 10 };
+    if (chaos === 'unfinished') { groups[1].unfinished = true; groups[1].holesPlayed = Object.fromEntries(groups[1].names.map(n => [n, 12])); }
+    if (chaos === 'late') groups[groups.length - 1].noCard = true;
+    const nH = holesMode === '9' ? 9 : 18;
+    const ev = buildEvent({ hcp, redFor: rnd() < 0.3 ? names.filter((_, i) => i % 3 === 1) : null, days: [{ nH, groups }], tSettings: { dayGames: { 1: { quota: { mode: 'pool', buyin: 5, payout } } } },
+      dayGames: (d, G, players) => ({ quota: { mode: 'pool', basis: 'auto', buyin: 5, payout, _t2field: true, participants: players.map(p => p.id) } }) });
+    const asg = FAUTO(names.map(n => ({ id: n, display_name: n, handicap: hcp[n] })), nF); const fNames = {}; names.forEach(n => fNames[nk(n)] = asg[n]);
+    ev.t.settings.flights = { n: nF, names: fNames, per: { all: true } }; FREG(ev.t);
+    const flightOf = n => fNames[nk(n)] || 1;
+    const per = f => trimRounds(ev.rounds, new Set(names.filter(n => flightOf(n) === f).map(nk)));
+    let exp = {}; for (let f = 1; f <= nF; f++) { const r = per(f); if (r.length) exp = mergeM(exp, oPoints(r, ev.t, 'quota', []).money); }
+    const a = QUOTA(clone(rowsOf(ev)), ev.t, []); const A = appMoneyKeyed(a);
+    const lbl = (fuzz ? 'FZQF' : 'QF') + ci + ' [flights=' + nF + ' carts=' + sizes.join('/') + ' holes=' + holesMode + ' chaos=' + chaos + ' payout=' + payout + ']';
+    const axis = fuzz ? 'fuzz' : ('flights=' + nF + ',holes=' + holesMode + ',chaos=' + chaos);
+    const bad = mapEq(A, exp, allKeys(A, exp));
+    check(lbl + ' :: Quota pool per flight = oracle', !bad.length, bad.slice(0, 4).join('; '), 'Quota per flight', axis);
+    // a lone flight member in a cart still scores his real points (TOURNEY-11 regression guard)
+    const lone = ev.rounds.some(g => g.players.some(p => g.players.filter(q => flightOf(q.name) === flightOf(p.name)).length === 1));
+    const st = (a && a.standings) || [];
+    const zeroLone = ev.rounds.some(g => g.players.some(p => { if (!scoredN(g, p) || g.players.filter(q => flightOf(q.name) === flightOf(p.name)).length !== 1) return false; const s = st.find(x => nk(x.name) === nk(p.name)); return s && s.points === 0; }));
+    check(lbl + ' :: a lone flight member in his cart is scored on his real quota points' + (lone ? '' : ' (no lone member)'), !zeroLone, '', 'Quota per flight', axis);
+    let fz = {}; ((a && a.perDay) || []).forEach(d => fz[d.flight] = (fz[d.flight] || 0) + Object.values(d.money || {}).reduce((s, v) => s + v, 0));
+    check(lbl + ' :: every flight Quota pool zero-sum', Object.values(fz).every(v => Math.abs(v) < 0.011), JSON.stringify(fz), 'Quota per flight', axis);
+  }
+  for (let i = 0; i < 40; i++) await runQuotaFlights(i, false);
+  for (let i = 40; i < 40 + Number(process.env.TOURNEY_QFFUZZ || 300); i++) await runQuotaFlights(i, true);
   {
     // D3b stroke-day cup: a player who LEFT after 11 is compared on an 11-hole net total against a full 18
     const names = NAMES.slice(0, 4); const hcp = {}; names.forEach(n => hcp[n] = 0); const teamOf = { [names[0]]: 'A', [names[1]]: 'A', [names[2]]: 'B', [names[3]]: 'B' };

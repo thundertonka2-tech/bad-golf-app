@@ -319,3 +319,62 @@ This answers the question "is the scramble4 [20,15,10,5] allowance applied on th
 - Team Quota 4-man, "vs the field" standings.
 - The `_t2ApplyTourneyPot` event pot (it needs `t2LoadCupStandings` against the full days/groups tables).
 - Quota per flight. It has the same root cause as TOURNEY-11 (`calcQuota` also requires 2 participants) but was not run separately.
+
+
+---
+
+# Addendum 2 (v2002b) — closing "Still not covered": 2v2 cup points, 4-man Team Quota, the event pot, Quota per flight
+
+**Suite totals now: 38,640 cases, all passing** (`node qa/v2002_matrix/tourney.js golf-app.html`, about 3 minutes).
+New run settings: `TOURNEY_CUP2FUZZ` (2v2 cup fuzz, default 500), `TOURNEY_POTFUZZ` (event pot fuzz, default 260), `TOURNEY_QFFUZZ` (Quota-per-flight fuzz, default 300). 4-man Team Quota reuses the D1 pairwise axes plus `TOURNEY_FUZZ2` (default 300).
+
+**New independent oracles (tourney.js, sections D3/D5-D8):**
+- `oCup` now has a 2v2 branch: Team Match (holes won) and Team Low Ball (lower best-ball total), net or gross, one point per cart, a hole counts when each side has at least one ball, side order swapped by `teamAKey`.
+- `oTQ4`: 4-man Team Quota vs the field (quota points on own-tee par, 36 − hcp / 18 − hcp/2 on an event nine; highest full-card cart(s) split the pool per head; all tied = push; early finisher pays but cannot win; pays when every cart is in).
+- `oPot`: the event pot fed by the suite's own `oCup` points (not the app's standings): buy-in from every roster player on a team, most final cup points takes (pot − reserve) per head, ties split, pending until every group is in; collected == paid + reserve to the cent.
+- Quota per flight: `oPoints('quota')` run per flight on the trimmed field.
+- The fake Supabase now serves `tournament_days` / `tournament_groups` / `tournament_group_members` / `tournament_matches` from inside tourney.js (wraps `HG.supa.from`; `qa/harness_globals.js` untouched), so `t2LoadCupStandings` → `_t2ApplyTourneyPot` runs end to end through `t2ComputeCombinedPayouts`.
+
+## New findings (all FIXED in golf-app.html + www/index.html, tag `// v2002b (matrix TOURNEY-2x)`)
+
+### TOURNEY-20 (P1) — 2v2 cup point: a side whose players BOTH left mid-round kept winning the point
+- **Game:** `_t2CartCupMatches` → `calcTeamMatch` / `calcTeamLowball` (2-man).
+- **Repro (FZC22):** 1 cart, Team Low Ball; both team-A players leave after hole 7-ish. Holes after that are skipped (no A ball), so A's 7-hole lead stood: app A 1, B 0.
+- **Rule (DECISIONS: a leaver can't win; stroke-day cup: the leaver forfeits the point):** a side whose every player left forfeits the point. One partner leaving is fine (the other ball covers him). Both sides left = compare as before.
+- **Size:** 47 of 1,000 fuzz + 2 pairwise cases, every one `chaos=sideLeft`.
+- **Fix:** `_sideLeft()` inside `_t2CartCupMatches`, applied to the Team Match and Team Low Ball pushes.
+
+### TOURNEY-21 (P2) — 2v2 head-to-head cart with no shared hole fell through to the stroke-day comparison
+- **Repro (FZC2125, CUP5/529/557):** one side has no card yet (a withdrawal with 0 holes); Team Match has `played = 0`, so the cart dropped into the "net stroke 1v1" branch, where the blank side summed to 0 and could take the point, and the withdrawal forfeit was skipped because a "match" now existed. App B +1 where the withdrawn side's opponent should have taken it (or nothing scored).
+- **Fix:** a cart that carries a head-to-head game (Team Match / Low Ball / Combo / 2-man Scramble / Ryder Cup / Team Quota / Match) returns no stroke-day fallback; `t2ComputeStandings` still applies the withdrawal forfeit to it (`out.h2h`). One-day events keep returning nothing as before.
+
+### TOURNEY-22 (P1) — 4-man Team Quota "vs the field" never settled its buy-in and scored no cup point
+- **Repro (Dtq4#*, D6b):** Configure Day 4-man Team Quota, buy-in 5, 3 carts. Standings ranked the carts (70 / 49 / 0) but `byGame` had no Team Quota column and nobody paid: `loadTourneyMoney` skips 4-man (no B side) and no field engine read it. On a team event the 4 v 4 day also scored 0 cup points (v1725 only covered 4-man Best Ball).
+- **Fix:** `t2ComputeFieldTeamQuota4` (shares `_t2ComputeFieldCartTeam` with Best Ball/Shamble; ranks high-to-low on team points − quota; buy-in is the stake), wired into `t2ComputeCombinedPayouts` as the **"Team Quota (teams)"** column (pending while a cart is out). `t2ComputeStandings`' 4 v 4 block now also scores a whole-team 4-man Team Quota day (higher total takes the point; line label "Team quota 4 v 4").
+- **Rule picked (consistent with DECISIONS):** same as 4-man Best Ball/Shamble — winners split the pool per head, all tied = push, an early-finishing cart pays but cannot win (TOURNEY-14 default).
+
+### TOURNEY-23 (P2) — Event pot column vanished (instead of "pending") while a group was out
+- **Repro (POT5, 14, 18, ...):** any late or unfinished group: `_t2ApplyTourneyPot` adds the label to `pending`, but `byGame` is built from `gameTotals`, which had no entry until money moved, so the column and its pending flag disappeared from the board.
+- **Fix:** `ctx.ensure(LABEL)` creates the empty column up front.
+
+### TOURNEY-24 (P2) — Event pot waited forever for a group marked no-show
+- **Repro (POT9001, D7b):** a launched group never tees off and the commissioner marks it a no-show; every field pot settles (TOURNEY-2 fix) but the event pot stayed pending, because it gates on every round having `finishedAt`.
+- **Fix:** the pot's gate counts a no-show round with no scores as in (DECISIONS "late groups"). The rest of the board's `allFinished` is unchanged.
+
+### Checked, no defect
+- 2v2 Team Match / Low Ball cup points: exact per cart (1-0 / ½-½) on 18/9/shotgun/pick-a-start, 1-4 carts × 1-3 days, swapped team keys, net and gross, partner pick-ups, single leaver, unfinished carts (projected vs final), withdrawals (forfeit only when undecided).
+- Event pot: buy-in from team players only, winners split, ties split across 2-4 teams, reserve (% and flat) off the top, flights on (the pot is whole-event, flights do not touch it), leaver (pays and the cup decides), 9-hole days; collected == paid + reserve and the whole board zero-sum net of the reserve in every case.
+- **Quota per flight shares the TOURNEY-11 fix:** `_t2ComputeFieldPointsPool` scores Quota on the full cart round and then filters by flight (same path as Stableford). 1,020/1,020, including lone flight members, leavers, unfinished and late carts, mixed tees, winner and 80/20.
+
+## Coverage — new rows
+
+| Game / area | Axes | Cases | Pass | Fail before fix | Cause |
+|---|---|---|---|---|---|
+| Cup 2v2 Team Match / Best Ball (pairwise 31 + fuzz 500) | 30 | 1,062 | 1,062 | 49 | TOURNEY-20, TOURNEY-21 |
+| Cup standings (now oracled for best ball too) | 34 | 662 | 662 | 3 | TOURNEY-21 |
+| Team Quota 4-man vs the field (money, standings totals, board column, cup point) | 26 | 1,361 | 1,361 | every paid money / board-column case | TOURNEY-22 |
+| Tournament pot (`_t2ApplyTourneyPot`) | 20 | 1,505 | 1,505 | 150 + 2 | TOURNEY-23, TOURNEY-24 |
+| Quota per flight | 26 | 1,020 | 1,020 | 0 | — |
+| **Whole suite** | | **38,640** | **38,640** | | |
+
+**Still not covered:** a cart that holds two teams on a 3+ team event where Team Match is merged across carts (`_t2H2HPerCart` money path); the pot's `tournament_matches` "saved" fallback for a deleted round.
