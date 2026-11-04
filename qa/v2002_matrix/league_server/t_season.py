@@ -184,18 +184,24 @@ def check_scenario(tag, shape, sys_, L, st, sn, hc, WEEKS, D, pp, axis):
         if not parts: continue
         sk = st['money']['weekly'].get('skins')
         if sk:
-            won = {}
-            for h in range(sn['holes']):
+            # v2009 (Tyler, 11/3) D8/D9: a tie carries to the next hole; a carry left after the last hole is split
+            # evenly among everyone in the pot. Share = pot * (won*N + carry) / (holes*N); the odd cent goes to the
+            # larger fractional share, then the lower id.
+            from fractions import Fraction
+            won = {}; carry = 0; T = sn['holes']
+            for h in range(T):
                 vals = {mid[i]: nets[i][h] for i in nets if nets[i] is not None}
                 lo = min(vals.values()); w_ = [m for m, v in vals.items() if v == lo]
-                if len(w_) == 1: won[w_[0]] = won.get(w_[0], 0) + 1
-            T = sum(won.values())
+                if len(w_) == 1: won[w_[0]] = won.get(w_[0], 0) + 1 + carry; carry = 0
+                else: carry += 1
             if T:
-                pot = sk['amount'] * 100 * len(parts); per = pot // T; rem = pot - per * T
+                pot = sk['amount'] * 100 * len(parts); N = len(parts)
                 for m in parts: exp[m] -= sk['amount'] * 100
-                ws = sorted(won); k = len(ws)
-                for r, m in enumerate(ws, 1):
-                    exp[m] += per * won[m] + rem // k + (1 if r <= rem % k else 0)
+                wts = {m: won.get(m, 0) * N + carry for m in parts}; tot = sum(wts.values())
+                ex = {m: Fraction(int(pot) * wts[m], tot) for m in parts if wts[m] > 0}
+                fl = {m: int(ex[m]) for m in ex}; rem = int(pot) - sum(fl.values())
+                for r, m in enumerate(sorted(ex, key=lambda m: (-(ex[m] - fl[m]), -ex[m], m))):
+                    exp[m] += fl[m] + (1 if r < rem else 0)
         ln = st['money']['weekly'].get('lowest_net')
         if ln:
             key2 = {mid[i]: (sum(nets[i]),) + O.cb(nets[i]) for i in nets if nets[i] is not None}

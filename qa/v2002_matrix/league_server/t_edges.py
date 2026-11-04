@@ -70,8 +70,13 @@ mus = [L.matchup(w, i) for i in range(3)]
 for i in range(3): L.card(mus[i], i, pars_plus(0))
 L.finalize(w)
 D = load(L)
-check('server money', 'skins all tie', 'every hole tied: nobody charged, nothing carried, pot unawarded', not [l for l in D['money'] if l['k'] == 'skins'], str([l for l in D['money'] if l['k'] == 'skins'])[:200])
-check('server money', 'skins carry (rollover)', 'tied skins do NOT carry to the next hole or week (league skins = holes won outright, pot split per skin)', True)
+# v2009 (Tyler, 11/3): D8/D9 overturn the v2002 rule. Ties carry to the next hole in the night's play order; a carry left
+# after the last hole is split evenly among everyone in the pot -> all tied: everyone charged 5, everyone paid 5, net 0.
+_sk = {}
+for l in D['money']:
+    if l['k'] == 'skins' and l['p'] == 'member': _sk[l['m'][-2:]] = _sk.get(l['m'][-2:], 0) + cents(l['a'])
+check('server money', 'skins all tie', 'every hole tied (D9): the carry is split evenly among all three, each nets 0', _sk == {'00': 0, '01': 0, '02': 0}, str(_sk))
+check('server money', 'skins carry (rollover)', 'tied skins carry to the next hole within the night, never into next week (D8)', True)
 # 3-way exact tie low net incl. card-off -> split 15/3 = 5 each (net 0)
 st, L = base(3, money={'buyin': 0, 'weekly': {'lowest_net': {'on': True, 'amount': 5}}})
 w = L.week(1, sn18, pp=10)
@@ -95,8 +100,10 @@ L.card(mus[0], 0, g0); L.card(mus[1], 1, g1); L.card(mus[2], 2, g2)
 L.finalize(w)
 D = load(L)
 pay = {l['m'][-2:]: cents(l['a']) for l in D['money'] if l['k'] == 'skins' and l['p'] == 'member' and float(l['a']) > 0}
-# oracle: pot 999c, 7 skins -> 142c a skin, 5c left; leftover split over winners (3) 1c each + 2 extra to lowest ids
-check('server money', 'skins pennies', '9.99 pot / 7 skins: 2/2/3 skins pay 284+2/284+2/426+1 = 999', pay == {'00': 286, '01': 286, '02': 427} and sum(pay.values()) == 999, str(pay))
+# v2009 (Tyler, 11/3) D8/D9 oracle: holes 8-18 tie and carry past the end (11), 18 skins in play, N=3.
+# Share = 999 * (won*3 + 11) / 54: P00 17/54 = 314.5, P01 314.5, P02 20/54 = 370.0 -> 314/314/370 = 998, the odd cent
+# to the larger fractional share, then the lower id -> P00 315.
+check('server money', 'skins pennies', '9.99 pot, 2/2/3 skins + 11 carried split evenly: 315/314/370 = 999 (D8/D9)', pay == {'00': 315, '01': 314, '02': 370} and sum(pay.values()) == 999, str(pay))
 money_checks(D, 'E3', 'pennies')
 
 # ---------- E4. season payout ties + structures (standings rows forced) ----------
