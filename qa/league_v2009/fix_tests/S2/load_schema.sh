@@ -27,3 +27,15 @@ if [ "${2:-}" != "--no-migrations" ]; then
     echo "applied $(basename "$f")"
   done
 fi
+# LOCAL PG16 SHIM ONLY (never in a migration): S2_01 rebuilds league_members.display_name_norm with
+# ALTER ... SET EXPRESSION, which needs PG17 (the live project is 17.6). On this PG16 copy, reproduce the same end state
+# by dropping and re-adding the generated column with the S2_01 expression, then the unique index on it.
+if [ "${2:-}" != "--no-migrations" ] && [ "$(psql -h $H -p $P -U postgres -d "$DB" -AtXc "show server_version_num")" -lt 170000 ]; then
+  $Q -d "$DB" -v ON_ERROR_STOP=1 <<'SQL' >/dev/null && echo "pg16 shim: display_name_norm rebuilt as on PG17"
+alter table public.league_members drop column display_name_norm;
+alter table public.league_members add column display_name_norm text generated always as
+  (coalesce(nullif(public.league_norm_name(display_name), ''), '#' || lower(btrim(display_name)))) stored;
+create unique index league_members_season_name_uq on public.league_members (season_id, display_name_norm)
+  where status = any (array['invited','requested','active']);
+SQL
+fi

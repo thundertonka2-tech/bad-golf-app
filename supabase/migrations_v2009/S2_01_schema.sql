@@ -94,8 +94,8 @@ AS $function$
   /* v2009 (Tyler, 11/3): SETUP-3 — fold accents (José = Jose) and keep letters of every script, so 김철수 and
      이영희 are two people instead of the same empty key. Punctuation and spaces still drop out. */
   select lower(regexp_replace(
-           regexp_replace(normalize(coalesce(p_name, ''), NFD), '[̀-ͯ]', '', 'g'),
-           '[^[:alnum:]]', '', 'g'));
+           normalize(regexp_replace(normalize(coalesce(p_name, ''), NFD), '[̀-ͯ]', '', 'g'), NFC),
+           '[^[:alnum:]]', '', 'g'));   -- NFC again so Hangul (decomposed by NFD into jamo) keys on its syllables
 $function$;
 
 -- The roster key follows league_norm_name; a name with no letters at all keys on its own text, never on ''.
