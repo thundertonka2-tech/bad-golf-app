@@ -62,8 +62,11 @@ begin
       v_phys := nullif(v_snap->'phys'->>(p_hole - 1), '')::int;
     end if;
   exception when others then v_phys := null; end;
-  v_mode := coalesce(nullif(v_snap->>'mode', ''), nullif(p_week->>'holes_mode', ''),
-                     case p_week->>'nine' when 'back' then 'back9' when 'front' then 'front9' else 'all18' end);
+  -- snapshot.mode first, then holes_mode; `nine` decides when holes_mode is the column default (no S2 mirror yet)
+  v_mode := coalesce(nullif(v_snap->>'mode', ''),
+                     case when p_week->>'nine' = 'back'  and coalesce(p_week->>'holes_mode', 'all18') = 'all18' then 'back9'
+                          when p_week->>'nine' = 'front' and coalesce(p_week->>'holes_mode', 'all18') = 'all18' then 'front9' end,
+                     nullif(p_week->>'holes_mode', ''), 'all18');
   if v_phys is null then
     v_phys := case v_mode when 'back9' then p_hole + 9
                           when 'f9x2'  then ((p_hole - 1) % 9) + 1
