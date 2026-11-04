@@ -1452,11 +1452,10 @@ begin
     1, 1
   ) returning id into v_me_id;
 
-  v_norm := lower(regexp_replace(
+  v_norm := public._league_name_key(   /* v2009 (Tyler, 11/3): SETUP-3 the roster key */
               coalesce(nullif(btrim(p_payload->>'commissioner_display_name'),''),
                        (select coalesce(pr.my_player, pr.display_name,'') from public.profiles pr where pr.id = v_uid),
-                       'Commissioner'),
-              '[^a-zA-Z0-9]', '', 'g'));
+                       'Commissioner'));
   v_seen := array[v_norm];
 
   -- v1297: a name on the roster is a MEMBER. No email is required, because no
@@ -1469,7 +1468,7 @@ begin
         raise exception 'LEAGUE_MEMBER_NAME_REQUIRED: every member needs a display name';
       end if;
 
-      v_norm := lower(regexp_replace(v_name, '[^a-zA-Z0-9]', '', 'g'));
+      v_norm := public._league_name_key(v_name);   /* v2009 (Tyler, 11/3): SETUP-3 */
       if v_norm = any(v_seen) then
         raise exception 'LEAGUE_DUPLICATE_MEMBER: "%" duplicates a name already on this roster', v_name;
       end if;

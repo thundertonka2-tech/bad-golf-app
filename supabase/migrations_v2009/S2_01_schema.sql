@@ -47,7 +47,8 @@ create or replace function public._league_week_holes_mirror()
 begin
   begin
     if tg_op = 'INSERT' then
-      if new.holes_mode = 'all18' and new.nine in ('front','back') then
+      if new.holes_mode = 'all18' and coalesce(new.nine, 'full18') <> 'full18' then   -- front/back, or a holes_mode
+                                                                                        -- written into nine (default_nine)
         new.holes_mode := public._league_holes_mode_of(new.nine);
       end if;
     elsif new.holes_mode is distinct from old.holes_mode then

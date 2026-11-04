@@ -383,6 +383,17 @@ patch('league_create_season', [
     raise exception 'LEAGUE_TEAM4_RETIRED: 4-man team leagues are retired — pick 2-man teams';
   end if;
   if v_default_nine not in ('front','back','rotate','full18','all18','b9first','front9','back9','f9x2','b9x2') then"""),
+    ("""  v_norm := lower(regexp_replace(
+              coalesce(nullif(btrim(p_payload->>'commissioner_display_name'),''),
+                       (select coalesce(pr.my_player, pr.display_name,'') from public.profiles pr where pr.id = v_uid),
+                       'Commissioner'),
+              '[^a-zA-Z0-9]', '', 'g'));""",
+     """  v_norm := public._league_name_key(   """ + TAG + """SETUP-3 the roster key */
+              coalesce(nullif(btrim(p_payload->>'commissioner_display_name'),''),
+                       (select coalesce(pr.my_player, pr.display_name,'') from public.profiles pr where pr.id = v_uid),
+                       'Commissioner'));"""),
+    ("""      v_norm := lower(regexp_replace(v_name, '[^a-zA-Z0-9]', '', 'g'));""",
+     """      v_norm := public._league_name_key(v_name);   """ + TAG + """SETUP-3 */"""),
 ])
 patch('league_rollover_season', [
     ("""  v_dn     := coalesce(v_set->>'default_nine', 'full18');""",
