@@ -9,3 +9,7 @@ Tests: `qa/league_v2009/fix_tests/S2/t/*.sql`, run with `fix_tests/S2/run.sh <db
 | R1 / SETUP-1 (S2 half) | fixed | t01: hcp 18, no par-3 strokes: net 71 → 75, par 3s net 4 | `league_card_place`, `league_adjusted_gross` + `league_suggest_handicaps` (pass week settings) |
 | SETUP-2 | fixed | t01: late joiner `handicap_used null`, net = gross → seeded 9.4 provisional from index, hcp 9; max score applies with no handicap (9 → 6) | `league_card_place`, `_league_seed_hcp` (S2_02), `league_open_week` |
 | LIFE-10 | fixed | t01: fixture stays `disputed` after the commissioner's re-entry → cleared | `league_card_place` |
+| LIFE-6 | fixed | t02: one sub assigned / self-claimed into a 2nd seat in a week, a player with his own fixture accepting, invites to seated players → all refused or skipped (14 base FAIL → 0) | `league_assign_sub`, `league_claim_sub`, `league_respond_sub_invite`, `league_invite_subs`, `_league_seat_conflict` |
+| LIFE-7 | fixed | t02: accept after a forfeit turned it into `sub` → refused, forfeit stands; assign onto a forfeited seat refused | `league_respond_sub_invite`, `league_assign_sub`, `league_claim_sub`, `league_invite_subs` |
+| R2 (S1 request) | fixed | t02: resolving a seat leaves invites `pending` → `cancelled`. Body = S1_02's (keeps the `'bogey'` line) + S2's tagged block | `league_resolve_absence` (S2_03) |
+| LIFE-14 | fixed | t02: claim / accept / assign-without-hcp wrote no handicap → seeded from the sub's Bad Golf index (12.0, 15.5, 7.0), editable | `league_claim_sub`, `league_respond_sub_invite`, `league_assign_sub` |
