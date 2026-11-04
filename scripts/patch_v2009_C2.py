@@ -421,6 +421,18 @@ P.append(('units-note', """    (st.note ? '<p class="help-text" style="margin:10
     (transfers.length"""))
 
 
+# ---------------------------------------------------------------- scramble gate must not undo another gate
+P.append(('scramble-gate', """      inp.disabled = on;
+      if (lbl) {
+        lbl.style.opacity = on ? '0.4' : '';""",
+"""      /* v2009 C2 (Tyler, 11/3): D10 / D2 - off a scramble this re-enabled every box, which also
+         undid a bgGateGame lock (league weekly pot, GIR junk vs GIR Pool, player count): the tile
+         read "Off while ..." and still took a tick. A tile another gate owns keeps its lock. */
+      if (on || !(lbl && lbl.dataset && lbl.dataset.bgGateSrc)) inp.disabled = on;
+      if (lbl) {
+        lbl.style.opacity = on ? '0.4' : '';"""))
+
+
 def main():
     for f in FILES:
         s = open(f, encoding='utf-8').read()
