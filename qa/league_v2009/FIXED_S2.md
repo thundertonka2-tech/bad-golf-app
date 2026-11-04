@@ -68,4 +68,12 @@ Tests: `qa/league_v2009/fix_tests/S2/t/*.sql`, run with `fix_tests/S2/run.sh <db
   - C13 / C14 (LIFE-4): the request is a reopen request and the fixture stays final.
   - B (LIFE-1 / D7): creating the team_4man season is refused.
 - **S1's own tests on the S2 DB:** 113/113 with S1's fixture trigger note (REQUESTS_S2 Q4).
-- **QA SCORING harness (blocks A-D) on the S2 DB:** see `fix_tests/S2/qa_scoring_harness_after.txt`.
+- **QA SCORING harness (blocks A-D) on the S2 DB**, S1's runner and oracles (`fix_tests/S2/qa_scoring_harness_after.txt`):
+  - A 1800/0.
+  - B 6941 run / 22 fail. These are the same 6 superseded pre-D14 oracle axes as S1's own after-fix run (6320/22); every S1 D14 replacement axis passes.
+  - The S1_01 R1 par-3 and max-score axes, which failed before S2 (247 fails in the QA run), are 0 now that S2's `league_card_place` is live.
+  - C / D were still running at hand-off (S1's own baseline: C 1382/5, D 192/0). Rerun: `python3 <S1>/fix_tests/S1/run_qa_harness.py v2009_s2_qa`, with S1's `scoring_sql` path.
+- **S2 + S3 together** (S3_01 applied on top of the S2 DB, `v2009_s2s3`):
+  - all 107 S2 checks pass;
+  - `t/x01_with_S3_leaver_money.sql`, the D6 end to end: the leaver is charged into Low Net and doesn't win it, he wins the 12 skins he played outright, holes 13-18 go to others, and the ledger balances (4/4).
+  - S3 replaces none of S2's functions.

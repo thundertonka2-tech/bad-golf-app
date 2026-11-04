@@ -1,6 +1,6 @@
 # REQUESTS from S2 (server: weeks, posting, membership) to S3 / the clients / the integrator
 
-## Q1 · S3 (money): the leaver's card, D6 / contract (c)
+## Q1 · S3 (money): the leaver's card, D6 / contract (c) — ANSWERED by S3_01, verified (t/x01, S2+S3 db)
 
 **What S2 now stores.** `league_post_round_cards` posts a partial card for a player who left the round (`games.data.leftRound.byId[pid] = N`). It is a normal `league_cards` row with:
 - `left_after_hole = N` (new column, S2_01). The value is a card slot / hole number, not a play index.
@@ -45,3 +45,11 @@ S2 test proving the card: `fix_tests/S2/t/t03_post_round.sql` (D6 checks).
 - **S1 and S3 must not re-replace S2's functions:** `league_card_place` (it carries S1's R1 line), `league_adjusted_gross`, `league_suggest_handicaps`, `league_post_round_cards`, `_league_week_final_notify`, `league_validate_settings`. If S3 replaces one of these, the S2 tagged blocks must be kept.
 - **PG17 only:** S2_01's `ALTER COLUMN display_name_norm SET EXPRESSION` needs PG17. Live is 17.6. The local PG16 copy uses a shim in `fix_tests/S2/load_schema.sh`; it is never a migration.
 - **S1's own tests on the merged DB:** 2 of S1's 113 checks fail. They build a `team_4man` season, or change `weeks` after week 1 opened, by a direct `UPDATE league_seasons`. S2's `league_validate_settings` now refuses the 4-man type (D7), and the live trigger always refused the `weeks` change; S1's own DB had no such trigger. With the trigger disabled in S1's prelude, all 113 pass. This is a test-fixture difference, not a regression.
+
+## Q5 · Contract check with S3_01 (coordinator question, 11/3)
+1. **`left_after_hole`** is a real COLUMN, `league_cards.left_after_hole integer` (S2_01). It is not a jsonb flag, so there is nothing to backfill.
+   - The value is the CARD SLOT of the last hole he played.
+   - League cards are stored slot = hole number on all18 / b9first / pick (a shotgun only changes the order). On front9 / back9 / f9x2 / b9x2, the slot is the played-hole number 1..holes. So the value is never a physical hole on a back-nine or twice-around week. This is exactly what S3's `array_position(v_order, lah)` expects.
+   - S2 writes it from the round's `leftRound.byId[pid]`, which the client also stamps in played-hole numbers.
+2. **The snapshot carries `mode`** on every week opened from v2009. `start` is present for pick (the week's `start_hole`) and b9first (10). It is omitted on other modes, and S3 falls back to `holes_mode` / `start_hole`. `phys` is there too.
+3. **Order:** S2_01 → S2_02 → S2_03 → S3_01 runs clean. S3_01 replaces no S2 function, and no S2 function replaces an S3 one.
