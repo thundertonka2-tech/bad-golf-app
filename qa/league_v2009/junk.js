@@ -116,13 +116,13 @@ async function main() {
 
   // =========================== A. GATE MAP (today) ===========================
   const ALLOW = F('LG_SIDE_ALLOW'), ALLOW_CFG = F('LG_SIDE_ALLOW_CFG'), ALLOW_SCR = F('LG_SIDE_ALLOW_SCRAMBLE');
-  check('A gate map', 'UI allow list', 'LG_SIDE_ALLOW has no "junk" (tile hidden on league games step today)', !ALLOW.has('junk'), J([...ALLOW]));
+  check('A gate map', 'UI allow list', 'LG_SIDE_ALLOW has "junk" (v2009 D2: Junk tile on the league games step)', ALLOW.has('junk'), J([...ALLOW]));   // v2009 C2: flipped per JUNK_SPEC Phase 6
   check('A gate map', 'UI allow list', 'LG_SIDE_ALLOW_SCRAMBLE has no "junk" (owner: keep it that way)', !ALLOW_SCR.has('junk'), J([...ALLOW_SCR]));
-  check('A gate map', 'cfg allow list', 'LG_SIDE_ALLOW_CFG has no "junk" (_lgFitGameNames deletes it at launch)', ALLOW_CFG.indexOf('junk') < 0, J(ALLOW_CFG));
+  check('A gate map', 'cfg allow list', 'LG_SIDE_ALLOW_CFG has "junk" (v2009 D2) and the scramble cfg list does not', ALLOW_CFG.indexOf('junk') >= 0 && F('LG_SIDE_ALLOW_SCRAMBLE_CFG').indexOf('junk') < 0, J(ALLOW_CFG));
   const fit = F('_lgFitGameNames');
   const gp = [{ id: 'a', name: 'Kevin Wells' }, { id: 'b', name: 'Tyler OConnor' }, { id: 'c', name: 'Hoon Kim' }];
   const fitted = fit({ junk: { gir: 1, sandy: 2 }, skins: { value: 1 } }, gp, {});
-  check('A gate map', 'launch strip', 'saved league junk is dropped by _lgFitGameNames today', !fitted.junk && !!fitted.skins, J(fitted));
+  check('A gate map', 'launch strip', 'saved league junk survives _lgFitGameNames (v2009 D2)', !!fitted.junk && fitted.junk.gir === 1 && fitted.junk.sandy === 2 && !!fitted.skins, J(fitted));
   const remap = F('t2RemapGamesToGroup');
   const rm = remap({ junk: { gir: 1, sandy: 2, participantNames: ['Kevin Wells', 'Hoon Kim'] } }, gp, [], [], ['A', 'B'], { inGroup: true });
   check('A gate map', 'remap', 't2RemapGamesToGroup keeps junk (whole-group branch) and maps the opt-in list to this group',
@@ -131,8 +131,8 @@ async function main() {
   check('A gate map', 'remap', 'no opt-in list -> whole group written explicitly', rmAll.junk && J(rmAll.junk.participants) === J(['a', 'b', 'c']), J(rmAll));
   // Snake config rides inside games.junk with snakeParticipants (ids from the SETUP form). Through remap:
   const rmSn = remap({ junk: { gir: 1, snake: 1, snakeParticipants: ['x1', 'x2'], snakeParticipantNames: ['Kevin Wells', 'Hoon Kim'] } }, gp, [], [], ['A', 'B'], { inGroup: true });
-  check('A gate map', 'remap', 'remap leaves stale setup-form snakeParticipants ids in place (they match nobody on the night)',
-        rmSn.junk && J(rmSn.junk.snakeParticipants) === J(['x1', 'x2']), J(rmSn.junk));
+  check('A gate map', 'remap', 'remap maps the Snake opt-in by name onto this group (v2009 G-2)',
+        rmSn.junk && J(rmSn.junk.snakeParticipants) === J(['a', 'c']), J(rmSn.junk));
   // Owned keys: live edit hides any key in g.lg.gameKeys from the group's form.
   const own = F('_bgLeagueOwnedGameKeys');
   const ogk = own({ lg: { sid: 's', gameKeys: ['skins', 'junk'] }, games: { skins: {}, junk: { gir: 1 } } });
@@ -332,7 +332,7 @@ async function main() {
   // Patch LG_SIDE_ALLOW_CFG in-sandbox to include 'junk' and launch through the REAL lgLaunchWeekRound, to see
   // what the round would carry: participants, snake ids, gameKeys ownership, team match per-player.
   {
-    F("(LG_SIDE_ALLOW_CFG.push('junk'), 1)");
+    F("(LG_SIDE_ALLOW_CFG.indexOf('junk') < 0 && LG_SIDE_ALLOW_CFG.push('junk'), 1)");   // v2009: already on the list
     const scen = [
       { label: 'field 4, everyone', mode: 'field', n: 4, side: { junk: { gir: 1, sandy: 1, polie: 2 } } },
       { label: 'field 5, opt-in 3', mode: 'field', n: 5, side: { junk: { gir: 1, participantNames: ['Player A Q', 'Player C Q', 'Player E Q'] } } },
@@ -438,12 +438,12 @@ async function main() {
     // settle each: earner in each group pays only from his own group
     [g1, g2].forEach((g, k) => { const ids = g.games.junk.participants; g.junkData = { 2: { sandy: [ids[0]] } };
       const r = calcJunk(g); check('H2 multi-group', ax, 'group ' + (k + 1) + ' sandy pays (k-1) inside the group', r && r.money[ids[0]] === ids.length - 1 && Math.abs(sumv(r.money)) < 1e-9, J(r && r.money)); });
-    check('H2 multi-group', ax, 'league weekly Skins pot is NOT stamped onto the round (server settles it)', !g1.games.skins && !g2.games.skins, J(Object.keys(g1.games)));
+    check('H2 multi-group', ax, 'league weekly Skins pot: only the league stamp (value 0, fieldOnly) is on the round, never a group Skins game (v2009 D10)', [g1, g2].every(g => !g.games.skins || (g.games.skins.fieldOnly && !Number(g.games.skins.value))) && F('calcSkins')(g1) == null, J(g1.games.skins));
   }
 
   // =========================== J. SCRAMBLE LEAGUE LAUNCH ===========================
   // LG_SIDE_ALLOW_SCRAMBLE is a UI filter only. Does the LAUNCH also restrict a scramble season?
-  F("(LG_SIDE_ALLOW_CFG.splice(LG_SIDE_ALLOW_CFG.indexOf('junk'), 1), 1)");   // back to the shipped list
+  /* v2009: junk is on the shipped list now; leave it there. */
   for (const fmt of ['scramble', 'stroke_net']) for (const where of ['season', 'week']) {
     const roster = []; for (let i = 0; i < 4; i++) roster.push({ id: 'm' + i, user_id: 'u' + i, display_name: 'Player ' + String.fromCharCode(65 + i) + ' Q', status: 'active', role: 'player', team_id: 'T' + Math.floor(i / 2) });
     const mus = [{ id: 'mu1', week_id: 'w1', kind: 'match', entrant_kind: 'team', a_entrant_id: 'T0', b_entrant_id: 'T1', game_code: null }];
@@ -472,10 +472,10 @@ async function main() {
     const fnBody = name => { const i = src.indexOf('function ' + name + '('); if (i < 0) return ''; let d = 0, j = src.indexOf('{', i); const st = j; for (; j < src.length; j++) { if (src[j] === '{') d++; else if (src[j] === '}') { d--; if (!d) break; } } return src.slice(st, j); };
     const le = fnBody('enterEditLiveRoundMode');
     GAP('K static', 'live edit', 'league live edit filters the game list (today: none, so any game incl. Junk/Wolf/Nassau can be added mid-round, also in a SCRAMBLE league)',
-        /lgFilterSideGames|LG_SIDE_ALLOW/.test(le), 'enterEditLiveRoundMode has no league game filter');
+        /lgFilterSideGames|LG_SIDE_ALLOW|lgFilterLiveEdit/.test(le), 'enterEditLiveRoundMode has no league game filter');
     const gb = fnBody('bgGirBetsOn');
     GAP('K static', 'GIR exclusivity', 'GIR junk and GIR Pool mutually exclusive (today bgGirBetsOn lists both, nothing greys one out)',
-        /girpool[\s\S]{0,200}junk-gir[\s\S]{0,200}(locked|disabled)|mutual/i.test(src.slice(src.indexOf('function bgGirBetsOn'), src.indexOf('function bgGirBetsOn') + 6000)), gb.slice(0, 160).replace(/\s+/g, ' '));
+        /function bgGirExclusive\(/.test(src) || /girpool[\s\S]{0,200}junk-gir[\s\S]{0,200}(locked|disabled)|mutual/i.test(src.slice(src.indexOf('function bgGirBetsOn'), src.indexOf('function bgGirBetsOn') + 6000)), gb.slice(0, 160).replace(/\s+/g, ' '));
     const i18n = ['es', 'ja', 'ko', 'zh'].map(l => [l, require(path.resolve(path.dirname(HTML), 'i18n', l + '.json')).x || {}]);
     ['Junk', 'GIR', 'Sandy', 'Barkie', 'Polie', 'Arnie', 'Chip-In', 'Rolo', 'Snake'].forEach(nm => i18n.forEach(([l, x]) =>
       check('K static', 'i18n names', nm + ' stays English in ' + l, x[nm] === undefined || x[nm] === nm, l + ': ' + x[nm])));

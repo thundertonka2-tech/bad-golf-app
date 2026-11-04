@@ -117,6 +117,17 @@ async function main() {
     check('AT1.5', 'sub takes the absentee’s junk entry', g && sub && g.games.junk && g.games.junk.participants.indexOf(sub.id) >= 0 && g.games.junk.participants.length === 2, J(g && g.games.junk));
   }
 
+  // ---------- AT2.4 / JUNK Q-4: a week override can change junk ----------
+  {
+    const season = { skins: { value: 1 }, junk: { gir: 1 } };
+    const w3 = await launch({ mode: 'field', n: 4, wn: 3, side: season, weekSide: { junk: { sandy: 2, barkie: 1 } } });
+    const w4 = await launch({ mode: 'field', n: 4, wn: 4, side: season });
+    check('AT2.4', 'week 3 override carries its own junk (and only its games)', w3 && J(keys(w3)) === J(['junk']) && w3.games.junk.sandy === 2 && w3.games.junk.barkie === 1 && w3.games.junk.gir == null, J(w3 && w3.games));
+    check('AT2.4', 'week 4 carries the league\u2019s games', w4 && J(keys(w4)) === J(['junk', 'skins']) && w4.games.junk.gir === 1, J(w4 && w4.games));
+    const w5 = await launch({ mode: 'field', n: 4, wn: 5, side: season, weekSide: {} });
+    check('AT2.4', 'empty override = nothing that week (no junk)', w5 && !keys(w5).length, J(w5 && w5.games));
+  }
+
   // ---------- G-2: retired Snake never rides into a league round ----------
   {
     const g = await launch({ mode: 'field', n: 4, side: { junk: { gir: 1, snake: 1, snakeParticipants: ['lg0', 'lg1'], snakeParticipantNames: ['Kevin Wells', 'Tyler OConnor'] } } });

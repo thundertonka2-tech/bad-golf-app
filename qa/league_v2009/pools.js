@@ -258,10 +258,10 @@ async function main() {
   {
     const legacy = { wolf: { value: 1 }, junk: { gir: 1, sandy: 1 }, nassau: { value: 5 }, teamMatch: { value: 2 }, scramble: { value: 5 }, banker: { value: 1 }, animals: { value: 1 }, snake: { value: 1 }, skins: cfgOf('skins', {}), lowNetPool: cfgOf('lowNetPool', {}) };
     const g = await launch({ n: 4, hcps: [3, 9, 14, 20], mode: 'field', side: legacy });
-    const extra = Object.keys(g.games).filter(k => POOLS.indexOf(k) < 0);
+    const extra = Object.keys(g.games).filter(k => POOLS.indexOf(k) < 0 && k !== 'junk');   // v2009 D2: junk is allowed in a league
     check('allow list', 'launch strips legacy games', 'season config from an older build: only allowed pools reach the round', !extra.length && g.games.skins && g.games.lowNetPool, 'round games ' + J(Object.keys(g.games)));
     const gw = await launch({ n: 4, hcps: [3, 9, 14, 20], mode: 'field', side: { skins: cfgOf('skins', {}) }, weekSide: legacy });
-    const extraW = Object.keys(gw.games).filter(k => POOLS.indexOf(k) < 0);
+    const extraW = Object.keys(gw.games).filter(k => POOLS.indexOf(k) < 0 && k !== 'junk');   // v2009 D2
     check('allow list', 'launch strips legacy games', 'week override (hasOwn) from an older build: only allowed pools reach the round', !extraW.length, J(Object.keys(gw.games)));
     seed(4); fill(g, {}); const a = F('computeAllGameMoney')(g); const o = oracle(g);
     check('allow list', 'launch strips legacy games', 'units = oracle (no wolf/junk/nassau money)', g.players.every(p => c2(a.combined[p.id]) === c2(o.M[p.id])), J(a.combined) + ' vs ' + J(o.M));
@@ -279,7 +279,7 @@ async function main() {
     check('allow list', 'live edit ownership', 'pre-v1410 league round: wolf/junk are not league-owned (group bets)', J(ko) === J(['lowNetPool', 'skins']), J(ko));
     // live edit path: does enterEditLiveRoundMode/openT2GroupSideBets apply LG_SIDE_ALLOW to a league round?
     const src = fnSrc('enterEditLiveRoundMode') + fnSrc('openT2GroupSideBets');
-    check('allow list', 'live edit allow list', 'live edit of a LEAGUE round filters the tiles to LG_SIDE_ALLOW (like lgOpenSideGames)', /lgFilterSideGames\s*\(\s*true|LG_SIDE_ALLOW/.test(src),
+    check('allow list', 'live edit allow list', 'live edit of a LEAGUE round filters the tiles to LG_SIDE_ALLOW (like lgOpenSideGames)', /lgFilterSideGames\s*\(\s*true|LG_SIDE_ALLOW|lgFilterLiveEdit\(/.test(src),
       'enterEditLiveRoundMode/openT2GroupSideBets never call lgFilterSideGames / LG_SIDE_ALLOW; t2FilterGroupConfigGames is gated on g.t2 only, so the group can add Wolf/Nassau/Banker to a league round on the night');
   }
 
