@@ -76,26 +76,18 @@ end $f$;
 -- Even split of p_cents over p_ids with numerators p_w (share_i = cents * w_i / sum(w)), zero-sum in cents.
 -- The odd cents go to the larger exact share first, then lowest id (or highest, for that penny rule).
 create or replace function public._league_split_weighted(p_cents bigint, p_ids uuid[], p_w bigint[], p_rule text default 'lowest_member_id')
- returns table(member_id uuid, cents bigint) language plpgsql immutable set search_path to 'public' as $f$
-declare v_tot numeric; v_rem bigint;
-begin
+ returns table(member_id uuid, cents bigint) language sql immutable set search_path to 'public' as $f$
   /* v2009 (Tyler, 11/3): payout rounding — zero-sum, remainder to the larger share first */
-  select sum(w) into v_tot from unnest(p_w) w;
-  if coalesce(v_tot, 0) <= 0 or coalesce(array_length(p_ids, 1), 0) = 0 then return; end if;
-  create temp table if not exists _lg_sw (id uuid, w bigint, fl bigint, frac numeric) on commit drop;
-  delete from _lg_sw where true;
-  insert into _lg_sw
-  select x.id, x.w, floor(p_cents::numeric * x.w / v_tot)::bigint, p_cents::numeric * x.w / v_tot
-    from unnest(p_ids, p_w) x(id, w) where x.w > 0;
-  select p_cents - coalesce(sum(fl), 0) into v_rem from _lg_sw;
-  return query
-  select s.id, s.fl + case when s.rk <= v_rem then 1 else 0 end
-    from (select z.id, z.fl, row_number() over (
-                   order by z.frac desc,
-                            case when p_rule = 'highest_member_id' then null else z.id end asc,
-                            case when p_rule = 'highest_member_id' then z.id else null end desc) rk
-            from _lg_sw z) s;
-end $f$;
+  with t as (select sum(w)::numeric tot from unnest(p_w) w),
+       x as (select u.id, u.w, floor(p_cents::numeric * u.w / t.tot)::bigint fl, p_cents::numeric * u.w / t.tot ex
+               from unnest(p_ids, p_w) u(id, w), t where u.w > 0 and t.tot > 0),
+       r as (select p_cents - coalesce((select sum(fl) from x), 0) rem),
+       o as (select x.*, row_number() over (
+                     order by x.ex - x.fl desc, x.ex desc,
+                              case when p_rule = 'highest_member_id' then null else x.id end asc,
+                              case when p_rule = 'highest_member_id' then x.id else null end desc) rk from x)
+  select o.id, o.fl + case when o.rk <= r.rem then 1 else 0 end from o, r
+$f$;
 
 revoke all on function public._league_week_play_order(jsonb, integer) from public, anon;
 revoke all on function public._league_hole_label(jsonb, integer) from public, anon;
@@ -498,11 +490,11 @@ begin
          v2009 (Tyler, 11/3): POOLS-4 — for Fewest Putts that means putts on every hole (a card with putts on
          half its holes used to "win" on a tiny total). D6: a leaver is charged off the holes he played. */
       if v_pool = 'most_girs' then
-        v_pool_parts := array(select m from unnest(v_pool_parts) m
-          where exists (select 1 from _lg_wc z where z.m = m and z.gir is not null));
+        v_pool_parts := array(select pp.id from unnest(v_pool_parts) pp(id)
+          where exists (select 1 from _lg_wc z where z.m = pp.id and z.gir is not null));
       elsif v_pool = 'fewest_putts' then
-        v_pool_parts := array(select m from unnest(v_pool_parts) m
-          where exists (select 1 from _lg_wc z where z.m = m and z.putts_full));
+        v_pool_parts := array(select pp.id from unnest(v_pool_parts) pp(id)
+          where exists (select 1 from _lg_wc z where z.m = pp.id and z.putts_full));
       end if;
       if coalesce(array_length(v_pool_parts,1),0) = 0 then continue; end if;
 
@@ -537,7 +529,7 @@ begin
             v_carry := v_carry + 1;
           end if;
         end loop;
-        v_nwin := v_won_any;
+        v_nwin := v_total_skins;   -- D9: even an all-tied night is paid (split evenly), not left unawarded
 
       elsif v_pool = 'lowest_net' then
         /* v1847: a tie on net goes to a card-off -- net on the last 9, 6, 3, 1 holes --
@@ -598,7 +590,7 @@ begin
           'week', v_w.week_number, 'kind', v_pool, 'amount', v_amt,
           'reason', case when v_pool in ('ctp','longest_drive','longest_putt')
                          then 'no winner recorded'
-                         when v_pool = 'skins' then 'every hole tied'
+                         when v_pool = 'skins' then 'no hole was scored'
                          when v_pool in ('most_girs','fewest_putts')
                          then 'no card carried the detail to rank it'
                          else 'no winner' end));
