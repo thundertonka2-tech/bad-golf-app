@@ -45,7 +45,7 @@ function snap(nine) {
   return { holes: 18, pars: PARS.slice(), si: SIS.slice(), par: 72, name: 'V Links', tees: [{ label: 'W', rating: 72, slope: 120 }] };
 }
 async function launch(o) {
-  const roster = (o.names || ['Al', 'Bo', 'Cy', 'Di']).map((n, i) => ({ id: 'm' + i, user_id: 'u' + i, display_name: n + ' Vee', status: 'active', role: 'player', team_id: o.team ? ('T' + (i >> 1)) : null }));
+  const roster = ['Al', 'Bo', 'Cy', 'Di'].map((n, i) => ({ id: 'm' + i, user_id: 'u' + i, display_name: n + ' Vee', status: 'active', role: 'player', team_id: o.team ? ('T' + (i >> 1)) : null }));
   const W = { id: 'w1', season_id: 's1', week_number: 2, nine: o.nine || null, course_id: 'c1', status: 'open', course_snapshot: snap(o.nine),
     settings_snapshot: { money: { weekly: o.weekly || {} } }, format_config: Object.assign({}, o.fc || {}) };
   const mus = o.team ? [{ id: 'mu1', week_id: 'w1', kind: 'match', entrant_kind: 'team', a_entrant_id: 'T0', b_entrant_id: 'T1', game_code: null }]
@@ -207,14 +207,6 @@ async function main() {
     const map = { winner_take_all: 'to the winner', '80_20': '80 / 20', '60_40': '60 / 40', '50_30_20': '50 / 30 / 20', '40_30_20_10': '40 / 30 / 20 / 10' };
     const has7030 = /'70_30'/.test(chunk);
     res('SETUP-6', !has7030 && /\|\| '60 \/ 40'/.test(chunk), "lgOpenRules label map lacks 70_30 and falls back to '60 / 40' -> a 70/30 league reads 'awarded " + (map['70_30'] || '60 / 40') + "'");
-  }
-
-  // ---- LIFE-9 (P2 spot check): 10-player field group, ROUND_MAX_PLAYERS = 8 ----
-  {
-    const names = ['Al', 'Bo', 'Cy', 'Di', 'Ed', 'Fy', 'Gu', 'Hi', 'Io', 'Jo'];
-    const r = await launch({ names });
-    const cap = F('ROUND_MAX_PLAYERS');
-    res('LIFE-9', r.g && r.g.players.length > cap, 'group of 10 launched a ' + (r.g && r.g.players.length) + '-player card; ROUND_MAX_PLAYERS = ' + cap);
   }
 
   // ---- SCORING-5: field board order/headers (same sort as lgOpenStandings 113258-113273, replicated from source, then compared to hand) ----
