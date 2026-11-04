@@ -28,3 +28,17 @@ Tests: `qa/league_v2009/fix_tests/S3/` — `bash load_schema.sh v2009_s3` then `
 | QA pools harness (t_money_qa.py 20; oracle moved to D8/D9 and POOLS-3 storage) | 2014/2014 (was 1941/2014 before the oracle change — the 73 were exactly the old dead-tie skins oracle and the two-row tie insert) |
 | QA t_extra.py / t_hold.py | 2/2; hold report unchanged |
 | qa/v2002_matrix/league_server t_pure / t_edges / run_season 200 | 15/0, 340/0, 1600/0 — two edge oracles and the season skins oracle moved to D8/D9 (dead ties → carry); marked `v2009 (Tyler, 11/3)` |
+| qa/v2002_matrix/league.js (LG_FUZZ=100) | 5512/0 (no app code changed by S3) |
+| guard_stale_base.sh / guard_button_inline.py / guard_i18n.py | all clear / all clear / exit 0 (the 7 untranslated strings pre-date S3) |
+| app script md5, golf-app.html vs www/index.html | equal (a1a5f3d4…), untouched |
+
+## Not fixed here (other owners) — see REQUESTS_S3.md
+- D10 group-tile lock at launch and on the side-games screen (C2/C3, R1). The server half is locked by test t08 D10.
+- POOLS-6 client loop adding most_girs / fewest_putts (C1, R2).
+- POOLS-9 card printing `members[].whole` (C1/C3, R3).
+- POOLS-5 wording on the Dues and holding cards (C1, R4).
+- Showing a tie and picking one by hand on the week screen (C3, R5).
+- POOLS-1 / POOLS-2 are client allow-list defects (C2), not money functions.
+
+## POOLS P2 rooted in S3 functions
+- POOLS-5: server half fixed (D8). POOLS-9: server half fixed (members[]). HOLES-7: fixed (ledger note). No other POOLS P2 roots in S3 functions.
