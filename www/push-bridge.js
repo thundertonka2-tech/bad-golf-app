@@ -91,6 +91,20 @@
           // ("pick the round that counts"); week-complete lands on the standings.
           // The app may still be booting when the tap arrives, so wait for the
           // league functions to exist (up to ~15s) instead of dropping the tap.
+          // v2009 (Tyler, 11/3): the new league pushes (S2). A reopen, a reopen request or changed results land on
+          // that week; a handicap-rules change lands on the league screen.
+          if (type === 'league_week_reopened' || type === 'league_week_results_changed' || type === 'league_reopen_request' || type === 'league_hcp_rules_changed') {
+            var _sid2 = data.season_id, _wid2 = data.week_id, _tries2 = 0;
+            (function _go2() {
+              try {
+                if (_sid2 && _wid2 && type !== 'league_hcp_rules_changed' && typeof window.lgOpenWeek === 'function') return window.lgOpenWeek(_sid2, _wid2);
+                if (_sid2 && typeof window.lgOpenSeason === 'function') return window.lgOpenSeason(_sid2);
+              } catch (e) {}
+              if (++_tries2 > 30) { try { if (typeof window.switchTab === 'function') window.switchTab('league'); } catch (e) {} return; }
+              setTimeout(_go2, 500);
+            })();
+            return;
+          }
           if (type === 'league_reminder' || type === 'league_week_complete') {
             var _sid = data.season_id, _wid = data.week_id, _tries = 0;
             (function _go() {
