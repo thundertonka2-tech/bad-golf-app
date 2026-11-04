@@ -13,7 +13,7 @@ Tests: `qa/league_v2009/fix_tests/S2/t/*.sql`, run with `fix_tests/S2/run.sh <db
 | LIFE-7 | fixed | t02: accept after a forfeit turned it into `sub` → refused, forfeit stands; assign onto a forfeited seat refused | `league_respond_sub_invite`, `league_assign_sub`, `league_claim_sub`, `league_invite_subs` |
 | R2 (S1 request) | fixed | t02: resolving a seat leaves invites `pending` → `cancelled`. Body = S1_02's (keeps the `'bogey'` line) + S2's tagged block | `league_resolve_absence` (S2_03) |
 | LIFE-14 | fixed | t02: claim / accept / assign-without-hcp wrote no handicap → seeded from the sub's Bad Golf index (12.0, 15.5, 7.0), editable | `league_claim_sub`, `league_respond_sub_invite`, `league_assign_sub` |
-| LIFE-8 + D6 | fixed (S2 half; pot exclusion → S3, see REQUESTS_S2) | t03: leaver after 12 of 18 skipped (`card has 12 of 18`) → posted, `left_after_hole 12`, 1-12 as scored, 13-18 net double bogey; shotgun-7 leaver fills 4-6 in play order; short card with no leave stamp still skipped. `league_card_holes_played(card)` gives S3 the played slots | `league_post_round_cards`, `league_cards.left_after_hole` (S2_01), `league_card_holes_played` (S2_02) |
+| LIFE-8 + D6 | fixed (S2 half; pot exclusion → S3, see REQUESTS_S2) | t03: leaver after 12 of 18 skipped (a score he entered before leaving is kept, v1887) (`card has 12 of 18`) → posted, `left_after_hole 12`, 1-12 as scored, 13-18 net double bogey; shotgun-7 leaver fills 4-6 in play order; short card with no leave stamp still skipped. `league_card_holes_played(card)` gives S3 the played slots | `league_post_round_cards`, `league_cards.left_after_hole` (S2_01), `league_card_holes_played` (S2_02) |
 | HOLES-9 (live poster) | fixed | t03: a front-nine round posted onto a back-nine week → `reason holes_mismatch` | `league_post_round_cards` |
 | LIFE-1 + D7 (cards) | fixed | t03: a pre-existing team_4man season took cards (2 of 4 kept) → `LEAGUE_TEAM4_RETIRED` | `league_card_place`, `league_post_round_cards` |
 | HOLES schema + `league_set_week` (all 7 options, per-week course) | fixed | t04: `holes_mode` b9first/front9/back9/f9x2/b9x2/pick+start not settable → set, `nine` mirrors it; pick needs start 2-18; unknown mode refused; an old client's `nine=back` still lands back9; per-week `course_id` (SETUP Q-2) kept; locked once open | S2_01 (columns, CHECKs, mirror trigger, backfill), `league_set_week` |
@@ -52,7 +52,7 @@ Tests: `qa/league_v2009/fix_tests/S2/t/*.sql`, run with `fix_tests/S2/run.sh <db
 | POOLS-8 / D11 fee proration | → S3 | money. S2 already writes `activated_week` on join |
 
 ## Regression runs (fixed DB `v2009_s2` = live + S1 + S2)
-- **S2 tests:** `bash qa/league_v2009/fix_tests/S2/run_all.sh` gives 107 checks, 0 FAIL on fixed. On base, 84 FAIL: every S2 defect reproduces.
+- **S2 tests:** `bash qa/league_v2009/fix_tests/S2/run_all.sh` gives 108 checks, 0 FAIL on fixed. On base, 85 FAIL: every S2 defect reproduces.
 - **v2002 league server matrix** (`qa/v2002_matrix/league_server`):
   - pure 15/0, edges 340/0, season(60) 480/0;
   - identical on base and fixed.
@@ -74,6 +74,6 @@ Tests: `qa/league_v2009/fix_tests/S2/t/*.sql`, run with `fix_tests/S2/run.sh <db
   - The S1_01 R1 par-3 and max-score axes, which failed before S2 (247 fails in the QA run), are 0 now that S2's `league_card_place` is live.
   - C / D were still running at hand-off (S1's own baseline: C 1382/5, D 192/0). Rerun: `python3 <S1>/fix_tests/S1/run_qa_harness.py v2009_s2_qa`, with S1's `scoring_sql` path.
 - **S2 + S3 together** (S3_01 applied on top of the S2 DB, `v2009_s2s3`):
-  - all 107 S2 checks pass;
+  - all 108 S2 checks pass;
   - `t/x01_with_S3_leaver_money.sql`, the D6 end to end: the leaver is charged into Low Net and doesn't win it, he wins the 12 skins he played outright, holes 13-18 go to others, and the ledger balances (4/4).
   - S3 replaces none of S2's functions.

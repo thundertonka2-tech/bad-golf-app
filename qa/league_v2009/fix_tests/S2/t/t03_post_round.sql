@@ -108,3 +108,24 @@ begin
   r := pg_temp.try('e', format('select public.league_post_card(%L,%L,null,''solo_post'',null,null,null)', m, pg_temp.pars(0)));
   perform pg_temp.check('D7 team_4man card refused', pg_temp.err(r) like 'LEAGUE_TEAM4_RETIRED%', r, 'LEAGUE_TEAM4_RETIRED');
 end $$;
+
+do $$
+declare b int := 3500; sid uuid; w uuid; m uuid; r jsonb; setj jsonb; gc text := 'S2T3500G'; c record; s jsonb;
+begin
+  -- D6 + v1887: left after 10, but hole 15 was scored before he left (kept); 11-14 and 16-18 filled
+  setj := '{"format":"stroke_net","competition_mode":"field","presence":{"mode":"open","solo_settlement":"auto"}}';
+  sid := pg_temp.season(b, setj, array['C','V1','V2']);
+  w := pg_temp.week(sid,1); perform pg_temp.openw(w, setj);
+  update league_weeks set format_config = jsonb_build_object('group_codes', jsonb_build_array(jsonb_build_object('g',1,'code',gc,'mids','[]'::jsonb))) where id=w;
+  perform pg_temp.mu(w, pg_temp.mem(b,2)); m := pg_temp.mu(w, pg_temp.mem(b,3));
+  s := to_jsonb(array(select case when i <= 10 or i = 15 then 4 else null end from generate_series(1,18) i));
+  insert into public.games(code,data,participants,owner_uid) values (gc, jsonb_build_object('nineMode','all18','startHole',1,
+     'players', jsonb_build_array(jsonb_build_object('id','a','uid',pg_temp.usr(b,2),'name','V1'), jsonb_build_object('id','b','uid',pg_temp.usr(b,3),'name','V2')),
+     'scores', jsonb_build_object('a', to_jsonb(pg_temp.pars(0)), 'b', s), 'leftRound', jsonb_build_object('byId', jsonb_build_object('b', 10))),
+     array[pg_temp.usr(b,2),pg_temp.usr(b,3)], pg_temp.usr(b,2));
+  perform pg_temp.who(pg_temp.usr(b,2));
+  r := pg_temp.try('p', format('select public.league_post_round_cards(%L)', gc));
+  select * into c from league_cards where matchup_id = m;
+  perform pg_temp.check('D6 a score entered before he left (hole 15) is kept; empty holes filled', c.left_after_hole = 10 and c.gross[15] = 4 and c.gross[11] = 6,
+     jsonb_build_object('r',r,'gross',c.gross), 'left 10, g15 4, g11 6');
+end $$;

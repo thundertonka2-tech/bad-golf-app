@@ -571,10 +571,11 @@ begin
             if v_lmode = 'b9first' and v_start = 1 then v_start := 10; end if;
             if v_start < 1 or v_start > v_holes then v_start := 1; end if;
             v_lcut := ((v_left - v_start) % v_holes + v_holes) % v_holes;
-            -- every hole up to the leave has a score, and nothing after it does
-            select bool_and(case when ((i - v_start) % v_holes + v_holes) % v_holes <= v_lcut
-                                 then v_gross[i] is not null else v_gross[i] is null end)
-              into v_ok_played from generate_series(1, v_holes) i;
+            -- every hole up to the leave has a score. A score after it is kept: the app keeps one that was
+            -- entered before he left (v1887, he really played it); only the empty holes are filled.
+            select bool_and(v_gross[i] is not null)
+              into v_ok_played from generate_series(1, v_holes) i
+             where ((i - v_start) % v_holes + v_holes) % v_holes <= v_lcut;
             if not coalesce(v_ok_played, false) then v_left := null; end if;
           end if;
           if v_left is not null then
