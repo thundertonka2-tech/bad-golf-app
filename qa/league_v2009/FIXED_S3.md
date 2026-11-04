@@ -18,3 +18,13 @@ Tests: `qa/league_v2009/fix_tests/S3/` — `bash load_schema.sh v2009_s3` then `
 | POOLS-9 (server half) | fixed | t08 POOLS-9 A (12.5 × 3: whole figures sum to −38 against a holding of 38), B (33.33 × 3) | league_money_settle returns `members[]` {member_id, name, balance, whole}: each member's whole-unit figure, zero-sum with the league's holding. The client card must print `whole` instead of re-rounding (C1/C3) — REQUESTS_S3.md |
 | HOLES-7 | fixed | t08 HOLES-7 (back nine played 3 → "hole 12"; b9x2 played 12 → "hole 12 (second loop)"; 18 holes unchanged) | `_league_hole_label` (snapshot.phys, else snapshot.mode / holes_mode / nine) in the CTP ledger note |
 | D10 (server half) | fixed (nothing to change server-side; locked by test) | t08 D10 (a round carrying skins/lowNetPool/girPool/puttsPool at real value changes nothing on the ledger; each league pot charged once) | The server never reads the round's group games. CTP/LP/LD are "stamped" by the CLIENT at launch (lgLaunchWeekRound, golf-app.html:118227-118248); no server function stamps them. The double charge is the group tile settling in the round, so the lock belongs to C2/C3 — REQUESTS_S3.md R1 |
+
+## Regression runs (local PG16, after the fix)
+
+| Suite | Result |
+|---|---|
+| fix_tests/S3 run_tests.sh (v2009_s3; and v2009_s3_s2 = with S2_01_schema.sql applied, migration applied twice) | 118/118, 118/118 |
+| same tests on v2009_s3_base (no S3) | every S3 defect check fails |
+| QA pools harness (t_money_qa.py 20; oracle moved to D8/D9 and POOLS-3 storage) | 2014/2014 (was 1941/2014 before the oracle change — the 73 were exactly the old dead-tie skins oracle and the two-row tie insert) |
+| QA t_extra.py / t_hold.py | 2/2; hold report unchanged |
+| qa/v2002_matrix/league_server t_pure / t_edges / run_season 200 | 15/0, 340/0, 1600/0 — two edge oracles and the season skins oracle moved to D8/D9 (dead ties → carry); marked `v2009 (Tyler, 11/3)` |
