@@ -85,8 +85,9 @@ async function launch(o) {
                          : ro.map((m, i) => ({ id: 'f' + i, kind: 'vs_field', entrant_kind: 'member', a_entrant_id: m.id })),
       matchupId: n === 8 ? 'mu1' : null, groupNo: n === 8 ? null : 1 });
     const got = r.g ? r.g.players.length : 0;
-    check('launch / ROUND_MAX_PLAYERS', (n === 8 ? 'team_4man fixture' : 'field group of ' + n) + ' -> every player on the card, never more than 8',
-      got === n && got <= 8, 'players on card=' + got + ' (expected ' + n + ', cap 8)');
+    // v2009 C3a: LIFE-9 - a group over 8 is refused with a message (nothing claimed); up to 8, everybody is on the card.
+    check('launch / ROUND_MAX_PLAYERS', (n === 8 ? 'team_4man fixture' : 'field group of ' + n) + (n > 8 ? ' -> refused before any claim, never a card over 8' : ' -> every player on the card'),
+      n > 8 ? (got === 0 && r.rpc.indexOf('league_claim_group_round') < 0) : got === n, 'players on card=' + got + ' (expected ' + (n > 8 ? 'refusal' : n) + ', cap 8) rpcs=' + r.rpc.join(','));
   }
   console.log('LIFECYCLE client: ' + PASS + ' passed, ' + FAIL + ' failed (' + (PASS + FAIL) + ' checks)');
   Object.keys(COV).forEach(k => console.log('  ' + k + ' : ' + COV[k].run + ' / ' + COV[k].fail));
