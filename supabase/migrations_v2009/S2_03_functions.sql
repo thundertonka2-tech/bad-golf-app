@@ -2374,7 +2374,28 @@ begin
     raise exception 'NOT_COMMISSIONER: only the commissioner sets handicaps';
   end if;
   if p_week_number is null or p_week_number < 1 then raise exception 'LEAGUE_WEEK_INVALID'; end if;
+  /* v2009 (Tyler, 11/3): D11 — the one exception to "handicaps lock at week open": rows the server SEEDED for
+     a joiner or a sub (source provisional, suggested_basis.seeded_from) can still be changed by the commissioner
+     while that player has no card in the week. Every other row of an opened week stays locked. */
   if exists (select 1 from public.league_weeks
+              where season_id = p_season_id and week_number = p_week_number
+                and status in ('open','in_play','awaiting_cards'))
+     and jsonb_array_length(coalesce(p_rows, '[]'::jsonb)) > 0
+     and not exists (
+       select 1 from jsonb_array_elements(coalesce(p_rows, '[]'::jsonb)) r
+        where nullif(r->>'member_id','') is not null and nullif(r->>'effective','') is not null
+          and not exists (
+            select 1 from public.league_handicaps h
+             where h.season_id = p_season_id and h.week_number = p_week_number
+               and h.member_id = (r->>'member_id')::uuid
+               and h.source = 'provisional' and coalesce(h.suggested_basis, '{}'::jsonb) ? 'seeded_from'
+               and not exists (select 1 from public.league_cards c
+                                 join public.league_matchups mu on mu.id = c.matchup_id
+                                 join public.league_weeks w on w.id = mu.week_id
+                                where w.season_id = p_season_id and w.week_number = p_week_number
+                                  and c.member_id = h.member_id))) then
+    null;   -- only seeded rows of players who have not posted: allowed
+  elsif exists (select 1 from public.league_weeks
               where season_id = p_season_id and week_number = p_week_number
                 and status in ('open','in_play','awaiting_cards','final')) then
     raise exception 'LEAGUE_HANDICAPS_LOCKED: week % has already opened — handicaps lock at week open (§10)', p_week_number;

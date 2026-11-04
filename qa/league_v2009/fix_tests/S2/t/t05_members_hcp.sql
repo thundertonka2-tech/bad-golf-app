@@ -131,3 +131,21 @@ begin
      or (select effective from league_handicaps where member_id=pg_temp.mem(b,2) and week_number=2) is not null,
      jsonb_build_object('r', r, 'h', (select to_jsonb(h) from league_handicaps h where member_id=pg_temp.mem(b,2) and week_number=2)), 'row present');
 end $$;
+
+do $$
+declare b int := 5500; sid uuid; w1 uuid; r jsonb; setj jsonb; jm uuid; m uuid;
+begin
+  -- D11 "commissioner can edit": the seeded row of a joiner in an OPEN week can be changed until he posts; others stay locked
+  setj := '{"format":"stroke_net","competition_mode":"field","presence":{"mode":"open","solo_settlement":"auto"}}';
+  sid := pg_temp.season(b, setj, array['C','P1']);
+  w1 := pg_temp.week(sid,1); perform pg_temp.mu(w1, pg_temp.mem(b,1)); perform pg_temp.mu(w1, pg_temp.mem(b,2));
+  perform pg_temp.openw(w1, setj);
+  perform pg_temp.hcp(sid, pg_temp.mem(b,2), 1, 10);
+  insert into public.profiles(id, display_name, hcp_index) values (pg_temp.id(b+77), 'Newbie', 20.0);
+  perform pg_temp.who(pg_temp.usr(b,1));
+  jm := (public.league_add_member(sid, 'Newbie', null, pg_temp.id(b+77))->>'member_id')::uuid;
+  r := pg_temp.try('edit', format('select public.league_set_handicaps(%L,1,%L)', sid, jsonb_build_array(jsonb_build_object('member_id',jm,'effective',17,'source','manual'))));
+  perform pg_temp.check('D11 the commissioner can change the seeded handicap of a joiner in an open week', (select effective from league_handicaps where member_id=jm and week_number=1) = 17, r, '17');
+  r := pg_temp.try('locked', format('select public.league_set_handicaps(%L,1,%L)', sid, jsonb_build_array(jsonb_build_object('member_id',pg_temp.mem(b,2),'effective',12,'source','manual'))));
+  perform pg_temp.check('D11 control: an ordinary row of the open week stays locked', pg_temp.err(r) like 'LEAGUE_HANDICAPS_LOCKED%', r, 'locked');
+end $$;

@@ -526,6 +526,33 @@ patch('league_seed_handicaps', [
 # league_set_handicaps — SETUP-7 bounds, SETUP-10 the 2-stroke note rule for every source
 # ===================================================================================================
 patch('league_set_handicaps', [
+    ("""  if exists (select 1 from public.league_weeks
+              where season_id = p_season_id and week_number = p_week_number
+                and status in ('open','in_play','awaiting_cards','final')) then""",
+     """  """ + TAG + """D11 — the one exception to "handicaps lock at week open": rows the server SEEDED for
+     a joiner or a sub (source provisional, suggested_basis.seeded_from) can still be changed by the commissioner
+     while that player has no card in the week. Every other row of an opened week stays locked. */
+  if exists (select 1 from public.league_weeks
+              where season_id = p_season_id and week_number = p_week_number
+                and status in ('open','in_play','awaiting_cards'))
+     and jsonb_array_length(coalesce(p_rows, '[]'::jsonb)) > 0
+     and not exists (
+       select 1 from jsonb_array_elements(coalesce(p_rows, '[]'::jsonb)) r
+        where nullif(r->>'member_id','') is not null and nullif(r->>'effective','') is not null
+          and not exists (
+            select 1 from public.league_handicaps h
+             where h.season_id = p_season_id and h.week_number = p_week_number
+               and h.member_id = (r->>'member_id')::uuid
+               and h.source = 'provisional' and coalesce(h.suggested_basis, '{}'::jsonb) ? 'seeded_from'
+               and not exists (select 1 from public.league_cards c
+                                 join public.league_matchups mu on mu.id = c.matchup_id
+                                 join public.league_weeks w on w.id = mu.week_id
+                                where w.season_id = p_season_id and w.week_number = p_week_number
+                                  and c.member_id = h.member_id))) then
+    null;   -- only seeded rows of players who have not posted: allowed
+  elsif exists (select 1 from public.league_weeks
+              where season_id = p_season_id and week_number = p_week_number
+                and status in ('open','in_play','awaiting_cards','final')) then"""),
     ("""    select display_name into v_name from public.league_members
      where id = v_mid and season_id = p_season_id;
     if v_name is null then raise exception 'LEAGUE_MEMBER_NOT_IN_SEASON: %', v_mid; end if;
