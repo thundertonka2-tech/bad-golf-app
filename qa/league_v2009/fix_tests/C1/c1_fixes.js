@@ -7,7 +7,9 @@ const path = require('path');
 const { loadApp } = require(path.join(__dirname, '..', '..', '..', 'app.js'));
 const HTML = process.argv[2] || path.join(__dirname, '..', '..', '..', '..', 'golf-app.html');
 const { qa, ctx } = loadApp(HTML);
-const F = n => qa.fn(n);
+const F = n => { try { const v = qa.fn(n); if (v === undefined) throw 0; return v; } catch (e) { return MISSING(n); } };
+// A helper this build does not have yet (the pre-fix build): a stand-in that fails every check it feeds.
+function MISSING(n) { const f = function () { return '\u0000missing:' + n; }; f.__missing = true; return f; }
 const W = ctx.window;
 // the real screens, kept before any test stubs a navigation target
 const REAL = {};
@@ -70,7 +72,7 @@ function install(DB, RPC) {
 }
 
 (async function main() {
-  // ===================== SETUP-3: name keys =====================
+  try {  // ===================== SETUP-3: name keys =====================
   {
     const k = F('lgNameKey');
     check('SETUP-3', 'José Muñoz = Jose Munoz (accents fold)', k('José Muñoz') === k('Jose Munoz'), k('José Muñoz') + ' / ' + k('Jose Munoz'));
@@ -97,8 +99,9 @@ function install(DB, RPC) {
     check('SETUP-3', 'import sends the Korean name as typed', CALLS[0] && CALLS[0][1].p_rows[0].name === '김연아');
     check('SETUP-3', 'import result names unmatched, ambiguous and out-of-range rows', /no match for Nobody/.test(t) && /more than one player called Kim/.test(t) && /Big/.test(t), t);
   }
+  } catch (e) { check('crash', 'SETUP-3: name keys' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-6: payout labels everywhere =====================
+  try {  // ===================== SETUP-6: payout labels everywhere =====================
   {
     const L = F('lgPayoutLabel');
     const want = { winner_take_all: 'to the winner', '80_20': '80 / 20', '70_30': '70 / 30', '60_40': '60 / 40', '50_30_20': '50 / 30 / 20', '40_30_20_10': '40 / 30 / 20 / 10' };
@@ -106,8 +109,9 @@ function install(DB, RPC) {
     check('SETUP-6', 'unset payout reads as the default (winner), never 60 / 40', L(undefined) === 'to the winner' && L(null) === 'to the winner');
     check('SETUP-6', 'unknown split spelled out, not 60 / 40', L('55_45') === '55 / 45');
   }
+  } catch (e) { check('crash', 'SETUP-6: payout labels everywhere' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-8 / SETUP-16: rules page =====================
+  try {  // ===================== SETUP-8 / SETUP-16: rules page =====================
   {
     const rules = async (st) => {
       install({ league_seasons: [{ id: 'S1', name: 'S', schedule_mode: 'calendar', start_date: '2027-04-06', settings: st }] }, {});
@@ -131,8 +135,9 @@ function install(DB, RPC) {
     const H4 = await rules({ format: 'stableford', competition_mode: 'field', weeks: 8, base_holes: 18, points: { system: 'stableford', season_race: 'points' } });
     check('SETUP-8', 'field Stableford: Stableford system, percentage race, no head-to-head', /Stableford points/.test(H4) && /Percentage/.test(H4) && !/Head-to-head/.test(H4));
   }
+  } catch (e) { check('crash', 'SETUP-8 / SETUP-16: rules page' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-5 / POOLS-6 / POOLS-5 / D10: Dues screen =====================
+  try {  // ===================== SETUP-5 / POOLS-6 / POOLS-5 / D10: Dues screen =====================
   {
     install({ league_seasons: [{ id: 'S1', settings: { side_games: { skins: { value: 2 }, girPool: { value: 3 } }, money: { weekly: {} } } }] }, {});
     reset(); F("(lgWizHtml = function(){ return ''; }, 1)");
@@ -169,8 +174,9 @@ function install(DB, RPC) {
     await F('lgSaveMoneySettings')('S1', { norender: true });
     check('SETUP Q-5', 'mid-season reserve change posts to the league chat', CHAT.length === 1 && CHAT[0][0] === 'S1' && /reserve/.test(CHAT[0][1].body) && /week 2/.test(CHAT[0][1].body), JSON.stringify(CHAT));
   }
+  } catch (e) { check('crash', 'SETUP-5 / POOLS-6 / POOLS-5 / D10: Dues screen' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP Q-5: handicap rules announced =====================
+  try {  // ===================== SETUP Q-5: handicap rules announced =====================
   {
     install({ league_weeks: [{ season_id: 'S1', week_number: 1, status: 'final' }, { season_id: 'S1', week_number: 2, status: 'scheduled' }] },
             { league_set_hcp_rules: () => ({ data: { ok: true, announced: true }, error: null }) });
@@ -182,8 +188,9 @@ function install(DB, RPC) {
     await F('lgSaveHcpRules')('S1');
     check('SETUP Q-5', 'pre-season save is not announced', CHAT.length === 0);
   }
+  } catch (e) { check('crash', 'SETUP Q-5: handicap rules announced' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-9 / SETUP-10: note prompt =====================
+  try {  // ===================== SETUP-9 / SETUP-10: note prompt =====================
   {
     let asked = 0, sent = null;
     install({}, { league_set_handicaps: a => { sent = a; return { data: { conflicts: [], weeks: 1 }, error: null }; } });
@@ -199,8 +206,9 @@ function install(DB, RPC) {
     check('SETUP-9', '0.3 -> 2.3 (exact 2.0) asks why', asked === 1 && sent && sent.p_rows[0].note === 'why', 'asked=' + asked);
     check('SETUP-9', '5.0 -> 6.9 (1.9) does not ask', sent && sent.p_rows[1].note === null);
   }
+  } catch (e) { check('crash', 'SETUP-9 / SETUP-10: note prompt' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-2: handicaps step not "done" while a member has none =====================
+  try {  // ===================== SETUP-2: handicaps step not "done" while a member has none =====================
   {
     const DB = { league_seasons: [{ id: 'S1', settings: { type: 'individual', competition_mode: 'field', game_set: true, money: {}, side_games_set: true, hcp_rules_set: true }, status: 'planning' }],
                  league_weeks: [{ id: 'w1', season_id: 'S1', status: 'scheduled', week_number: 1 }],
@@ -216,8 +224,9 @@ function install(DB, RPC) {
     const st2 = await F('lgSetupState')('S1', { members, course: { course_id: 'c1' } });
     check('SETUP-2', 'every player has one (sub ignored) -> done', !!st2.handicaps && !st2.handicapsMissing);
   }
+  } catch (e) { check('crash', 'SETUP-2: handicaps step not "done" while a member has none' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-14: checklist = wizard =====================
+  try {  // ===================== SETUP-14: checklist = wizard =====================
   {
     const cl = F('lgSetupChecklistHtml');
     const h = cl('S1', { game: true, members: 3, course: 'c', matchups: 1, handicaps: 1, ready: true, type: 'individual', hcpRules: false, money: false, sideGames: false });
@@ -228,8 +237,9 @@ function install(DB, RPC) {
     check('SETUP-14', 'hint names only live games', !/match, stableford or scramble/.test(h3) && /Stroke play, Stableford, Scramble or Team match play/.test(h3));
     check('SETUP-14', 'hidden once every step is done', cl('S1', { game: true, members: 3, course: 'c', matchups: 1, handicaps: 1, type: 'individual', hcpRules: true, money: true, sideGames: true }) === '');
   }
+  } catch (e) { check('crash', 'SETUP-14: checklist = wizard' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-15: wizard dots =====================
+  try {  // ===================== SETUP-15: wizard dots =====================
   {
     restore('lgWizHtml');
     W._lgSetupSt = { game: true, members: 3, course: null, matchups: 0, handicaps: 0, type: 'individual', hcpRules: false, money: false, sideGames: false }; W._lgSetupStSid = 'S1';
@@ -245,16 +255,18 @@ function install(DB, RPC) {
     check('SETUP-15', 'CSS: done solid, todo dashed (beats the button system)', /\.lg-wiz-dot\.done \{[^}]*solid[^}]*!important/.test(css) && /\.lg-wiz-dot\.todo \{[^}]*dashed[^}]*!important/.test(css));
     check('SETUP-16', 'wizard hint is split so i18n can match "Step {0} of {1}"', /<span>Step 3 of 8<\/span> — <span>The course the league plays\.<\/span>/.test(h), (h.match(/t2-wiz-hint">[^]*?<\/div>/) || [''])[0]);
   }
+  } catch (e) { check('crash', 'SETUP-15: wizard dots' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-16: game/format names stay English =====================
+  try {  // ===================== SETUP-16: game/format names stay English =====================
   {
     const src = require('fs').readFileSync(HTML, 'utf8');
     check('SETUP-16', 'Game screen game names are data-noi18n', /<strong data-noi18n style="font-size:14px">' \+ lgEsc\(g\.name\)/.test(src));
     check('SETUP-16', 'team rule names are data-noi18n', /<strong data-noi18n style="font-size:14px">' \+ lgEsc\(r\.name\)/.test(src));
     check('SETUP-16', 'create screen "Individual — against the field" is data-noi18n', /s\.key === 'field' \? ' data-noi18n'/.test(src));
   }
+  } catch (e) { check('crash', 'SETUP-16: game/format names stay English' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-4 =====================
+  try {  // ===================== SETUP-4 =====================
   for (const [fmt, type] of [['stableford', 'individual'], ['team_match', 'team_2man'], ['stroke_h2h', 'individual'], ['stableford_h2h', 'individual'], ['team_stableford', 'team_2man'], ['scramble', 'team_2man'], ['stroke_net', 'individual'], ['match', 'individual']]) {
     install({ league_seasons: [{ id: 'S1', settings: { format: fmt, type } }] }, {});
     W._lgShapeWas = undefined; W._lgSeason = 'S1';
@@ -268,8 +280,9 @@ function install(DB, RPC) {
     await F('lgSaveShape')('S1');
     check('SETUP-4', 'a real change still saves (field -> team = scramble)', CALLS.some(c => c[0] === 'league_set_format' && c[1].p_format === 'scramble'));
   }
+  } catch (e) { check('crash', 'SETUP-4' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-11 / D7: teams =====================
+  try {  // ===================== SETUP-11 / D7: teams =====================
   {
     const roster = [{ id: 'm1', user_id: 'u0', display_name: 'A', status: 'active', role: 'commissioner' }, { id: 'm2', display_name: 'B', status: 'active', role: 'player' },
                     { id: 's1', display_name: 'Sub Sam', status: 'active', role: 'sub' }];
@@ -284,8 +297,9 @@ function install(DB, RPC) {
     const src = String(F('lgSetupState'));
     check('D7', 'setup state never sizes a team at 4', !/team_4man/.test(src.replace(/\/\*[^]*?\*\//g, '')));
   }
+  } catch (e) { check('crash', 'SETUP-11 / D7: teams' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== SETUP-12: rebuild warns =====================
+  try {  // ===================== SETUP-12: rebuild warns =====================
   for (const cleared of [0, 6]) {
     let msg = null;
     install({}, { league_generate_schedule: a => ({ data: a.p_dry_run ? { entrants: 4, entrant_kind: 'player', plan: [{ week_number: 1, pairs: [{ a: 'A', b: 'B' }] }], skipped: [], cleared } : { plan: [] }, error: null }) });
@@ -305,8 +319,9 @@ function install(DB, RPC) {
     install(DB, {});
     F("(lgOpenSchedule = " + String(F('lgOpenSchedule')).replace(/^async function lgOpenSchedule/, 'async function') + ", 1)");
   }
+  } catch (e) { check('crash', 'SETUP-12: rebuild warns' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== D3 / HOLES_SPEC: week editor =====================
+  try {  // ===================== D3 / HOLES_SPEC: week editor =====================
   {
     W._lgSchedWeeks = { w1: { id: 'w1', week_number: 3, date: '2027-04-20', nine: 'full18', holes_mode: 'all18', status: 'scheduled', course_id: 'c1' } };
     F("(lgCourseName = function(id){ return id === 'c2' ? 'Other GC' : 'Buffalo Creek'; }, 1)");
@@ -349,8 +364,9 @@ function install(DB, RPC) {
     check('D3', 'week labels', F('lgHolesLabel')('pick', 7) === 'Shotgun · starts 7' && F('lgHolesLabel')('f9x2') === 'Front 9 twice' && F('lgHolesLabel')('back9') === 'Back 9');
     check('D3', 'legacy nine maps to holes_mode', F('lgHolesModeOf')({ nine: 'back' }) === 'back9' && F('lgHolesModeOf')({ nine: 'front' }) === 'front9' && F('lgHolesModeOf')({ nine: 'full18' }) === 'all18' && F('lgHolesModeOf')({ holes_mode: 'b9x2', nine: 'full18' }) === 'b9x2');
   }
+  } catch (e) { check('crash', 'D3 / HOLES_SPEC: week editor' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== HOLES_SPEC 2.3 + SETUP-17: snapshot =====================
+  try {  // ===================== HOLES_SPEC 2.3 + SETUP-17: snapshot =====================
   {
     const PARS = [4, 4, 3, 5, 4, 4, 3, 4, 5, 4, 3, 4, 5, 4, 4, 3, 5, 4];
     const SIS = [7, 1, 15, 3, 11, 5, 17, 13, 9, 8, 16, 2, 10, 6, 14, 18, 4, 12];
@@ -382,8 +398,9 @@ function install(DB, RPC) {
     const wk = await F('lgCourseSnapshot')('c1', { holes_mode: 'b9x2', nine: 'full18' }, 'Gold');
     check('HOLES 2.3', 'a week row is read for its holes_mode', wk && wk.mode === 'b9x2' && wk.holes === 18);
   }
+  } catch (e) { check('crash', 'HOLES_SPEC 2.3 + SETUP-17: snapshot' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== D11: joiner fee on the roster + seeded handicap =====================
+  try {  // ===================== D11: joiner fee on the roster + seeded handicap =====================
   {
     const DB = {
       league_seasons: [{ id: 'S1', name: 'Season 1', status: 'active', settings: { weeks: 10, money: { buyin: 100 } }, leagues: { name: 'L' } }],
@@ -422,8 +439,9 @@ function install(DB, RPC) {
     check('D11', 'save in an open week sends only the seeded row', sent && sent.p_rows.length === 1 && sent.p_rows[0].member_id === 'm9' && sent.p_rows[0].effective === 11, JSON.stringify(sent && sent.p_rows));
     W._lgHcpSeedOnly = null;
   }
+  } catch (e) { check('crash', 'D11: joiner fee on the roster + seeded handicap' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== D12: dispute on a final week =====================
+  try {  // ===================== D12: dispute on a final week =====================
   {
     install({}, { league_dispute_card: () => ({ data: { disputed: false, reopen_requested: true, message: 'Week 3 is final, so this went to the commissioner as a request to reopen it. The results stand until he does.' }, error: null }) });
     F("(uiPrompt = async function(){ return 'wrong 7th'; }, 1)");
@@ -448,8 +466,9 @@ function install(DB, RPC) {
     reset(); try { await REAL.lgOpenSeason('S1'); } catch (e) { check('D1x', 'league screen renders', false, String(e && e.stack)); }
     check('D12', 'a player does not see the commissioner list', !/Reopen requests/.test(EL['league-body'].innerHTML));
   }
+  } catch (e) { check('crash', 'D12: dispute on a final week' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== D15: best N of M on the league screen =====================
+  try {  // ===================== D15: best N of M on the league screen =====================
   {
     const DB = { league_seasons: [{ id: 'S1', name: 'Season 1', status: 'active', settings: {}, leagues: { name: 'L' } }], league_weeks: [{ id: 'w1', season_id: 'S1', week_number: 1, status: 'final' }] };
     install(DB, { league_roster: () => ({ data: [], error: null }),
@@ -460,8 +479,9 @@ function install(DB, RPC) {
     check('D15', '"Best 8 of 10 weeks counting" on the league screen', /Best 8 of 10 weeks counting · 8 counted so far/.test(H));
     check('D15', 'the dropped week is named on the row', /not counting week 4/.test(H));
   }
+  } catch (e) { check('crash', 'D15: best N of M on the league screen' + ' section ran', false, String(e && e.message)); }
 
-  // ===================== D13 / SETUP-13 / error codes =====================
+  try {  // ===================== D13 / SETUP-13 / error codes =====================
   {
     check('D13', 'play-the-course confirm says net bogey', /Score net bogey on every hole/.test(String(F('lgResolveAbsence'))) && !/net par on every hole/.test(String(F('lgResolveAbsence'))));
     const E2 = F('lgErrText');
@@ -474,7 +494,7 @@ function install(DB, RPC) {
     W._lgShape = 'field'; F('lgPlayoffNote')();
     check('SETUP-13', 'field league says players', /8 players or fewer/.test(EL['lg-po-note'].innerHTML));
   }
-
+  } catch (e) { check('crash', 'D13 / SETUP-13 / error codes' + ' section ran', false, String(e && e.message)); }
   console.log('\nC1 fixes: ' + PASS + ' passed, ' + FAIL + ' failed (' + (PASS + FAIL) + ' checks)');
   Object.keys(COV).sort().forEach(k => console.log('  ' + k + ' : ' + COV[k].run + ' / ' + COV[k].fail));
   if (FAILS.length) { console.log('\nFAILURES'); FAILS.forEach(f => console.log('  ' + f)); }
