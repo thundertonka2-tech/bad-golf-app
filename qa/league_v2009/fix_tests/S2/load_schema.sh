@@ -20,7 +20,9 @@ LOC=$(psql -h "$H" -p "$P" -U postgres -d "$DB" -AtXc "select proname||':'||leng
 BAD=$(comm -23 <(tr ' ' '\n' < "$D/live_md5_2026-11-03.txt" | grep . | sort) <(echo "$LOC" | sort))
 if [ -z "$BAD" ]; then echo "live-md5 check: OK"; else echo "live-md5 MISMATCH: $BAD"; fi
 if [ "${2:-}" != "--no-migrations" ]; then
-  for f in $(ls "$ROOT"/supabase/migrations_v2009/S2_*.sql 2>/dev/null | sort); do
+  # S1 (scoring) runs first: S2 bodies call league_hole_strokes. Prefer the repo's own S1_* if merged, else s1_deps/.
+  S1SRC="$ROOT/supabase/migrations_v2009"; ls "$S1SRC"/S1_*.sql >/dev/null 2>&1 || S1SRC="$D/s1_deps"
+  for f in $(ls "$S1SRC"/S1_*.sql "$ROOT"/supabase/migrations_v2009/S2_*.sql 2>/dev/null ); do
     $Q -d "$DB" -v ON_ERROR_STOP=1 -f "$f" >/dev/null || { echo "MIGRATION FAILED: $f"; exit 1; }
     echo "applied $(basename "$f")"
   done
