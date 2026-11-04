@@ -55,6 +55,16 @@ create or replace function public._league_holes_compatible(p_week_mode text, p_r
     else public._league_holes_mode_of(p_week_mode) = coalesce(p_round_mode, 'all18') end
 $f$;
 
+-- The same, for a week whose card has p_week_holes holes: an all18 week on a NINE-hole course (a 9-hole snapshot)
+-- is played once round that nine, so a 9-hole round (front9, or all18 on that course) fits it.
+create or replace function public._league_holes_compatible(p_week_mode text, p_round_mode text, p_week_holes int)
+ returns boolean language sql immutable set search_path to 'public' as $f$
+  select case
+    when coalesce(p_week_holes, 18) = 9 and public._league_holes_mode_of(p_week_mode) = 'all18'
+      then coalesce(p_round_mode, 'all18') in ('all18','front9')
+    else public._league_holes_compatible(p_week_mode, p_round_mode) end
+$f$;
+
 -- Physical hole number for each card slot (league cards are stored by slot; all18 / b9first / pick slots ARE
 -- hole numbers, whatever the start).
 create or replace function public._league_holes_phys(p_mode text)
@@ -218,6 +228,8 @@ grant execute on function public._league_name_key(text) to authenticated, servic
 grant execute on function public._league_holes_label(text) to authenticated, service_role;
 grant execute on function public._league_round_holes_mode(jsonb) to authenticated, service_role;
 grant execute on function public._league_holes_compatible(text, text) to authenticated, service_role;
+revoke all on function public._league_holes_compatible(text, text, int) from public, anon;
+grant execute on function public._league_holes_compatible(text, text, int) to authenticated, service_role;
 grant execute on function public._league_holes_phys(text) to authenticated, service_role;
 -- writers / internal (as _league_push / league_card_place: no authenticated execute)
 revoke all on function public._league_seed_hcp(uuid, uuid, int, text) from public, anon, authenticated;

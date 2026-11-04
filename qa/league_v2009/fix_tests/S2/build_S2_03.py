@@ -151,7 +151,7 @@ begin"""),
     return jsonb_build_object('posted', 0, 'skipped', 0, 'reason', 'team_4man_retired');
   end if;
   select w.holes_mode into v_wmode from public.league_weeks w where w.id = v_wid;
-  if not public._league_holes_compatible(v_wmode, public._league_round_holes_mode(v_data)) then
+  if not public._league_holes_compatible(v_wmode, public._league_round_holes_mode(v_data), v_holes) then
     return jsonb_build_object('posted', 0, 'skipped', 0, 'reason', 'holes_mismatch',
       'message', 'That round was ' || public._league_holes_label(public._league_round_holes_mode(v_data))
                  || '; this week is ' || public._league_holes_label(v_wmode));
@@ -245,10 +245,14 @@ for fn in ('league_eligible_rounds', 'league_eligible_rounds_for'):
          """  """ + TAG + """HOLES-9 — length and shape come from the week's holes mode */
   select w.holes_mode into v_nine from public.league_weeks w where w.id = p_week_id;
   v_nine  := public._league_holes_mode_of(v_nine);
-  v_holes := case when v_nine in ('front9','back9') then 9 else 18 end;"""),
+  v_holes := case when v_nine in ('front9','back9') then 9 else 18 end;
+  -- an all18 week on a nine-hole course (its frozen card has 9 holes) takes 9-hole rounds, as before
+  if v_nine = 'all18' and (select nullif(w.course_snapshot->>'holes','')::int from public.league_weeks w where w.id = p_week_id) = 9 then
+    v_holes := 9;
+  end if;"""),
         ("""             'blocked',   public.league_round_format_block(g.data, coalesce(v_set->>'format', 'stroke_net')),""",
          """             'blocked',   coalesce(public.league_round_format_block(g.data, coalesce(v_set->>'format', 'stroke_net')),
-                            case when not public._league_holes_compatible(v_nine, public._league_round_holes_mode(g.data))
+                            case when not public._league_holes_compatible(v_nine, public._league_round_holes_mode(g.data), v_holes)
                                  then 'That round was ' || public._league_holes_label(public._league_round_holes_mode(g.data))
                                       || '; this week is ' || public._league_holes_label(v_nine) end),   """ + TAG + """HOLES-9 */"""),
     ])
@@ -275,6 +279,7 @@ begin"""),
   select w.holes_mode, w.start_hole into v_mode, v_start from public.league_weeks w where w.id = p_week_id;
   v_mode := public._league_holes_mode_of(v_mode);
   v_want := case when v_mode in ('front9','back9') then 9 else 18 end;
+  if v_mode = 'all18' and v_holes = 9 then v_want := 9; end if;   -- a nine-hole course, played once round
   if v_holes <> v_want then
     raise exception 'LEAGUE_COURSE_SNAPSHOT_INVALID: this week plays % (% holes) and that card has % holes',
       public._league_holes_label(v_mode), v_want, v_holes;

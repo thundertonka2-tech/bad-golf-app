@@ -34,4 +34,4 @@ Tests: `qa/league_v2009/fix_tests/S2/t/*.sql`, run with `fix_tests/S2/run.sh <db
 | LIFE-9 (server) | fixed | t06: late joiner appended to the group that teed off (code GROUP1X) → seated in a group with no code and fewer than 8, else a new group | `league_claim_group_round` |
 | SETUP Q-5 | fixed | t06: mid-season handicap-rules change sent nothing → members pushed; pre-season change silent; audit row keeps `before` | `league_set_hcp_rules` |
 | SETUP-12 (server) | fixed | t06: dry run `cleared 0` → counts the pairings a rebuild replaces | `league_generate_schedule` |
-| SETUP Q-7 | fixed | t06 + loader: 22 anon grants on league tables (live: 133 privilege rows) → 0; authenticated keeps its grants (RLS unchanged) | S2_01 revoke loop |
+| SETUP Q-7 | fixed | t06 + loader: 133 anon privilege rows on league tables (same as live) → 0; authenticated keeps its grants (RLS unchanged) | S2_01 revoke loop |

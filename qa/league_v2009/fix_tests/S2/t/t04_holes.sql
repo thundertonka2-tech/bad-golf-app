@@ -84,3 +84,24 @@ begin
   r := pg_temp.try('att', format('select public.league_attach_round(%L,%L)', w1, 'S2T41front9'));
   perform pg_temp.check('HOLES-9 attach of the front nine to the back-nine week is refused', pg_temp.err(r) like 'LEAGUE_ROUND_FORMAT_MISMATCH%', r, 'refused');
 end $$;
+
+do $$
+declare b int := 4200; sid uuid; w uuid; r jsonb; set0 jsonb; s9 jsonb; x jsonb;
+begin
+  -- a nine-hole COURSE on an all18 week (the default) still opens and still takes its 9-hole rounds
+  s9 := '{"holes":9,"pars":[4,4,3,4,5,4,5,3,4],"si":[4,5,9,8,6,3,1,7,2],"par":36,"rating":35.5,"slope":113,"course_id":"NINE"}';
+  set0 := '{"format":"stroke_net","competition_mode":"field","play":{"self_scheduled":true,"window_days":6},"presence":{"mode":"open","solo_settlement":"auto"}}';
+  sid := pg_temp.season(b, set0, array['C','Pz']);
+  w := pg_temp.week(sid,1); update league_weeks set date='2026-10-01', course_id='NINE' where id=w;
+  perform pg_temp.who(pg_temp.usr(b,1));
+  r := pg_temp.try('open9', format('select public.league_open_week(%L,%L,false)', w, s9));
+  perform pg_temp.check('HOLES control: a nine-hole course opens on an all18 week', r->>'status' = 'open', r, 'open');
+  insert into public.games(code,data,participants,owner_uid) values ('S2T4200', jsonb_build_object('course','N','courseId','NINE','nineMode','all18','holes',9,
+     'finishedAt', (extract(epoch from timestamptz '2026-10-01 18:00:00+00')*1000)::bigint, 'pars','[4,4,3,4,5,4,5,3,4]'::jsonb,
+     'players', jsonb_build_array(jsonb_build_object('id','p1','uid',pg_temp.usr(b,2),'name','Pz')),
+     'scores', jsonb_build_object('p1','[4,4,3,4,5,4,5,3,4]'::jsonb)), array[pg_temp.usr(b,2)], pg_temp.usr(b,2));
+  perform pg_temp.who(pg_temp.usr(b,2));
+  x := public.league_eligible_rounds(w);
+  perform pg_temp.check('HOLES control: the nine-hole course''s round is eligible and not blocked',
+     exists (select 1 from jsonb_array_elements(x) e where e->>'code'='S2T4200' and e->'blocked'='null'::jsonb), x, 'eligible');
+end $$;

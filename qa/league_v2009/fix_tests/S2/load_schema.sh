@@ -11,6 +11,8 @@ Q="psql -h $H -p $P -U postgres -qX"
 $Q -d postgres -c "drop database if exists $DB" >/dev/null
 $Q -d postgres -c "create database $DB" >/dev/null
 $Q -d "$DB" -f "$ROOT/qa/v2002_matrix/league_server/00_bootstrap.sql" >/dev/null 2>&1
+# auth.uid() reads qa.uid OR request.jwt.claims (the QA track harnesses impersonate through the JWT claims)
+$Q -d "$DB" -c "create or replace function auth.uid() returns uuid language sql stable as \$f\$ select coalesce(nullif(current_setting('qa.uid', true), ''), nullif(current_setting('request.jwt.claims', true), '')::jsonb->>'sub')::uuid \$f\$" >/dev/null
 $Q -d "$DB" -v ON_ERROR_STOP=1 -f "$D/schema_tables.sql" >/dev/null || { echo "LOAD FAILED"; exit 1; }
 $Q -d "$DB" -v ON_ERROR_STOP=1 -f "$D/live_league_funcs.sql" >/dev/null || { echo "LOAD FAILED"; exit 1; }
 $Q -d "$DB" -v ON_ERROR_STOP=1 -f "$D/schema_extra_funcs.sql" >/dev/null || { echo "LOAD FAILED"; exit 1; }
