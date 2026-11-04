@@ -197,7 +197,7 @@ async function main() {
       const cs = comboSpecFromId(base + ':buckskin');
       F('window').__qaCard = id => (id === base + ':buckskin' ? { pars: cs.combo.pars, sis: cs.combo.sis, tees: cs.combo.tees } : null);
       const s = await appSnap(base + ':buckskin', 'back', null);
-      check('multi-nine', 'single nine id', 'base:buckskin back-week = Buckskin itself, its own SI, rating unhalved', s && s.holes === 9 && J(s.pars) === J(set.buckskin.pars) && J(s.si) === J(set.buckskin.hdcp) && s.tees[0].rating === set.buckskin.tees[0].rating, J(s && { p: s.pars, si: s.si, r: s.tees[0] }));
+      check('multi-nine', 'single nine id', 'base:buckskin back-week = Buckskin itself, its own SI, rating unhalved', s && s.holes === 9 && J(s.pars) === J(set.buckskin.pars) && J(s.si) === J(set.buckskin.hdcp) && (function () { const _bt = set.buckskin.tees.find(t => t.label === s.tees[0].label); return !!_bt && s.tees[0].rating === _bt.rating; })(), J(s && { p: s.pars, si: s.si, r: s.tees[0] }));   // v2009 C3a: SETUP-17 leads with Blue, so compare the same tee by label
     }
   }
   // A4. does the app's own getCourseScorecard resolve a combo id at all when no saved card exists?
@@ -303,7 +303,9 @@ async function main() {
   {
     const src = require('fs').readFileSync(HTML, 'utf8');
     const lock = src.slice(src.indexOf('function _bgApplyLeagueSetupLock(g)'), src.indexOf('function _bgApplyLeagueSetupLock(g)') + 600);
-    check('live edit', 'reachability', 'Holes to play (setup-holes-field) is hidden on a league round', /'setup-holes-field'/.test(lock), 'lock list: ' + (lock.match(/\[[^\]]+\]/) || [''])[0]);
+    // v2009 C3a: HOLES_SPEC 2.6 - shown on an 18-hole league round for the ORDER only (all18 / b9first / pick); hidden otherwise.
+    const lock2 = src.slice(src.indexOf('function _bgApplyLeagueSetupLock(g)'), src.indexOf('function _bgApplyLeagueSetupLock(g)') + 2400);
+    check('live edit', 'reachability', 'Holes to play on a league round: order only (all18 / b9first / pick), nine shapes locked', /'setup-holes-field'/.test(lock2) && /_ordOnly/.test(lock2) && /\['all18', 'b9first', 'pick'\]\.indexOf\(o\.value\) < 0/.test(lock2), 'lock: ' + lock2.slice(0, 200));
   }
   const base18 = launchedRounds.find(r => r.nine === 'full18' && r.fm === 'stroke_net').g;
   const base9 = launchedRounds.find(r => r.nine === 'back' && r.fm === 'stroke_net').g;
