@@ -1,0 +1,5 @@
+-- v2009 TRACK HOLES: league_eligible_rounds / league_attach_round vs the nine played. One execute_sql call, rolled back.
+-- Result seen 2026-11-03: back_week_eligible = [QAFRT9 (a FRONT nine), QABCK9]; w18_eligible = [QAF9X2 (front 9 twice), QASHT7].
+-- Attach then posted QAFRT9 onto the back-nine week: front-nine gross scored on the back nine's pars / SI.
+-- (Full statement text is the one run in the session; fixture: 1 member, week 1 nine=back, week 2 nine=full18,
+--  four finished rounds on qa-c1: front9, back9, f9x2, all18 startHole 7.)

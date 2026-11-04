@@ -1,0 +1,3 @@
+-- Block E (run inline, rolled back): a 4-player field week, run once as a Stableford league and once as a to-par league,
+-- with the same gross cards (Ann 0 hcp, Bob 10, Cal 20, Dee 5). The dumped server rows are embedded verbatim in
+-- ../scoring_display.js (NETS / SERVER). See SCORING_FINDINGS.md SCORING-5/6 for the outputs.
