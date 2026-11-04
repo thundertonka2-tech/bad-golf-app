@@ -35,3 +35,37 @@ Tests: `qa/league_v2009/fix_tests/S2/t/*.sql`, run with `fix_tests/S2/run.sh <db
 | SETUP Q-5 | fixed | t06: mid-season handicap-rules change sent nothing → members pushed; pre-season change silent; audit row keeps `before` | `league_set_hcp_rules` |
 | SETUP-12 (server) | fixed | t06: dry run `cleared 0` → counts the pairings a rebuild replaces | `league_generate_schedule` |
 | SETUP Q-7 | fixed | t06 + loader: 133 anon privilege rows on league tables (same as live) → 0; authenticated keeps its grants (RLS unchanged) | S2_01 revoke loop |
+| HOLES season default (create) | fixed | t04: `default_nine` f9x2 / b9first / back9 refused (`LEAGUE_DEFAULT_NINE_INVALID`) → the weeks carry that holes_mode; 'rotate' still alternates front9 / back9 | `league_create_season`, `league_rollover_season` (via the mirror trigger) |
+| HOLES nine-hole course on an all18 week | regression guard | t04: a 9-hole course on the default all18 week still opens and still takes its 9-hole rounds | `league_open_week`, `league_eligible_rounds(_for)`, `_league_holes_compatible(…, holes)` |
+
+## Not fixed here (owner or other agent)
+
+| ID | Status | Why |
+|---|---|---|
+| Leaver Low Net / pot exclusion (D6) | → S3 | Money functions are S3's. The card and `league_card_holes_played` are ready: REQUESTS_S2 Q1 |
+| HOLES-7 (CTP ledger names the played hole) | → S3 | `league_money_recompute` note. `snapshot.phys` is now written: REQUESTS_S2 Q2. It is the 1 failure of 2749 in the HOLES harness, on both base and fixed |
+| POOLS-1..9 | → S3 | money / pool functions |
+| LIFE-5, SETUP-1 S1 half, SCORING-* | S1 (done) | S2 made R1 live (t01) |
+| LIFE-2 client half, LIFE-9 client cap at 8, LIFE-13, HOLES-1..6, SETUP-4/5/6/8/13..17, SETUP-9 prompt | → C1 / C3 | client code. Server answers for LIFE-2 / LIFE-9 are in place (t06) |
+| LIFE-15 (players may open a week) | unchanged by decision | DECISIONS Q-LC4 |
+| Q-LC7 (field-week absence) | unchanged by decision | DECISIONS |
+| POOLS-8 / D11 fee proration | → S3 | money. S2 already writes `activated_week` on join |
+
+## Regression runs (fixed DB `v2009_s2` = live + S1 + S2)
+- **S2 tests:** `bash qa/league_v2009/fix_tests/S2/run_all.sh` gives 107 checks, 0 FAIL on fixed. On base, 84 FAIL: every S2 defect reproduces.
+- **v2002 league server matrix** (`qa/v2002_matrix/league_server`):
+  - pure 15/0, edges 340/0, season(60) 480/0;
+  - identical on base and fixed.
+- **v2002 client league matrix:** `node qa/v2002_matrix/league.js golf-app.html` gives 27,960 passed, 0 failed. S2 made no client edits.
+  - Guards `guard_stale_base`, `guard_button_inline` and `guard_i18n`: rc 0.
+  - The app script is byte-identical in `golf-app.html` and `www/index.html`.
+- **QA HOLES harness** (`holes_server/spec.py`, all 86 specs): 2748 pass, 1 fail, on both base and fixed. The fail is HOLES-7, which is S3's.
+- **QA LIFECYCLE scenarios A / B / C-I**, diffed base → fixed. The only changes are the intended ones:
+  - A11 / C04 (LIFE-3): the card no longer self-settles.
+  - A06: refused with the holes wording.
+  - A22 / A34 / A35: follow from A11 / A34 now needing approval.
+  - A24 (LIFE-10): the fixture is `live`.
+  - C13 / C14 (LIFE-4): the request is a reopen request and the fixture stays final.
+  - B (LIFE-1 / D7): creating the team_4man season is refused.
+- **S1's own tests on the S2 DB:** 113/113 with S1's fixture trigger note (REQUESTS_S2 Q4).
+- **QA SCORING harness (blocks A-D) on the S2 DB:** see `fix_tests/S2/qa_scoring_harness_after.txt`.

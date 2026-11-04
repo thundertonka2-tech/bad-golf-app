@@ -105,3 +105,20 @@ begin
   perform pg_temp.check('HOLES control: the nine-hole course''s round is eligible and not blocked',
      exists (select 1 from jsonb_array_elements(x) e where e->>'code'='S2T4200' and e->'blocked'='null'::jsonb), x, 'eligible');
 end $$;
+
+do $$
+declare b int := 4300; r jsonb; sid uuid; md text; got text;
+begin
+  -- HOLES_SPEC phase 1.1: league_create_season's default_nine may be any holes_mode; 'rotate' still front/back
+  insert into public.profiles(id, display_name) values (pg_temp.usr(b,1), 'Comm');
+  perform pg_temp.who(pg_temp.usr(b,1));
+  foreach md in array array['f9x2','b9first','back9','rotate'] loop
+    r := pg_temp.try('cs '||md, format('select public.league_create_season(%L)', jsonb_build_object(
+          'league_name','S2T '||md,'timezone','America/Chicago','schedule_mode','calendar','start_date','2026-12-01','weeks',6,
+          'settings', jsonb_build_object('default_nine', md, 'weeks', 6, 'type','individual','competition_mode','field','format','stroke_net'))));
+    sid := (r->>'season_id')::uuid;
+    select string_agg(holes_mode || '/' || nine, ',' order by week_number) into got from league_weeks where season_id = sid and week_number <= 2;
+    perform pg_temp.check('HOLES season default_nine '||md||' -> weeks', got = case md when 'f9x2' then 'f9x2/full18,f9x2/full18' when 'b9first' then 'b9first/full18,b9first/full18'
+                                    when 'back9' then 'back9/back,back9/back' else 'front9/front,back9/back' end, coalesce(to_jsonb(got), r), md);
+  end loop;
+end $$;
