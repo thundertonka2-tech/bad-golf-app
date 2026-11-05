@@ -341,7 +341,12 @@ function oTeamQuota(g) {
   const cfg = g.games.teamQuota, m = zero(g), n = oN(g); if (cfg.teamMode === '4man') return m;
   const A = cfg.teamA.map(id => oPl(g, id)), B = cfg.teamB.map(id => oPl(g, id)); if (!A.length || A.length !== B.length) return m;
   const res = p => { let t = 0; for (let i = 0; i < n; i++) { const r = oRaw(g, p.id, i); if (r == null) continue; const d = r - oPar(g, p.id, i); t += d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0; }
-    const q = (cfg.basis === 'manual' && cfg.quotas && cfg.quotas[p.id] != null) ? Number(cfg.quotas[p.id]) : (n === 9 ? 18 : 36) - Math.round(oHcp(g, p)); return t - q; };
+    const q0 = (cfg.basis === 'manual' && cfg.quotas && cfg.quotas[p.id] != null) ? Number(cfg.quotas[p.id]) : (n === 9 ? 18 : 36) - Math.round(oHcp(g, p));
+    // v2015 (Tyler 11/5, D2; the 10/9 per-point rule "a leaver is scored on only the holes played"): a player who LEFT
+    // is measured against his quota prorated to the holes he played, round(full x played / round holes).
+    let hp = 0; for (let i = 0; i < n; i++) if (oRaw(g, p.id, i) != null) hp++;
+    const L = g.leftRound && g.leftRound.byId && g.leftRound.byId[p.id];
+    const q = (L > 0 && hp < n) ? Math.round(q0 * hp / n) : q0; return t - q; };
   const at = A.reduce((s, p) => s + res(p), 0), bt = B.reduce((s, p) => s + res(p), 0);
   if ((cfg.mode || 'perpoint') === 'pool') { if (!oDone(g)) return m; const bi = cfg.buyin || 0, pot = (A.length + B.length) * bi; A.concat(B).forEach(p => m[p.id] = -bi);
     if (at > bt) A.forEach(p => m[p.id] += pot / A.length); else if (bt > at) B.forEach(p => m[p.id] += pot / B.length); else A.concat(B).forEach(p => m[p.id] += bi); return m; }

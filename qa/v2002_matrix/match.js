@@ -239,6 +239,11 @@ function oMatch(g) {
       if (Math.abs(up) > rem) { closed = true; break; }
     }
     if (played === 0) return;
+    // v2015 (DECISIONS #2, Tyler 11/2 -- owner reconfirmed 11/5): a leaver pays every unfinished side as a loser
+    // and can't win it. A match closed out before he left stands; otherwise the player who stayed wins it.
+    // (This oracle used to pay whoever was up on the holes played, the leaver included.) Both left -> as before.
+    const lA = leftAfter(g, A) != null, lB = leftAfter(g, B) != null;
+    if (!closed && lA !== lB) { const w = lA ? B : A, l = lA ? A : B; money[w] += v; money[l] -= v; return; }
     // closed, complete, finished-early, or live-provisional: the leader is paid (app convention, provisional live)
     if (up > 0) { money[A] += v; money[B] -= v; } else if (up < 0) { money[B] += v; money[A] -= v; }
     void closed; void nH;
@@ -256,6 +261,9 @@ function oBestBallTeam(g, key) {   // teamMatch / teamLowball
     played++; const x = Math.min(...av), y = Math.min(...bv); at += x; bt += y; if (x < y) aw++; else if (y < x) bw++;
   }
   if (!complete && g.finishedAt && played) complete = true;
+  // v2015 (DECISIONS #2): Team Low Ball -- a side whose players ALL left loses the bet once it settles (calcTeamLowball v2015)
+  if (key === 'teamLowball' && complete) { const allL = ids => ids.every(id => leftAfter(g, id) != null); const la = allL(a), lb = allL(b);
+    if (la !== lb) { const W = la ? b : a, L = la ? a : b; W.forEach(id => money[id] += cfg.value); L.forEach(id => money[id] -= cfg.value); return { money }; } }
   if (complete) { const aWin = key === 'teamMatch' ? aw > bw : at < bt, bWin = key === 'teamMatch' ? bw > aw : bt < at;
     if (aWin) { a.forEach(id => money[id] += cfg.value); b.forEach(id => money[id] -= cfg.value); }
     else if (bWin) { b.forEach(id => money[id] += cfg.value); a.forEach(id => money[id] -= cfg.value); } }
@@ -330,7 +338,15 @@ function oTeamSpread(g, cfg, a, b, kind) {
   const A = r5(tot(a)), B = r5(tot(b)); const d = Math.abs(A - B);
   return A > B ? { a: d, b: 0 } : { a: 0, b: d };
 }
-const teamNet = (g, sc, st, i) => (sc == null || !st) ? sc : sc - strokes(st, g.sis[i], g.pars[i], g.hcpRules, nHof(g));
+// v2015 (Tyler 11/5, D3): a side whose players ALL play the same tee takes its team strokes on THAT tee's SI and
+// par; a mixed-tee pair keeps the main card. (Pass the side's ids; no ids = the card, as before.)
+const teamNet = (g, sc, st, i, ids) => {
+  if (sc == null || !st) return sc;
+  let si = g.sis[i], par = g.pars[i];
+  const ps = (ids || []).map(id => P(g, id)).filter(Boolean);
+  if (ps.length && ps.every(p => tee(g, p) === tee(g, ps[0]))) { si = siOf(g, ps[0], i); par = parOf(g, ps[0], i); }
+  return sc - strokes(st, si, par, g.hcpRules, nHof(g));
+};
 function oScramble(g) {
   const cfg = g.games.scramble; const money = zero(g);
   if (cfg.teamMode === '4man') return { money };
@@ -339,12 +355,15 @@ function oScramble(g) {
   let at = 0, bt = 0, aw = 0, bw = 0, played = 0; const seq = playSeq(g); let closed = false;
   const done = new Set();
   for (let h = 1; h <= 18; h++) { const d = (g.scrambleData || {})[h] || {}; if (d.teamA == null || d.teamB == null) continue;
-    const x = teamNet(g, d.teamA, sp.a, h - 1), y = teamNet(g, d.teamB, sp.b, h - 1); played++; at += x; bt += y; if (x < y) aw++; else if (y < x) bw++; done.add(h); }
+    const x = teamNet(g, d.teamA, sp.a, h - 1, a), y = teamNet(g, d.teamB, sp.b, h - 1, b); played++; at += x; bt += y; if (x < y) aw++; else if (y < x) bw++; done.add(h); }
   let complete = played >= nH || (g.finishedAt && played > 0);
   if (!complete && cfg.scoring === 'match' && played) {
     // closed out = lead exceeds the holes still to play in PLAY order
     const rem = seq.filter(h => !done.has(h)).length; if (Math.abs(aw - bw) > rem) { complete = true; closed = true; }
   }
+  // v2015 (DECISIONS #2): a side whose players ALL left loses the match-play scramble once it settles
+  const allL = ids => ids.length > 0 && ids.every(id => leftAfter(g, id) != null); const lfA = allL(a), lfB = allL(b);
+  if (cfg.scoring === 'match' && complete && lfA !== lfB) { const W = lfA ? b : a, L = lfA ? a : b; W.forEach(id => money[id] += cfg.value); L.forEach(id => money[id] -= cfg.value); return { money }; }
   if (cfg.scoring === 'match') { if (complete) { if (aw > bw) { a.forEach(id => money[id] += cfg.value); b.forEach(id => money[id] -= cfg.value); } else if (bw > aw) { b.forEach(id => money[id] += cfg.value); a.forEach(id => money[id] -= cfg.value); } } }
   else if (played) { const d = at - bt, amt = Math.abs(d) * cfg.value; if (d < 0) { a.forEach(id => money[id] += amt); b.forEach(id => money[id] -= amt); } else if (d > 0) { b.forEach(id => money[id] += amt); a.forEach(id => money[id] -= amt); } }
   void closed;
@@ -354,7 +373,9 @@ function oRyder(g) {
   const cfg = g.games.ryderCup; const money = zero(g); const { a, b } = teamIds(g, cfg);
   if (a.length !== 2 || b.length !== 2) return { money, dropped: true };
   const nH = nHof(g); const seg = Math.max(1, Math.floor(nH / 3));
-  const fmt = h => h <= seg ? cfg.seg1 : h <= 2 * seg ? cfg.seg2 : cfg.seg3;
+  // v2015 (Tyler 11/5, D1): segments go by PLAY ORDER -- the first third of the holes the cart plays is seg1.
+  // (Was by hole number; identical on a start-on-1 round.)
+  const fmt = h => { const k = playPos(g, h) + 1; return k <= seg ? cfg.seg1 : k <= 2 * seg ? cfg.seg2 : cfg.seg3; };
   const sp = { scramble: oTeamSpread(g, cfg, a, b, 'scramble2'), altshot: oTeamSpread(g, cfg, a, b, 'altshot') };
   let ap = 0, bp = 0;
   for (let h = 1; h <= nH; h++) {
@@ -362,7 +383,7 @@ function oRyder(g) {
     if (f === 'bestball') {
       const av = a.map(id => netI(g, id, h - 1, !!cfg.net)).filter(v => v != null), bv = b.map(id => netI(g, id, h - 1, !!cfg.net)).filter(v => v != null);
       if (!av.length || !bv.length) continue; x = Math.min(...av); y = Math.min(...bv);
-    } else { const d = (g.ryderCupData || {})[h] || {}; if (d.teamA == null || d.teamB == null) continue; x = teamNet(g, d.teamA, sp[f].a, h - 1); y = teamNet(g, d.teamB, sp[f].b, h - 1); }
+    } else { const d = (g.ryderCupData || {})[h] || {}; if (d.teamA == null || d.teamB == null) continue; x = teamNet(g, d.teamA, sp[f].a, h - 1, a); y = teamNet(g, d.teamB, sp[f].b, h - 1, b); }   // v2015 (D3)
     if (x < y) ap++; else if (y < x) bp++; else { ap += .5; bp += .5; }
   }
   const d = ap - bp, amt = Math.abs(d) * cfg.value;

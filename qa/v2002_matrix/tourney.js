@@ -1024,7 +1024,11 @@ async function checkCombined(ev, label, axis, parts) {
       const res = {}; const dt = {};
       inR.forEach(g => g.players.forEach(p => { const tk = teamOf[p.name]; if (!tk) return; let pts = 0;
         for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; if (s == null) continue; const d = s - oPar(g, p, h); pts += d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0; }
-        const r = pts - oQTarget(g, (nHof(g) === 9 ? 18 : 36) - Math.round(p.hcp * (nHof(g) === 9 ? 0.5 : 1)));
+        const qf = (nHof(g) === 9 ? 18 : 36) - Math.round(p.hcp * (nHof(g) === 9 ? 0.5 : 1));
+        // v2015 (Tyler 11/5, D2): a player who LEFT is measured against his quota prorated to the holes he played
+        // (round(full x played / round holes)); an early-finished day's cut already prorates everybody (oQTarget).
+        const hp = (g.scores[p.id] || []).slice(0, nHof(g)).filter(v => v != null).length;
+        const r = pts - ((!g._early && leftAfter(g, p) != null && hp < nHof(g)) ? Math.round(qf * hp / nHof(g)) : oQTarget(g, qf));
         res[nk(p.name)] = { tk, r }; dt[tk] = (dt[tk] || 0) + r; }));
       Object.keys(dt).forEach(k => totals[day + ':' + k] = dt[k]);
       if (!inR.every(cardDone)) return;
@@ -1049,15 +1053,21 @@ async function checkCombined(ev, label, axis, parts) {
       const mem = membersByGroup[grp.id] || []; const tb = {}; mem.forEach(m => tb[m.tournament_player_id] = m);
       const ks = ['A', 'B', 'C', 'D'].filter(k => mem.some(m => m.team === k)); const gk = [ks[0] || 'A', ks[1] || 'B'];
       const side = p => { const m = tb[p.t2pid]; return m ? (m.team === gk[0] ? 'a' : m.team === gk[1] ? 'b' : null) : null; };
-      const fin = !!g.finishedAt, nH = nHof(g); const M = [];
+      const fin = !!g.finishedAt, nH = nHof(g); const M = []; const pairs = [];   // v2015 (W1): the 1v1 pairings the cart is set up to play
       const netOf = (p, h) => { const s = (g.scores[p.id] || [])[h]; return s == null ? null : s - oStrokes(p.hcp, oSi(g, p, h), oPar(g, p, h), g.hcpRules, nH); };
       if (g.games.match) (g.games.match.instances || [g.games.match]).forEach(inst => {
         const a = g.players.find(p => p.id === inst.participants[0]), b = g.players.find(p => p.id === inst.participants[1]); if (!a || !b) return;
         let sa = side(a), sb = side(b); if (!sa || !sb || sa === sb) return;
+        pairs.push([a.t2pid, b.t2pid]);
         let up = 0, pl = 0, closed = false; const st = g.startHole || 1;
         for (let k = 0; k < nH; k++) { const h = (st - 1 + k) % nH; const va = netOf(a, h), vb = netOf(b, h); if (va == null || vb == null) continue; pl++; if (va < vb) up++; else if (vb < va) up--; if (Math.abs(up) > nH - (k + 1)) { closed = true; break; } }
-        if (!pl) return; let ab = up > 0 ? [1, 0] : up < 0 ? [0, 1] : [.5, .5]; if (sa === 'b') ab = [ab[1], ab[0]];
-        M.push({ a: ab[0], b: ab[1], dec: closed || pl >= nH || fin });
+        if (!pl) return; let ab = up > 0 ? [1, 0] : up < 0 ? [0, 1] : [.5, .5];
+        // v2015 (L2, owner rule 11/2 reconfirmed 11/5: a leaver loses any match not closed out). Was: whoever was up.
+        const la = leftAfter(g, a) != null, lb = leftAfter(g, b) != null;
+        let dec = closed || pl >= nH || fin;
+        if (!closed && la !== lb) { ab = la ? [0, 1] : [1, 0]; dec = fin; }
+        if (sa === 'b') ab = [ab[1], ab[0]];
+        M.push({ a: ab[0], b: ab[1], dec, who: [a.t2pid, b.t2pid] });
       });
       // 2v2 Team Match (holes won) / Team Low Ball (lower best-ball total) — one point per cart. A hole counts
       // when each side has at least one ball (a partner who picked up or left is covered by the other ball).
@@ -1076,22 +1086,32 @@ async function checkCombined(ev, label, axis, parts) {
         if (la !== lb) ab = la ? [0, 1] : [1, 0];
         else { if (!pl) return; ab = KEY === 'teamMatch' ? (aw > bw ? [1, 0] : bw > aw ? [0, 1] : [.5, .5]) : (at < bt ? [1, 0] : bt < at ? [0, 1] : [.5, .5]); }
         const local = cfg.teamAKey && cfg.teamAKey === gk[1] ? [ab[1], ab[0]] : ab;
-        M.push({ a: local[0], b: local[1], dec: comp || fin });
+        M.push({ a: local[0], b: local[1], dec: comp || fin, who: A.concat(B).map(p => p.t2pid) });
       });
       if (!M.length && !g.games.match && !g.games.teamMatch && !g.games.teamLowball && !oneDay) {
         const A = g.players.filter(p => side(p) === 'a').sort((x, y) => tb[x.t2pid].slot - tb[y.t2pid].slot), B = g.players.filter(p => side(p) === 'b').sort((x, y) => tb[x.t2pid].slot - tb[y.t2pid].slot);
-        for (let i = 0; i < Math.min(A.length, B.length); i++) { const ha = scoredN(g, A[i]), hb = scoredN(g, B[i]); if (!ha || !hb) continue;   // app: a pairing where either player has no card yet is not a match
+        for (let i = 0; i < Math.min(A.length, B.length); i++) { pairs.push([A[i].t2pid, B[i].t2pid]); const ha = scoredN(g, A[i]), hb = scoredN(g, B[i]); if (!ha || !hb) continue;   // app: a pairing where either player has no card yet is not a match
           let na = 0, nb = 0; for (let h = 0; h < 18; h++) { const x = netOf(A[i], h), y = netOf(B[i], h); if (x != null) na += x; if (y != null) nb += y; }
           // DECISIONS (v2002): stroke-day cup point when a player left -> the leaver forfeits the point.
           const la = !!leftAfter(g, A[i]), lb = !!leftAfter(g, B[i]);
-          if (la !== lb) { M.push({ a: la ? 0 : 1, b: la ? 1 : 0, dec: fin || (ha >= nH && hb >= nH) }); continue; }
-          M.push({ a: na < nb ? 1 : na > nb ? 0 : .5, b: nb < na ? 1 : nb > na ? 0 : .5, dec: fin || (ha >= nH && hb >= nH) }); }
+          if (la !== lb) { M.push({ a: la ? 0 : 1, b: la ? 1 : 0, dec: fin || (ha >= nH && hb >= nH), who: [A[i].t2pid, B[i].t2pid] }); continue; }
+          M.push({ a: na < nb ? 1 : na > nb ? 0 : .5, b: nb < na ? 1 : nb > na ? 0 : .5, dec: fin || (ha >= nH && hb >= nH), who: [A[i].t2pid, B[i].t2pid] }); }
       }
       let decided = M.length > 0 && M.every(m => m.dec);
       const wdm = mem.filter(m => wd.has(m.tournament_player_id)); const anyS = g.players.some(p => scoredN(g, p));
       const h2h = ['teamMatch', 'teamLowball'].some(k => g.games[k] && g.games[k].teamMode !== '4man');
-      if (wdm.length && !decided && !fin && (M.length || !anyS || h2h)) { const ts = new Set(wdm.map(m => m.team)); const n = Math.max(1, M.length);
-        const fa = ts.size > 1 ? .5 : (ts.has(gk[0]) ? 0 : 1); M.length = 0; M.push({ a: fa * n, b: (1 - fa) * n, dec: true }); if (ts.size > 1) M[0].b = .5 * n; }
+      if (wdm.length && !decided && !fin && (M.length || !anyS || h2h)) {
+        if (M.length) {
+          // v2015 (W1, TYLER_RULES withdrawal): only the withdrawn player's UNDECIDED match forfeits; decided results and the
+          // other pairings stand. A pairing with no shared hole yet that includes him forfeits too. (Was: the whole cart.)
+          const wdP = new Set(wdm.map(m => m.tournament_player_id)), teamOfP = {}; mem.forEach(m => teamOfP[m.tournament_player_id] = m.team);
+          const ff = ids => { const ts = new Set(ids.filter(x => wdP.has(x)).map(x => teamOfP[x])); return ts.size > 1 ? [.5, .5] : ts.has(gk[0]) ? [0, 1] : [1, 0]; };
+          const inM = new Set(); M.forEach(m => (m.who || []).forEach(x => inM.add(x)));
+          M.forEach(m => { if (m.dec || !(m.who || []).some(x => wdP.has(x))) return; const r = ff(m.who); m.a = r[0]; m.b = r[1]; m.dec = true; });
+          pairs.forEach(pr => { if (pr.some(x => inM.has(x)) || !pr.some(x => wdP.has(x))) return; const r = ff(pr); M.push({ a: r[0], b: r[1], dec: true, who: pr }); });
+        } else {   // no match yet (no-show / 2 v 2 with no shared hole): the whole cart forfeits, as before
+          const ts = new Set(wdm.map(m => m.team)); const fa = ts.size > 1 ? .5 : (ts.has(gk[0]) ? 0 : 1); M.push({ a: fa, b: ts.size > 1 ? .5 : 1 - fa, dec: true }); }
+      }
       M.forEach(m => { bump(gk[0], m.a, m.dec || fin); bump(gk[1], m.b, m.dec || fin); });
     }));
     return pts;
