@@ -111,7 +111,8 @@ const chips = [...t.querySelectorAll('caption.sc-tabs .sc-tab')].map(b => b.data
 // v1711: the leading chip is decided by bgScLeadMode. This round's match covers 2 of
 // its 4 players, so the match is a side bet and Strokes leads. Units is always last.
 // (qa/qa_scorecard_tab_order.js covers the ordering rule itself, both ways round.)
-ok('three chips, side-bet match: strokes | match | units', JSON.stringify(chips) === JSON.stringify(['strokes','match','units']), chips.join('|'));
+// v2017: the round plays Quota + Team Quota, so the Quota tab rides last.
+ok('four chips, side-bet match: strokes | match | units | quota', JSON.stringify(chips) === JSON.stringify(['strokes','match','units','quota']), chips.join('|'));
 const row = () => [...t.querySelectorAll('tbody tr[data-pid="p0"] td')].map(td => td.textContent.trim());
 w.bgScApplyMode(t, 'strokes');
 ok('Strokes restores the real scores', row()[1] === '4' && row()[3] === '2');
@@ -143,7 +144,7 @@ delete gNM.games.match; delete gNM.games.teamMatch; delete gNM.games.scramble;
 doc.body.innerHTML = tableHtml('t2');
 const t2 = doc.getElementById('t2');
 ok('a round with NO match still decorates', w.bgMatchViewDecorate(t2, gNM) === true);
-ok('  and offers strokes + units only', JSON.stringify([...t2.querySelectorAll('.sc-tab')].map(b => b.dataset.mode)) === JSON.stringify(['strokes','units']));
+ok('  and offers strokes + units (+ quota, v2017) only', JSON.stringify([...t2.querySelectorAll('.sc-tab')].map(b => b.dataset.mode)) === JSON.stringify(['strokes','units','quota']));
 ok('  and still opens on Strokes', w.bgScViewMode(gNM) === 'strokes');
 ok('bgMatchViewHtml wraps a units-only round',
    /data-sc-units/.test(w.bgMatchViewHtml(tableHtml('t3'), gNM)));

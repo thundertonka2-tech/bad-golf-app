@@ -108,7 +108,10 @@ function oQuota(rounds, t, fieldPlayers) {
       const k = nk(p.name); if (wdN.has(k) || (list && !list.includes(k)) || !scoredN(g, p)) return;
       let pts = 0;
       for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; if (s == null) continue; const d = s - oPar(g, p, h); pts += d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0; }
-      const stat = pts - oQTarget(g, (nH === 9 ? 18 : 36) - Math.round((p.playsGross ? 0 : p.hcp) * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1)));
+      let _qf = oQTarget(g, (nH === 9 ? 18 : 36) - Math.round((p.playsGross ? 0 : p.hcp) * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1)));
+      // v2018 (Tyler 11/5): a player who LEFT is judged against his quota prorated to the holes he played (not on a cut day)
+      if (!g._early && leftAfter(g, p) != null) { const _sn = scoredN(g, p); if (_sn < nH) _qf = Math.round(_qf * _sn / nH); }
+      const stat = pts - _qf;
       results[k] = (results[k] || 0) + stat;
       E.push({ k, stat, left: leftAfter(g, p) != null }); }); });
     const N = E.length; const buyin = dc.buyin != null ? dc.buyin : (dc.value || 0);
