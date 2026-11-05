@@ -1,4 +1,5 @@
 'use strict';
+// Promoted 2026-11-05 (v2014) from qa/cross_v2009/fix/engine_v2010.js: oracle follows Tyler's 11/2 + 11/4 rules (cross bets tied to their day, leaver forfeit, nine-twice = no cross bet, early finish = common holes).
 // qa/cross_v2009/engine.js -- cross-bet QA, stream "engine" (build v2008/v2009).
 // REPORT ONLY. Loads the real app script (qa/app.js) and compares the cross-group settlement engine
 // (t2ComputeCrossGroupMatches -> _t2EventPdataByDay / _t2SettleCrossPair / _t2SettleCrossSeg /
@@ -15,6 +16,7 @@
 // against the rule oracle is attributed to the smallest set of switches that, turned OFF, reproduce the
 // app exactly; a case the all-OFF oracle cannot reproduce is an UNEXPLAINED engine defect.
 const path = require('path');
+// v2010 FIX COPY (stream E): oracle updated only where a Tyler 11/4 decision changed an assumption -- see E_NOTES.md.
 const HTML = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'golf-app.html'));
 const { loadApp } = require(path.join(__dirname, '..', 'app.js'));
 const _e = console.error, _w = console.warn; console.error = () => {}; console.warn = () => {};
@@ -93,7 +95,7 @@ function oPlayer(g, p) {
   const leftPos = (la != null && Number(la) > 0) ? pos[Number(la) - 1] : null;
   const active = ix => leftPos == null || pos[ix] <= leftPos;
   // physical hole -> slot list (x2 modes put a physical hole on two slots)
-  const byPhys = {}; for (let i = 0; i < n; i++) { const h = physOf(g, i); (byPhys[h] = byPhys[h] || []).push(i); }
+  const byPhys = {}; for (let i = 0; i < n; i++) { const h = (g.nineMode === 'f9x2' || g.nineMode === 'b9x2') ? i + 1 : physOf(g, i); (byPhys[h] = byPhys[h] || []).push(i); }   // v2010: decision 3
   // a FORGOTTEN cell: a finished card, the player was still in, somebody else in his cart scored the hole
   const forgot = ix => !!g.finishedAt && gross[ix] == null && active(ix) && (g.players || []).some(q => q.id !== p.id && ((g.scores[q.id] || [])[ix] != null));
   return { g, p, n, seq, pos, gross, net, thru, fin: !!g.finishedAt, leaver: leftPos != null, active, forgot, byPhys, start: (Number(g.startHole) || 1),
@@ -132,7 +134,11 @@ function oMatch(A, B, inst, R) {
     const remaining = R.dormie ? (nC - played) : (R.byNumber ? (nC - (k + 1)) : (nC - (maxP + 1)));
     if (Math.abs(aw - bw) > remaining) { closed = true; break; }
   }
-  if (!played) return null;
+  if (!played) {
+    // v2010 oracle fix (decision 4): a leaver who played no shared hole still loses once the other side finished them
+    if (R.leaver && R.byNumber) { const aL = A.leaver && S.some(s => !A.active(s.ia)), bL = B.leaver && S.some(s => !B.active(s.ib)); if (aL !== bL) { const stay = aL ? B : A, sKey = aL ? 'ib' : 'ia'; if (S.every(s => stay.gross[s[sKey]] != null)) return { money: aL ? { a: -v, b: v } : { a: v, b: -v }, settled: true, forfeit: true }; } }
+    return null;
+  }
   const blankFin = R.blank && S.some(s => A.forgot(s.ia) || B.forgot(s.ib));
   // leaver forfeit (Tyler 11/2): one side left before the end, match not already closed out, other side finished every common hole
   if (R.leaver && !closed) {
@@ -170,19 +176,19 @@ function oNassau2(A, B, inst, R) {
   segs.forEach(([nm, L]) => {
     let aw = 0, bw = 0, as = 0, bs = 0, played = 0, miss = 0;
     L.forEach(s => { const va = valOf(A, s.ia, net), vb = valOf(B, s.ib, net); if (va == null || vb == null) { miss++; return; } played++; as += va; bs += vb; if (va < vb) aw++; else if (vb < va) bw++; });
-    if (!played) return;
-    any = true;
     // leaver forfeit for this side
     let forfeit = 0;
     if (R.leaver) {
       const aL = A.leaver && L.some(s => !A.active(s.ia)), bL = B.leaver && L.some(s => !B.active(s.ib));
       if (aL !== bL) { const stay = aL ? B : A, k = aL ? 'ib' : 'ia'; if (L.every(s => stay.gross[s[k]] != null)) forfeit = aL ? -1 : 1; }
     }
+    if (!played && !(R.byNumber && forfeit)) return;   // v2010 oracle fix (decision 4): a side the leaver never reached still goes to the opponent
+    any = true;
     const complete = miss === 0, closedM = fmt === 'match' && aw !== bw && Math.abs(aw - bw) > miss;
     if (!forfeit && nm === 'T' && bothFin && !(fDone && bDone)) return;   // Total with one nine = push
     if (complete || closedM) { const sg = fmt === 'match' ? Math.sign(aw - bw) : Math.sign(bs - as); a += sg * v; return; }
     if (forfeit) { a += forfeit * v; return; }
-    if (!bothFin) unsettled = true;
+    if (!bothFin || (R.blank && L.some(s => A.forgot(s.ia) || B.forgot(s.ib)))) unsettled = true;   // v2010: ENG-7 for sides
   });
   if (!any) return null;
   return { money: { a, b: -a }, settled: !unsettled };
@@ -210,7 +216,7 @@ function oGroup(Ps, inst, R) {
         leavers = Ps.map((P, j) => j).filter(j => Ps[j].leaver && L.some(s => !Ps[j].active(s.ix[j])));
         const stay = elig.filter(j => leavers.indexOf(j) < 0);
         if (leavers.length && stay.length && stay.every(done)) elig = stay;
-        else { if (!allFin) unsettled = true; return; }
+        else { if (!allFin || (R.blank && L.some(s => Ps.some((P, j) => P.forgot(s.ix[j]))))) unsettled = true; return; }   // v2010: ENG-7 for group sides
       } else { if (!allFin) unsettled = true; return; }
     }
     any = true;
@@ -219,7 +225,7 @@ function oGroup(Ps, inst, R) {
     if (win.length === 1) { const u = 1 + carry; carry = 0; Ps.forEach((P, j) => { if (j !== win[0]) { money[j] -= u * v; money[win[0]] += u * v; } }); }
     else { carry += 1; }
   });
-  if (!any) return null;
+  if (!any) return unsettled ? { money, settled: false } : null;   // v2010 oracle fix: an open group side is pending, not nothing
   return { money, settled: !unsettled };
 }
 
@@ -242,14 +248,19 @@ function oracleEvent(ev, R) {
         if (kind === 'match' && pr.length !== 2) return;
         if (pr.length < 2) return;
         const ks = pr.map(canon);
-        if (!ks.every(k => P[k])) { if (R.dayBound && c.day === day) settledAll.pending = settledAll.pending || ev.rounds.some(g => g.t2.day === day && !g.finishedAt); return; }
+        // v2010 decision 3 first: a nine played twice against anything else is no bet even before anyone scores
+        if (R.byNumber) { const md = {}; ev.rounds.filter(g => g.t2.day === day).forEach(g => g.players.forEach(p => { const k = canon(p.name); if (md[k] == null) md[k] = (g.nineMode === 'f9x2' || g.nineMode === 'b9x2') ? g.nineMode : ''; })); if (ks.every(k => md[k] != null) && new Set(ks.map(k => md[k])).size > 1) return; }
+        if (!ks.every(k => P[k])) { const _seat = {}; ev.rounds.filter(g => g.t2.day === day).forEach(g => g.players.forEach(p => { const k = canon(p.name); if (!_seat[k]) _seat[k] = g.code; })); if (ks.every(k => _seat[k]) && new Set(ks.map(k => _seat[k])).size <= 1) return; if (R.dayBound && c.day === day) settledAll.pending = settledAll.pending || ev.rounds.some(g => g.t2.day === day && !g.finishedAt); return; }
         if (new Set(ks.map(k => rid[k])).size <= 1) return;
+        // v2010 decision 3: a nine played twice against anything else = no bet (dropped 'nine-twice')
+        if (R.byNumber) { const xm = new Set(ks.map(k => P[k].g.nineMode === 'f9x2' || P[k].g.nineMode === 'b9x2' ? P[k].g.nineMode : '')); if (xm.size > 1) { const key0 = day + '|' + ks.slice().sort().join('|'); const seen0 = kind === 'match' ? seenM : seenN; seen0.add(key0); return; } }
         const key = day + '|' + ks.slice().sort().join('|'); const seen = kind === 'match' ? seenM : seenN; if (seen.has(key)) return; seen.add(key);
         let r;
         if (kind === 'match') { r = oMatch(P[ks[0]], P[ks[1]], c.inst, R); if (r) { add(ks[0], r.money.a); add(ks[1], r.money.b); } }
         else if (ks.length === 2) { r = oNassau2(P[ks[0]], P[ks[1]], c.inst, R); if (r) { add(ks[0], r.money.a); add(ks[1], r.money.b); } }
         else { r = oGroup(ks.map(k => P[k]), c.inst, R); if (r) ks.forEach((k, j) => add(k, r.money[j])); }
         if (r && r.settled === false) settledAll.pending = true;
+        if (!r && ks.some(k => !P[k].fin) && R.byNumber) { let sh = 0; for (let h = 1; h <= 18; h++) if (ks.every(k => P[k].byPhys[h])) sh++; if (sh) settledAll.pending = true; }   // v2010 oracle fix: no shared hole scored YET while a card is open = pending
       });
     });
   });
@@ -355,9 +366,10 @@ function buildEvent(spec) {
   Object.keys(t.settings.groupGames).forEach(gid => { const day = Number(gid.split('-')[1]); ['match', 'nassau'].forEach(kind => { const m = t.settings.groupGames[gid][kind]; if (m) m.instances.forEach(inst => cands.push({ kind, inst, day })); }); });
   rounds.forEach(g => ['match', 'nassau'].forEach(kind => { const m = g.games[kind]; if (m) m.instances.forEach(inst => cands.push({ kind, inst, day: g.t2.day })); }));
   // the engine scans all match candidates then all nassau candidates; order within kind preserved above
+  if (spec.renamed) t.settings.crossRenames = Object.keys(spec.renamed).map(k => ({ from: k.replace(/\b\w/g, c => c.toUpperCase()), to: spec.renamed[k].replace(/\b\w/g, c => c.toUpperCase()) }));   // v2010: written by t2RenameGuestPlayer
   return { t, tid, rounds, cands, alias: spec.alias || null, renamed: spec.renamed || null, spec };
 }
-function setAliases(a) { try { const m = {}; Object.keys(a || {}).forEach(k => { m[k] = { canon: a[k].replace(/\b\w/g, c => c.toUpperCase()), canonKey: a[k], at: 1 }; m[a[k]] = { canon: a[k], canonKey: a[k], at: 2 }; }); LS.setItem('golf:player-aliases', JSON.stringify(m)); } catch (e) {} }
+function setAliases(a) { try { const m = {}; Object.keys(a || {}).forEach(k => { m[k] = { canon: a[k].replace(/\b\w/g, c => c.toUpperCase()), canonKey: a[k], at: 1 }; m[a[k]] = { canon: a[k], canonKey: a[k], at: 2 }; }); LS.setItem('golf:player-aliases', JSON.stringify(m)); } catch (e) {} try { qa.fn('_bgAliasMemAt = 0'); } catch (e) {} }
 function prepRows(ev) { return ev.rounds.map(g => { const c = clone(g); try { MATERIALIZE(c); } catch (e) {} return { data: c }; }); }
 function install(ev) {
   HG.S.rounds = ev.rounds; HG.S.tournaments[ev.tid] = ev.t;
@@ -384,15 +396,17 @@ function runEngine(ev, label, covKeys, opts) {
   if (!ok) { tags = attribute(ev, app); tags.forEach(tg => cause(tg, label + ' :: ' + d.slice(0, 3).join('; '))); }
   // x2 rounds + byNumber: the rule itself is open (hole played twice) -> count separately, never a pass/fail
   const x2 = ev.rounds.some(g => g.nineMode === 'f9x2' || g.nineMode === 'b9x2');
-  if (!ok && x2 && tags.length === 1 && tags[0] === 'byNumber') { openQ('front/back nine twice (x2) vs by-hole-number', label + ' :: ' + d.slice(0, 2).join('; ')); (covKeys || []).forEach(k => cov(k, true)); PASS++; }
+  if (false && !ok && x2 && tags.length === 1 && tags[0] === 'byNumber') { openQ('front/back nine twice (x2) vs by-hole-number', label + ' :: ' + d.slice(0, 2).join('; ')); (covKeys || []).forEach(k => cov(k, true)); PASS++; }
   else { check(label + ' :: cross units = rule oracle' + (tags.length ? ' [' + tags.join('+') + ']' : ''), ok, d.slice(0, 4).join('; '), null); (covKeys || []).forEach(k => cov(k, ok)); }
-  check(label + ' :: app reproduces its own documented behaviour (legacy oracle)', legacyOk, mapDiff(app, L.money).slice(0, 3).join('; '), 'legacy-consistency');
+  cov('legacy differs (expected after the v2010 fix)', !legacyOk);   // v2010: informational -- the v2008 behaviour is what was fixed
   if (opts.pendingCheck !== false) {
-    const appPend = (r.matches || []).some(m => m.settled === false);
+    const appPend = !!r.pendingAny || (r.matches || []).some(m => m.settled === false) || (r.nassaus || []).some(n => n.pending) || (r.nassauGroups || []).some(g => g.pending);
     if (o.pending && !appPend) cause('pendingFlag', label + ' :: an unsettled cross bet (Nassau side / late cart) is not flagged pending');
     check(label + ' :: Cross-group column pending when a cross bet is unsettled', !o.pending || appPend, 'oracle pending, app has no unsettled match', 'pending flag');
+    check(label + ' :: no false pending once every cross bet is settled', o.pending || !appPend, 'app pending, oracle settled', 'pending flag');
   }
   if (VERBOSE && !ok) console.log('  ' + label, JSON.stringify({ app, exp: o.money, tags }));
+  if (process.env.DUMP && label.indexOf(process.env.DUMP + ' ') === 0) { console.log('DUMP', JSON.stringify({ o, r: { m: r.matches.map(m => [m.day, m.aKey, m.bKey, m.status, m.settled, m.pending]), n: r.nassaus.map(n => [n.day, n.aKey, n.bKey, n.pending, n.segments.map(s => s.name + ':' + s.status + ':' + s.pending)]), g: r.nassauGroups.map(g => [g.day, g.keys, g.pending, g.segments.map(s => s.name + ':' + s.status + ':' + s.pending)]), d: r.dropped, pa: r.pendingAny } })); ev.rounds.forEach(g => console.log('  RND', g.t2.day, g.code, g.nineMode || '', g.finishedAt ? 'fin' : 'open', g.players.map(p => p.name + ':' + (g.scores[p.id] || []).map(x => x == null ? '.' : x).join('')).join(' | '))); }
   return { r, app, exp: o.money };
 }
 async function runCombined(ev, label) {

@@ -1,8 +1,13 @@
+// FIX COPY (stream F, v2011): oracle follows Tyler's 11/4 "Early-finished events" rule (fix/oEarly.js): when a
+// finished cart stopped short (here: a one-player cart whose player stopped scoring, with no Left mark), the
+// field is scored on the holes every cart played. Otherwise identical to qa/qa_v2005_field_perskin.js.
 // v2005 checks: Tournament Skins per-skin mode + win requirement, against an independent oracle.
 // Gross only (handicaps off) so the oracle is plain: low score wins, ties carry or die.
 'use strict';
+// Promoted 2026-11-05 (v2014) from qa/cross_v2009/fix/qa_v2005_field_perskin_v2011.js: oracle follows Tyler's 11/2 + 11/4 rules (cross bets tied to their day, leaver forfeit, nine-twice = no cross bet, early finish = common holes).
 const path = require('path');
 const REPO = path.join(__dirname, '..');
+const { oCutRounds } = require(path.join(__dirname, 'cross_v2009', 'fix', 'oEarly.js'));
 const HTML = path.resolve(process.argv[2] || path.join(REPO, 'golf-app.html'));   // node qa/qa_v2005_field_perskin.js [golf-app.html]
 const { loadApp } = require(path.join(REPO, 'qa', 'app.js'));
 const _e = console.error, _w = console.warn; console.error = () => {}; console.warn = () => {};
@@ -58,7 +63,9 @@ for (let it = 0; it < 1500; it++) {
   const groups = []; for (let i = 0; i < n; i += 4) groups.push(names.slice(i, i + 4));
   const rows = groups.filter(g => g.length).map(g => ({ data: mkRound(g, Object.fromEntries(g.map(x => [x, all[x]]))) }));
   let r = null; try { r = SKINS(rows, cfg); } catch (e) { check('it ' + it + ' threw', false, e.message); continue; }
-  const o = oracle(all, cfg);
+  // v2011: the decided rule -- cut every player's card to the common holes before the oracle scores it
+  let allO = all; { const cut = oCutRounds(rows.map(r => r.data)); if (cut.some(g => g._early)) { allO = {}; cut.forEach(g => g.players.forEach(p => { allO[p.name] = g.scores[p.id].slice(); })); } }
+  const o = oracle(allO, cfg);
   const d = r && r.perDay && r.perDay[0];
   if (!d) { check('it ' + it + ' no result', n < 2, JSON.stringify(cfg)); continue; }
   const app = {}; (d.rows || []).forEach(x => app[x.name] = x.net);

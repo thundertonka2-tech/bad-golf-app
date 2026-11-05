@@ -1,9 +1,15 @@
 'use strict';
+// Promoted 2026-11-05 (v2014) from qa/cross_v2009/fix/tourney_v2011.js: oracle follows Tyler's 11/2 + 11/4 rules (cross bets tied to their day, leaver forfeit, nine-twice = no cross bet, early finish = common holes).
 // qa/v2002_matrix/tourney.js — v2002 calculation matrix, family "tourney" (events / multi-group field play).
 // REPORT-ONLY suite: loads the real app (qa/app.js), builds multi-day multi-group events, and compares every
 // field engine against an INDEPENDENT oracle written here from the rules (never by calling the app for the answer).
 //   node qa/v2002_matrix/tourney.js golf-app.html
 // Prints PASS/FAIL counts and every failing case with a minimal repro. Exit 1 on any failure.
+// v2011 FIX COPY (stream F) on top of E's v2010 copy: every FIELD oracle follows Tyler's 11/4 "Early-finished events" rule
+// (DECISIONS.md) through fix/oEarly.js -- an early-finished day is scored on the holes every group finished (quota
+// prorated, CTP holes outside called off, a cut card is full at its common holes). D2c / D2e are rewritten to the rule.
+// v2010 FIX COPY (stream E): the cross-group oracle follows Tyler's 11/4 DECISIONS (fix/oCross2010.js); the v2008 oCross is kept
+// as oCross2008 and every case where the two differ is attributed to the decision that changed it (printed at the end).
 const path = require('path');
 const HTML = path.resolve(process.argv[2] || path.join(__dirname, '..', '..', 'golf-app.html'));
 const { loadApp } = require(path.join(__dirname, '..', 'app.js'));
@@ -11,6 +17,7 @@ const _e = console.error, _w = console.warn; console.error = () => {}; console.w
 const { qa } = loadApp(HTML);
 const F = n => { const f = qa.fn(n); if (typeof f !== 'function') throw new Error('missing ' + n); return f; };
 const HG = require(path.join(__dirname, '..', 'harness_globals.js'));
+const { oCutRounds, oQTarget, oFullN } = require(path.join(__dirname, '..', 'cross_v2009', 'fix', 'oEarly.js'));   // v2011 (stream F)
 qa.install({ supa: HG.supa, loadGame: HG.loadGame, roster: () => HG.S.roster, meName: () => HG.S.meName });
 
 // ── bookkeeping ─────────────────────────────────────────────────────────────
@@ -67,6 +74,7 @@ const activeOn = (g, p, h1) => { const l = leftAfter(g, p); return l == null || 
 // launched group has tapped Finish, or (c) every POSTED card holds every hole AND no launched group is still
 // to post its first score. (The "day is past" fallback is never exercised: all rounds are stamped today.)
 function oGate(rounds, noSingle) {
+  if (rounds.some(g => g._early)) return true;   // v2011: an early-finished day is over (every round finished)
   if (rounds.length === 1 && !noSingle) return true;
   if (rounds.every(g => g.finishedAt)) return true;
   let cards = 0, short = 0;
@@ -81,6 +89,7 @@ const byDayOf = rounds => { const d = {}; rounds.forEach(g => { const k = Number
 
 // FIELD SKINS oracle
 function oSkins(rounds, cfg) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
   const pct = cfg.hcpPct != null ? Number(cfg.hcpPct) : 100;
   const carry = cfg.ties !== 'void' && cfg.ties !== 'none';
   const out = {}; const perDay = {};
@@ -129,6 +138,7 @@ function oSkins(rounds, cfg) {
 // better wins it from every other entrant, worse pays the Hero Tax on it). CTP is whole field even when
 // flights are on (DECISIONS, TOURNEY-19).
 function oCtp(rounds) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
   const out = {}, perDay = {};
   Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
     const live = rs.filter(g => g.games && g.games.ctp && g.games.ctp.fieldOnly); if (!live.length) return;
@@ -168,6 +178,7 @@ function oCtp(rounds) {
 function inList(cfg, p) { const l = cfg && (cfg.fieldNames || cfg.players); if (!Array.isArray(l) || !l.length) return true; return l.map(nk).includes(nk(p.name)); }
 // FIELD LONG PUTT oracle — longest made putt across the field wins the pot; exact tie splits.
 function oLongPutt(rounds, cfg) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
   const out = {}, perDay = {};
   Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
     const live = rs.filter(g => g.games && g.games.longPutt); if (!live.length) return;
@@ -189,6 +200,7 @@ function oLongPutt(rounds, cfg) {
 // (gross by default, own tee par). Totals wait for the day: complete = the GL-6/v1984 gate (a launched group with
 // no card yet keeps the day pending) — the house rule says Birdie Bump Totals wait for the day to complete.
 function oBirdie(rounds) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
   const out = {}, live = {}, perDay = {};
   Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
     const inn = rs.filter(g => g.games && g.games.birdiePool && (g.games.birdiePool.fieldOnly || (g.t2.dayGameKeys || []).includes('birdiePool')));
@@ -215,6 +227,7 @@ function oBirdie(rounds) {
 // eligible = played every hole of the day (a leaver can't win, still pays). Ties: USGA card-off for Low Net
 // (back 9/6/3/18th), then split. Pays once the day is complete (same gate as every field pot).
 function oSide(rounds, cfg) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
   const out = {}, perDay = {};
   Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
     const nH = Math.min(...rs.map(nHof));
@@ -228,7 +241,7 @@ function oSide(rounds, cfg) {
         const hn = s - oStrokes(H, oSi(g, p, h), par, g.hcpRules, nH); net += hn; if (h < nH) nets[h] = hn;
         const pu = g.puttsData && g.puttsData[p.id] ? g.puttsData[p.id][h] : null;
         if (pu != null) { putts += pu; ph++; if (s - pu <= par - 2) girs++; } }
-      const k = nk(p.name); if (!parts[k] || parts[k].n < n) parts[k] = { k, n, net, girs, putts, ph, nets };
+      const k = nk(p.name); if (!parts[k] || parts[k].n < n) parts[k] = { k, n, net, girs, putts, ph, nets, need: oFullN(g) };
     }));
     const P = Object.values(parts); if (P.length < 2) return;
     const complete = oGate(rs, true);   // waits for the day like Birdie Bump (TOURNEY-2); never settles live off one group
@@ -237,7 +250,7 @@ function oSide(rounds, cfg) {
       const c = cfg[key]; if (!c || !c.on || !(Number(c.value) > 0)) return;
       const inP = P.filter(x => !Array.isArray(c.players) || !c.players.length || c.players.map(nk).includes(x.k));
       const val = Number(c.value), pot = val * inP.length;
-      let el = inP.filter(x => x.n >= nH); if (key === 'putts') el = el.filter(x => x.ph >= x.n);
+      let el = inP.filter(x => x.n >= Math.min(nH, x.need)); if (key === 'putts') el = el.filter(x => x.ph >= x.n);
       if (!el.length) return;
       const stat = x => key === 'lowNet' ? x.net : key === 'girs' ? -x.girs : x.putts;
       const b = Math.min(...el.map(stat)); let W = el.filter(x => stat(x) === b);
@@ -259,6 +272,7 @@ function oSide(rounds, cfg) {
 // who LEFT pays every segment he did not finish as a loser and cannot win it (the others compete); a
 // launched group with no card yet keeps every segment pending (late-group rule).
 function oFieldNassau(rounds, cfg) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
   const out = {}, pend = {};
   Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
     const parts = {};
@@ -270,11 +284,15 @@ function oFieldNassau(rounds, cfg) {
     const P = Object.values(parts), N = P.length; if (N < 2) return;
     const segs = nineDay ? [[0, 8]] : (cfg.segments === 'fb' ? [[0, 8], [9, 17]] : [[0, 8], [9, 17], [0, 17]]);
     let carry = 0;
+    const _E = rs.find(g => g._early); const _ES = _E ? new Set(_E._early.idx) : null;   // v2011: card indexes in the common set
+    const _nine = (a, b) => { for (let h = a; h <= b; h++) if (!_ES.has(h)) return false; return true; };
     segs.forEach(([a, b], si) => {
-      const isFull = x => { for (let h = a; h <= b; h++) if (x.net[h] == null) return false; return true; };
+      const HL = []; for (let h = a; h <= b; h++) if (!_ES || _ES.has(h)) HL.push(h);
+      if (_ES && (!HL.length || ((b - a) === 17 ? !(_nine(0, 8) || _nine(9, 17)) : HL.length < b - a + 1))) return;   // no bet; the carry passes on
+      const isFull = x => { for (const h of HL) if (x.net[h] == null) return false; return true; };
       const fin = P.filter(isFull), lo = P.filter(x => x.left && !isFull(x));
       if (late || fin.length + lo.length !== N || !fin.length) { pend[day + ':' + si] = true; return; }
-      const tot = x => { let t = 0; for (let h = a; h <= b; h++) t += x.net[h]; return t; };
+      const tot = x => { let t = 0; for (const h of HL) t += x.net[h]; return t; };
       const units = 1 + carry, ante = cfg.value * units;
       const places = Math.min(N <= 10 ? 1 : N <= 20 ? 2 : 3, fin.length);
       const srt = fin.slice().sort((x, y) => tot(x) - tot(y));
@@ -289,7 +307,7 @@ function oFieldNassau(rounds, cfg) {
   return { totals: out, pend };
 }
 // CROSS-GROUP 1v1 + 2-player Nassau oracle (net uses the player's allowanced event handicap).
-function oCross(rounds, t) {
+function oCross2008(rounds, t) {
   const res = {}; const add = (k, v) => res[k] = (res[k] || 0) + v;
   const gg = (t.settings && t.settings.groupGames) || {};
   const mInst = [], nInst = [];
@@ -328,6 +346,21 @@ function oCross(rounds, t) {
     });
   });
   return res;
+}
+
+// v2010: the decided-rules oracle (shared with the multi-day copy) + attribution of every v2008 difference
+let OX = null; const CLS = {};
+function oCross(rounds, t) { if (!OX) OX = require(path.join(__dirname, '..', 'cross_v2009', 'fix', 'oCross2010.js'))({ nk, nHof, oStrokes, oPar, oSi, scoredN }); return OX(rounds, t).money; }
+function classify(label, A, ev) {
+  if (!OX) oCross(ev.rounds, ev.t);
+  const old = oCross2008(ev.rounds, ev.t), dOld = mapEq(A, old, allKeys(A, old)); if (!dOld.length) return;
+  const nw = OX(ev.rounds, ev.t).money, bugs = mapEq(A, nw, allKeys(A, nw));
+  const SW = ['dayBound', 'byNumber', 'holeOrder', 'leaver', 'blank']; let tag = null;
+  const same = R => { const m = OX(ev.rounds, ev.t, R).money; return !mapEq(m, old, allKeys(m, old)).length; };
+  for (let n = 1; n <= SW.length && !tag; n++) { const combos = []; const rec = (st, acc) => { if (acc.length === n) { combos.push(acc.slice()); return; } for (let i = st; i < SW.length; i++) { acc.push(SW[i]); rec(i + 1, acc); acc.pop(); } }; rec(0, []);
+    for (const c of combos) { const R = {}; c.forEach(k => R[k] = false); if (same(R)) { tag = c.join('+'); break; } } }
+  if (bugs.length) tag = 'ENGINE BUG (app != v2010 oracle)'; else if (!tag) tag = 'UNEXPLAINED';
+  const c = CLS[tag] || (CLS[tag] = { n: 0, ex: [] }); c.n++; if (c.ex.length < 3) c.ex.push(label.split(' [')[0] + ' ' + dOld.slice(0, 2).join('; '));
 }
 
 // ── event builder ───────────────────────────────────────────────────────────
@@ -464,7 +497,8 @@ function checkEngines(ev, label, axis) {
   if (st.tourneyNassau) { const a = FNAS(clone(rows), st.tourneyNassau), o = oFieldNassau(ev.rounds, st.tourneyNassau); const A = tbk(a);
     const bad = mapEq(A, o.totals, allKeys(A, o.totals));
     check(label + ' :: field Nassau = oracle', !bad.length, bad.slice(0, 4).join('; '), 'Field Nassau', axis); out.fnas = o.totals; }
-  { const a = CROSS(ev.t, clone(rows)), o = oCross(ev.rounds, ev.t); const A = crossApp(a);
+  { const a = CROSS(ev.t, clone(rows)), o = oCross(ev.rounds, ev.t); const A = crossApp(a); classify(label, A, ev);
+    { const ap = !!a.pendingAny || (a.matches || []).some(m => m.pending) || (a.nassaus || []).some(n => n.pending); const op = OX(ev.rounds, ev.t).pending; check(label + ' :: cross-group pending = v2010 oracle', ap === op, 'app=' + ap + ' oracle=' + op, 'Cross-group', axis); }
     if (process.env.TDBG && label.indexOf(process.env.TDBG) === 0) console.log('DBG X', JSON.stringify({m:a.matches,n:a.nassaus}), JSON.stringify(ev.t.settings.groupGames));
     const bad = mapEq(A, o, allKeys(A, o));
     if (Object.keys(o).length || Object.keys(A).length) check(label + ' :: cross-group 1v1 + Nassau = oracle', !bad.length, bad.slice(0, 4).join('; '), 'Cross-group', axis);
@@ -715,7 +749,7 @@ async function checkCombined(ev, label, axis, parts) {
     const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), leave: { [names[0]]: 12 } }, { names: names.slice(2) }] }], dayGames: () => ({}),
       tSettings: { groupGames: { g1: { nassau: { instances: [{ value: 5, net: true, format: 'stroke', segments: 'fb', pair: [names[0], names[2]] }, { value: 3, net: true, format: 'match', segments: 'fbo', pair: [names[1], names[3]] }] },
         match: { instances: [{ value: 10, net: true, pair: [names[0], names[3]] }] } } } } });
-    const a = CROSS(ev.t, rowsOf(ev)), o = oCross(ev.rounds, ev.t), A = crossApp(a);
+    const a = CROSS(ev.t, rowsOf(ev)), o = oCross(ev.rounds, ev.t), A = crossApp(a); classify('A15', A, ev);
     const bad = mapEq(A, o, allKeys(A, o));
     check('A15 cross-group Nassau/1v1 with a leaver + fb segments = oracle', !bad.length, bad.join('; ') + ' segs=' + JSON.stringify((a.nassaus || []).map(n => n.segments.map(s => s.name + ':' + s.settled))), 'Cross-group', 'leaver');
     const n1 = (a.nassaus || []).find(n => n.aKey === nk(names[0]) || n.bKey === nk(names[0]));
@@ -898,6 +932,7 @@ async function checkCombined(ev, label, axis, parts) {
   // player; pays once every group of the day has finished or filled its card. House rule (v1998 F-4, Low
   // Net rule): a player who LEFT mid-round still pays his entry but cannot win.
   function oPoints(rounds, t, kind, fieldPlayers) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
     const money = {}; let anyPending = false;
     const wd = new Set(((t.settings.withdrawn) || []).map(String));
     const wdN = new Set((fieldPlayers || []).filter(p => wd.has(String(p.id))).map(p => nk(p.display_name)));
@@ -912,7 +947,7 @@ async function checkCombined(ev, label, axis, parts) {
         for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; if (s == null) continue; const par = oPar(g, p, h);
           if (kind === 'quota') { const d = s - par; pts += d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0; }
           else { const sc = cfg.net ? s - oStrokes(p.hcp, oSi(g, p, h), par, g.hcpRules, nH) : s; pts += Math.max(0, 2 - (sc - par)); } }
-        const stat = kind === 'quota' ? pts - ((nH === 9 ? 18 : 36) - Math.round((p.playsGross ? 0 : p.hcp) * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1))) : pts;
+        const stat = kind === 'quota' ? pts - oQTarget(g, (nH === 9 ? 18 : 36) - Math.round((p.playsGross ? 0 : p.hcp) * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1))) : pts;
         E.push({ k, stat, left: leftAfter(g, p) != null }); }); });
       const N = E.length; const buyin = dc.buyin != null ? dc.buyin : (dc.value || 0);
       const complete = inR.every(cardDone) && N > 0;
@@ -930,6 +965,7 @@ async function checkCombined(ev, label, axis, parts) {
   // Oracle: 4-man best ball / shamble across carts (each cart one team, low total wins, `value` a head,
   // winners split the pot a head; all teams tied = push). Pays once every launched cart has finished.
   function oCartTeam(rounds, KEY) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
     const money = {};
     Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
       const inR = rs.filter(g => g.games && g.games[KEY] && g.games[KEY].teamMode === '4man' && (g.games[KEY].fieldOnly || (g.t2.dayGameKeys || []).includes(KEY)));
@@ -941,7 +977,7 @@ async function checkCombined(ev, label, axis, parts) {
             const H = KEY === 'shamble' ? Math.round((p.playsGross ? 0 : p.baseHcp) * ((cfg.hcpPct != null ? cfg.hcpPct : 50) / 100)) : p.hcp;
             return cfg.net ? s - oStrokes(H, oSi(g, p, h), oPar(g, p, h), g.hcpRules, nHof(g)) : s; }).filter(x => x != null).sort((a, b) => a - b);
           if (!v.length) continue; pl++; tot += v.slice(0, balls).reduce((a, b) => a + b, 0); }
-        if (pl) sides.push({ tot, ks: g.players.map(p => nk(p.name)), full: pl >= nHof(g) }); });
+        if (pl) sides.push({ tot, ks: g.players.map(p => nk(p.name)), full: pl >= oFullN(g) }); });
       const complete = inR.every(g => g.finishedAt) && sides.length >= 2;
       if (!complete || !(val > 0)) return;
       // DECISIONS (TOURNEY-14): a cart that tapped Finish early pays but cannot win.
@@ -956,13 +992,14 @@ async function checkCombined(ev, label, axis, parts) {
   // allowance is the USGA 4-person 25/20/15/10 of the four lowest FULL course handicaps, halved on an event
   // nine (GL-9 / hcp18 convention); a team that tapped Finish early pays but cannot win (TOURNEY-14).
   function oScramble(rounds, cfg) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
     const money = {};
     Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
       const inR = rs.filter(g => g.games && g.games.scramble);
       const teams = [];
       inR.forEach(g => { let tot = 0, n = 0; for (let h = 1; h <= 18; h++) { const d = g.scrambleData && g.scrambleData[h]; if (!d || d.teamA == null) continue; tot += d.teamA; n++; }
         let allow = 0; if (cfg.net) { const hs = g.players.map(p => p.baseHcp).sort((a, b) => a - b); [.25, .2, .15, .1].forEach((w, i) => { if (hs[i] != null) allow += hs[i] * w; }); if (nHof(g) === 9 && g.hcpRules.hcp18) allow /= 2; allow = Math.round(allow * 10) / 10; }
-        if (n) teams.push({ total: tot - allow, code: g.code, ks: g.players.map(p => nk(p.name)), full: n >= nHof(g) }); });
+        if (n) teams.push({ total: tot - allow, code: g.code, ks: g.players.map(p => nk(p.name)), full: n >= oFullN(g) }); });
       const complete = inR.length > 0 && inR.every(g => g.finishedAt) && teams.length >= 2;
       const buyin = Number(cfg.buyin != null ? cfg.buyin : cfg.value) || 0;
       if (!complete || !(buyin > 0)) return;
@@ -980,13 +1017,14 @@ async function checkCombined(ev, label, axis, parts) {
   // Oracle: field Team Quota (2 or 3+ roster teams). Every player in the field: points - quota; team total =
   // sum; pool: winner team splits N x buyin per head (3+: payout table); tie = refund. Pays when every cart is in.
   function oTeamQuota(rounds, teamOf, cfg, nTeams) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
     const money = {}, totals = {};
     Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
       const inR = rs.filter(g => g.games && g.games.teamQuota); if (!inR.length) return;
       const res = {}; const dt = {};
       inR.forEach(g => g.players.forEach(p => { const tk = teamOf[p.name]; if (!tk) return; let pts = 0;
         for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; if (s == null) continue; const d = s - oPar(g, p, h); pts += d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0; }
-        const r = pts - ((nHof(g) === 9 ? 18 : 36) - Math.round(p.hcp * (nHof(g) === 9 ? 0.5 : 1)));
+        const r = pts - oQTarget(g, (nHof(g) === 9 ? 18 : 36) - Math.round(p.hcp * (nHof(g) === 9 ? 0.5 : 1)));
         res[nk(p.name)] = { tk, r }; dt[tk] = (dt[tk] || 0) + r; }));
       Object.keys(dt).forEach(k => totals[day + ':' + k] = dt[k]);
       if (!inR.every(cardDone)) return;
@@ -1060,7 +1098,7 @@ async function checkCombined(ev, label, axis, parts) {
   }
   const appMoneyKeyed = r => { const o = {}; Object.keys((r && r.money) || {}).forEach(k => o[k] = r.money[k]); return o; };
   const mergeM = (...ms) => { const o = {}; ms.forEach(m => Object.keys(m || {}).forEach(k => o[k] = (o[k] || 0) + m[k])); return o; };
-  const trimRounds = (rounds, inSet) => rounds.map(g => Object.assign({}, g, { players: g.players.filter(p => inSet.has(nk(p.name))) })).filter(g => g.players.length);
+  const trimRounds = (rounds, inSet) => oCutRounds(rounds).map(g => Object.assign({}, g, { players: g.players.filter(p => inSet.has(nk(p.name))) })).filter(g => g.players.length);
 
   // ---- D1. points pools (Stableford / Quota) + cart team games + scramble: pairwise + fuzz ------------
   const AX2 = { carts: [[2, 3], [4, 4], [3, 4, 5], [4, 4, 4, 4], [5, 2, 3]], holes: ['18', '9', 'shotgun', 'pick'],
@@ -1190,7 +1228,9 @@ async function checkCombined(ev, label, axis, parts) {
       dayGames: (d, G, players) => ({ scramble: { teamMode: '4man', teamA: players.map(p => p.id), teamB: [] } }) });
     ev3.rounds.forEach((g, i) => { g.scrambleData = {}; for (let h = 1; h <= (i ? 14 : 18); h++) g.scrambleData[h] = { teamA: g.pars[h - 1] - 1 }; });
     const a3 = SCR(rowsOf(ev3), ev3.t); const w3 = a3.perDay[0].teams[0];
-    check('D2c field scramble: a team that finished after 14 holes does not beat full 18-hole teams on raw total', w3.holes === 18, 'winner ' + w3.name + ' holes=' + w3.holes + ' total=' + w3.total, 'Field Scramble 4-man', 'earlyFinish');
+    // v2011 (DECISIONS early-finished events): both teams are scored on holes 1-14, the holes every team finished.
+    const e3 = ev3.rounds.map(g => { let t = 0; for (let h = 1; h <= 14; h++) t += g.scrambleData[h].teamA; return t; });
+    check('D2c field scramble: a team that finished after 14 holes -> every team is scored on holes 1-14 (early-finished rule)', a3.perDay[0].teams.every(x => x.holes === 14) && a3.perDay[0].teams.map(x => x.gross).sort((p, q) => p - q).join() === e3.slice().sort((p, q) => p - q).join(), 'teams ' + JSON.stringify(a3.perDay[0].teams.map(x => [x.gross, x.holes])) + ' exp gross ' + e3, 'Field Scramble 4-man', 'earlyFinish');
     // 9-hole day: the 18-hole allowance is applied to a 9-hole total
     const ev4 = buildEvent({ hcp, days: [{ nH: 9, groups: groupsFor(names, [4, 4]) }], tSettings: { tourneyScramble: { on: true, buyin: 10, net: true } },
       dayGames: (d, G, players) => ({ scramble: { teamMode: '4man', teamA: players.map(p => p.id), teamB: [] } }) });
@@ -1205,8 +1245,11 @@ async function checkCombined(ev, label, axis, parts) {
     seed(4242);
     const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 4), holesPlayed: Object.fromEntries(names.slice(0, 4).map(n => [n, 13])) }, { names: names.slice(4) }] }],
       dayGames: (d, G, players) => ({ teamLowball: { teamMode: '4man', net: true, value: 5, fieldOnly: true, teamA: players.map(p => p.id), teamB: [] } }) });
-    const a = BB(rowsOf(ev), ev.t); const s = a.perDay[0].sides; const winner = s[0];
-    check('D2e field best ball: a cart that finished after 13 holes does not win on a 13-hole total', winner.holes >= 18, 'winner holes=' + winner.holes + ' totals=' + s.map(x => x.total + '/' + x.holes).join(' vs '), 'Field Best Ball 4-man', 'earlyFinish');
+    const a = BB(rowsOf(ev), ev.t); const s = a.perDay[0].sides;
+    // v2011 (DECISIONS early-finished events): both carts are scored on holes 1-13; the low 13-hole net best ball wins.
+    const cut = oCutRounds(ev.rounds); const tot13 = g => { let t = 0; for (let h = 0; h < 13; h++) t += Math.min(...g.players.map(p => g.scores[p.id][h] - oStrokes(p.hcp, oSi(g, p, h), oPar(g, p, h), g.hcpRules, 18))); return t; };
+    const e13 = cut.map(tot13);
+    check('D2e field best ball: a cart that finished after 13 holes -> both carts are scored on holes 1-13 (early-finished rule)', s.every(x => x.holes === 13) && s.map(x => x.total).sort((p, q) => p - q).join() === e13.slice().sort((p, q) => p - q).join(), 'totals=' + s.map(x => x.total + '/' + x.holes).join(' vs ') + ' exp ' + e13, 'Field Best Ball 4-man', 'earlyFinish');
   }
   {
     // D2f points pool: a player who LEFT mid-round can win the field Stableford pool
@@ -1329,6 +1372,7 @@ async function checkCombined(ev, label, axis, parts) {
   // launched cart is finished. Cup: on a team event a whole-team cart adds its total to its team; higher wins.
   const qpts = d => d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0;
   function oTQ4(rounds) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
     const money = {}; const totals = {};
     Object.entries(byDayOf(rounds)).forEach(([day, rs]) => {
       const inR = rs.filter(g => g.games.teamQuota && g.games.teamQuota.teamMode === '4man');
@@ -1337,9 +1381,9 @@ async function checkCombined(ev, label, axis, parts) {
       inR.forEach(g => { const nH = nHof(g); let tot = 0, pl = 0;
         for (let h = 0; h < 18; h++) if (g.players.some(p => (g.scores[p.id] || [])[h] != null)) pl++;
         g.players.forEach(p => { let pts = 0; for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; if (s != null) pts += qpts(s - oPar(g, p, h)); }
-          tot += pts - ((nH === 9 ? 18 : 36) - Math.round(p.hcp * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1))); });
+          tot += pts - oQTarget(g, (nH === 9 ? 18 : 36) - Math.round(p.hcp * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1))); });
         totals[day + ':' + g.code] = tot;
-        if (pl) sides.push({ tot, ks: g.players.map(p => nk(p.name)), full: pl >= nH, code: g.code }); });
+        if (pl) sides.push({ tot, ks: g.players.map(p => nk(p.name)), full: pl >= oFullN(g), code: g.code }); });
       if (!(inR.length && inR.every(g => g.finishedAt) && sides.length >= 2) || !(buy > 0)) return;
       const R = sides.some(s => s.full) ? sides.filter(s => s.full) : sides;
       const best = Math.max(...R.map(s => s.tot)); const W = R.filter(s => s.tot === best); if (W.length === sides.length) return;
@@ -1602,6 +1646,8 @@ async function checkCombined(ev, label, axis, parts) {
   if (process.env.TALL) FAILS.filter(f => new RegExp(process.env.TALL).test(f)).slice(0, 6).forEach(f => console.log('   ALL> ' + f.slice(0, 700)));
   // distinct failure signatures (first occurrence) so the report stays readable
   const sig = {}; FAILS.forEach(f => { const s = f.split('\n')[0].replace(/^(FZ|B)\d+ \[[^\]]*\] :: /, ''); if (!sig[s]) sig[s] = { n: 0, ex: f }; sig[s].n++; });
+  console.log('\n=== v2010 vs v2008 cross oracle -- cases where the app differs from the v2008 oracle, by the decision that explains it ===');
+  Object.keys(CLS).sort((a, b) => CLS[b].n - CLS[a].n).forEach(k => { console.log('   ' + String(CLS[k].n).padStart(5) + '  ' + k); CLS[k].ex.forEach(e => console.log('            e.g. ' + e.slice(0, 260))); });
   console.log('\n' + (FAIL ? (FAIL + ' FAILED, ' + PASS + ' passed') : ('ALL ' + PASS + ' CHECKS PASSED')) + '   (total ' + (PASS + FAIL) + ')');
   Object.keys(sig).forEach(s => console.log('  - [' + sig[s].n + 'x] ' + sig[s].ex));
   console.error = _e; console.warn = _w;

@@ -1,4 +1,8 @@
 'use strict';
+// Promoted 2026-11-05 (v2014) from qa/cross_v2009/fix/qa_v2007_event_skins_quota_v2011.js: oracle follows Tyler's 11/2 + 11/4 rules (cross bets tied to their day, leaver forfeit, nine-twice = no cross bet, early finish = common holes).
+// qa/cross_v2009/fix/qa_v2007_event_skins_quota_v2011.js -- FIX COPY (stream F): oracles follow Tyler's 11/4
+// "Early-finished events" rule (DECISIONS.md) via fix/oEarly.js -- an early-finished day is scored on the holes every
+// group finished, quota prorated. Everything else is the original suite.
 // qa/qa_v2007_event_skins_quota.js -- full QA of TOURNAMENT SKINS (pool + per skin, carry / no carry, win
 // requirement) and TOURNAMENT QUOTA (whole-field pool, 9+ players), every scenario axis we know of.
 //   node qa/qa_v2007_event_skins_quota.js [golf-app.html]
@@ -16,6 +20,7 @@ const path = require('path');
 const fs = require('fs');
 const HTML = path.resolve(process.argv[2] || path.join(__dirname, '..', 'golf-app.html'));
 const MATRIX = path.join(__dirname, 'v2002_matrix', 'tourney.js');
+const { oCutRounds, oQTarget } = require(path.join(__dirname, 'cross_v2009', 'fix', 'oEarly.js'));
 const src = fs.readFileSync(MATRIX, 'utf8');
 const cut = src.indexOf("// =============================================================================\nconsole.log('Bad Golf v2002 matrix");
 if (cut < 0) throw new Error('tourney.js layout changed: cannot find its first test section');
@@ -25,12 +30,14 @@ const EXPORTS = ['qa', 'F', 'HG', 'check', 'near', 'c2', 'nk', 'seed', 'rnd', 'r
 const fakeProcess = { argv: [process.argv[0], MATRIX, HTML], env: process.env, exit: process.exit, stdout: process.stdout };
 const L = new Function('require', 'process', '__dirname', 'console', prelude + '\nreturn { ' + EXPORTS.join(', ') + ', get PASS() { return PASS; }, get FAIL() { return FAIL; }, FAILS, COV };')(require, fakeProcess, path.dirname(MATRIX), console);
 console.error = (...a) => process.stderr.write(a.join(' ') + '\n');
-const { F, qa, check, near, c2, nk, seed, rnd, ri, pick, mapEq, sumv, NAMES, HCP_POOL, oStrokes, oPar, oSi, nHof, scoredN, full, leftAfter, activeOn, oGate, byDayOf, buildEvent, rowsOf, clone, allKeys, groupsFor, inList } = L;
+const { F, qa, check, near, c2, nk, seed, rnd, ri, pick, mapEq, sumv, NAMES, HCP_POOL, oStrokes, oPar, oSi, nHof, scoredN, full, leftAfter, activeOn, oGate: oGate0, byDayOf, buildEvent, rowsOf, clone, allKeys, groupsFor, inList } = L;
+const oGate = (rs, ns) => (rs.some(g => g._early) ? true : oGate0(rs, ns));   // v2011: an early-finished day is over (every round finished)
 const SKINS = F('t2ComputeFieldSkins'), QUOTA = F('t2ComputeFieldQuota'), FREG = F('bgFlightsRegister'), FAUTO = F('bgFlightsAutoAssign');
 console.log('Bad Golf v2007 QA -- Tournament Skins + Tournament Quota   app: ' + path.basename(HTML));
 
 // ── oracles ─────────────────────────────────────────────────────────────────
 function oSkinsX(rounds, cfg) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
   const pct = cfg.hcpPct != null ? Number(cfg.hcpPct) : 100;
   const carry = cfg.ties !== 'void' && cfg.ties !== 'none';
   const req = (cfg.require === 'net' || cfg.require === 'gross') ? cfg.require : null;
@@ -87,6 +94,7 @@ function oSkinsX(rounds, cfg) {
 }
 const cardDone = g => !!g.finishedAt || g.players.every(p => { for (let h = 1; h <= nHof(g); h++) { if (!activeOn(g, p, h)) continue; if ((g.scores[p.id] || [])[h - 1] == null) return false; } return true; });
 function oQuota(rounds, t, fieldPlayers) {
+  rounds = oCutRounds(rounds);   // v2011 (DECISIONS early-finished events)
   const money = {}; let anyPending = false;
   const wd = new Set(((t.settings.withdrawn) || []).map(String));
   const wdN = new Set((fieldPlayers || []).filter(p => wd.has(String(p.id))).map(p => nk(p.display_name)));
@@ -100,7 +108,7 @@ function oQuota(rounds, t, fieldPlayers) {
       const k = nk(p.name); if (wdN.has(k) || (list && !list.includes(k)) || !scoredN(g, p)) return;
       let pts = 0;
       for (let h = 0; h < 18; h++) { const s = (g.scores[p.id] || [])[h]; if (s == null) continue; const d = s - oPar(g, p, h); pts += d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0; }
-      const stat = pts - ((nH === 9 ? 18 : 36) - Math.round((p.playsGross ? 0 : p.hcp) * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1)));
+      const stat = pts - oQTarget(g, (nH === 9 ? 18 : 36) - Math.round((p.playsGross ? 0 : p.hcp) * (nH === 9 && g.hcpRules.hcp18 ? 0.5 : 1)));
       results[k] = (results[k] || 0) + stat;
       E.push({ k, stat, left: leftAfter(g, p) != null }); }); });
     const N = E.length; const buyin = dc.buyin != null ? dc.buyin : (dc.value || 0);
@@ -116,7 +124,7 @@ function oQuota(rounds, t, fieldPlayers) {
   });
   return { money, anyPending, results };
 }
-const trimRounds = (rounds, inSet) => rounds.map(g => Object.assign({}, g, { players: g.players.filter(p => inSet.has(nk(p.name))) })).filter(g => g.players.length);
+const trimRounds = (rounds, inSet) => oCutRounds(rounds).map(g => Object.assign({}, g, { players: g.players.filter(p => inSet.has(nk(p.name))) })).filter(g => g.players.length);
 const mergeM = (...ms) => { const o = {}; ms.forEach(m => Object.keys(m || {}).forEach(k => o[k] = (o[k] || 0) + m[k])); return o; };
 const skinsApp = r => { const o = {}; ((r && r.perDay) || []).forEach(d => { if (d.complete === false) return; (d.rows || []).forEach(x => o[nk(x.name)] = (o[nk(x.name)] || 0) + x.net); }); return o; };
 

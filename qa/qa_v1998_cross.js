@@ -84,18 +84,24 @@ console.log('\n== Case 3: leaver / early finish ==');
   const r = X(T, [{ data: a }, { data: b }]);
   log('1v1', r.matches[0]); log('nassau', r.nassaus[0]);
   const n = r.nassaus[0];
-  // Hand: front complete -> Tyler +10. Back: 3 of 9 holes, bothFin true -> engine settles on played holes? Rule says unfinished side = no bet. Total: frontDone && !backDone with bothFin -> pushed.
+  // v2014: Tyler's 11/4 rule (cross DECISIONS 4) -- a leaver loses any cross match not yet closed out, and pays
+  // every unfinished side. Kevin left after 12 (6 down, not closed out); Tyler finished every hole.
+  // Nassau: Front Tyler 10 + Back Tyler by forfeit 10 + Total Tyler by forfeit 10 = +30. Match: Tyler by forfeit (+20).
   check('c3 nassau front pays Tyler', n.segments[0].winnerFirst === 'Tyler' && n.segments[0].settled);
-  check('c3 nassau BACK (3 of 9 played, round finished) is NO BET', !n.segments[1].settled || n.segments[1].winnerFirst == null, JSON.stringify(n.segments[1]));
-  check('c3 nassau TOTAL pushed (only one nine)', n.segments[2].settled === false, JSON.stringify(n.segments[2]));
-  check('c3 nassau aNet = +10 only', n.aNet === 10, 'aNet=' + n.aNet);
-  // 1v1: Tyler won 9 front, Kevin won 3 (holes 10-12). Tyler 6 up with 6 left after hole 12 -> not closed; bothFin -> settled 6 up thru 12
-  check('c3 1v1 settles on holes played when both finished: Tyler 6 up (thru 12)', r.matches[0].winnerFirst === 'Tyler' && r.matches[0].settled && /6 up \(thru 12\)/.test(r.matches[0].status), r.matches[0].status);
-  // Variant: group 2 still LIVE (not finished) -> nothing settles beyond front
+  check('c3 nassau BACK: Kevin left, Tyler finished -> Tyler by forfeit', n.segments[1].settled && n.segments[1].forfeit && n.segments[1].winnerFirst === 'Tyler', JSON.stringify(n.segments[1]));
+  check('c3 nassau TOTAL: the leaver forfeits it -> Tyler', n.segments[2].settled && n.segments[2].forfeit && n.segments[2].winnerFirst === 'Tyler', JSON.stringify(n.segments[2]));
+  check('c3 nassau aNet = +30 (F 10 + B 10 + T 10)', n.aNet === 30, 'aNet=' + n.aNet);
+  check('c3 1v1: a leaver not closed out loses -> Tyler by forfeit', r.matches[0].winnerFirst === 'Tyler' && r.matches[0].settled && r.matches[0].forfeit, r.matches[0].status);
+  // c3b: Kevin's cart still live, but Kevin has left and Tyler finished every shared hole -> the forfeit already stands
   b.finishedAt = null;
   const r2 = X(T, [{ data: a }, { data: b }]);
-  check('c3b live group: 1v1 in progress, not settled', r2.matches[0].settled === false && /in progress/.test(r2.matches[0].status), r2.matches[0].status);
-  check('c3b live group: back segment not settled', r2.nassaus[0].segments[1].settled === false);
+  check('c3b live group: leaver forfeit settles once the opponent has finished', r2.matches[0].settled && r2.matches[0].forfeit, r2.matches[0].status);
+  check('c3b live group: back goes to Tyler by forfeit', r2.nassaus[0].segments[1].settled && r2.nassaus[0].segments[1].forfeit);
+  // c3c: Tyler has NOT finished yet (stopped after 15, his cart live) -> nothing beyond the front settles until he does
+  const a3 = JSON.parse(JSON.stringify(a)); a3.finishedAt = null; a3.scores[a3.players[0].id] = a3.scores[a3.players[0].id].map((v, k) => k < 15 ? v : null);
+  const r3 = X(T, [{ data: a3 }, { data: b }]);
+  check('c3c opponent still playing: match not settled yet', r3.matches[0].settled === false, r3.matches[0].status);
+  check('c3c opponent still playing: back not settled yet', r3.nassaus[0].segments[1].settled === false, JSON.stringify(r3.nassaus[0].segments[1]));
 }
 
 // ── Case 4: 9-hole rounds / front-back-only / one group 9 the other 18 ──

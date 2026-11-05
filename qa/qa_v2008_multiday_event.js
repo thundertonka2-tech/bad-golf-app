@@ -1,4 +1,5 @@
 'use strict';
+// Promoted 2026-11-05 (v2014) from qa/cross_v2009/fix/qa_v2008_multiday_event_v2010.js: oracle follows Tyler's 11/2 + 11/4 rules (cross bets tied to their day, leaver forfeit, nine-twice = no cross bet, early finish = common holes).
 // qa/qa_v2008_multiday_event.js -- MULTI-DAY TOURNAMENT end to end: a different course every day (a regular 18, real
 // multi-nine combos from THREE_NINE_COURSES built through the app's own buildNineCombo, a reversed combo at another
 // facility, a single nine), the starting hole changing every day (all off 1, shotgun, back-nine start, pick a start),
@@ -9,8 +10,11 @@
 // (each loaded up to its first test section, so their game generators + oracles run on THIS event's real rounds).
 const path = require('path');
 const fs = require('fs');
+// v2010 FIX COPY (stream E): the cross-group oracle follows Tyler's 11/4 DECISIONS (fix/oCross2010.js) instead of the
+// v2008 rules; every case where the two oracles differ is attributed to the decision that changed it (MD_CLASSIFY=1).
 const HTML = path.resolve(process.argv[2] || path.join(__dirname, '..', 'golf-app.html'));
 const DIR = path.join(__dirname, 'v2002_matrix');
+const makeOCross = require(path.join(__dirname, 'cross_v2009', 'fix', 'oCross2010.js'));
 const realErr = console.error, realWarn = console.warn;
 function loadPrelude(file, cutMarker, names) {
   const src = fs.readFileSync(path.join(DIR, file), 'utf8');
@@ -26,7 +30,7 @@ function loadPrelude(file, cutMarker, names) {
 process.stderr.write('loading the app 4x (field + pools + points + match oracles)...\n');
 const T = loadPrelude('tourney.js', '\n(async () => {', ['qa', 'F', 'HG', 'seed', 'rnd', 'ri', 'pick', 'nk', 'near', 'c2', 'sumv', 'mapEq', 'allKeys', 'NAMES', 'HCP_POOL', 'PARS18', 'SIS18', 'RED_PARS18', 'RED_SIS18',
   'oStrokes', 'oPar', 'oSi', 'nHof', 'scoredN', 'full', 'leftAfter', 'activeOn', 'oGate', 'byDayOf', 'inList', 'rowsOf', 'clone', 'install', 'groupsFor', 'mkPlayer', 'genScores', 'uuid', 'NOW',
-  'checkEngines', 'checkCombined', 'SK', 'LP', 'SP', 'PASS', 'FAIL', 'FAILS', 'COV', 'check']);
+  'checkEngines', 'checkCombined', 'SK', 'LP', 'SP', 'PASS', 'FAIL', 'FAILS', 'COV', 'check', 'oCross', 'crossApp']);
 const PO = loadPrelude('pools.js', '// ───────────────────────────── 1. pairwise', ['F', 'GAMES', 'addGames', 'moneyEq', 'zeroSum', 'quiet']);
 const PT = loadPrelude('points.js', '// ───────────────────────── 1. MATRIX', ['F', 'ORACLE', 'CALC', 'OPTS', 'NP', 'applyGame', 'fixWolf', 'sameMoney']);
 const MA = loadPrelude('match.js', 'const AXES = {', ['F', 'ORACLE', 'CALC', 'GAME_OPTS', 'GAME_NPLAYERS', 'fillBlobs', 'eqMoney', 'RESKEY', 'teamsFor', 'NAS']);
@@ -37,7 +41,8 @@ const F = T.F, CAGM = T.F('computeAllGameMoney'), SKINS = F('t2ComputeFieldSkins
 const TN = T.qa.fn('THREE_NINE_COURSES'), BCOMBO = F('buildNineCombo'), BSINGLE = F('buildSingleNine'), NETSW = F('bgNetsWhole');
 
 // ── own bookkeeping (grouped report) ─────────────────────────────────────────
-const CAT = {}; let PASS = 0, FAIL = 0;
+const CAT = {}; let PASS = 0, FAIL = 0; const CLS = {};
+const CROSSX = T.F('t2ComputeCrossGroupMatches'), OX = makeOCross(T);
 function chk(cat, label, cond, detail) {
   const c = CAT[cat] || (CAT[cat] = { run: 0, fail: 0, ex: [], sig: {} }); c.run++;
   if (cond) { PASS++; return true; }
@@ -322,7 +327,10 @@ async function runEvent(cfg, ci, tag) {
   const g0 = days[0].groups[0].names, g1 = days[0].groups[1] ? days[0].groups[1].names : null;
   const tS = { tourneySkins: sk, tourneyLongPutt: T.LP({ mode: ci % 4 === 1 ? 'total' : 'buyin' }), tourneySidePots: T.SP({ lowNet: { on: true, value: 5, hcpPct: ci % 2 ? 100 : 80 } }),
     tourneyNassau: { on: true, value: 3, segments: ci % 2 ? 'fb' : 'fbo', payoutSplit: ci % 3 === 2 ? '8020' : 'standard' }, dayGames: dg };
-  if (g1) tS.groupGames = { g1: { match: { instances: [{ value: 10, net: ci % 2 === 0, pair: [g0[0], g1[0]] }] }, nassau: { instances: [{ value: 5, net: true, format: ci % 2 ? 'match' : 'stroke', segments: ci % 3 ? 'fbo' : 'fb', pair: [g0[1], g1[1]] }] } } };
+  // v2010 copy: by default the bet is saved under the group id of the cart that really launched it (day 1, group 2);
+  // MD_GID=g1 reproduces the original suite's unlaunched key (used for the 286-case classification).
+  const GID = process.env.MD_GID || 'grp-1-1';
+  if (g1) tS.groupGames = { [GID]: { match: { instances: [{ value: 10, net: ci % 2 === 0, pair: [g0[0], g1[0]] }] }, nassau: { instances: [{ value: 5, net: true, format: ci % 2 ? 'match' : 'stroke', segments: ci % 3 ? 'fbo' : 'fb', pair: [g0[1], g1[1]] }] } } };
   const ev = buildMultiDay({ index, redFor: cfg.hcp === 'mixedTees' ? names.filter((_, i) => i % 3 === 0) : null, days, tSettings: tS,
     dayGames: (day, G, players, C) => {
       const par3 = C.pars.map((p, i) => p === 3 ? i + 1 : 0).filter(Boolean).slice(0, 3);
@@ -348,6 +356,23 @@ async function runEvent(cfg, ci, tag) {
   delete evForStd.t.settings.tourneySkins;
   T.FAILS.length = 0; const f0 = T.FAILS.length; const before = { p: 0 };
   const parts = checkEngines(evForStd, lbl, axis);
+  // v2010: drop tourney.js's v2008 cross-group check and re-check against the decided rules
+  { const xi = []; T.FAILS.forEach((f, i) => { if (/:: cross-group 1v1 \+ Nassau = oracle/.test(f)) xi.push(i); }); xi.reverse().forEach(i => T.FAILS.splice(i, 1));
+    Object.keys(T.COV).forEach(k => { if (k.split('|')[0] === 'Cross-group') delete T.COV[k]; });
+    const a = CROSSX(evForStd.t, clone(rowsOf(ev))); const A = T.crossApp(a); const o = OX(ev.rounds, evForStd.t);
+    const bad = mapEq(A, o.money, allKeys(A, o.money));
+    chk('Field: Cross-group (v2010 rules)', lbl + ' :: cross-group 1v1 + Nassau = v2010 oracle', !bad.length, bad.slice(0, 4).join('; '));
+    const ap = !!a.pendingAny || (a.matches || []).some(m => m.pending) || (a.nassaus || []).some(n => n.pending);
+    chk('Field: Cross-group (v2010 rules)', lbl + ' :: cross-group pending = v2010 oracle', ap === o.pending, 'app=' + ap + ' oracle=' + o.pending);
+    // classification against the v2008 oracle
+    const old = T.oCross(ev.rounds, evForStd.t); const dOld = mapEq(A, old, allKeys(A, old));
+    if (dOld.length) { const SW = ['dayBound', 'byNumber', 'holeOrder', 'leaver', 'blank']; let tag = null;
+      const same = R => !mapEq(OX(ev.rounds, evForStd.t, R).money, old, allKeys(old)).length && !mapEq(old, OX(ev.rounds, evForStd.t, R).money, allKeys(OX(ev.rounds, evForStd.t, R).money)).length;
+      for (let n = 1; n <= SW.length && !tag; n++) { const combos = []; const rec = (st, acc) => { if (acc.length === n) { combos.push(acc.slice()); return; } for (let i = st; i < SW.length; i++) { acc.push(SW[i]); rec(i + 1, acc); acc.pop(); } }; rec(0, []);
+        for (const c of combos) { const R = {}; c.forEach(k => R[k] = false); if (same(R)) { tag = c.join('+'); break; } } }
+      if (!tag) tag = bad.length ? 'ENGINE BUG' : 'UNEXPLAINED';
+      CLS[tag] = CLS[tag] || { n: 0, ex: [] }; CLS[tag].n++; if (CLS[tag].ex.length < 3) CLS[tag].ex.push(lbl.split(' [')[0] + ' ' + dOld.slice(0, 2).join('; ')); }
+    parts.cross = o.money; }
   // re-home tourney.js's check() results into this report
   const tf = T.FAILS.splice(0); const tc = T.COV; Object.keys(tc).forEach(k => { const c = tc[k]; const cat = 'Field: ' + k.split('|')[0]; const cc = CAT[cat] || (CAT[cat] = { run: 0, fail: 0, ex: [], sig: {} }); cc.run += c.run; cc.fail += c.run - c.pass; PASS += c.pass; FAIL += c.run - c.pass; delete tc[k]; });
   tf.forEach(f => { RAWF.push(f); });
@@ -398,6 +423,8 @@ async function runEvent(cfg, ci, tag) {
     bad.forEach(k => { console.log('\n== ' + k + ' (' + CAT[k].fail + ' fails)'); Object.entries(CAT[k].sig).sort((a, b) => b[1] - a[1]).slice(0, 8).forEach(([s, n]) => console.log('   x' + n + '  ' + s)); CAT[k].ex.forEach(e => console.log('   - ' + e)); });
   }
   if (process.env.MD_RAW) RAWF.slice(0, Number(process.env.MD_RAW)).forEach(f => console.log('RAW ' + f.slice(0, 1500)));
+  console.log('\n   v2010 vs v2008 cross oracle -- events where the app differs from the v2008 oracle, by the decision that explains it:');
+  Object.keys(CLS).sort((a, b) => CLS[b].n - CLS[a].n).forEach(k => { console.log('   ' + String(CLS[k].n).padStart(5) + '  ' + k); CLS[k].ex.forEach(e => console.log('            e.g. ' + e.slice(0, 260))); });
   console.log('\n' + (FAIL ? FAIL + ' FAILED' : 'ALL ' + PASS + ' CHECKS PASSED') + '   (total ' + (PASS + FAIL) + ')');
   process.exit(FAIL ? 1 : 0);
 })().catch(e => { console.log('CRASH ' + (e && e.stack)); process.exit(2); });
