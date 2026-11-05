@@ -92,13 +92,23 @@ function oBanker(g, opts) {
   const ls = cfg.loserStart || 16;
   const lastN = 19 - ls;
   const loserFromPos = lastN > 0 ? (n - lastN + 1) : Infinity;   // 1-based play position the phase starts on
+  // v2017 (owner decisions 11/5, replaces the old order[(hole - 1) % n] formula): the rotation is a TURN walked in
+  // play order -- the first hole PLAYED is player 1's; a player who left is skipped and the next takes his turn (1);
+  // a participant missing from the saved order joins at the end (2); a banker who walks off ON his rotation turn
+  // (left after the previous hole) holds the hole and pays every player its value (3); under 3 players no game (4).
+  const walkOff = (pid, hole) => { const L = g.leftRound && g.leftRound.byId && g.leftRound.byId[pid]; return L > 0 && cfg.mode !== 'pick' && oPos(g, hole) === oPos(g, L) + 1; };
+  const ROT = {};
+  { let ord = (bd.bankerOrder && bd.bankerOrder.length) ? bd.bankerOrder.map(id => parts.find(p => p.id === id)).filter(Boolean) : parts.slice();
+    if (!ord.length) ord = parts.slice();
+    parts.forEach(p => { if (!ord.includes(p)) ord.push(p); });   // fuzz: no mid-round joins, nobody scored late
+    let ptr = 0;
+    oSeq(g).forEach(hole => { ROT[hole] = null; for (let k = 0; k < ord.length; k++) { const c = ord[(ptr + k) % ord.length]; if (oActive(g, c.id, hole) || walkOff(c.id, hole)) { ROT[hole] = c; ptr = (ptr + k + 1) % ord.length; break; } } }); }
   const bankerFor = hole => {
+    if (parts.length < 3) return null;
     const act = parts.filter(p => oActive(g, p.id, hole)); if (!act.length) return null;
     const phase = cfg.mode === 'pick' ? true : (oPos(g, hole) + 1 >= loserFromPos);
     if (phase && bd.picks && bd.picks[hole]) return act.find(p => p.id === bd.picks[hole]) || null;
-    const ord = (bd.bankerOrder && bd.bankerOrder.length) ? bd.bankerOrder.map(id => act.find(p => p.id === id)).filter(Boolean) : act;
-    if (!ord.length) return act[(hole - 1) % act.length];
-    return ord[(hole - 1) % ord.length];
+    return ROT[hole];
   };
   // auto-press streaks (play order)
   const ap = {};
@@ -107,14 +117,16 @@ function oBanker(g, opts) {
     for (const hole of oSeq(g)) {
       const b = bankerFor(hole); if (!b) continue; const i = hole - 1;
       parts.forEach(p => { if (p.id !== b.id && (st[p.id] || 0) >= down) { (ap[hole] = ap[hole] || {})[p.id] = true; } });
-      const bs = oSc(g, b.id, i, cfg.net); if (bs == null) continue;
-      parts.forEach(p => { if (p.id === b.id) return; const s = oSc(g, p.id, i, cfg.net); if (s == null) return; if (s < bs) st[p.id] = 0; else if (bs < s) st[p.id] = (st[p.id] || 0) + 1; });
+      const walked = !oActive(g, b.id, hole);   // decision 3: a forfeited hole is a hole every scorer won
+      const bs = oSc(g, b.id, i, cfg.net); if (bs == null && !walked) continue;
+      parts.forEach(p => { if (p.id === b.id) return; const s = oSc(g, p.id, i, cfg.net); if (s == null) return; if (walked || s < bs) st[p.id] = 0; else if (bs < s) st[p.id] = (st[p.id] || 0) + 1; });
     }
   }
   const defBet = cfg.defaultBet > 0 ? cfg.defaultBet : (opts.legacyDefault ? 1 : 0);
   for (let i = 0; i < n; i++) {
     const hole = i + 1, b = bankerFor(hole); if (!b) continue;
-    const bRaw = oRaw(g, b.id, i); if (bRaw == null) continue;
+    const walked = !oActive(g, b.id, hole);   // v2017 decision 3
+    const bRaw = oRaw(g, b.id, i); if (bRaw == null && !walked) continue;
     const hd = bd.holes[hole] || {};
     const act = parts.filter(p => oActive(g, p.id, hole));
     const bird = {}, eag = {}; let anyB = false, anyE = false;
@@ -135,7 +147,7 @@ function oBanker(g, opts) {
       else if (mode === 'anyone' && (bird[p.id] || bird[b.id])) mult *= (triple && (eag[p.id] || eag[b.id])) ? 3 : 2;
       if (ap[hole] && ap[hole][p.id]) mult *= 2;
       const w = bet * mult, bs = oSc(g, b.id, i, cfg.net), ps = oSc(g, p.id, i, cfg.net);
-      if (bs < ps) { m[b.id] += w; m[p.id] -= w; } else if (ps < bs) { m[b.id] -= w; m[p.id] += w; }
+      if (walked) { m[b.id] -= w; m[p.id] += w; } else if (bs < ps) { m[b.id] += w; m[p.id] -= w; } else if (ps < bs) { m[b.id] -= w; m[p.id] += w; }
     });
   }
   return m;
