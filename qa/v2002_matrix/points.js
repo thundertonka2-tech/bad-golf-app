@@ -61,6 +61,13 @@ function courseFor(mode) {
 
 // ───────────────────────── ORACLE primitives (independent of the app) ─────────────────────────
 const oN = g => (g.holes === 9 || g.pars.filter(x => x != null).length === 9) ? 9 : 18;
+// v2022 (Tyler 11/6): a FINISHED regular round that ended early for everyone (nobody has a full card and nobody
+// scored the last hole in play order) judges each player's quota on the holes he played, round(full x played / n);
+// a player with no holes keeps his full quota.
+const oEndedEarly = g => { if (!g.finishedAt || (g.t2 && g.t2.tournamentId) || (g.lg && g.lg.sid)) return false; const n = oN(g);
+  const ids = (g.players || []).map(p => p.id); const cnt = id => { let c = 0; for (let i = 0; i < n; i++) if (oRaw(g, id, i) != null) c++; return c; };
+  if (ids.some(id => cnt(id) >= n)) return false; const seq = oSeq(g), last = seq[seq.length - 1]; return !ids.some(id => oRaw(g, id, last - 1) != null); };
+const oQPlayed = (g, id, q0) => { const n = oN(g); let hp = 0; for (let i = 0; i < n; i++) if (oRaw(g, id, i) != null) hp++; return (hp > 0 && hp < n) ? Math.round(q0 * hp / n) : q0; };
 const oSeq = g => { const n = oN(g); let s = parseInt(g.startHole, 10); if (!(s >= 1 && s <= n)) s = 1; const a = []; for (let i = 0; i < n; i++) a.push(((s - 1 + i) % n) + 1); return a; };
 const oPos = (g, h) => oSeq(g).indexOf(h);
 const oWPos = (g, h) => { const k = oPos(g, h); return k >= 0 ? k : h - 1; };   // a hole outside the round keeps its old place
@@ -337,7 +344,8 @@ function oPointsGame(g, key) {
     return m;
   }
   if (!oDone(g)) return m;
-  const score = {}; P.forEach(p => score[p.id] = key === 'quota' ? tot[p.id] - quota[p.id] : tot[p.id]);
+  const _ee = key === 'quota' && oEndedEarly(g);   // v2022
+  const score = {}; P.forEach(p => score[p.id] = key === 'quota' ? tot[p.id] - (_ee ? oQPlayed(g, p.id, quota[p.id]) : quota[p.id]) : tot[p.id]);
   const buyin = cfg.buyin != null ? cfg.buyin : (key === 'stableford' ? (cfg.value || 0) : 0);
   const pot = P.length * buyin; P.forEach(p => m[p.id] = -buyin);
   let rk = P.filter(p => !(g.leftRound && g.leftRound.byId && g.leftRound.byId[p.id] > 0)); if (!rk.length) rk = P;
@@ -358,7 +366,7 @@ function oTeamQuota(g) {
     // is measured against his quota prorated to the holes he played, round(full x played / round holes).
     let hp = 0; for (let i = 0; i < n; i++) if (oRaw(g, p.id, i) != null) hp++;
     const L = g.leftRound && g.leftRound.byId && g.leftRound.byId[p.id];
-    const q = (L > 0 && hp < n) ? Math.round(q0 * hp / n) : q0; return t - q; };
+    const q = (L > 0 && hp < n) ? Math.round(q0 * hp / n) : ((oEndedEarly(g) && hp > 0 && hp < n) ? Math.round(q0 * hp / n) : q0); return t - q; };   // v2022: + ended early
   const at = A.reduce((s, p) => s + res(p), 0), bt = B.reduce((s, p) => s + res(p), 0);
   if ((cfg.mode || 'perpoint') === 'pool') { if (!oDone(g)) return m; const bi = cfg.buyin || 0, pot = (A.length + B.length) * bi; A.concat(B).forEach(p => m[p.id] = -bi);
     if (at > bt) A.forEach(p => m[p.id] += pot / A.length); else if (bt > at) B.forEach(p => m[p.id] += pot / B.length); else A.concat(B).forEach(p => m[p.id] += bi); return m; }

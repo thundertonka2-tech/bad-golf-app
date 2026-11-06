@@ -18,6 +18,28 @@ const seg=(lo,hi,label,id)=>{
     for(let i=lo;i<hi;i++) h+='<td>'+g.scores[p.id][i]+'</td>'; h+='<td class="tot">40</td></tr>';});
   return h+'</tbody></table>';
 };
+// v2022 (Tyler 11/6): a points game with its OWN tab is no longer repeated under Units.
+// First the real card: all three points games here have tabs -> no points blocks at all.
+{
+  doc.body.innerHTML = w.bgMatchViewHtml(seg(0,9,'Out','a')+seg(9,18,'In','b'), g);
+  const tabsHere = [...doc.querySelectorAll('.sc-tab')].map(b=>b.dataset.mode);
+  ok('v2022: the points games have their own tabs', tabsHere.filter(m=>m==='quota'||/^pt:/.test(m)).length>=1, tabsHere.join(','));
+  ok('v2022: no "points per hole" block under Units', doc.querySelectorAll('tbody.sc-units-band .sc-ub-head').length===0 && !doc.querySelector('table.sc-ub-mini'));
+  ok('v2022: no settles-after box under Units', doc.querySelectorAll('.sc-ub-foot').length===0, String(doc.querySelectorAll('.sc-ub-foot').length));
+  // the Tot column carries everything in (single-table card: the mini GPS card here has no Tot column)
+  const hdr0=['Player'].concat([1,2,3,4,5,6,7,8,9],['Out'],[10,11,12,13,14,15,16,17,18],['In'],['Tot']);
+  let one0='<table id="solo0"><thead><tr>'+hdr0.map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>';
+  g.players.forEach(p=>{one0+='<tr data-pid="'+p.id+'"><td>'+p.name+'</td>'+Array(21).fill('<td>4</td>').join('')+'</tr>';});
+  doc.body.innerHTML=one0+'</tbody></table>';
+  const s0=doc.getElementById('solo0'); w.bgMatchViewDecorate(s0,g); w.bgScApplyMode(s0,'units');
+  const um = w.bgUnitsCardModel(g); const bad = [];
+  g.players.forEach(p => { const r = um.rows[p.id]; if (!r) return; const td = s0.querySelector('tr[data-pid="'+p.id+'"]').lastElementChild;
+    const want = (w._bgUnitsFmt(r.totN + r.endN) || '0'); const got = td.textContent.trim(); if (got !== want) bad.push(p.name+':'+got+'≠'+want); });
+  ok('v2022: Units Tot = round total, everything in', !bad.length && um.end.length > 0, bad.join(' ') + ' end=' + um.end.length);
+}
+// Then the layout rules for a points game WITHOUT a tab of its own (stub the tab models away).
+const _qSave = w.bgQuotaCardModel, _pSave = w.bgPointsCardModels;
+w.bgQuotaCardModel = () => null; w.bgPointsCardModels = () => [];
 const stacked = w.bgMatchViewHtml(seg(0,9,'Out','a')+seg(9,18,'In','b'), g);
 doc.body.innerHTML = stacked;
 const tables=[...doc.querySelectorAll('table.mini-sc')];
@@ -46,14 +68,13 @@ if (strip) {
   const back=[...r1.querySelectorAll('td')].slice(10,19).map(td=>td.textContent.trim());
   ok('  back-nine points are there too', back.some(v=>/\d/.test(v)), back.join(','));
 }
-ok('settles-after-18 footer appears once', doc.querySelectorAll('.sc-ub-foot').length===1, String(doc.querySelectorAll('.sc-ub-foot').length));
-ok('  on the last table', !!tables[1].querySelector('.sc-ub-foot'));
+ok('v2022: no settles-after footer (Tot carries it)', doc.querySelectorAll('.sc-ub-foot').length===0, String(doc.querySelectorAll('.sc-ub-foot').length));
 
 // par row on the mini card must be tagged and hide in units
 const pars=[...doc.querySelectorAll('tr.sc-par-row')];
 ok('mini-card Par rows tagged (class="par" markup)', pars.length===2, String(pars.length));
 tables.forEach(t=>w.bgScApplyMode(t,'units'));
-ok('Units: both Par rows hidden', pars.every(p=>p.style.display==='none'), pars.map(p=>p.style.display).join('|'));
+ok('Units: both Par rows SHOWN (v2022: the full card on every tab)', pars.every(p=>p.style.display===''), pars.map(p=>p.style.display).join('|'));
 tables.forEach(t=>w.bgScApplyMode(t,'strokes'));
 ok('Strokes: both Par rows back', pars.every(p=>p.style.display===''));
 ok('Strokes: the bands are hidden', [...doc.querySelectorAll('tbody.sc-units-band')].every(b=>b.style.display==='none'));
@@ -67,5 +88,6 @@ const solo=doc.getElementById('solo'); w.bgMatchViewDecorate(solo,g);
 ok('single-table card: no mini strip', !solo.querySelector('table.sc-ub-mini'));
 ok('single-table card: aligned band rows instead', solo.querySelectorAll('.sc-ub-row').length>0);
 ok('single-table card: heading present once', solo.querySelectorAll('.sc-ub-head').length>=1);
+w.bgQuotaCardModel = _qSave; w.bgPointsCardModels = _pSave;
 console.log('\n'+(fails? fails+' FAILURE(S)':'ALL STACKED-CARD CHECKS PASSED'));
 process.exit(fails?1:0);

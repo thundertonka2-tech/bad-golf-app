@@ -112,21 +112,22 @@ const chips = [...t.querySelectorAll('caption.sc-tabs .sc-tab')].map(b => b.data
 // its 4 players, so the match is a side bet and Strokes leads. Units is always last.
 // (qa/qa_scorecard_tab_order.js covers the ordering rule itself, both ways round.)
 // v2017: the round plays Quota + Team Quota, so the Quota tab rides last.
-ok('four chips, side-bet match: strokes | match | units | quota', JSON.stringify(chips) === JSON.stringify(['strokes','match','units','quota']), chips.join('|'));
+ok('chips, side-bet match: strokes | match | units | quota (+ v2020 points tabs)', JSON.stringify(chips.slice(0,4)) === JSON.stringify(['strokes','match','units','quota']) && chips.slice(4).every(c => /^pt:/.test(c)), chips.join('|'));
 const row = () => [...t.querySelectorAll('tbody tr[data-pid="p0"] td')].map(td => td.textContent.trim());
 w.bgScApplyMode(t, 'strokes');
 ok('Strokes restores the real scores', row()[1] === '4' && row()[3] === '2');
-ok('the bands are hidden outside Units', t.querySelector('tbody.sc-units-band').style.display === 'none');
+ok('v2022: no band under the card at all (points games have their own tabs; Tot carries the end games)', !t.querySelector('tbody.sc-units-band'));
 w.bgScApplyMode(t, 'match');
 ok('Match shows running status', /[↑↓]|AS/.test(row()[1] || ''), row().slice(1,4).join(','));
 w.bgScApplyMode(t, 'units');
 const ut = row();
 ok('Units shows signed numbers', /^[+−]\d/.test(ut[3] || ''), ut.slice(1,6).join(','));
-ok('the bands are visible in Units', t.querySelector('tbody.sc-units-band').style.display === '');
+ok('v2022: still no band in Units', !t.querySelector('tbody.sc-units-band'));
 ok('hole 3 in the DOM == the model', ut[3] === m.rows.p0.cells[2], ut[3] + ' vs ' + m.rows.p0.cells[2]);
 ok('Out in the DOM == the model', ut[10] === m.rows.p0.out);
 ok('In in the DOM == the model', ut[20] === m.rows.p0.inn);
-ok('Tot in the DOM == the model', ut[21] === m.rows.p0.tot, ut[21] + ' vs ' + m.rows.p0.tot);
+const _allIn = (m.end && m.end.length && Math.abs(m.rows.p0.endN || 0) >= 0.005) ? (w._bgUnitsFmt(m.rows.p0.totN + m.rows.p0.endN) || '0') : m.rows.p0.tot;
+ok('v2022: Tot in the DOM == round total, everything in', ut[21] === _allIn, ut[21] + ' vs ' + _allIn);
 const tap = t.querySelector('tbody tr[data-pid="p0"] td:nth-child(4) span[data-ub]');
 ok('a paying hole is tappable', !!tap);
 if (tap) { w.bgUnitsCellTap({ preventDefault(){}, stopPropagation(){} }, tap);
@@ -134,24 +135,28 @@ if (tap) { w.bgUnitsCellTap({ preventDefault(){}, stopPropagation(){} }, tap);
   ok('the breakdown popup opens', !!pop);
   ok('and itemises each game plus the hole total', !!pop && /Skins/.test(pop.textContent) && /This hole/.test(pop.textContent));
   if (pop) pop.remove(); }
-const band = t.querySelector('tbody.sc-units-band').textContent;
-ok('the points band names Stableford', /Stableford/.test(band));
-ok('the after-18 line is there', /Settles after the round/.test(band));
-ok('the reconciling round total is there', /Round total, everything in/.test(band));
+// v2022: the points band and the after-18 box are gone; Stableford has its own tab and Tot is everything in
+ok('v2022: Stableford has its own tab', !!t.querySelector('.sc-tab[data-mode="pt:stableford"]'));
+const totTap = t.querySelector('tbody tr[data-pid="p0"] td:last-child span[data-ub]');
+if (m.end && m.end.length && Math.abs(m.rows.p0.endN || 0) >= 0.005) {
+  ok('v2022: the Tot cell itemises the round total', !!totTap);
+  if (totTap) { w.bgUnitsCellTap({ preventDefault(){}, stopPropagation(){} }, totTap); const pop = doc.getElementById('bg-units-pop');
+    ok('v2022: ... hole by hole plus each game settled at the end', !!pop && /Hole by hole/.test(pop.textContent) && m.end.every(e => pop.textContent.indexOf(e.label) >= 0 || Math.abs((e.money||{}).p0||0) < 0.005), pop && pop.textContent.slice(0,200)); if (pop) pop.remove(); }
+}
 // a round with no match at all
 const gNM = JSON.parse(JSON.stringify(g)); gNM.code = 'NOMATCH'; gNM.updatedAt = 2;
 delete gNM.games.match; delete gNM.games.teamMatch; delete gNM.games.scramble;
 doc.body.innerHTML = tableHtml('t2');
 const t2 = doc.getElementById('t2');
 ok('a round with NO match still decorates', w.bgMatchViewDecorate(t2, gNM) === true);
-ok('  and offers strokes + units (+ quota, v2017) only', JSON.stringify([...t2.querySelectorAll('.sc-tab')].map(b => b.dataset.mode)) === JSON.stringify(['strokes','units','quota']));
+ok('  and offers strokes + units (+ quota, v2017; + points tabs, v2020) only', (function(){ const c=[...t2.querySelectorAll('.sc-tab')].map(b => b.dataset.mode); return JSON.stringify(c.slice(0,3)) === JSON.stringify(['strokes','units','quota']) && c.slice(3).every(x => /^pt:/.test(x)); })());
 ok('  and still opens on Strokes', w.bgScViewMode(gNM) === 'strokes');
 ok('bgMatchViewHtml wraps a units-only round',
    /data-sc-units/.test(w.bgMatchViewHtml(tableHtml('t3'), gNM)));
 // the stacked GPS card: two tables, one footer
 const stacked = w.bgMatchViewHtml(tableHtml('a') + tableHtml('b'), g);
-ok('a stacked card carries the after-18 footer exactly once',
-   (stacked.match(/Settles after the round/g) || []).length === 1,
+ok('v2022: a stacked card has no after-18 footer',
+   (stacked.match(/Settles after the round/g) || []).length === 0,
    String((stacked.match(/Settles after the round/g) || []).length));
 ok('and the tabs exactly once', (stacked.match(/data-mode="units"/g) || []).length === 1);
 

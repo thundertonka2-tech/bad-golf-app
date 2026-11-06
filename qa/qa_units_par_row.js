@@ -21,8 +21,8 @@ ok('column detection still reads the HOLE header, not the par row',
    [...t.querySelectorAll('tbody tr[data-pid="p0"] td')].length===22);
 w.bgScApplyMode(t,'strokes'); ok('Strokes: par row visible', par().style.display==='', JSON.stringify(par().style.display));
 w.bgScApplyMode(t,'match');   ok('Match: par row visible',   par().style.display==='');
-w.bgScApplyMode(t,'units');   ok('Units: par row HIDDEN',    par().style.display==='none', par().style.display);
-ok('Units: the points/settle band is showing', (t.querySelector('tbody.sc-units-band')||{style:{}}).style.display==='');
+w.bgScApplyMode(t,'units');   ok('Units: par row SHOWN (v2022: full card on every tab)', par().style.display==='', par().style.display);
+ok('v2022: no points/settle band under Units', !t.querySelector('tbody.sc-units-band') || [...t.querySelectorAll('tbody.sc-units-band .sc-ub-head, tbody.sc-units-band .sc-ub-foot')].length===0);
 w.bgScApplyMode(t,'strokes'); ok('back to Strokes: par row returns', par().style.display==='');
 ok('  and real scores are back', [...t.querySelectorAll('tbody tr[data-pid="p0"] td')][1].textContent.trim()==='4');
 console.log('\n'+(fails? fails+' FAILURE(S)':'ALL PAR-ROW CHECKS PASSED'));
