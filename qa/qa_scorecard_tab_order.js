@@ -65,7 +65,8 @@ const card=(g,id)=>{let h='<table id="'+id+'"><thead><tr>'+hdr.map(x=>'<th>'+x+'
   g.games.match=pair(g,0,1);
   doc.body.innerHTML=card(g,'a'); const t=doc.getElementById('a'); w.bgMatchViewDecorate(t,g);
   const chips=[...t.querySelectorAll('.sc-tab')].map(b=>b.dataset.mode);
-  ok('side-bet match: Strokes | Match | Units', JSON.stringify(chips)===JSON.stringify(['strokes','match','units']), chips.join(' | '));
+  // v2020: this round plays Splix 6's, a points game, so it also gets its own points tab after Units (like Quota since v2017)
+  ok('side-bet match: Strokes | Match | Units | Splix 6\'s points', JSON.stringify(chips)===JSON.stringify(['strokes','match','units','pt:splixSixes']), chips.join(' | '));
 }
 {
   const g=mk(4);
