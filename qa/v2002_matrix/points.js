@@ -348,6 +348,18 @@ function oPointsGame(g, key) {
     P.forEach(p => { if (W.indexOf(p) >= 0) return; const o = Math.max(0, top - R[p.id]) * (cfg.value || 0); m[p.id] -= o; W.forEach(x => m[x.id] += o / W.length); });
     return m;
   }
+  if (key === 'stableford' && (cfg.mode || 'pool') === 'perpoint') {
+    // v2025 (Tyler 11/6, "whatever is standard", Golf Digest): at the end the winner collects (his points -
+    // each other player's) x value; tied winners split; a leaver can't win and owes the gap on the holes he played.
+    if (!oDone(g)) return m;
+    const lft = id => !!(g.leftRound && g.leftRound.byId && g.leftRound.byId[id] > 0);
+    let rk = P.filter(p => !lft(p.id)); if (!rk.length) rk = P;
+    const top = Math.max(...rk.map(p => tot[p.id])); const W = rk.filter(p => tot[p.id] === top);
+    P.forEach(p => { if (W.indexOf(p) >= 0) return; W.forEach(wp => {
+      const ref = (lft(p.id) && rk.length < P.length) ? H.reduce((s, hr) => s + ((hr[p.id] != null && hr[wp.id] != null) ? hr[wp.id] : 0), 0) : tot[wp.id];
+      const o = Math.max(0, ref - tot[p.id]) * (cfg.value || 0) / W.length; m[p.id] -= o; m[wp.id] += o; }); });
+    return m;
+  }
   if ((cfg.mode || 'pool') === 'perpoint') {
     H.forEach(hr => { const ids = P.map(p => p.id).filter(id => hr[id] != null); if (ids.length < 2) return;
       const res = {}; ids.forEach(id => res[id] = key === 'quota' ? hr[id] - quota[id] / n : hr[id]);
@@ -624,7 +636,9 @@ function tcase(game, label, got, want, ok, extra) { T.push({ game, label, ok });
 // T10 Stableford/Quota per-point leaver (house rule: scored on holes played only)
 { const g = hand('SFL', [{ scores: flat(18, 4) }, { scores: flat(18, 5) }, { scores: flat(9, 3).concat(flat(9, null)) }], { leftRound: { at: 1, byId: {} } }); const [a, b, c] = ids(g); g.leftRound.byId[c] = 9;
   g.games.stableford = Object.assign({ mode: 'perpoint', net: false, value: 1 }, P(g)); roundHoles(g);
-  const m = CALC.stableford(g).money; tcase('stableford', 'per-point leaver after 9: C +9, A +4.5, B -13.5', m, { [a]: 4.5, [b]: -13.5, [c]: 9 }, m[a] === 4.5 && m[b] === -13.5 && m[c] === 9); }
+  // v2025 (by the book): A (36 pts) wins; B (18) pays A the 18-point gap; C left after 9 -- he can't win and owes
+  // the gap on his 9 holes only (A's 18 there vs his 36 -> nothing). Was v1901 vs-the-average: A +4.5, B -13.5, C +9.
+  const m = CALC.stableford(g).money; tcase('stableford', 'per-point leaver after 9 (by the book): A +18, B -18, C 0', m, { [a]: 18, [b]: -18, [c]: 0 }, m[a] === 18 && m[b] === -18 && m[c] === 0); }
 // T11 Quota plus handicap: +2 player quota = 38
 { const g = hand('QPL', [{ hcp: -2, scores: flat(18, 4) }, { hcp: 10, scores: flat(18, 5) }]); const [a, b] = ids(g);
   g.games.quota = Object.assign({ mode: 'pool', basis: 'auto', buyin: 10, payout: 'winner' }, P(g)); roundHoles(g);
