@@ -337,6 +337,17 @@ function oPointsGame(g, key) {
       tot[p.id] += hr[p.id]; });
     H.push(hr);
   }
+  if (key === 'quota' && (cfg.mode || 'pool') === 'perpoint') {
+    // v2024 (Tyler 11/6, "by the book"): at the end every other player pays the WINNER the gap in
+    // (points - quota) x value; tied winners split; a leaver can't win and is judged on his prorated quota.
+    if (!oDone(g)) return m;
+    const _ee = oEndedEarly(g); const lft = id => !!(g.leftRound && g.leftRound.byId && g.leftRound.byId[id] > 0);
+    const R = {}; P.forEach(p => { const q = (lft(p.id) || _ee) ? oQPlayed(g, p.id, quota[p.id]) : quota[p.id]; R[p.id] = tot[p.id] - q; });
+    let rk = P.filter(p => !lft(p.id)); if (!rk.length) rk = P;
+    const top = Math.max(...rk.map(p => R[p.id])); const W = rk.filter(p => R[p.id] === top);
+    P.forEach(p => { if (W.indexOf(p) >= 0) return; const o = Math.max(0, top - R[p.id]) * (cfg.value || 0); m[p.id] -= o; W.forEach(x => m[x.id] += o / W.length); });
+    return m;
+  }
   if ((cfg.mode || 'pool') === 'perpoint') {
     H.forEach(hr => { const ids = P.map(p => p.id).filter(id => hr[id] != null); if (ids.length < 2) return;
       const res = {}; ids.forEach(id => res[id] = key === 'quota' ? hr[id] - quota[id] / n : hr[id]);

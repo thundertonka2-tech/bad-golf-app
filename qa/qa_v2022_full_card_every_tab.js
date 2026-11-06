@@ -58,7 +58,8 @@ const K = { id: 'k', name: 'Kevin Wells', hcp: 10, tee: 'White' }, T = { id: 't'
   ok('ended early: result -2 / +9', r.result.k === -2 && r.result.t === 9, JSON.stringify(r.result));
   const live = w.calcQuota(clone(base));
   ok('still playing: full quota', live.quotas.k === 26 && live.quotas.t === 34, JSON.stringify(live.quotas));
-  ok('per-point units unchanged by the cut', Math.abs(r.money.t - live.money.t) < 1e-9 && Math.abs(r.money.t - 97 / 18) < 1e-9, r.money.t + ' vs ' + live.money.t);
+  // v2024 (by the book): per-point pays at the end -- the loser pays the winner the gap on the cut quotas (+9 vs -2 = 11)
+  ok('per-point: Kevin pays Tyler the 11-point gap at the end', r.money.t === 11 && r.money.k === -11 && live.money.t === 0, r.money.t + ' / live ' + live.money.t);
   const ev = Object.assign(clone(fin), { t2: { tournamentId: 'ev1', day: 1 } });
   ok('event round: unchanged here (events use the early-finish rule)', w.calcQuota(ev).quotas.k === 26);
   const lg = Object.assign(clone(fin), { lg: { sid: 'season-1' } });
