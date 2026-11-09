@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.2031-->
+<!--BGVER=v2026.11.2032-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12333,7 +12333,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.2031';
+const BG_BUILD = 'v2026.11.2032';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -80551,6 +80551,13 @@ async function showIncomingInvite(inv) {
       }
     } catch (e) {}
   }
+  // v2032 (Tyler 11/9): "it prompted me twice before I could join" -- Gregory's day start sent
+  // the event invite AND the cart's round invite to a player who was already on his roster
+  // under his own account, and each popped its own Accept screen. A player the host added BY
+  // ACCOUNT is never asked: the event is just added and the round is just joined. The only
+  // question left is the one that matters -- leaving another unfinished round on this phone
+  // (bgConfirmLeaveForJoin). Guests and name-only seats keep the normal screens.
+  try { if (await _bgAutoAcceptInvite(inv, { isT2: isT2, isOR: isOR })) return true; } catch (e) {}
   // Keep the invite PENDING until the user explicitly Joins or Declines, so a
   // missed popup re-surfaces on the next realtime ping / poll / launch instead of
   // vanishing. Accept/Decline update the row by id (accepted/declined), removing
@@ -80637,11 +80644,55 @@ async function bgConfirmLeaveForJoin(newCode, newG) {
   } catch (e) { console.warn('bgConfirmLeaveForJoin', e); }
   return true;
 }
-async function acceptIncomingInvite() {
-  const inv = _pendingInvite;
-  document.getElementById('incoming-invite-modal').classList.remove('show');
+// v2032: is this signed-in account the one the host put in this round / on this event roster?
+const _bgAutoInvBusy = new Set();
+async function _bgAutoAcceptInvite(inv, k) {
+  if (!inv || !inv.id || !supa || !_authUser || !_authUser.id) return false;
+  if (k && k.isOR) return false;                       // open round: grabbing a spot is a choice
+  if (_bgAutoInvBusy.has(inv.id)) return true;         // realtime + poll can both hand us the same row
+  const code0 = String(inv.game_code || '');
+  const myUid = String(_authUser.id);
+  if (k && k.isT2) {
+    const tid = code0.slice(3);
+    let onRoster = false;
+    try {
+      const r = await _bgRead(() => supa.from('tournament_players').select('id').eq('tournament_id', tid).eq('user_id', myUid).limit(1), 'autoAcceptT2');
+      onRoster = !!(r && r.ok && Array.isArray(r.data) && r.data.length);
+    } catch (e) {}
+    if (!onRoster) return false;
+    _bgAutoInvBusy.add(inv.id);
+    try { await supa.from('game_invites').update({ status: 'accepted' }).eq('id', inv.id); } catch (e) {}
+    try { if (typeof renderT2List === 'function') renderT2List(); } catch (e) {}
+    setTimeout(function () { try { checkPendingInvites(); } catch (e) {} }, 700);   // the round invite that came with it
+    return true;
+  }
+  let g = null; try { g = await loadGame(code0); } catch (e) {}
+  if (!g || g.finishedAt || !Array.isArray(g.players)) return false;
+  let meN = ''; try { meN = normalizeNameSegment(String((await getMeName()) || '')); } catch (e) {}
+  const mine = g.players.some(p => p && ((p.uid && String(p.uid) === myUid) || (meN && normalizeNameSegment(String(p.name || '')) === meN)));
+  if (!mine) return false;
+  try { if (meN && Array.isArray(g.declinedBy) && g.declinedBy.some(n => normalizeNameSegment(String(n)) === meN)) return false; } catch (e) {}
+  _bgAutoInvBusy.add(inv.id);
+  if (g.scheduled === true) {
+    // a round set up for later: just put it in my rounds, nothing to join yet
+    try { await supa.from('game_invites').update({ status: 'accepted' }).eq('id', inv.id); } catch (e) {}
+    try { await addToRecent(g); } catch (e) {}
+    setTimeout(function () { try { checkPendingInvites(); } catch (e) {} }, 700);
+    return true;
+  }
+  if (state && state.game && state.game.code === g.code && !state.viewOnlyMode) {
+    try { await supa.from('game_invites').update({ status: 'accepted' }).eq('id', inv.id); } catch (e) {}
+    return true;   // already in it
+  }
+  try { await acceptIncomingInvite(inv, { auto: true }); } catch (e) { try { console.warn('[BG v2032] auto-join', e); } catch (e2) {} }
+  return true;   // handled either way -- never fall through to a second screen
+}
+async function acceptIncomingInvite(_invArg, _opts) {
+  const inv = (_invArg && _invArg.id) ? _invArg : _pendingInvite;
+  const _auto = !!(_opts && _opts.auto);
+  if (!_auto) document.getElementById('incoming-invite-modal').classList.remove('show');   // v2032: an auto-join never closes another invite's screen
   setTimeout(function () { try { checkPendingInvites(); } catch (e) {} }, 700);   // surface the next pending invite (e.g. the game) once this one is handled
-  _pendingInvite = null;   // v1802 (L9): cleared on accept exactly as decline does — a second tap must not re-accept
+  if (!_auto || _pendingInvite === inv) _pendingInvite = null;   // v1802 (L9): cleared on accept exactly as decline does — a second tap must not re-accept
   if (!inv) return;
   // v1140: this update's { error } was dropped, so an invite that failed to accept
   // still produced the "Added to your rounds" success toast further down.
@@ -80674,7 +80725,11 @@ async function acceptIncomingInvite() {
   }
   const g = await loadGame(inv.game_code);
   if (!g) { showToast('Round not found — it may have ended'); return; }
-  if (!(await bgConfirmLeaveForJoin(inv.game_code, g))) { showToast('Stayed put \u2014 you can join from Home \u203a Live now any time'); return; }   // v1834
+  if (!(await bgConfirmLeaveForJoin(inv.game_code, g))) {
+    // v2032: an auto-join that the player turned down stays a normal invite they can take later
+    if (_auto) { try { await supa.from('game_invites').update({ status: 'pending' }).eq('id', inv.id); } catch (e) {} }
+    showToast('Stayed put \u2014 you can join from Home \u203a Live now any time'); return;
+  }   // v1834
   // Accepting = I've joined, so this round counts toward my stats. Clear the
   // not-joined flag and undo any earlier decline.
   try {
@@ -80702,7 +80757,10 @@ async function acceptIncomingInvite() {
   }
   enableGameTabs(true);
   switchTab(state.viewOnlyMode ? 'board' : 'score');
-  showToast('Joined the round');
+  try {
+    if (_auto) { let _h = ''; try { _h = String(g.createdBy || '').split(/\s+/)[0]; } catch (e) {} showToast('You\u2019re in' + (_h ? ' ' + _h + '\u2019s round' : ' the round') + (g.course ? ' at ' + g.course : '') + ' \u2713', 3500); }
+    else showToast('Joined the round');
+  } catch (e) {}
   // Join now → drop straight onto the hole's GPS screen. Force-open (NOT auto): auto
   // mode silently bails back to the scorecard/settings when it can't confirm the hole
   // is mapped, which is exactly what stranded joiners on the setup screen. The
@@ -132857,13 +132915,17 @@ async function timesOpenDetail(id){
   var myEntry=players.filter(function(p){return (uid&&p.uid&&String(p.uid)===String(uid))||(meN&&normalizeNameSegment(p.name)===meN);})[0];
   var myStatus=myEntry?myEntry.status:'';
   var dateLbl=t.date?new Date(t.date+'T00:00:00').toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}):'';
+  /* v2032 (Tyler 11/9): "nobody is accepting until the round starts so this is kind of pointless."
+     A player added by ACCOUNT is in -- no Accept, no Verify. Verify stays only for a name-only
+     guest (no account), the one seat nobody can confirm from a phone. Declined still shows. */
+  function _ttIn(p){ return !!p && (p.status==='accepted' || p.status==='verified' || (p.uid && p.status!=='declined')); }
   function _stBadge(s){ if(s==='accepted') return '<span class="pv-in">✓ in</span>'; if(s==='verified') return '<span class="pv-in">✓ verified</span>'; if(s==='declined') return '<span class="pv-dec">declined</span>'; if(s==='pending') return '<span class="pv-pend">⏳ invited</span>'; return ''; }
   var plrows=players.map(function(p){
     var meta=[]; if(p.hcp!==''&&p.hcp!=null) meta.push('HCP '+p.hcp); if(p.tee) meta.push(p.tee);
-    var vbtn=(manage && t.type==='teetime' && p.status!=='accepted' && p.status!=='verified')?('<button class="bg-btn times-mini" onclick="timesVerifyPlayer(\''+tid+'\',\''+_timesEsc(p.name)+'\')">Verify</button>'):'';
+    var vbtn=(manage && t.type==='teetime' && !_ttIn(p))?('<button class="bg-btn times-mini" onclick="timesVerifyPlayer(\''+tid+'\',\''+_timesEsc(p.name)+'\')">Verify</button>'):'';
     var _isOwnerSeat=false; try { _isOwnerSeat = !!(t.createdByUid && p.uid && String(p.uid)===String(t.createdByUid)); } catch(e){}   // v1898: the creator is always "in"
     if(_isOwnerSeat) vbtn='';
-    return '<div class="times-prow-view"><span class="pv-n">'+_timesEsc(_timesDispName(p.name))+(meta.length?' <small>'+_timesEsc(meta.join(' · '))+'</small>':'')+'</span><span class="pv-s">'+(t.type==='teetime'?_stBadge(_isOwnerSeat?'accepted':p.status):'')+vbtn+'</span></div>';
+    return '<div class="times-prow-view"><span class="pv-n">'+_timesEsc(_timesDispName(p.name))+(meta.length?' <small>'+_timesEsc(meta.join(' · '))+'</small>':'')+'</span><span class="pv-s">'+(t.type==='teetime'?_stBadge((_isOwnerSeat||(_ttIn(p)&&p.status!=='verified'))?'accepted':p.status):'')+vbtn+'</span></div>';
   }).join('');
   // Open spots are tappable when I can grab one: a tee time uses the accept flow,
   // a scheduled/open round uses timesJoinOpen. Otherwise they render as plain rows.
@@ -132887,7 +132949,7 @@ async function timesOpenDetail(id){
   // v1914 (Tyler): preview the course right from the tee time.
   try{ var _pvc=t.courseId||((typeof _timesCourseId==='function')?_timesCourseId(t.course):''); if(_pvc && typeof previewCourseGps==='function' && !_timesClosed(t)) acts+='<button class="bg-btn bg-btn--ghost times-act times-act-ghost" onclick="try{previewCourseGps(\''+_timesEsc(_pvc)+'\')}catch(e){}">\uD83D\uDC40 Preview course</button>'; }catch(e){}
   if(t.type==='teetime'){
-    if(myEntry && myStatus!=='accepted' && myStatus!=='verified'){
+    if(myEntry && !_ttIn(myEntry)){
       acts+='<button class="bg-btn bg-btn--primary times-act" onclick="timesAccept(\''+tid+'\')">Accept</button>';
       acts+='<button class="bg-btn bg-btn--danger times-act times-act-danger" onclick="timesDecline(\''+tid+'\')">Decline</button>';
     } else if(myEntry && !manage){
