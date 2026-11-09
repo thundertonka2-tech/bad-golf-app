@@ -1,0 +1,5 @@
+-- v2033 (2026-11-09): APPLIED to production via migration v2033_t2_join_link_auto_approve_accounts.
+-- Kept here for the record. A signed-in account that asks in through an event join link is approved
+-- on the spot (bg_t2_req_submit -> _bg_t2_req_approve(auto)); no-account requests still wait for the
+-- director (bg_t2_req_decide -> _bg_t2_req_approve). _bg_t2_req_approve is not callable by app users.
+-- Directors get a "New player — X joined <event> from your link" push for auto-approved players.
