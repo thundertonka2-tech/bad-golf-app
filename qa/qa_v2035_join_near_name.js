@@ -27,7 +27,7 @@ const { chromium } = require('playwright'), path = require('path');
       from: () => { const a = { select() { return a; }, eq() { return a; }, in() { return a; }, maybeSingle() { return Promise.resolve({ data: null, error: null }); }, then(r) { return Promise.resolve({ data: [], error: null }).then(r); } }; return a; },
       auth: { getSession: async () => ({ data: { session: null } }) }
     };
-    window.isSignedIn = () => false;
+    window.isSignedIn = () => true; window.getMeName = async () => ''; window.getPlayerRoster = async () => [];
     window.showToast = (m) => window.__calls.push({ fn: 'toast', args: m });
   });
   const open = async (first, last, hcp) => {

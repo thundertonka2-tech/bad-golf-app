@@ -1,5 +1,5 @@
 // qa/qa_v2033_joinlink_accounts.js -- Tyler 11/9: on an event join link, a signed-in account joins right away
-// (screen says Join, server answers 'approved', lands on the event); no account still sends a request.
+// (screen says Join, server answers 'approved', lands on the event). v2036: no account -> sign in first, nothing sent.
 const { chromium } = require('playwright'), path = require('path');
 (async () => {
   const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 390, height: 844 }, isMobile: true });
@@ -16,7 +16,10 @@ const { chromium } = require('playwright'), path = require('path');
       return { data: null, error: null }; } };
     await openT2RequestScreen('ev1'); await new Promise(r => setTimeout(r, 150));
     const ov = document.getElementById('t2-req-ov');
-    const title = ov ? ov.querySelector('h2').textContent : '', btn = ov ? ov.querySelector('#t2req-send').textContent : '';
+    const title = ov ? ov.querySelector('h2').textContent : '';
+    // v2036: signed out now gets a Sign in screen (no request without an account)
+    if (ov && !ov.querySelector('#t2req-send')) return { title, btn: '', signin: !!ov.querySelector('#t2req-signin'), calls, toasts, opened, after: ov.textContent.replace(/\s+/g, ' ').slice(0, 160) };
+    const btn = ov ? ov.querySelector('#t2req-send').textContent : '';
     const set = (id, v) => { const i = ov.querySelector(id); if (i) { i.value = v; i.dispatchEvent(new Event('input', { bubbles: true })); } };
     set('#t2req-first', 'Tyler'); set('#t2req-last', 'OConnor'); set('#t2req-hcp', '3');
     ov.querySelector('#t2req-send').click(); await new Promise(r => setTimeout(r, 300));
@@ -28,8 +31,8 @@ const { chromium } = require('playwright'), path = require('path');
   let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : (fail++, console.log('FAIL', m)); };
   ok(/Join this event/.test(a.title) && a.btn === 'Join', 'signed in: screen says Join this event / Join');
   ok(a.calls.includes('bg_t2_req_submit') && a.after === 'closed' && a.opened === 'ev1' && a.toasts.some(t => /You're in SR. SUNDAY/.test(t)), 'signed in: joined, lands on the event');
-  ok(/Ask to join/.test(n.title) && n.btn === 'Send request', 'no account: Ask to join / Send request');
-  ok(/Request sent/.test(n.after), 'no account: request sent, waits for the organizer');
+  ok(n.signin && !n.calls.includes('bg_t2_req_submit'), 'no account (v2036): Sign in screen, no request sent');
+  ok(/Sign in or create your free Bad Golf account/.test(n.after), 'no account (v2036): explains an account is needed to accept');
   ok(!errs.length, 'no page errors ' + errs.slice(0, 2).join(' | '));
   console.log('  ' + pass + ' passed, ' + fail + ' failed'); await b.close(); process.exit(fail ? 1 : 0);
 })();
