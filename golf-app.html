@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.2037-->
+<!--BGVER=v2026.11.2038-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12330,7 +12330,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.2037';
+const BG_BUILD = 'v2026.11.2038';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -21014,6 +21014,14 @@ async function flushDirtySingletons() {
   try { return await _flushDirtySingletonsInner(dirtyKeys); }
   finally { _flushingSingletons = false; }
 }
+/* v2038 RETRY BACKOFF (11/13 database jam). A shared save that never commits used to be retried every
+   15 s for as long as the tab stayed open. With the 2.9 MB course library failing on a server timeout,
+   one tab left open overnight sent thousands of whole-library reads + writes and the database stopped
+   answering. A key that fails now waits 30 s, then doubles each time up to 30 minutes. Success, a page
+   reload or coming back online clears the wait. Deliberate saves are not delayed - only this retry. */
+const _bgFlushBackoff = {};
+function _bgFlushFail(key) { try { const b = _bgFlushBackoff[key] || (_bgFlushBackoff[key] = { n: 0, next: 0 }); b.n++; b.next = Date.now() + Math.min(15000 * Math.pow(2, b.n), 1800000); } catch (e) {} }
+function _bgFlushOk(key) { try { delete _bgFlushBackoff[key]; } catch (e) {} }
 async function _flushDirtySingletonsInner(dirtyKeys) {
   try { if (!supaReady) await initSupabase(); } catch (e) {}
   if (!supa || !supaOnline) return;
@@ -21036,6 +21044,7 @@ async function _flushDirtySingletonsInner(dirtyKeys) {
       try { const _lr = JSON.parse(localStorage.getItem(key) || '[]'); if (Array.isArray(_lr)) { await savePlayerRoster(_lr); } } catch (e) { _singletonDirty[key] = true; _persistDirty(); }
       continue;
     }
+    try { const _bo = _bgFlushBackoff[key]; if (_bo && Date.now() < _bo.next) continue; } catch (e) {}   // v2038
     let v = null; try { v = localStorage.getItem(key); } catch (e) {}
     if (v == null) { _singletonDirty[key] = false; continue; }
     try {
@@ -21050,17 +21059,18 @@ async function _flushDirtySingletonsInner(dirtyKeys) {
           // v970: 'objectMap' was MISSING here while writeSharedSingleton guards it —
           // so a retry with a dead cloud read blind-wrote the local course map over
           // shared:courses and wiped every other admin's edits. Now symmetric.
-          if (['stringSet','objectMap','tombstones','recentGames','crewBoard','roundTemplates','aliasMap'].indexOf(_SHARED_MERGE_STRATEGY[key]) >= 0) { continue; }   // v1805 alias: aliasMap too
+          if (['stringSet','objectMap','tombstones','recentGames','crewBoard','roundTemplates','aliasMap'].indexOf(_SHARED_MERGE_STRATEGY[key]) >= 0) { _bgFlushFail(key); continue; }   // v1805 alias: aliasMap too; v2038 backs off
         } else if (_m !== undefined) { _data = _m; try { localStorage.setItem(key, JSON.stringify(_data)); } catch (e) {} }
       } catch (e) {}
       const { error } = await supa.from('games').upsert({ code: singletonRowCode(key), data: _data, updated_at: new Date().toISOString() });
-      if (!error) { _singletonDirty[key] = false; _singletonWroteAt[key] = Date.now(); _persistDirty(); }
-    } catch (e) {}
+      if (!error) { _singletonDirty[key] = false; _singletonWroteAt[key] = Date.now(); _persistDirty(); _bgFlushOk(key); }
+      else { _bgFlushFail(key); }
+    } catch (e) { _bgFlushFail(key); }
   }
 }
 try { setInterval(() => { flushDirtySingletons().catch(() => {}); }, 15000); } catch (e) {}
 try { flushDirtySingletons().catch(() => {}); } catch (e) {}   // retry any edits left unsaved from a previous session, on boot
-try { window.addEventListener('online', () => { flushDirtySingletons().catch(() => {}); }); } catch (e) {}
+try { window.addEventListener('online', () => { try { for (const _k in _bgFlushBackoff) delete _bgFlushBackoff[_k]; } catch (e) {} flushDirtySingletons().catch(() => {}); }); } catch (e) {}
 
 // ===== Course-GPS dirty queue (v216, Phase 2b) =====
 // course_gps is its own table, NOT covered by flushDirtySingletons. When a hole
@@ -28013,6 +28023,26 @@ async function persistCourseScorecard(courseId, name, pars, sis, tees, opts) {
         try { console.warn('[bg] refused an automatic card write: "' + name + '" into "' + courseId + '", which is "' + _known + '"'); } catch (e) {}
         return true;   // treated as a no-op, exactly like the other yields below
       }
+      /* v2038 WRONG-COURSE CARD GUARD (Tyler, 11/13). On 11/12 08:54 CT a round-start save wrote Buffalo
+         Creek's whole card (pars, stroke index, Gold/Blue/White/Green) into Fighting Joe. The name guard
+         above passed because the form had the right NAME and the wrong CARD. An automatic write whose
+         pars + stroke index + tee labels are exactly those of a DIFFERENT course loaded this session is
+         that course's card, not an edit. A factory-default card is left to the v1781 rule above. */
+      try {
+        const _sg = (p, s, t) => JSON.stringify([(p || []).map(Number), (s || []).map(Number), (Array.isArray(t) ? t : []).map(x => String((x && x.label) || '').trim().toLowerCase())]);
+        const _in = _sg(pars, sis, tees);
+        const _isDefault = JSON.stringify((pars || []).map(Number)) === JSON.stringify(STANDARD_PARS) && JSON.stringify((sis || []).map(Number)) === JSON.stringify(DEFAULT_SI);
+        if (!_isDefault && Array.isArray(pars) && pars.length && !(cur && _sg(cur.pars, cur.sis, cur.tees) === _in)) {
+          for (const _oid in _cardLoadedTs) {
+            if (_oid === courseId) continue;
+            const _oc = saves[_oid];
+            if (_oc && Array.isArray(_oc.pars) && _oc.pars.length && Array.isArray(_oc.tees) && _oc.tees.length && _sg(_oc.pars, _oc.sis, _oc.tees) === _in && !_bgSameCourseName(_oc.name || '', name || '')) {
+              try { console.warn('[bg v2038] refused an automatic card write: the card for "' + (_oc.name || _oid) + '" was about to be saved into "' + courseId + '"'); } catch (e) {}
+              return true;
+            }
+          }
+        }
+      } catch (e) {}
       if (cur) {
         const _same = JSON.stringify([cur.pars || [], cur.sis || [], cur.tees || []]) ===
                       JSON.stringify([pars || [], sis || [], Array.isArray(tees) ? tees : []]);
@@ -42583,7 +42613,18 @@ async function renderCourseList(query) {
 // Pick a course (by id) and populate name + scorecard editor accordingly.
 // Single code path used by the search picker, the add-new flow, and the
 // tournament prefill flow.
+/* v2038 (Tyler, 11/13: Fighting Joe showed Buffalo Creek's pars). selectCourseById sets the form's
+   course id first and fills the par / stroke-index / tee grids only after the scorecard read comes
+   back. Two selections close together (the home course loading as setup opens, then the course the
+   player actually picks) could finish out of order, so the slower one's card filled the grid under
+   the other course's id. Each call now takes a number; a card that arrives after the form has moved
+   on is dropped. _bgFormCardFor: null while a plain library course's card is still loading, the
+   course id once the grid holds that course's card, '' for every other path (combos, pickers). */
+let _bgCourseSelSeq = 0;
+let _bgFormCardFor = '';
 async function selectCourseById(id) {
+  const _selSeq = ++_bgCourseSelSeq;
+  _bgFormCardFor = '';
   const status = $('course-status');
   const editor = $('scorecard-editor');
   if (!id) {
@@ -42635,7 +42676,21 @@ async function selectCourseById(id) {
   if (typeof MULTI_COURSE_FACILITIES !== 'undefined' && MULTI_COURSE_FACILITIES[id]) { openFacilityPicker(id); return; }
 
   // Check for saved scorecard
-  const saved = await getCourseScorecard(id);
+  // v2038: a read that throws or takes over 10 s counts as "no card" (blank grid) - before, it left
+  // the PREVIOUS course's pars, stroke index and tees in the grid under this course's id.
+  _bgFormCardFor = null;
+  const _selP = Promise.race([
+    (async () => { try { return await getCourseScorecard(id); } catch (e) { return null; } })(),
+    new Promise(r => setTimeout(() => r(null), 10000))
+  ]);
+  try { window._bgCourseSelPending = _selP; } catch (e) {}
+  const saved = await _selP;
+  try { if (window._bgCourseSelPending === _selP) window._bgCourseSelPending = null; } catch (e) {}
+  if (_selSeq !== _bgCourseSelSeq || $('course-name').dataset.courseId !== id) {
+    try { console.warn('[bg v2038] dropped a late scorecard for ' + id + ' - the form has moved to another course'); } catch (e) {}
+    return;
+  }
+  _bgFormCardFor = id;
   if (saved && saved.pars && saved.sis) {
     status.className = 'course-status verified';
     status.querySelector('.icon').textContent = '✓';
@@ -124287,6 +124342,12 @@ async function init() {
     // the user cancels at any point in this walk-through, abort start.
     const dupesResolved = await preventDuplicatesBeforeStart();
     if (!dupesResolved) return;
+    // v2038: a scorecard still loading must land before the form is read, or the round starts on
+    // the previous course's pars (Fighting Joe, 11/12). The load itself gives up after 10 s.
+    try {
+      if (window._bgCourseSelPending) { await Promise.race([window._bgCourseSelPending, new Promise(r => setTimeout(r, 11000))]); await new Promise(r => setTimeout(r, 0)); }
+      if (_bgFormCardFor === null) { try { console.warn('[bg v2038] start held: the course scorecard is still loading'); } catch (e) {} return; }
+    } catch (e) {}
     const setup = gatherSetup();
     if (!setup) return;
     if (setup.noCourse) { await uiConfirm('Pick a course before you start the round — search the library above or add a new one. A course is required so scores, handicaps and games stay accurate.', { title: 'Course required', okLabel: 'OK', cancelLabel: 'Close', danger: false }); showToast('Select a course to start the round'); return; }
