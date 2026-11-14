@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.2041-->
+<!--BGVER=v2026.11.2043-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12330,7 +12330,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.2041';
+const BG_BUILD = 'v2026.11.2043';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -62993,6 +62993,45 @@ async function bragToCrew() {
 // roundManagedByMe covers a tournament's director and its assigned admins.
 // Errors resolve to TRUE on purpose, matching canEditRoundSettings — a flaky profile
 // read must never lock the real scorekeeper out of fixing his own card.
+// v2042 (Tyler, 11/14, viewing a round he was not in): "I want to make sure that the ability
+// to text settle up, re open round or delete round is only allowed for people that were part
+// of the game ... lock it down to a view only status."
+// The round Games sheet drew all three buttons for ANYONE -- nothing checked who was looking.
+// Harmless while the sheet only opened from your own Rounds list; since v2040/v2041 it opens
+// from the Friends highlights, Game history and a friend's rounds too, i.e. for rounds you
+// never played. Reopen was the real hole: its handler ran the reopen flow with no check.
+//   member  I am one of this round's players (account id, else my player name)
+//   manage  this tournament's director / assigned admin, or the round's scorer (NOT app admin -- v2043)
+// Fails CLOSED (view only): this decides what a stranger may do to somebody else's round.
+async function bgRoundViewerAccess(g) {
+  const out = { member: false, manage: false };
+  try {
+    if (!g) return out;
+    // v2043 (Tyler, 11/14): "Even though I am an admin I don't want to have my screens be
+    // different when viewing a round I am not part of. Restrict it for me as well." So being an
+    // app admin is NOT a pass here. roundManagedByMe() says yes to every admin, so the
+    // tournament check is done directly: only this event's own director / assigned admins.
+    try { out.manage = !!(_authUser && g.t2 && Array.isArray(g.t2.managerIds) && g.t2.managerIds.indexOf(_authUser.id) !== -1); } catch (e) {}
+    let me = ''; try { me = (await getMeName()) || ''; } catch (e) {}
+    if (!out.manage && me && g.createdBy) {
+      try { out.manage = normalizeNameSegment(String(me)) === normalizeNameSegment(String(g.createdBy)); } catch (e) {}
+    }
+    try { out.member = !!bgAmInRound(g); } catch (e) {}
+    if (!out.member && me) { try { out.member = !!(await gameHasMe(g)); } catch (e) {} }   // first-name cards ("Kevin" vs "Kevin Wells")
+  } catch (e) {}
+  return out;
+}
+// Am I on this list of players (a tournament's field)? Account id first, then my player name.
+async function bgListHasMe(players) {
+  try {
+    if (!Array.isArray(players) || !players.length) return false;
+    const uid = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) || null;
+    if (uid && players.some(p => p && (p.uid === uid || p.user_id === uid))) return true;
+    let me = ''; try { me = (await getMeName()) || ''; } catch (e) {}
+    const mn = me ? bgAliasKey(normalizeNameSegment(String(me))) : '';
+    return !!mn && players.some(p => p && p.name && bgAliasKey(normalizeNameSegment(String(p.name))) === mn);
+  } catch (e) { return false; }
+}
 async function bgCanReopenRound(g) {
   try {
     if (!g) return false;
@@ -67459,7 +67498,7 @@ function bgStashBetHistory(name, validMoney) {
   return key;
 }
 
-function buildHomeKpiHtml(player, isMe) {
+function buildHomeKpiHtml(player, isMe, opts) {   // v2043: opts.name -- print whose card this is (Friends tab / player pop-up)
   // v1141: lifetime units, avg score, best round and the round count all come off this
   // one list, so filtering it here takes deleted-tournament rounds out of every tile.
   // Stats reuses this exact function for its KPI card, so the two cannot drift.
@@ -67547,6 +67586,7 @@ function buildHomeKpiHtml(player, isMe) {
   return '<div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">' +
       bubble +
       '<div style="min-width:0">' +
+        ((opts && opts.name) ? '<div style="font-weight:700;font-size:15px;margin-bottom:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(String(opts.name)) + '</div>' : '') +   /* v2043 */
         '<div style="font-weight:700;font-size:17px;margin-bottom:2px">' + titleHtml + '</div>' +
         '<div class="small-text" style="color:var(--text-muted);font-size:11px;margin-bottom:3px">' +
           '<span class="bgl-full">' + escapeHtml(calc.basis || '') + '</span>' +
@@ -72057,79 +72097,31 @@ function renderStatsCompareKpis(meP, friendP) {
 // best-diff/lifetime-bets + putts/GIR/fairways). Used by the Crew "Player stats"
 // lookup. Mirrors the Stats-tab KPI card's numbers.
 function computePlayerKpiHtml(player) {
+  // v2043 (Tyler, 11/14, three screenshots -- his Stats card vs two Friends-tab cards): "can you
+  // make the friend tab identical to the home page for this? The handicap shows up in the player
+  // picture and if the player has a picture it just disappears."
+  // This function used to draw its OWN copy of the card: a different layout (Best differential
+  // and Lifetime games as wide bars), different rounding (GIR 4.1% here, 39% on Home), a raw
+  // round count where Home leaves out Sim Games and deleted-event rounds, and -- the one he saw
+  // -- with a photo the index dropped into the small grey subtitle line, and with no index yet
+  // it printed a bare dash where Home shows N/A or the TEMP handicap. Two builders, so they
+  // drifted (v900, v1475 and v2039 were all "the Crew box does not match Home").
+  // Now there is ONE card: buildHomeKpiHtml, the builder Home and the Stats tab already share.
+  // Only two things are added for this surface: whose card it is (Home never needs to say) and
+  // the mulligans row (v1821), drawn as one more Home-style tile.
   const history = (player && Array.isArray(player.scoreHistory)) ? player.scoreHistory : [];
   if (!history.length) return '<div class="help-text">No rounds stored yet for ' + escapeHtml(displayFull(player)) + '.</div>';
-  const calc = calcHandicapIndex(history);
-  const validGross = history.filter(bgIs18Card);   /* v1759: 18-hole cards only */
-  const avgGross = validGross.length ? Math.round(validGross.reduce((a, b) => a + b.gross, 0) / validGross.length) : '—';
-  const bestGross = validGross.length ? Math.min(...validGross.map(s => s.gross)) : '—';
-  const validDiffs = history.filter(s => s.differential != null);
-  const bestDiff = validDiffs.length ? Math.min(...validDiffs.map(s => s.differential)).toFixed(1) : '—';
-  const validMoney = history.filter(roundCountsForBets);   // v762: finished rounds only
-  const lifeMoney = validMoney.reduce((a, b) => a + b.money, 0);
-  let moneyTxt = '—', moneyColor = '';
-  if (validMoney.length) { moneyTxt = (lifeMoney >= 0 ? '+' : '−') + '' + bgWhole(Math.abs(lifeMoney)); moneyColor = lifeMoney >= 0 ? 'var(--money-pos)' : 'var(--money-neg)'; }
-  // v900 (Tyler): the Crew box's tiles must behave EXACTLY like Home's. Home
-  // stashes the player's per-round units under the same key openBetHistory reads,
-  // so do it here too — without this, tapping Lifetime games in Crew opened
-  // nothing. v1347: shares bgStashBetHistory with every other surface, so a re-render
-  // from any of them writes byte-identical data.
-  const _betKey = bgStashBetHistory(player.name, validMoney);
-  const pr = statPuttRounds(history), gr = statGirRounds(history), fr = statFairwayRounds(history);
-  const tP = pr.reduce((a, b) => a + b.putts, 0), tPH = pr.reduce((a, b) => a + b.puttHoles, 0);
-  const tG = gr.reduce((a, b) => a + b.girs, 0), tGH = gr.reduce((a, b) => a + (b.girHoles || b.puttHoles), 0);
-  const tF = fr.reduce((a, b) => a + b.fairways, 0), tFH = fr.reduce((a, b) => a + b.fairwayHoles, 0);
-  const puttsTxt = tPH > 0 ? (tP / tPH * 18).toFixed(1) : 'NA';
-  const girTxt = tGH > 0 ? (tG / tGH * 100).toFixed(1) + '%' : 'NA';
-  const fwTxt = tFH > 0 ? (tF / tFH * 100).toFixed(1) + '%' : 'NA';
-  // v2039 (Tyler, 11/14: Kevin's stats said "something went wrong"): the tile style is declared HERE
-  // because the mulligans row below uses it. It used to sit under that row, so any player with a
-  // mulligan-tracked round threw "Cannot access 'box' before initialization". Its v1475 note is below.
-  const box = 'text-align:center;min-width:0;background:var(--bg-surface-alt);border:1px solid var(--bg-border);border-radius:12px;padding:12px 6px 11px';
-  // v1821: mulligans per round over the rounds that tracked them
-  const _mulR = history.filter(s => s && s.trackedMulligans && s.mulligans != null);
-  const _mulTot = _mulR.reduce((a, s) => a + (s.mulligans || 0), 0);
-  const mullHtml = _mulR.length ? '<div style="' + box + ';display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-left:14px;padding-right:14px"><span class="small-text" style="color:var(--text-muted);font-size:11px;font-weight:600">🔁 Mulligans / round</span><span style="font-size:16px;font-weight:700">' + (_mulTot / _mulR.length).toFixed(1) + ' <span class="small-text" style="color:var(--text-muted);font-weight:600">(' + _mulTot + ' in ' + _mulR.length + ' round' + (_mulR.length === 1 ? '' : 's') + ')</span></span></div>' : '';
-  // v1475 (Tyler, 9/4): "on the friends tab in dark mode this stats area is not
-  // displaying right." These six tiles were built with a hardcoded #f8fafc panel and
-  // an #eef1f5 border -- no tokens -- so in dark mode the tile stayed near-white while
-  // the number inside it inherited the LIGHT var(--text). Near-white on white: the
-  // figures were effectively invisible, and only the labels (which do use a themed
-  // grey) survived. --bg-surface-alt is #f7f9fc in light, so light mode is unchanged
-  // to the eye; it is #1c2734 in dark, which is what the tile should have been.
-  // computePlayerKpiHtml() feeds BOTH the Crew "Player stats" card and the player
-  // pop-up, so this is one fix for both screens.
-  const lbl = 'class="small-text" style="color:var(--text-muted);font-size:10px;margin-top:2px;font-weight:600"';   // v1903 (audit #2 P2): --bgx-ink-65 (#9ca3af) on the tile was 2.4:1
-  const idxTxt = fmtHcp(calc.index);
-  // Same photo bubble as the Home/Stats handicap box so a friend's picture shows
-  // here too. With a photo the index moves up beside the "Handicap Index" label.
-  const _avSafe2 = _bgSafeAvatarUrl(player.avatar);   // v1898
-  const bubble = _avSafe2
-    ? '<div data-av="' + _avSafe2 + '" onclick="openAvatarZoom(this.dataset.av)" style="width:54px;height:54px;border-radius:11px;background-image:url(\'' + _avSafe2 + '\');background-size:cover;background-position:center;flex-shrink:0;box-shadow:0 3px 12px rgba(0,0,0,0.18);cursor:pointer"></div>'
-    : '<div style="width:66px;height:66px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;flex-shrink:0"><div style="font-size:26px;font-weight:800;color:#fff;line-height:1">' + idxTxt + '</div></div>';
-  const titleHtml = player.avatar
-    ? 'Handicap Index <span style="color:var(--accent);font-size:18px;font-weight:800;margin-left:4px">' + idxTxt + '</span>'
-    : 'Handicap Index';
-  return ''
-    + '<div style="display:flex;align-items:center;gap:16px;margin-bottom:14px">'
-    +   bubble
-    +   '<div style="min-width:0"><div style="font-weight:700;font-size:16px">' + escapeHtml(displayFull(player)) + '</div>'
-    +     '<div class="small-text" style="color:var(--text-muted);font-size:11px">' + titleHtml + (calc.basis ? ' · ' + escapeHtml(calc.basis) : '') + '</div></div>'
-    + '</div>'
-    + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">'
-    +   '<div style="' + box + ';cursor:pointer" title="View the rounds behind this" onclick="' + statOnclick(player.name, 'score') + '"><div style="font-size:20px;font-weight:700">' + history.length + '</div><div ' + lbl + '>Rounds</div></div>'
-    +   '<div style="' + box + ';cursor:pointer" onclick="' + statOnclick(player.name, 'score') + '"><div style="font-size:20px;font-weight:700">' + avgGross + '</div><div ' + lbl + '>Avg Score</div></div>'
-    +   '<div style="' + box + ';cursor:pointer" onclick="' + bestRoundOnclick(player.name, 'gross') + '"><div style="font-size:20px;font-weight:700">' + bestGross + '</div><div ' + lbl + '>Best</div></div>'
-    + '</div>'
-    + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">'
-    +   '<div style="' + box + ';cursor:pointer" onclick="' + statOnclick(player.name, 'putts') + '"><div style="font-size:20px;font-weight:700">' + puttsTxt + '</div><div ' + lbl + '>Putts/Rd</div></div>'
-    +   '<div style="' + box + ';cursor:pointer" onclick="' + statOnclick(player.name, 'gir') + '"><div style="font-size:20px;font-weight:700">' + girTxt + '</div><div ' + lbl + '>GIR %</div></div>'
-    +   '<div style="' + box + ';cursor:pointer" onclick="' + statOnclick(player.name, 'fairway') + '"><div style="font-size:20px;font-weight:700">' + fwTxt + '</div><div ' + lbl + '>Fairway %</div></div>'
-    + '</div>'
-    // v493 Item 4: Best differential as a wide row, Lifetime games pulled into its own green/red highlight bar.
-    + '<div style="' + box + ';display:flex;align-items:center;justify-content:space-between;cursor:pointer;margin-bottom:8px;padding-left:14px;padding-right:14px" onclick="' + bestRoundOnclick(player.name, 'diff') + '"><span class="small-text" style="color:var(--text-muted);font-size:11px;font-weight:600">Best differential</span><span style="font-size:16px;font-weight:700">' + bestDiff + '</span></div>'
-    + mullHtml   // v1821
-    + (validMoney.length ? '<div onclick="openBetHistory(&quot;' + _betKey + '&quot;)" title="See every round that moved this number" style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:12px;cursor:pointer;background:' + (lifeMoney >= 0 ? 'var(--bgx-surf-93)' : 'var(--bgx-surf-95-c)') + '"><span style="font-size:12px;font-weight:700;color:' + (lifeMoney >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">Lifetime games</span><span style="font-size:18px;font-weight:700;color:' + (lifeMoney >= 0 ? 'var(--money-pos)' : 'var(--money-neg)') + '">' + moneyTxt + '</span></div>' : '');
+  let mullHtml = '';
+  try {
+    const _live = (typeof bgLiveHistory === 'function') ? bgLiveHistory(history) : history;   // same list Home's tiles use
+    const _mulR = _live.filter(s => s && s.trackedMulligans && s.mulligans != null);
+    const _mulTot = _mulR.reduce((a, s) => a + (s.mulligans || 0), 0);
+    if (_mulR.length) mullHtml = '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;background:var(--surface-2);border-radius:10px;padding:10px 14px;margin-top:8px">' +
+      '<span class="small-text" style="color:var(--text-muted);font-size:10px">\u{1F501} Mulligans / Round</span>' +
+      '<span style="font-size:16px;font-weight:700;white-space:nowrap">' + (_mulTot / _mulR.length).toFixed(1) +
+      ' <span class="small-text" style="color:var(--text-muted);font-weight:600">(' + _mulTot + ' in ' + _mulR.length + ' round' + (_mulR.length === 1 ? '' : 's') + ')</span></span></div>';
+  } catch (e) { mullHtml = ''; }
+  return buildHomeKpiHtml(player, false, { name: displayFull(player) }) + mullHtml;
 }
 
 // Crew-tab "Player stats" lookup: pick any visible player → show their KPI box.
@@ -76486,6 +76478,7 @@ async function openRoundBetsSheet(code, courseName, opts) {
   // v1111: kept so the share handler can rebuild the same lines WITH payment links.
   let _evSettle = null, _evNameOf = null, _evPlayerOf = null;
   let _evRaw = [], _evPay = null;   // v1320: hoisted for the breakdown + the share text
+  let _rbEventMine = false;   // v2042: I am in this tournament's field (another group) -> I may text the event standings
   let _evScores = [], _evPl = [];   // v1802: were `const` inside the try below, so the field standings block never saw them
   let t = null;
   /* v1366 (Tyler, 1 Sep 2026) — "it takes a while to build the bet summary when you
@@ -76554,6 +76547,15 @@ async function openRoundBetsSheet(code, courseName, opts) {
         t2GetPlayers(t.id).catch(() => [])
       ]);
       _evRaw = _raw || []; _evPay = _pay || null;   // v1320
+      // v2042: a player in the EVENT looking at another group's card may text the event's
+      // standings (they are his results too) -- but still cannot reopen or delete that card.
+      try {
+        if (!_rbEventMine && (await bgListHasMe(_evFieldPl))) {
+          _rbEventMine = true;
+          const _sb = body.querySelector('#rb-share'); if (_sb) _sb.style.display = '';
+          const _vo = body.querySelector('#rb-viewonly'); if (_vo) _vo.textContent = 'View only — this is another group’s card.';
+        }
+      } catch (e) {}
       _evScores = _evSc || []; _evPl = _evFieldPl || [];   // v1802: into the outer lets so _t2FieldStandingsHtml below gets them
       if (_pay && Array.isArray(_pay.rows) && _pay.rows.length) {
         const _dict = {}; _pay.rows.forEach(r => { _dict[r.id] = r.net || 0; });
@@ -76683,18 +76685,22 @@ async function openRoundBetsSheet(code, courseName, opts) {
   // active prize pool is one row in the Tournament games table right above, with the winner
   // and what they taken, so this button opened a second view of what is already
   // on screen. openBetsBreakdownScreen is left in place for its other callers.
-  html += '<button id="rb-share" class="bg-btn bg-btn--full full" style="width:100%;margin-top:8px">\u{1F4F2} Text Final Standings</button>';
+  // v2042: view only unless I was part of this round (or run it). See bgRoundViewerAccess.
+  const _rbAcc = await bgRoundViewerAccess(g);
+  const _rbMine = !!(_rbAcc.member || _rbAcc.manage);
+  if (_rbMine || _isT2Round) html += '<button id="rb-share" class="bg-btn bg-btn--full full" style="width:100%;margin-top:8px' + ((_rbMine || _rbEventMine) ? '' : ';display:none') + '">\u{1F4F2} Text Final Standings</button>';
+  if (!_rbMine) html += '<div id="rb-viewonly" class="small-text" style="color:var(--text-muted);text-align:center;margin-top:12px">' + (_rbEventMine ? 'View only — this is another group’s card.' : 'View only — you were not in this round.') + '</div>';
   // v1125 (Tyler): View and 🏅 merged into one button that lands here, so the one
   // thing this sheet was missing is the way back into an editable round.
   // Finished rounds only — a live round is already editable from the Score tab.
-  if (g && g.finishedAt) {
+  if (g && g.finishedAt && _rbMine) {   // v2042
     html += '<div id="rb-hcpsw"></div>';   // v1717: "Count toward my handicap" switch (casual rounds)
     html += '<button id="rb-reopen" class="bg-btn bg-btn--full full" style="width:100%;margin-top:8px">\u{1F513} Reopen round</button>';
   }
   // v1143 (Tyler, 8/20): "once they do click on this screen, they need the option
   // to delete the round from here." The round rows on Home / Saved rounds / Stats
   // dropped their red x, so this is now the way to delete a round.
-  if (g && g.code) {
+  if (g && g.code && _rbMine) {   // v2042
     html += '<button id="rb-delete" class="bg-btn bg-btn--danger bg-btn--full full" style="width:100%;margin-top:8px">\u{1F5D1} Delete round</button>';
   }
   body.innerHTML = html;
@@ -76807,6 +76813,7 @@ async function openRoundBetsSheet(code, courseName, opts) {
   { const rb = body.querySelector('#rb-reopen'); if (rb) rb.onclick = async () => {
       rb.disabled = true;
       try {
+        { const _a = await bgRoundViewerAccess(g); if (!(_a.member || _a.manage)) { try { showToast('View only — you were not in this round'); } catch (e) {} return; } }   // v2042
         try { close(); } catch (e) {}
         await openRecent({ code: g.code, course: g.course });
         await bgReopenRoundFlow();
@@ -76817,6 +76824,7 @@ async function openRoundBetsSheet(code, courseName, opts) {
   { const dl = body.querySelector('#rb-delete'); if (dl) dl.onclick = async () => {
       dl.disabled = true;
       try {
+        { const _a = await bgRoundViewerAccess(g); if (!(_a.member || _a.manage)) { try { showToast('View only — you were not in this round'); } catch (e) {} return; } }   // v2042
         const gone = await bgDeleteRoundFlow(g.code, g.course);
         if (gone) { try { close(); } catch (e) {} }
       } catch (e) {
