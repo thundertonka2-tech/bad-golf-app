@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.2049-->
+<!--BGVER=v2026.11.2051-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12330,7 +12330,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.2049';
+const BG_BUILD = 'v2026.11.2051';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -37653,6 +37653,13 @@ function playerGender(p) {
 //   17-18: avg of lowest 7
 //   19-20+: avg of lowest 8 (most recent 20 rounds only)
 // Returns { index: number | null, n: count, basis: string }
+// v2051: WHS Rule 5.2a - the average is "rounded to the nearest tenth", a .5 rounding upward
+// (so a plus handicap of -1.25 reads -1.2). Cleaned to six places first so binary float
+// drift cannot tip a true .x5 either way. Pure.
+function bgRoundIndex(raw) {
+  const v = Math.floor(Math.round(Number(raw) * 1e6) / 1e5 + 0.5) / 10;
+  return v === 0 ? 0 : v;   // never -0
+}
 function calcHandicapIndex(scoreHistory) {
   // v1157 (Kevin, 22 Aug): the dead-event filter used to run HERE too, and that was
   // wrong. Deleting a tournament deletes the EVENT — the standings, the leaderboard, the
@@ -37719,7 +37726,11 @@ function calcHandicapIndex(scoreHistory) {
   // The +0.0001 absorbs binary float drift: an average that is mathematically 10.7 can
   // land at 10.699999999999999, which floor() would take to 10.6.
   const _raw = avg + adjustment;
-  const index = Math.floor(Math.abs(_raw) * 10 + 0.0001) / 10 * (_raw < 0 ? -1 : 1);
+  // v2051 (Tyler/Kevin 11/18: "users are claiming our handicaps are calculating lower than
+  // GHIN"): the v1157 note above quotes the PRE-2020 rule. The World Handicap System rounds
+  // to the nearest tenth, so truncating read 0.1 LOW for every average whose hundredths were
+  // .05 or more - 7 of the 32 players with an index on 11/18 (Kevin 10.05 -> 10.0, not 10.1).
+  const index = bgRoundIndex(_raw);
   // Fewer than 5 rounds → WHS leans on your single best round with a big downward
   // adjustment, so the index can read scratch/plus off one good round. Flag it
   // provisional so it's not mistaken for an established handicap.
@@ -37759,14 +37770,42 @@ function bgIngestSharedHcp(rows) {
       };
       if (!isFinite(rec.index)) return;
       const prev = _bgHcpShared[k];
-      if (!prev || rec.at > prev.at) _bgHcpShared[k] = rec;   // newest publish wins
+      if (!prev || _bgHcpNewer(rec.at, prev.at)) _bgHcpShared[k] = rec;   // newest publish wins (v2051: compared as TIMES - profiles and player_stats spell a timestamp differently)
     });
   } catch (e) {}
 }
 function bgSharedHcp(name) { try { const k = _bgHcpKey(name); return k ? (_bgHcpShared[k] || null) : null; } catch (e) { return null; } }
 // Drop-in replacement for calcHandicapIndex(entry.scoreHistory) at every place
 // that decides what a player PLAYS OFF or what the group is SHOWN.
-function bgHcpFor(entry, nameHint) {
+function _bgHcpNewer(a, b) {
+  try { const x = Date.parse(a || '') || 0, y = Date.parse(b || '') || 0; return (x || y) ? x > y : String(a || '') > String(b || ''); } catch (e) { return false; }
+}
+/* v2051 (Tyler 11/18, "Entered handicap until 5 rounds"). With 3 or 4 rounds the rule book
+   leans on the single best round with a big deduction, so Fred Hall read 2.4 after three
+   rounds against the 8 Kevin had typed for him. A handicap somebody ENTERED for this player
+   on this phone now stands until the player has 5 scored rounds; then the calculated one
+   takes over on its own. Nobody typed one -> the calculated number, as before.
+   Done here, in the one function every "what does he play off" site already calls: a held
+   index comes back as index:null (+ held / heldIndex), which is exactly the shape those
+   sites already treat as "no index yet - use the saved handicap and badge it TEMP". */
+const BG_HCP_HOLD_ROUNDS = 5;
+function bgEnteredHcp(entry) {
+  try {
+    if (!entry || entry._fromProfile) return null;   // a picker row built from an account carries the PUBLISHED index in .hcp, not a typed one
+    const v = (typeof entry.hcp === 'number') ? entry.hcp : parseFloat(entry.hcp);
+    return (isFinite(v) && v !== 0) ? v : null;
+  } catch (e) { return null; }
+}
+function bgHcpHold(calc, entry) {
+  try {
+    if (!calc || calc.index == null) return calc;
+    if ((Number(calc.n) || 0) >= BG_HCP_HOLD_ROUNDS) return calc;
+    if (bgEnteredHcp(entry) == null) return calc;
+    return Object.assign({}, calc, { index: null, held: true, heldIndex: calc.index });
+  } catch (e) { return calc; }
+}
+function bgHcpFor(entry, nameHint) { return bgHcpHold(_bgHcpForCalc(entry, nameHint), entry); }
+function _bgHcpForCalc(entry, nameHint) {
   const local = calcHandicapIndex((entry && entry.scoreHistory) || []);
   let nm = nameHint || '';
   if (!nm && entry) {
@@ -37777,10 +37816,96 @@ function bgHcpFor(entry, nameHint) {
   if (sh && sh.index != null) return { index: sh.index, n: sh.n, holes: sh.holes, basis: sh.basis || ('avg of lowest of ' + sh.n), shared: true };
   return local;
 }
+/* v2051 (Tyler 11/18, "find the cause, then fix"). The shared index is written by the
+   player's OWN phone, so it only moved when that player next opened the app. Since v2044
+   the server files a finished round into every account-holder's player_stats, so a player
+   whose round was scored by somebody else kept an old shared index until he opened the app:
+   on 11/18 Larry Perkins read 7.6 (should be 6.0), Britt 4.6 (5.6), Kylan 3.3 (4.3).
+   Every phone now checks, once per launch and when the tournament picker opens, whose stats
+   are newer than their shared index, reads just those rows and recalculates. Results are
+   remembered on the device per (player, stats timestamp), so a row is read once, and the
+   owner's own publish - always newer once he opens the app - wins as before. Rounds deleted
+   for everyone (shared tombstones) are left out, as they are on the owner's phone. */
+let _bgHcpHealAt = 0, _bgHcpHealBusy = null;
+const BG_HCP_HEAL_KEY = 'bg_hcp_heal_seen';
+// Pure. -> { fetch:[uid], cached:[publish-shaped rows], keep:{uid:seen entry} }
+function bgHcpStalePlan(statRows, profiles, seen, meId) {
+  const plan = { fetch: [], cached: [], keep: {} };
+  try {
+    const byId = {}; (profiles || []).forEach(p => { if (p && p.id) byId[p.id] = p; });
+    const need = [];
+    (statRows || []).forEach(r => {
+      if (!r || !r.user_id || r.user_id === meId) return;
+      const pr = byId[r.user_id]; if (!pr) return;
+      const a = Date.parse(r.updated_at || '') || 0; if (!a) return;
+      const b = Date.parse(pr.hcp_at || '') || 0;
+      if (a <= b + 120000) return;                       // the owner has published since (2 min of slack for his own sync)
+      const s = seen && seen[r.user_id];
+      if (s && s.at === r.updated_at) {
+        plan.keep[r.user_id] = s;
+        if (s.rec && s.rec.hcp_index != null) plan.cached.push(Object.assign({ my_player: pr.my_player || pr.display_name || '' }, s.rec));
+        return;
+      }
+      need.push({ id: r.user_id, at: a });
+    });
+    need.sort((x, y) => y.at - x.at);                    // most recently played first
+    plan.fetch = need.map(x => x.id);
+  } catch (e) {}
+  return plan;
+}
+// Pure. One player_stats row -> the same shape a profile publish has, or null when there is no index to give.
+function bgHcpRowFromStats(row, pr, dead) {
+  try {
+    if (!row || !pr) return null;
+    let list = Array.isArray(row.stats) ? row.stats : [];
+    if (dead && dead.size) list = list.filter(s => !(s && dead.has(statsRoundKey(s))));
+    const c = calcHandicapIndex(list);
+    if (!c || c.index == null) return null;
+    const t = Date.parse(row.updated_at || '') || 0;
+    return { hcp_index: c.index, hcp_n: c.n || 0, hcp_holes: c.holes || 0, hcp_basis: c.basis || '', hcp_at: t ? new Date(t).toISOString() : String(row.updated_at || '') };
+  } catch (e) { return null; }
+}
+async function bgHcpHealStale(profiles) {
+  if (_bgHcpHealBusy) { try { return await _bgHcpHealBusy; } catch (e) { return 0; } }
+  _bgHcpHealBusy = (async () => {
+    try {
+      if (!supa || !Array.isArray(profiles) || !profiles.length) return 0;
+      if (Date.now() - _bgHcpHealAt < 300000) return 0;
+      const r = await supa.from('player_stats').select('user_id,updated_at').limit(5000);
+      if (!r || r.error || !Array.isArray(r.data)) return 0;
+      _bgHcpHealAt = Date.now();
+      let seen = {}; try { seen = JSON.parse(localStorage.getItem(BG_HCP_HEAL_KEY) || '{}') || {}; } catch (e) { seen = {}; }
+      const meId = (typeof _authUser !== 'undefined' && _authUser && _authUser.id) || null;
+      const plan = bgHcpStalePlan(r.data, profiles, seen, meId);
+      if (plan.cached.length) bgIngestSharedHcp(plan.cached);
+      const ids = plan.fetch.slice(0, 60);
+      let n = plan.cached.length;
+      if (ids.length) {
+        const byId = {}; profiles.forEach(p => { if (p && p.id) byId[p.id] = p; });
+        const dead = new Set();
+        try { const st = await getSharedTombstones(); if (st && st.rounds && st.rounds.forEach) st.rounds.forEach(k => dead.add(k)); } catch (e) {}
+        for (let i = 0; i < ids.length; i += 15) {
+          let q = null;
+          try { q = await supa.from('player_stats').select('user_id,stats,updated_at').in('user_id', ids.slice(i, i + 15)); } catch (e) { q = null; }
+          if (!q || q.error || !Array.isArray(q.data)) continue;
+          q.data.forEach(row => {
+            const pr = byId[row.user_id]; if (!pr) return;
+            const rec = bgHcpRowFromStats(row, pr, dead);
+            plan.keep[row.user_id] = { at: row.updated_at, rec: rec };
+            if (rec) { bgIngestSharedHcp([Object.assign({ my_player: pr.my_player || pr.display_name || '' }, rec)]); n++; }
+          });
+        }
+      }
+      try { localStorage.setItem(BG_HCP_HEAL_KEY, JSON.stringify(plan.keep)); } catch (e) {}
+      return n;
+    } catch (e) { return 0; }
+  })();
+  try { return await _bgHcpHealBusy; } catch (e) { return 0; } finally { _bgHcpHealBusy = null; }
+}
 // Publish MY index so every other login sees the number I see. Idempotent — the
 // signature check means at most one write per actual change.
 let _bgHcpPublished = '';
-async function bgPublishMyHcp() {
+async function bgPublishMyHcp(histOverride) {
   try {
     if (!supa || typeof _authUser === 'undefined' || !_authUser || !_authUser.id) return;
     let me = ''; try { me = (await getMeName()) || ''; } catch (e) {}
@@ -37788,7 +37913,10 @@ async function bgPublishMyHcp() {
     let entry = null;
     try { const roster = await getPlayerRoster(); entry = findMyRosterPlayer(roster, me); } catch (e) {}
     if (!entry) return;
-    const c = calcHandicapIndex(entry.scoreHistory || []);
+    // v2051: syncMyStatsToCloud passes the list it just uploaded - the durable superset. On
+    // 11/18 Chris Curry's phone published 16.8 before today's round reached its roster copy and
+    // never corrected it (16.2); publishing from what the cloud holds cannot lag that way.
+    const c = calcHandicapIndex((Array.isArray(histOverride) && histOverride.length) ? histOverride : (entry.scoreHistory || []));
     const row = {
       hcp_index: (c && c.index != null) ? c.index : null,
       hcp_n: (c && c.n) || 0,
@@ -37824,7 +37952,7 @@ function isHcpTemp(entry) {
     return !!entry.hcp; // a nonzero saved value someone actually entered
   } catch (e) { return false; }
 }
-const HCP_TEMP_BADGE_TITLE = 'Temporary handicap — entered manually, not yet an official index. Play 3+ rounds (54+ holes total) on a rated tee and this becomes your real handicap automatically.';
+const HCP_TEMP_BADGE_TITLE = 'Temporary handicap - entered by hand. Once this player has 5 scored rounds on rated tees, the calculated handicap takes over automatically.';   // v2051
 function hcpTempBadgeHtml(show) {
   return show ? (' <span class="hcp-temp-badge" title="' + HCP_TEMP_BADGE_TITLE + '">TEMP</span>') : '';
 }
@@ -38089,6 +38217,7 @@ async function healMyRoundsFromCloud() {
     _bgHealRoundsUid = _authUser.id;
     _bgHealRoundsP = _bgHealMyRoundsFromCloudOnce();
     try { await _bgHealRoundsP; } finally { _bgHealRoundsP = null; }
+    try { bgPublishMyHcp(); } catch (e) {}   // v2051: the launch publish can run before the backup is merged in - publish again once it is
     try { bgPullMyParticipantRounds().catch(function () {}); } catch (e) {}   // v1809: rounds I'm in that never reached my list
   } catch (e) { console.warn('healMyRoundsFromCloud failed', e); }
 }
@@ -43643,6 +43772,8 @@ async function renderRosterList() {
         <span style="color:var(--accent);font-weight:600">HCP ${fmtHcp(calc.index)}</span>
         <span style="color:var(--text-muted)"> · GHIN-calc, ${calc.n} round${calc.n > 1 ? 's' : ''}</span>
       </div>`;
+    } else if (calc && calc.held) {   // v2051: a typed handicap stands until 5 scored rounds
+      hcpLine = `<div class="small-text" style="font-size:11px"><span style="color:var(--accent);font-weight:600">HCP ${fmtHcp(p.hcp)}</span><span style="color:var(--text-muted)"> · entered · ${calc.n} of ${BG_HCP_HOLD_ROUNDS} rounds</span></div>`;
     } else if ((p.scoreHistory || []).length > 0) {
       const _h = (calc && typeof calc.holes === 'number') ? calc.holes : 0;
       hcpLine = `<div class="small-text" style="font-size:11px"><span style="color:var(--text-muted)">${_h}/54 holes for GHIN handicap</span></div>`;
@@ -53328,6 +53459,7 @@ function refreshBgUserNames(force) {
         if (!Array.isArray(rows)) return _bgUserNames;
         const r = { data: rows };   // v1474: keeps every line below reading r.data, unchanged
         try { bgIngestSharedHcp(r.data); } catch (e) {}      // v1010
+        try { bgHcpHealStale(r.data); } catch (e) {}         // v2051: top up anyone whose shared index is older than their stats
         try { bgPublishMyHcp(); } catch (e) {}               // v1010: keep mine current on launch
         const set = new Set();
         const emailSet = new Set();  // v1323: account emails, for the GUEST pill
@@ -72410,7 +72542,8 @@ async function syncMyStatsToCloud(roster, visOverride){
     if (_statsRow.player_name == null) delete _statsRow.player_name;
     const _up = await supa.from('player_stats').upsert(_statsRow, { onConflict: 'user_id' });
     if (_up && _up.error) console.warn('syncMyStatsToCloud: upsert failed', _up.error);
-    else { try { _bgStatsCacheBust(); } catch (e) {} try { if (_statsSig) { window._bgStatsSyncSig = _statsSig; window._bgStatsSyncAt = Date.now(); } } catch (e) {} }   // v963: my backup changed — drop the 30s memo so the next board read sees it
+    else { try { _bgHcpPublished = ''; bgPublishMyHcp(stats); } catch (e) {}   /* v2051: my backup just changed - publish the index from exactly that list */
+      try { _bgStatsCacheBust(); } catch (e) {} try { if (_statsSig) { window._bgStatsSyncSig = _statsSig; window._bgStatsSyncAt = Date.now(); } } catch (e) {} }   // v963: my backup changed — drop the 30s memo so the next board read sees it
   } catch (e) { console.warn('syncMyStatsToCloud failed', e); }
   finally { try { window._bgStatsSyncBusySig = null; } catch (e) {} }
 }
@@ -83835,11 +83968,14 @@ function t2GrpCard(g) {
   try {
     if (!g || !Array.isArray(g.players) || !g.players.length) return null;
     let nH = 18; try { nH = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18; } catch (e) { nH = 18; }
+    let _tot = null; try { _tot = (typeof calcTotals === 'function') ? (calcTotals(g) || null) : null; } catch (e) { _tot = null; }
     const rows = g.players.filter(p => p && p.name).map(p => {
       const sc = (g.scores && g.scores[p.id]) || [];
       let gross = 0, thru = 0;
       for (let i = 0; i < nH; i++) { const v = sc[i]; if (v != null && v !== '' && isFinite(Number(v))) { gross += Number(v); thru++; } }
-      return { name: p.name, gross: gross, thru: thru };
+      // v2050: net strokes, from the same totals the scorecard and the leaderboard use
+      let net = null; try { const tt = _tot && _tot[p.id]; if (tt && tt.count && isFinite(Number(tt.net))) net = Number(tt.net); } catch (e) { net = null; }
+      return { name: p.name, gross: gross, net: net, thru: thru };
     });
     return { rows: rows, nH: nH, any: rows.some(r => r.thru > 0), startedAt: Number(g.createdAt) || 0 };
   } catch (e) { return null; }
@@ -83859,11 +83995,19 @@ function t2GrpPlayersHtml(info) {
   try {
     const c = info && info.card;
     if (!c || !c.any) return (info && info.memberNames && info.memberNames.length) ? '<div style="font-size:13px;line-height:1.4;word-break:break-word">👥 ' + t2esc(info.memberNames.join(' · ')) + '</div>' : '';
-    return '<div class="t2-grp-scores" style="font-size:14px">' + c.rows.map(r =>
-      '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:4px 0;border-top:1px solid var(--border)">' +
-        '<span data-noi18n style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + t2esc(r.name) + '</span>' +
-        '<span style="flex:0 0 auto;font-weight:700;white-space:nowrap">' + (r.thru ? (r.gross + ((!info.finished && r.thru < c.nH) ? ' <span class="small-text" style="font-weight:400;color:var(--text-muted)">thru ' + r.thru + '</span>' : '')) : '—') + '</span>' +
-      '</div>').join('') + '<div class="small-text" style="color:var(--text-muted);padding-top:3px">Gross</div></div>';
+    /* v2050 (Tyler 11/18: "show net and gross here as well"): name | Net | Gross, two fixed narrow columns on the
+       right with a small header, so the numbers line up and a long name is the only thing that shrinks. A group
+       still playing shows "thru N" under the name instead of beside the score. */
+    const col = 'flex:0 0 44px;text-align:right;white-space:nowrap';
+    return '<div class="t2-grp-scores" style="font-size:14px">' +
+      '<div class="small-text" style="display:flex;gap:8px;color:var(--text-muted);padding:2px 0"><span style="flex:1;min-width:0"></span><span style="' + col + '">Net</span><span style="' + col + '">Gross</span></div>' +
+      c.rows.map(r => {
+        const live = !info.finished && r.thru > 0 && r.thru < c.nH;
+        return '<div style="display:flex;align-items:baseline;gap:8px;padding:4px 0;border-top:1px solid var(--border)">' +
+          '<span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span data-noi18n>' + t2esc(r.name) + '</span>' + (live ? ' <span class="small-text" style="color:var(--text-muted)">thru ' + r.thru + '</span>' : '') + '</span>' +
+          '<span style="' + col + ';color:var(--text-muted);font-weight:600">' + ((r.thru && r.net != null) ? r.net : '—') + '</span>' +
+          '<span style="' + col + ';font-weight:700">' + (r.thru ? r.gross : '—') + '</span>' +
+        '</div>'; }).join('') + '</div>';
   } catch (e) { return ''; }
 }
 async function _t2MyGroupInfo(t, opts) {
@@ -91016,6 +91160,7 @@ async function openT2AddPlayerPicker(t, onDone, known) {
     try {
       const now = Date.now();
       if (!window._rosterAllProfiles || (now - (window._rosterAllProfilesAt || 0)) > 60000) { window._rosterAllProfiles = await fetchProfiles(); window._rosterAllProfilesAt = now; }
+      try { bgIngestSharedHcp(window._rosterAllProfiles); await bgHcpHealStale(window._rosterAllProfiles); } catch (e) {}   // v2051: current handicaps before anyone is put in a group
       allUsers = t2PickerUsersFromProfiles(window._rosterAllProfiles);
       if (document.body.contains(ov) && allUsers.length) { _rebuild(); paint(); }
     } catch (e) {}
@@ -91023,6 +91168,11 @@ async function openT2AddPlayerPicker(t, onDone, known) {
   try { if (typeof bgKeyboardSafe === 'function') bgKeyboardSafe(ov.querySelector('.modal')); } catch (e) {}
 }
 // v2046: registered accounts as picker rows (pure). An account with no usable name is skipped, as in v860.
+// v2051: an account row's handicap = the freshest shared index (a stale profile value may have been topped up from stats), else the profile's own.
+function bgProfileHcp(pr, full) {
+  try { const sh = bgSharedHcp(full); if (sh && sh.index != null && isFinite(Number(sh.index))) return Number(sh.index); } catch (e) {}
+  return (pr && pr.hcp_index != null && isFinite(Number(pr.hcp_index))) ? Number(pr.hcp_index) : 0;
+}
 function t2PickerUsersFromProfiles(profiles) {
   const out = [];
   try {
@@ -91030,7 +91180,7 @@ function t2PickerUsersFromProfiles(profiles) {
       let full = ''; try { full = friendFullName(pr); } catch (e) { full = ''; }
       if (!full || full === 'Player') return;
       const parts = String(full).split(/\s+/);
-      out.push({ firstName: parts[0] || full, lastName: parts.slice(1).join(' ') || '', name: full, hcp: (pr && pr.hcp_index != null && isFinite(Number(pr.hcp_index))) ? Number(pr.hcp_index) : 0, scoreHistory: [], avatar: (pr && pr.avatar) || null, _uid: (pr && pr.id) || null, _fromProfile: true });
+      out.push({ firstName: parts[0] || full, lastName: parts.slice(1).join(' ') || '', name: full, hcp: bgProfileHcp(pr, full), scoreHistory: [], avatar: (pr && pr.avatar) || null, _uid: (pr && pr.id) || null, _fromProfile: true });
     });
   } catch (e) {}
   return out;
@@ -102684,6 +102834,15 @@ async function _bgEvpCalc(S) {
     return { card: card, models: models, pay: pay, pools: pools, early: early };
   } finally { try { if (!_bgEvp || _bgEvp === S) window._bgEvpPre = null; } catch (e) {} }
 }
+/* v2050 (Tyler 11/18, the event page's Tee times tab reading "—" for every group): no tee time was set for this
+   tournament. With none set, show when the group's card was opened instead. Pure: '' when there is no card. */
+function bgEvpTeeOff(D, d, g) {
+  try {
+    const r = ((D && D.rounds) || []).find(x => x && x.t2 && Number(x.t2.day || 1) === Number((d && d.day) || 1) && Number(x.t2.group) === Number(g && g.n));
+    const at = r ? Number(r.createdAt) : 0;
+    return at > 0 ? new Date(at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '';
+  } catch (e) { return ''; }
+}
 async function bgEventPageOpen(opts) {
   try {
     _bgEvpCss();
@@ -102818,7 +102977,7 @@ async function _bgEvpRender(reload) {
     days.forEach(d => {
       const gs = d.groups || []; if (!gs.length) return;
       h += '<div class="evp-sec">' + ((Number(D.num_days) || 1) > 1 ? ('<span>Day ' + d.day + '</span> · ') : '') + '<span data-noi18n>' + esc(nice(d.date)) + (d.course ? ' · ' + esc(d.course) : '') + '</span>' + (d.shotgun ? ' · <span>Shotgun start</span>' : '') + '</div>';
-      h += '<div class="evp-card">' + gs.map(g => '<div class="evp-grp"><div><div class="w">' + (d.shotgun ? ('<span>Hole</span> ' + esc(g.hole || '?')) : esc(g.time || '—')) + '</div><div class="small-text" style="color:var(--text-muted)"><span>Group</span> ' + esc(g.n) + '</div></div>'
+      h += '<div class="evp-card">' + gs.map(g => '<div class="evp-grp"><div><div class="w">' + (d.shotgun ? ('<span>Hole</span> ' + esc(g.hole || '?')) : esc(g.time || bgEvpTeeOff(D, d, g) || '—')) + '</div><div class="small-text" style="color:var(--text-muted)"><span>Group</span> ' + esc(g.n) + ((!g.time && bgEvpTeeOff(D, d, g)) ? ' · <span>teed off</span>' : '') + '</div></div>'
         + '<div data-noi18n>' + (g.players || []).map(n => esc(n)).join('<br>') + '</div></div>').join('') + '</div>';
     });
   } else {

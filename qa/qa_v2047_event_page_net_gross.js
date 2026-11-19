@@ -32,6 +32,15 @@ w.__setEvp(S);
   S.data.num_days = 2; await w.__fn('_bgEvpRender')(false);
   const hd = cells(el.querySelector('.evp-row.lb.hd'));
   ok('multi-day: Today column kept', hd.join('|') === '#|Player|To par|Net|Gross|Today|Thru', hd.join('|'));
+  // v2050: Tee times tab. Group 1 has a set time; group 2 has none -> the time its card was opened ("teed off")
+  rounds[0].t2.group = 1; rounds[1].t2.group = 2; rounds[1].createdAt = new Date(2026, 10, 18, 12, 50).getTime();
+  S.data.num_days = 1; S.data.days = [{ day: 1, date: '2026-11-18', course: 'QA', groups: [{ n: 1, time: '8:10 AM', players: ['Al Adams', 'Bo Banks'] }, { n: 2, time: '', players: ['Cy Cole'] }, { n: 3, time: '', players: ['No Card'] }] }];
+  S.tab = 'tee'; await w.__fn('_bgEvpRender')(false);
+  const grp = [...el.querySelectorAll('.evp-grp')].map(g => [...g.children[0].children].map(c => c.textContent.replace(/\s+/g, ' ').trim()).join(' | '));
+  ok('tee tab: a set tee time shows as set', /^8:10 AM \| Group 1$/.test(grp[0]), grp[0]);
+  ok('tee tab: none set -> when the card was opened, marked "teed off"', /^12:50.?PM \| Group 2 · teed off$/.test(grp[1]), grp[1]);
+  ok('tee tab: no tee time and no card -> a dash', /^— \| Group 3$/.test(grp[2]), grp[2]);
+  S.tab = 'board';
   const M = w.__fn('bgTvModel')(rounds.map(x => ({ data: x })), {});
   ok('model carries net strokes; TV board fields unchanged', M.rows.every(r => typeof r.net === 'number' && typeof r.gross === 'number' && 'toPar' in r && 'thru' in r));
   console.log('\n' + checks + ' checks, ' + (fails ? fails + ' FAILED' : 'ALL v2047 CHECKS PASSED') + '  (' + path.basename(FILE) + ')');
