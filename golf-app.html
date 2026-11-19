@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.2043-->
+<!--BGVER=v2026.11.2045-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12330,7 +12330,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.2043';
+const BG_BUILD = 'v2026.11.2045';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -21445,6 +21445,131 @@ function maybeAutoCloseFinishedRound(prevFinished) {
     return true;
   } catch (e) { return false; }
 }
+/* ==========================================================================
+   v2045 (Tyler 11/18): "He then deleted the tournament but it did not close out on everyone's
+   phone so Chris ended up scoring on the wrong tourney."
+   A deleted tournament's rounds are purged on the server (bg_t2_delete_everywhere). A phone that
+   was awake got the realtime DELETE and closed; a phone that was asleep, or whose socket had
+   dropped, did not -- its 12 s backstop read an empty row and returned without a word, forever,
+   so it kept "scoring" a round that no longer existed. Two parts:
+     - every live TOURNAMENT round asks the server whether its event still exists (bg_events_alive,
+       the SECURITY DEFINER check v1926 added) on wake, and at most every 40 s while open;
+     - a confirmed delete closes the round on this phone at once, says who it was, and offers the
+       replacement tournament if there is one.
+   Never guesses: no answer from the server (offline) = nothing happens.
+   ========================================================================== */
+let _bgT2AliveAt = 0, _bgT2AliveBusy = false;
+async function bgT2LiveAliveCheck(code, force) {
+  try {
+    const g = (typeof state !== 'undefined' && state) ? state.game : null;
+    if (!g || g.code !== code || g.finishedAt) return false;
+    const tid = g.t2 && g.t2.tournamentId; if (!tid) return false;
+    const now = Date.now();
+    if (_bgT2AliveBusy || (!force && (now - _bgT2AliveAt) < 40000)) return false;
+    _bgT2AliveBusy = true; _bgT2AliveAt = now;
+    let alive = null;
+    try { alive = await _bgEventsAlive([tid]); } catch (e) { alive = null; }
+    _bgT2AliveBusy = false;
+    if (!alive) return false;                     // could not ask -> never guess
+    if (alive.has(String(tid))) return false;     // still there
+    if (!state.game || state.game.code !== code) return false;
+    await bgCloseDeletedEventRound(state.game);
+    return true;
+  } catch (e) { _bgT2AliveBusy = false; return false; }
+}
+// A round that is gone for everyone (not this event's fault): the pre-v2045 close, unchanged.
+function _bgCloseDeletedRoundGeneric(code, mine) {
+  try { tombstoneRound(code); } catch (e) {}
+  try { const h = getHiddenRounds(); if (h.indexOf(code) < 0) { h.push(code); setHiddenRounds(h); } } catch (e) {}
+  try { localStorage.removeItem('game:' + code); } catch (e) {}
+  setTimeout(async () => {
+    try { if (typeof window.discardActiveRound === 'function') await window.discardActiveRound(); } catch (e) {}
+    try { if (!mine) showToast('This round was deleted by the host'); } catch (e) {}
+    try { if (!mine && typeof switchTab === 'function') switchTab('home'); } catch (e) {}
+  }, 0);
+}
+// The realtime DELETE of a tournament round: was it the whole tournament?
+async function bgT2DeletedRoundEcho(g, code) {
+  try {
+    const tid = g && g.t2 && g.t2.tournamentId;
+    let alive = null; try { alive = tid ? await _bgEventsAlive([tid]) : null; } catch (e) { alive = null; }
+    if (alive && tid && !alive.has(String(tid))) { await bgCloseDeletedEventRound(g); return; }
+  } catch (e) {}
+  _bgCloseDeletedRoundGeneric(code, false);
+}
+async function bgCloseDeletedEventRound(g) {
+  if (window._bgEvGoneClosing) return;
+  window._bgEvGoneClosing = true;
+  try {
+    const code = g.code, tid = g.t2 && g.t2.tournamentId;
+    const info = { tid: tid, name: (g.t2 && g.t2.name) || 'This tournament', course: g.course || '', courseId: g.courseId || '', managerIds: (g.t2 && Array.isArray(g.t2.managerIds)) ? g.t2.managerIds.slice() : [], createdAt: Number(g.createdAt) || 0 };
+    // this phone knows now, without waiting for the shared list
+    try { const s = bgDeadEvents(); if (tid && !s.has(String(tid))) { s.add(String(tid)); localStorage.setItem(BG_DEAD_EVENTS_KEY, JSON.stringify([...s])); } } catch (e) {}
+    try { _bgSelfDeleted[code] = Date.now(); } catch (e) {}          // a late DELETE echo says nothing more
+    try { tombstoneRound(code); } catch (e) {}                       // an unsent save can't bring it back
+    try { const h = getHiddenRounds(); if (h.indexOf(code) < 0) { h.push(code); setHiddenRounds(h); } } catch (e) {}
+    try { localStorage.removeItem('game:' + code); } catch (e) {}
+    try { if (typeof window.discardActiveRound === 'function') await window.discardActiveRound(); } catch (e) {}
+    try { if (typeof switchTab === 'function') switchTab('home'); } catch (e) {}
+    try { if (typeof loadRounds === 'function') loadRounds(); } catch (e) {}
+    try { await bgShowEventDeletedSheet(info); } catch (e) {}
+  } catch (e) {}
+  finally { setTimeout(() => { window._bgEvGoneClosing = false; }, 4000); }
+}
+// The tournament that replaced a deleted one: mine, not deleted, not over, made in the last 18 hours
+// -- the same course first, then the newest.
+function bgPickReplacementEvent(list, info, now) {
+  try {
+    now = now || Date.now();
+    const nk = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const cands = (list || []).filter(t => {
+      if (!t || !t.id || String(t.id) === String(info.tid)) return false;
+      try { if (typeof bgIsDeadEvent === 'function' && bgIsDeadEvent(t.id)) return false; } catch (e) {}
+      if (/^(complete|completed|final|done|archived|closed)$/i.test(String(t.status || ''))) return false;
+      const made = Date.parse(t.created_at || '') || 0;
+      return made > 0 && (now - made) < 18 * 3600000;
+    });
+    if (!cands.length) return null;
+    const courseOf = t => { try { const dc = (t.settings && t.settings.dayCourses) || {}; return Object.keys(dc).map(k => nk(dc[k] && dc[k].name)).filter(Boolean); } catch (e) { return []; } };
+    const want = nk(info.course);
+    cands.sort((a, b) => {
+      const sa = (want && courseOf(a).indexOf(want) >= 0) ? 1 : 0, sb = (want && courseOf(b).indexOf(want) >= 0) ? 1 : 0;
+      if (sa !== sb) return sb - sa;
+      return (Date.parse(b.created_at || '') || 0) - (Date.parse(a.created_at || '') || 0);
+    });
+    return cands[0];
+  } catch (e) { return null; }
+}
+async function bgShowEventDeletedSheet(info) {
+  let who = '';
+  try {
+    const cid = info.managerIds && info.managerIds[0];
+    if (cid && supa) {
+      const r = await _promiseTimeout(supa.from('profiles').select('display_name').eq('id', cid).maybeSingle(), 3500, 'evgone:who');
+      const p = r && r.data;
+      if (p && p.display_name && String(p.display_name).indexOf('@') < 0) who = String(p.display_name).trim().split(/\s+/)[0] || '';
+    }
+  } catch (e) { who = ''; }
+  let rep = null;
+  try { const list = await _promiseTimeout(t2ListMine(), 6000, 'evgone:list'); rep = bgPickReplacementEvent(list, info); } catch (e) { rep = null; }
+  try {
+    const old = document.getElementById('bg-evgone-ov'); if (old) old.remove();
+    const ov = document.createElement('div');
+    ov.id = 'bg-evgone-ov'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100095';
+    ov.innerHTML = '<div class="modal" style="max-width:420px">' +
+      '<h2 style="margin:0 0 6px">Tournament deleted</h2>' +
+      '<p style="margin:0 0 8px;white-space:normal">' + escapeHtml((who ? who : 'The commissioner') + ' deleted “' + info.name + '”. Scoring on it has stopped on this phone, and nothing more will be saved to it.') + '</p>' +
+      (rep ? ('<p class="help-text" style="margin:0 0 10px;white-space:normal">' + escapeHtml('There is a new tournament: “' + (rep.name || 'Tournament') + '”. Open it to get on your group’s card.') + '</p>')
+           : '<p class="help-text" style="margin:0 0 10px;white-space:normal">If a new tournament was set up, it will show on Home as soon as you are added to it.</p>') +
+      '<div class="actions">' + (rep ? '<button class="bg-btn bg-btn--primary primary" id="bg-evgone-open">Open the new tournament</button>' : '') + '<button class="bg-btn bg-btn--ghost" id="bg-evgone-ok">' + (rep ? 'Not now' : 'OK') + '</button></div></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('#bg-evgone-ok').onclick = () => { try { ov.remove(); } catch (e) {} };
+    const ob = ov.querySelector('#bg-evgone-open');
+    if (ob) ob.onclick = async () => { try { ov.remove(); } catch (e) {} try { if (typeof switchTab === 'function') switchTab('tourney'); } catch (e) {} try { await openT2Home(rep.id); } catch (e) {} };
+  } catch (e) { try { showToast('That tournament was deleted — scoring on it has stopped.', 6000); } catch (e2) {} }
+}
+try { window.bgT2LiveAliveCheck = bgT2LiveAliveCheck; window.bgPickReplacementEvent = bgPickReplacementEvent; } catch (e) {}
+
 // v1017: round codes this device deleted, so the realtime DELETE echo doesn't
 // tell the deleter that their own round "was deleted by the host".
 const _bgSelfDeleted = {};
@@ -21472,6 +21597,8 @@ function subscribeToGame(code) {
             // Don't announce my own delete back to me.
             let _mine = false;
             try { _mine = !!(_bgSelfDeleted[code] && (Date.now() - _bgSelfDeleted[code]) < 60000); } catch (e) {}
+            // v2045: a TOURNAMENT round that vanished -> was the whole tournament deleted? (says so, offers the new one)
+            try { const _gX = state.game; if (!_mine && _gX && _gX.t2 && _gX.t2.tournamentId && typeof bgT2DeletedRoundEcho === 'function') { setTimeout(() => { Promise.resolve(bgT2DeletedRoundEcho(_gX, code)).catch(() => {}); }, 0); return; } } catch (e) {}
             try { tombstoneRound(code); } catch (e) {}            // can't resurrect from a stale blob
             try { const h = getHiddenRounds(); if (h.indexOf(code) < 0) { h.push(code); setHiddenRounds(h); } } catch (e) {}
             try { localStorage.removeItem('game:' + code); } catch (e) {}
@@ -21656,6 +21783,7 @@ function subscribeToGame(code) {
 let _bgGamePollTick = 0;
 async function pollGameOnce(code, force) {
   try {
+    try { if (typeof bgT2LiveAliveCheck === 'function') Promise.resolve(bgT2LiveAliveCheck(code, !!force)).catch(() => {}); } catch (e) {}   // v2045: a deleted tournament closes here too
     try {
       _bgGamePollTick++;
       const _rtUp = !!(typeof activeRealtimeSub !== 'undefined' && activeRealtimeSub && activeRealtimeSub.state === 'joined'); // v935: truthiness isn't health — a dead socket must not slow the backstop
@@ -21816,6 +21944,8 @@ const BG_MERGE_RULES = {
   adminFix: 'newestAt',
   // v1602: who left the round and after which hole; one phone's mark or undo wins by stamp
   leftRound: 'newestAt',
+  // v2045: who joined after the round started and on which hole (late add); cross Stroke/Quota bets by id
+  joinedRound: 'newestAt', xbets: 'holeMap',
   // --- round configuration: cloud wins unless this device just edited settings -----
   games: 'cloudWins', hcpRules: 'cloudWins', pars: 'cloudWins', sis: 'cloudWins',
   tees: 'cloudWins', teeYards: 'cloudWins', teePars: 'cloudWins', teeSis: 'cloudWins',
@@ -22108,7 +22238,29 @@ function bgHasLeavers(g) {
   } catch (e) { return false; }
 }
 // true when `pid` is still playing on `hole` (1-based, play-order aware)
+/* v2045 (Tyler 11/18: "Kevin had to add a player after the tourney had started and we would not let
+   him"): a player added to a card mid-round. g.joinedRound = { at, byId: { <playerId>: <hole he starts
+   on> } }. He is not waited for, and not judged, on the holes played before he joined. */
+function bgJoinedAt(g, pid) {
+  try {
+    const b = g && g.joinedRound && g.joinedRound.byId;
+    const v = b ? b[pid] : null;
+    return (v != null && Number(v) > 0) ? Number(v) : null;
+  } catch (e) { return null; }
+}
+function bgHasJoiners(g) {
+  try {
+    const b = g && g.joinedRound && g.joinedRound.byId;
+    return !!(b && Object.keys(b).some(k => b[k] != null && Number(b[k]) > 0 && bgPlayIdx(g, Number(b[k])) > 0));
+  } catch (e) { return false; }
+}
+// holes (count) played before `pid` joined; 0 for everyone else
+function bgMissedBeforeJoin(g, pid) {
+  try { const j = bgJoinedAt(g, pid); return j == null ? 0 : Math.max(0, bgPlayIdx(g, j)); } catch (e) { return 0; }
+}
+try { window.bgJoinedAt = bgJoinedAt; } catch (e) {}
 function bgActiveOnHole(g, pid, hole) {
+  try { const _j = bgJoinedAt(g, pid); if (_j != null && bgPlayIdx(g, hole) < bgPlayIdx(g, _j)) return false; } catch (e) {}   // v2045
   const n = bgLeftAfter(g, pid);
   if (n == null) return true;
   return bgPlayIdx(g, hole) <= bgPlayIdx(g, n);
@@ -48998,6 +49150,7 @@ function renderGameBanners() {
   // v2010 (cross audit S-1/S-7): every cross bet a player on THIS card is in -- Match, 2-player and
   // group-mode Nassau, saved before launch or on the other cart -- with the engine's live status.
   try { if (typeof _t2RenderCrossBanners === 'function') _t2RenderCrossBanners(g, banners); } catch (e) {}
+  try { if (typeof bgXbetButton === 'function') bgXbetButton(g, banners); } catch (e) {}   // v2045: cross Stroke / Quota
 
   // NASSAU + HUCKLE banner — shows current segment standings + a button to call a Huckle
   if (_nasCfg && _nasCfg.allowHuckle !== false && getParticipants(g, _nasCfg).length >= 2) {   // v1811 (audit D4): group-bucket Nassau reaches Huckle too
@@ -52220,6 +52373,7 @@ async function handleScoreChange(pid, action) {
   // v625 CONSENT: nobody can enter scores for a player who hasn't accepted.
   if (consentBlockToast(g, pid)) return;
   { const _bg = bgBracketScoreGate(g, pid); if (_bg) { showToast(_bg, 'warn'); return; } }   // v1167
+  if (!bgActiveOnHole(g, pid, h) && bgLeftAfter(g, pid) == null && bgJoinedAt(g, pid) != null) { showToast('Joined on hole ' + bgJoinedAt(g, pid) + ' \u2014 earlier holes don\u2019t count for them', 'warn'); return; }   // v2045
   if (!bgActiveOnHole(g, pid, h)) { showToast('Left the round after hole ' + bgLeftAfter(g, pid) + ' — tap “bring back” to score them again', 'warn'); return; }   // v1602
   if (!g.scores[pid]) g.scores[pid] = new Array(18).fill(null);
   let cur = g.scores[pid][h - 1];
@@ -57044,6 +57198,13 @@ function _bgQuotaRegularEndedEarly(g) {
 function _bgQuotaTargetPlayed(g, cfg, p) {
   const full = quotaTargetFor(g, cfg, p);
   try {
+    // v2045: a player added mid-round is judged against his quota for the holes left when he joined
+    try {
+      if (g && !g._bgEarly && p && bgLeftAfter(g, p.id) == null) {
+        const _ms = bgMissedBeforeJoin(g, p.id);
+        if (_ms > 0) { const _rhJ = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18; return Math.round(full * Math.max(0, _rhJ - _ms) / _rhJ); }
+      }
+    } catch (e) {}
     if (!g || g._bgEarly || !p || (bgLeftAfter(g, p.id) == null && (!_bgQuotaRegularEndedEarly(g) || (cfg && cfg._t2field) || g.tourneyId))) return full;   // v2022: a whole-field (event) game keeps the event early-finish rule
     const rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
     const sc = (g.scores && g.scores[p.id]) || [];
@@ -58795,10 +58956,10 @@ function _bgSettlePool(g, cfg, kind, label, statOf, lowWins, eligible) {
        marked leaver, settle over the full cards: everyone in the pool pays, only a
        player with every hole scored can win. */
     let _lvScoped = false;
-    if (!done && g && g.finishedAt && stats.length && typeof bgHasLeavers === 'function' && bgHasLeavers(g)) {
+    if (!done && g && g.finishedAt && stats.length && typeof bgHasLeavers === 'function' && (bgHasLeavers(g) || bgHasJoiners(g))) {
       const _full = stats.filter(s => s.scored >= s.holes);
       const _short = stats.filter(s => s.scored < s.holes);
-      if (_full.length >= 1 && _short.every(s => bgLeftAfter(g, s.id) != null)) { done = true; _lvScoped = true; }
+      if (_full.length >= 1 && _short.every(s => bgLeftAfter(g, s.id) != null || bgMissedBeforeJoin(g, s.id) > 0)) { done = true; _lvScoped = true; }
     }
     if (!done) return null;
     // v2002 (matrix CORE-2, DECISIONS OPEN-4): a leaver NEVER wins, whichever path set `done` (the group ending
@@ -60651,7 +60812,10 @@ function gpsMyStatuses(g, res, myId) {
   // points-over-quota; same treatment for standard groups AND tournaments. ----
   try {
     const q = res && res.results && res.results.quota;
-    if (q && q.result && q.result[myId] != null) {
+    let _fqp = null; try { _fqp = (typeof bgFieldQuotaPlace === 'function') ? bgFieldQuotaPlace(g, myId) : null; } catch (e) { _fqp = null; }
+    if (_fqp) {   // v2045: an event Quota pool ranks the whole field
+      out.push({ label: bgGameIcon('quota'), text: (_fqp.place === 1) ? ((_fqp.tied ? 'T1st' : '1st') + (_fqp.lead > 0 ? ' by ' + _fqp.lead : '')) : ((_fqp.tied ? 'T' : '') + ord(_fqp.place) + ' of ' + _fqp.n), cls: _fqp.place === 1 ? 'pos' : 'neg' });
+    } else if (q && q.result && q.result[myId] != null) {
       const ranked = Object.keys(q.result)
         .filter(id => q.result[id] != null)
         .map(id => ({ id, v: q.result[id] }))
@@ -61335,7 +61499,7 @@ function _t2CrossFromCache(cache, g) {
       if (lg && lg.code && lg.t2 && lg.t2.tournamentId === cache.tid) {
         let hit = false;
         rows = rows.map(r => { const d = r && r.data ? r.data : r; if (d && d.code === lg.code) { hit = true; return { data: lg }; } return r; });
-        if (hit) sig = lg.code + '|' + JSON.stringify(lg.scores || {}) + '|' + (lg.finishedAt || '') + '|' + JSON.stringify(lg.leftRound || null);
+        if (hit) sig = lg.code + '|' + JSON.stringify(lg.scores || {}) + '|' + (lg.finishedAt || '') + '|' + JSON.stringify(lg.leftRound || null) + '|' + JSON.stringify(lg.xbets || null);
         else rows = cache.rows || [];
       }
     } catch (e) { rows = cache.rows || []; sig = ''; }
@@ -61346,6 +61510,144 @@ function _t2CrossFromCache(cache, g) {
     return X;
   } catch (e) { return null; }
 }
+/* v2045: the cross Stroke / Quota bet builder. Lives on the round's banners (event carts only), so
+   any player can set one from his own phone once the other group has teed off. */
+function bgXbetMeta(n, g) {
+  try {
+    const q = n.xkind === 'quota';
+    let h = ' <span style="font-weight:400;color:var(--text-muted);font-size:11px">· ' + escapeHtml(String(Number(n.value) || 0)) + (n.per ? (q ? ' per point' : ' per stroke') : ' flat') + (q ? '' : (n.net === false ? ' · gross' : ' · net')) + '</span>';
+    if (g && n.xid && n.xcode && n.xcode === g.code && !g.finishedAt && !(typeof state !== 'undefined' && state && state.viewOnlyMode)) h += ' <span role="button" tabindex="0" class="bg-xbet-rm" data-xid="' + escapeHtml(String(n.xid)) + '" title="Remove this bet" style="cursor:pointer;font-weight:400;font-size:11px;text-decoration:underline;color:var(--text-muted)">remove</span>';
+    return h;
+  } catch (e) { return ''; }
+}
+function bgXbetOthers(g) {
+  const out = [];
+  try {
+    const cache = window._t2CrossGps;
+    if (!cache || !g || !g.t2 || cache.tid !== g.t2.tournamentId) return out;
+    const day = Number((g.t2 && g.t2.day) || 1);
+    const mine = new Set((g.players || []).filter(p => p && p.name).map(p => _t2SKey(p.name)));
+    const seen = new Set();
+    (cache.rows || []).forEach(r => {
+      const d = r && r.data ? r.data : r;
+      if (!d || d.code === g.code || !Array.isArray(d.players)) return;
+      if (Number((d.t2 && d.t2.day) || 1) !== day) return;
+      d.players.forEach(p => { if (!p || !p.name) return; const k = _t2SKey(p.name); if (mine.has(k) || seen.has(k)) return; seen.add(k); out.push({ name: p.name, group: (d.t2 && d.t2.group) || '' }); });
+    });
+    out.sort((a, b) => (Number(a.group) - Number(b.group)) || String(a.name).localeCompare(String(b.name)));
+  } catch (e) {}
+  return out;
+}
+// Pure: the bet object, or a string saying why not.
+function bgXbetBuild(g, o) {
+  const kind = o && o.kind;
+  if (kind !== 'stroke' && kind !== 'quota') return 'Pick Stroke play or Quota';
+  const a = String((o && o.mine) || '').trim(), b = String((o && o.opp) || '').trim();
+  if (!a || !b) return 'Pick both players';
+  if (_t2SKey(a) === _t2SKey(b)) return 'Pick two different players';
+  if (!(g.players || []).some(p => p && p.name && _t2SKey(p.name) === _t2SKey(a))) return a + ' is not on this card';
+  if ((g.players || []).some(p => p && p.name && _t2SKey(p.name) === _t2SKey(b))) return b + ' is on this card — set it as a group game';
+  const v = Number(o.value);
+  if (!(v > 0)) return 'Enter the units';
+  return { kind: kind, names: [a, b], value: v, net: kind === 'quota' ? true : (o.net !== false), per: !!o.per, savedAt: Date.now(), by: String(o.by || '') };
+}
+async function bgXbetSave(g, bet) {
+  try {
+    if (!g || !bet || typeof bet !== 'object') return false;
+    if (!g.xbets || typeof g.xbets !== 'object') g.xbets = {};
+    const id = 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    g.xbets[id] = bet;
+    g.updatedAt = Date.now();
+    let ok = false; try { ok = await saveGame(g); } catch (e) { ok = false; }
+    try { if (window._t2CrossGps) { window._t2CrossGps._sx = null; window._t2CrossGps.at = 0; } } catch (e) {}
+    try { if (typeof _t2RefreshCrossGpsCache === 'function') Promise.resolve(_t2RefreshCrossGpsCache(g)).then(() => { try { if (state.game === g && typeof renderGameBanners === 'function') renderGameBanners(); } catch (e) {} }).catch(() => {}); } catch (e) {}
+    try { if (typeof renderGameBanners === 'function') renderGameBanners(); } catch (e) {}
+    try { if (typeof updateGpsMoneyMatch === 'function') updateGpsMoneyMatch(); } catch (e) {}
+    return ok !== false;
+  } catch (e) { return false; }
+}
+async function bgXbetRemove(g, id) {
+  try {
+    if (!g || !g.xbets || !g.xbets[id]) return;
+    const b = g.xbets[id];
+    const who = (b.names || []).map(n => String(n).split(/\s+/)[0]).join(' v ');
+    if (!(await uiConfirm('Remove the ' + (b.kind === 'quota' ? 'Quota' : 'Stroke play') + ' bet ' + who + '?', { title: 'Remove cross bet?', okLabel: 'Remove', cancelLabel: 'Keep', danger: true }))) return;
+    g.xbets[id] = Object.assign({}, b, { off: true, offAt: Date.now() });
+    g.updatedAt = Date.now();
+    try { await saveGame(g); } catch (e) {}
+    try { if (window._t2CrossGps) window._t2CrossGps._sx = null; } catch (e) {}
+    try { if (typeof renderGameBanners === 'function') renderGameBanners(); } catch (e) {}
+    try { if (typeof updateGpsMoneyMatch === 'function') updateGpsMoneyMatch(); } catch (e) {}
+    showToast('Cross bet removed');
+  } catch (e) {}
+}
+function bgXbetOpen(g) {
+  try {
+    if (!g || !(g.t2 && g.t2.tournamentId) || document.getElementById('bg-xbet-ov')) return;
+    const others = bgXbetOthers(g);
+    if (!others.length) {
+      try { if (window._t2CrossGps) window._t2CrossGps.at = 0; if (typeof _t2RefreshCrossGpsCache === 'function') Promise.resolve(_t2RefreshCrossGpsCache(g)).catch(() => {}); } catch (e) {}
+      showToast('No other group is on the course yet — try again in a moment', 4500);
+      return;
+    }
+    let myId = null; try { myId = gpsResolveMyId(g); } catch (e) { myId = null; }
+    const mine = (g.players || []).filter(p => p && p.name);
+    const ov = document.createElement('div');
+    ov.id = 'bg-xbet-ov'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100060';
+    const opt = (v, t, sel) => '<option value="' + escapeHtml(String(v)) + '"' + (sel ? ' selected' : '') + '>' + escapeHtml(String(t)) + '</option>';
+    const lab = 'font-weight:600;display:block;margin:10px 0 4px';
+    ov.innerHTML = '<div class="modal" style="max-width:440px;max-height:88vh;overflow-y:auto">' +
+      '<h2 style="margin:0 0 4px">Cross bet with another group</h2>' +
+      '<p class="help-text" style="margin:0 0 4px;white-space:normal">Scored on the holes both players finish. It settles on the Event Leaderboard, separate from your group games.</p>' +
+      '<label class="help-text" for="xb-mine" style="' + lab + '">Who is betting?</label><select id="xb-mine" style="width:100%">' + mine.map(p => opt(p.name, p.name, p.id === myId)).join('') + '</select>' +
+      '<label class="help-text" for="xb-opp" style="' + lab + '">Against</label><select id="xb-opp" style="width:100%">' + others.map(o => opt(o.name, o.name + (o.group ? ' · Group ' + o.group : ''), false)).join('') + '</select>' +
+      '<label class="help-text" for="xb-kind" style="' + lab + '">Game</label><select id="xb-kind" style="width:100%">' + opt('stroke', 'Stroke play — lower total wins', true) + opt('quota', 'Quota — most points over quota wins', false) + '</select>' +
+      '<div id="xb-net-wrap"><label class="help-text" for="xb-net" style="' + lab + '">Scores</label><select id="xb-net" style="width:100%">' + opt('net', 'Net (with handicap strokes)', true) + opt('gross', 'Gross', false) + '</select></div>' +
+      '<label class="help-text" for="xb-pay" style="' + lab + '">Pays</label><select id="xb-pay" style="width:100%">' + opt('flat', 'Flat amount to the winner', true) + opt('per', 'Per stroke of the gap', false) + '</select>' +
+      '<label class="help-text" for="xb-val" style="' + lab + '">Units</label><input type="number" id="xb-val" data-no-draft inputmode="decimal" min="0" step="1" value="5" style="width:100%">' +
+      '<div class="actions" style="margin-top:14px"><button class="bg-btn bg-btn--ghost" id="xb-cancel">Cancel</button><button class="bg-btn bg-btn--primary primary" id="xb-save">Save bet</button></div></div>';
+    document.body.appendChild(ov);
+    const q = id => ov.querySelector('#' + id);
+    const sync = () => {
+      const isQ = q('xb-kind').value === 'quota';
+      q('xb-net-wrap').style.display = isQ ? 'none' : '';
+      const po = q('xb-pay').querySelector('option[value="per"]'); if (po) po.textContent = isQ ? 'Per point of the gap' : 'Per stroke of the gap';
+    };
+    q('xb-kind').onchange = sync; sync();
+    const close = () => { try { ov.remove(); } catch (e) {} };
+    q('xb-cancel').onclick = close;
+    q('xb-save').onclick = async () => {
+      let by = ''; try { const me = mine.find(p => p.id === myId); by = me ? me.name : ''; } catch (e) {}
+      const bet = bgXbetBuild(g, { kind: q('xb-kind').value, mine: q('xb-mine').value, opp: q('xb-opp').value, value: q('xb-val').value, net: q('xb-net').value !== 'gross', per: q('xb-pay').value === 'per', by: by });
+      if (typeof bet === 'string') { showToast(bet, 'warn'); return; }
+      // the other cart (or this one) already set this pair for this game today: the first saved wins
+      try {
+        const X = _t2CrossFromCache(window._t2CrossGps, g), day = Number((g.t2 && g.t2.day) || 1);
+        const ks = bet.names.map(_t2SKey).sort().join(',');
+        if (X && (X.nassaus || []).some(n => n.xkind === bet.kind && Number(n.day) === day && (n.keys || []).slice().sort().join(',') === ks)) { showToast('That ' + (bet.kind === 'quota' ? 'Quota' : 'Stroke play') + ' bet is already set for those two today', 'warn'); return; }
+      } catch (e) {}
+      q('xb-save').disabled = true; q('xb-save').textContent = 'Saving…';
+      const ok = await bgXbetSave(g, bet);
+      close();
+      showToast(ok ? ((bet.kind === 'quota' ? 'Quota' : 'Stroke play') + ' bet saved ✓ — it shows on both groups’ screens') : 'Saved on this phone — it will sync when you have signal', 5000);
+    };
+    try { if (typeof bgKeyboardSafe === 'function') bgKeyboardSafe(ov.querySelector('.modal')); } catch (e) {}
+  } catch (e) {}
+}
+function bgXbetButton(g, banners) {
+  try {
+    if (!g || !banners || !(g.t2 && g.t2.tournamentId)) return;
+    banners.querySelectorAll('.bg-xbet-rm').forEach(el => { el.onclick = (ev) => { try { ev.stopPropagation(); } catch (e) {} bgXbetRemove(g, el.getAttribute('data-xid')); }; });
+    if (g.finishedAt || (typeof state !== 'undefined' && state && state.viewOnlyMode)) return;
+    if ((typeof bgTeamBallRound === 'function') && bgTeamBallRound(g)) return;
+    const d = document.createElement('div');
+    d.className = 'turn-banner bg-cross-banner';
+    d.innerHTML = '<span role="button" tabindex="0" class="bg-xbet-add" style="cursor:pointer;font-weight:600;color:var(--accent)">➕ Cross bet with another group — Stroke play or Quota</span>';
+    banners.appendChild(d);
+    d.querySelector('.bg-xbet-add').onclick = () => bgXbetOpen(g);
+  } catch (e) {}
+}
+try { window.bgXbetOpen = bgXbetOpen; window.bgXbetBuild = bgXbetBuild; } catch (e) {}
 function _t2CrossLead(m) {
   try {
     if (Array.isArray(m.holes) && m.holes.length) { let a = 0, b = 0; m.holes.forEach(h => { const r = String(h && h.res || ''); if (r === 'A' || r === 'a') a++; else if (r === 'B' || r === 'b') b++; }); return Math.abs(a - b); }
@@ -61407,7 +61709,7 @@ function _t2CrossNoteText(d, L, kindOf) {
   try {
     if (kindOf === 'conflict') {
       const who = (d.keys || []).map(k => L.first(k)).join(' v ');
-      const kn = d.kind === 'match' ? 'Match' : 'Nassau';
+      const kn = d.kind === 'match' ? 'Match' : (d.kind === 'stroke' ? 'Stroke play' : (d.kind === 'quota' ? 'Quota' : 'Nassau'));
       return _sTf('{0} ({1}): two carts set different terms — counted {2}, ignored {3}', [who, kn, _t2CrossTerms(d.used || {}), _t2CrossTerms(d.other || {})]);
     }
     return _sT(String(d.text || ((d.names || []).join(' v ') + ': game dropped')));
@@ -61485,7 +61787,7 @@ function _t2RenderCrossBanners(g, banners) {
       let body = '';
       if (!n.segments.length) body = row('', _sT('Not started'), 'as');
       n.segments.forEach(s => { const r = _t2CrossSegLine(s, n, L); body += row(_sT((s.name === 'Total' ? 'Total' : s.name) + ':'), r.text, r.state); });
-      add('<div style="font-weight:600;margin-bottom:4px">' + bgGameIconPrefix('nassau') + 'Nassau (cross-group): ' + escapeHtml(A + ' vs ' + B) + meta(n, true) + '</div>'
+      add('<div style="font-weight:600;margin-bottom:4px">' + (n.xkind ? (bgGameIconPrefix(n.xkind === 'quota' ? 'quota' : 'stroke') + (n.xkind === 'quota' ? 'Quota' : 'Stroke play') + ' (cross-group): ') : (bgGameIconPrefix('nassau') + 'Nassau (cross-group): ')) + escapeHtml(A + ' vs ' + B) + (n.xkind ? bgXbetMeta(n, g) : meta(n, true)) + '</div>'
         + '<div style="display:flex;flex-direction:column;gap:2px;font-size:12px">' + body + '</div>' + foot);
     });
     X.nassauGroups.filter(G => onDay(G) && hasMe(G.keys)).forEach(G => {
@@ -61664,6 +61966,12 @@ function _t2MyCrossGroupStatuses(g, myId) {
         if (n.aKey !== myKey && n.bKey !== myKey) return;
         const oppKey = n.aKey === myKey ? n.bKey : n.aKey; if (oppKey === myKey || cartKeys.has(oppKey)) return;
         const opp = L.first(oppKey, n.aKey === myKey ? n.bFirst : n.aFirst);
+        if (n.xkind) {   // v2045: Stroke / Quota cross bet -- who is ahead and by how much
+          const sg = (n.segments || [])[0] || null, ldK = sg ? (sg.leaderKey || sg.winnerKey) : null, up = ldK === myKey;
+          const tx = (!sg || !sg.played) ? ('– · ' + opp) : (!ldK ? ('AS · ' + opp) : ((up ? '▲ ' : '▼ ') + (sg.gap != null ? sg.gap : '') + ' · ' + opp));
+          out.push({ label: bgGameIcon(n.xkind === 'quota' ? 'quota' : 'stroke'), text: tx, cls: !ldK ? 'even' : (up ? 'pos' : 'neg'), cross: true, pending: !!n.pending });
+          return;
+        }
         const amt = n.aKey === myKey ? n.aNet : n.bNet;
         const text = (!amt ? 'AS · ' : ((amt > 0 ? '▲ ' : '▼ ') + sgn(amt) + ' · ')) + opp;
         out.push({ label: bgGameIcon('nassau'), text: text, cls: !amt ? 'even' : (amt > 0 ? 'pos' : 'neg'), cross: true, pending: !!n.pending });
@@ -66294,6 +66602,52 @@ function _bgQuotaEarlyRound(g) {
     return _bgT2TrimRound(g, common);
   } catch (e) { return g; }
 }
+/* v2045 (Tyler 11/18): "the quota bubble on the gps screen only show where I was with my group in the
+   quota game instead of the entire tournament." In an event the day's Quota is ONE whole-field pool
+   (t2ComputeFieldQuota), but the bubble and the chip ranked only the card in hand. This is my place in
+   the field (my flight, when pools are per flight), from the event copy the GPS screen already keeps
+   (window._t2CrossGps, refreshed every 20 s) with THIS card's live scores swapped in.
+   Returns { place, tied, n, lead, result } or null (not an event pool / the event has not loaded yet). */
+const _bgFqMem = { k: null, v: null };
+function bgFieldQuotaPlaceFrom(rows, t, fieldPlayers, day, myName) {
+  try {
+    const fq = t2ComputeFieldQuota(rows, t, fieldPlayers);
+    if (!fq || !Array.isArray(fq.perDay)) return null;
+    const k = normalizeNameSegment(String(myName || ''));
+    let list = null;
+    fq.perDay.forEach(D => { if (list || Number(D.day) !== Number(day) || !Array.isArray(D.rows)) return; if (D.rows.some(x => normalizeNameSegment(String(x.name)) === k)) list = D.rows; });
+    if (!list || list.length < 2) return null;
+    const me = list.find(x => normalizeNameSegment(String(x.name)) === k);
+    const mine = Number(me.result) || 0;
+    const place = list.filter(x => (Number(x.result) || 0) > mine).length + 1;
+    const tied = list.filter(x => (Number(x.result) || 0) === mine).length > 1;
+    let lead = 0;
+    if (place === 1) { const nx = list.filter(x => (Number(x.result) || 0) < mine).sort((a, b) => b.result - a.result)[0]; lead = (nx && !tied) ? (mine - (Number(nx.result) || 0)) : 0; }
+    else lead = Math.max.apply(null, list.map(x => Number(x.result) || 0)) - mine;
+    return { place: place, tied: tied, n: list.length, lead: lead, result: mine };
+  } catch (e) { return null; }
+}
+function bgFieldQuotaPlace(g, myId) {
+  try {
+    const tid = g && g.t2 && g.t2.tournamentId;
+    if (!tid || !g.games || !g.games.quota || !g.games.quota._t2field) return null;
+    try { if (typeof _t2RefreshCrossGpsCache === 'function') Promise.resolve(_t2RefreshCrossGpsCache(g)).catch(() => {}); } catch (e) {}
+    const cache = window._t2CrossGps;
+    if (!cache || cache.tid !== tid || !cache.t) return null;
+    const me = (g.players || []).find(p => p && p.id === myId); if (!me || !me.name) return null;
+    let sig = '';
+    try { sig = cache.at + '|' + g.code + '|' + myId + '|' + JSON.stringify(g.scores || {}) + '|' + JSON.stringify([g.leftRound || null, g.joinedRound || null, g.finishedAt || 0]); } catch (e) { sig = ''; }
+    if (sig && _bgFqMem.k === sig) return _bgFqMem.v;
+    let hit = false;
+    const rows = (cache.rows || []).map(r => { const d = r && r.data ? r.data : r; if (d && d.code === g.code) { hit = true; return { data: g }; } return r; });
+    if (!hit) rows.push({ data: g });
+    const fp = (window._bgT2PlayersCache && window._bgT2PlayersCache[tid]) || null;
+    const out = bgFieldQuotaPlaceFrom(rows, cache.t, fp, Number((g.t2 && g.t2.day) || 1), me.name);
+    _bgFqMem.k = sig; _bgFqMem.v = out;
+    return out;
+  } catch (e) { return null; }
+}
+try { window.bgFieldQuotaPlace = bgFieldQuotaPlace; } catch (e) {}
 const _bgQuotaMem = { stamp: null, model: null };
 function bgQuotaCardModel(g) {
   try {
@@ -90252,6 +90606,7 @@ async function openT2HcpEditor(t) {
   try { if (typeof bgKeyboardSafe === 'function') bgKeyboardSafe(ov.querySelector('.modal')); } catch (e) {}
   if (canEdit) {
     const addBtn = ov.querySelector('#t2he-add');
+    try { t2LateUnseatedBanner(t, list, () => { try { renderList(); } catch (e) {} }); } catch (e) {}   // v2045
     /* v1924 (Tyler, 10/16 recording): this waited on a fresh players read before opening,
        so on a slow connection the picker appeared seconds after the tap. Open at once from
        the list already on screen; the picker re-reads the event and roster underneath. */
@@ -90277,6 +90632,7 @@ async function openT2AddPlayerPicker(t, onDone, known) {
   const real = () => (players || []).filter(p => !t2IsOpenSlot(p));
   const inEvent = (name) => real().find(p => K(p.display_name) === K(name)) || null;
   const pending = new Set();   // name keys with a save in flight
+  const _lateCtxP = (async () => { try { return t2CanManage(t) ? await t2LateCtx(t) : null; } catch (e) { return null; } })();   // v2045: has a day started? (asked once per open)
   const wanted = new Map();    // v1962: what the tap asked for (true = in), shown at once
   let list = [];
   const _rebuild = () => {
@@ -90390,6 +90746,7 @@ async function openT2AddPlayerPicker(t, onDone, known) {
     pending.add(k); wanted.set(k, adding); paintRow(name); paintCount();   // v1962: ticks now, saves behind
     enqueue(async () => {
       const ok = adding ? await addOne(name, hv) : await removeOne(name);
+      if (ok && adding) { try { const _lc = await _lateCtxP; if (_lc) await t2LateSeatOffer(t, inEvent(name)); } catch (e) {} }   // v2045: the event is being played -> pick his group now
       pending.delete(k); wanted.delete(k);
       if (!ok) showToast(adding ? ('Couldn’t add ' + name + ' — try again') : (window._bgRemoveCancelled ? 'Kept in the event' : ('Couldn’t take ' + name + ' off — try again')));
       if (document.body.contains(ov)) { if (ok) { paintRow(name); paintCount(); } else { _rebuild(); paint(); } }
@@ -90402,7 +90759,7 @@ async function openT2AddPlayerPicker(t, onDone, known) {
     const nm = await uiPrompt('Guest name:', { title: 'Add guest', okLabel: 'Add' }); if (!nm || !nm.trim()) return;
     const g = nm.trim(); const k = K(g);
     pending.add(k); list.push({ name: g, _evOnly: true }); list.sort((a, b) => (a.name || '').localeCompare(b.name || '')); paint();
-    enqueue(async () => { const ok = await addOne(g, ''); pending.delete(k); if (!ok) showToast('Couldn’t add ' + g + ' — try again'); if (document.body.contains(ov)) { _rebuild(); paint(); } });
+    enqueue(async () => { const ok = await addOne(g, ''); pending.delete(k); if (ok) { try { const _lc = await _lateCtxP; if (_lc) await t2LateSeatOffer(t, inEvent(g)); } catch (e) {} }   /* v2045 */ if (!ok) showToast('Couldn’t add ' + g + ' — try again'); if (document.body.contains(ov)) { _rebuild(); paint(); } });
   };
   // Fresh copies from the cloud, painted in place (keeps search text and scroll).
   (async () => {
@@ -93080,6 +93437,250 @@ function t2OpenLogoPicker(team) {
 // cart's players are the snapshot t2LaunchDayRounds took (see there) -- a mover would never reach that
 // scorecard -- and a cart holds T2_MAX_GROUP_SIZE, the same cap t2SeatPlayersIntoGroups honours.
 // o = { launched: bool, count: members already in the target }
+/* ==========================================================================
+   v2045 (Tyler 11/18) -- ADD A PLAYER AFTER THE TOURNAMENT HAS STARTED.
+   Kevin could add the player to the event, but a started day locks its carts and a launched
+   card is a one-time snapshot, so the player had no card to be scored on (he deleted the
+   tournament and rebuilt it instead). The commissioner / an event admin now picks the group:
+     - a group already on the course: the player goes on that card from the next hole nobody
+       has scored yet (g.joinedRound), in every event game, full entry, quota cut to the holes left;
+     - a group that has not started: he is simply added to it;
+     - a new group: created, and it starts from that player's phone like any other cart.
+   ========================================================================== */
+async function t2LateCtx(t) {
+  try {
+    if (!t || !t.id) return null;
+    let days = []; try { days = await t2GetDays(t.id); } catch (e) { days = []; }
+    days = (days || []).slice().sort((a, b) => (Number(b.day_number) || 0) - (Number(a.day_number) || 0));
+    for (const d of days) {
+      let gs = []; try { gs = await t2GetGroups(d.id); } catch (e) { gs = []; }
+      if ((gs || []).some(x => x && x.game_code)) {
+        let mem = {}; try { mem = await t2GetMembersForGroups(gs); } catch (e) { mem = {}; }
+        return { day: d, groups: gs, members: mem };
+      }
+    }
+    return null;
+  } catch (e) { return null; }
+}
+// The hole a late joiner starts on: the first hole (in play order) nobody on the card has scored.
+function t2LateJoinHole(g) {
+  try {
+    const rh = (typeof roundHoles === 'function') ? (roundHoles(g) || 18) : 18;
+    const seq = _bgPlaySeqOr(g, rh);
+    for (const h of seq) {
+      const any = (g.players || []).some(p => p && g.scores && g.scores[p.id] && g.scores[p.id][h - 1] != null);
+      if (!any) return h;
+    }
+    return null;
+  } catch (e) { return null; }
+}
+// Why this card cannot take a late player, or null when it can.
+function t2LateAddRefusal(g) {
+  try {
+    if (!g || !Array.isArray(g.players)) return 'Couldn’t read that group’s card — try again.';
+    if (g.finishedAt) return 'That group has finished its round.';
+    if (g.players.length >= T2_MAX_GROUP_SIZE) return 'That card is full (' + T2_MAX_GROUP_SIZE + ' max).';
+    if (g.bracket) return 'A bracket match can’t take another player.';
+    if ((typeof bgTeamBallRound === 'function' && bgTeamBallRound(g)) || (g.games && (g.games.scramble || g.games.ryderCup))) return 'That group is playing a team-ball format — its sides are set.';
+    if (t2LateJoinHole(g) == null) return 'That group has scored every hole.';
+    return null;
+  } catch (e) { return 'Couldn’t read that group’s card — try again.'; }
+}
+// Build the card row for a late player the same way t2LaunchDayRounds builds everyone else's.
+function t2LateBuildPlayer(t, g, tp) {
+  const parts = String((tp && tp.display_name) || 'Player').trim().split(/\s+/);
+  const first = parts[0] || 'Player', last = parts.slice(1).join(' ') || '';
+  const h = Math.round(parseFloat(tp && tp.handicap) || 0);
+  const rules = g.hcpRules || {};
+  const pct = rules.noHandicaps ? 0 : (rules.pct != null ? (Number(rules.pct) || 0) : 100);
+  let base = h, hcp = h;
+  try {
+    if (!rules.noHandicaps && rules.basis === 'lowest') {
+      // off the low man: measured against the card's raw handicaps; the players already on the
+      // card keep the strokes they started with.
+      const raws = (g.players || []).map(p => Number(p && p.rawHcp) || 0).concat([h]);
+      const bo = bgApplyHcpBasis(raws, 'lowest', pct, false);
+      base = bo[bo.length - 1].base; hcp = bo[bo.length - 1].hcp;
+    } else {
+      const bo = bgApplyHcpBasis([h], rules.basis, pct, !!rules.noHandicaps);
+      base = bo[0].base; hcp = bo[0].hcp;
+    }
+  } catch (e) { base = h; hcp = h; }
+  let tee = null;
+  try {
+    const pt = (t && t.settings && t.settings.playerTees) || {};
+    const m = pt[g.courseId || ''] || {};
+    if (tp && m[tp.id]) tee = m[tp.id];
+    const labels = (Array.isArray(g.tees) ? g.tees : []).map(x => x && x.label).filter(Boolean);
+    if (tee && labels.length && labels.indexOf(tee) < 0) tee = null;
+    if (!tee && labels.length === 1) tee = labels[0];
+    if (!tee) {   // the tee most of the card is playing
+      const cnt = {}; (g.players || []).forEach(p => { if (p && p.teeLabel) cnt[p.teeLabel] = (cnt[p.teeLabel] || 0) + 1; });
+      const best = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a])[0];
+      if (best) tee = best;
+    }
+  } catch (e) { tee = null; }
+  return {
+    id: 't2p' + ((g.players || []).length) + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+    firstName: first, lastName: last, name: combineName(first, last),
+    hcp: hcp, rawHcp: h, baseHcp: base, playsGross: false,
+    teeLabel: tee, uid: (tp && tp.user_id) || null, t2pid: (tp && tp.id) || null, joinedLate: true
+  };
+}
+// Pure: put the player on the card. Returns { p, hole } or null. No network.
+function t2LateApplyToRound(t, g, tp) {
+  if (t2LateAddRefusal(g)) return null;
+  const nk = s => normalizeNameSegment(String(s || ''));
+  if ((g.players || []).some(p => p && (nk(p.name) === nk(tp.display_name) || (tp.id && p.t2pid === tp.id)))) return null;
+  const hole = t2LateJoinHole(g);
+  const p = t2LateBuildPlayer(t, g, tp);
+  g.players.push(p);
+  if (!g.scores) g.scores = {};
+  g.scores[p.id] = new Array(18).fill(null);
+  if (bgPlayIdx(g, hole) > 0) {
+    if (!g.joinedRound || typeof g.joinedRound !== 'object') g.joinedRound = { byId: {} };
+    if (!g.joinedRound.byId) g.joinedRound.byId = {};
+    g.joinedRound.byId[p.id] = hole;
+    g.joinedRound.at = Date.now();
+  }
+  g.updatedAt = Date.now();
+  return { p: p, hole: hole };
+}
+async function t2LateAddToLiveGroup(t, ctx, grp, tp) {
+  let g = null; try { g = await loadGame(grp.game_code); } catch (e) { g = null; }
+  const why = t2LateAddRefusal(g);
+  if (why) { showToast(why, 'warn'); return false; }
+  const hole = t2LateJoinHole(g);
+  const fn = String(tp.display_name || 'Player').trim().split(/\s+/)[0];
+  const missed = bgPlayIdx(g, hole);
+  const msg = missed > 0
+    ? (fn + ' joins Group ' + grp.group_number + ' from hole ' + hole + '. The ' + missed + ' hole' + (missed === 1 ? '' : 's') + ' already played don’t count for him: he is in every event game, pays the full entry, and his quota is cut to the holes left.')
+    : (fn + ' joins Group ' + grp.group_number + ' from the first hole.');
+  if (!(await uiConfirm(msg, { title: 'Add ' + fn + ' to Group ' + grp.group_number + '?', okLabel: 'Add', cancelLabel: 'Cancel' }))) return false;
+  const pill = (typeof bgBusyPill === 'function') ? bgBusyPill('Adding ' + fn + '…') : null;
+  try {
+    const mem = (ctx.members && ctx.members[grp.id]) || [];
+    const slot = mem.reduce((mx, r) => Math.max(mx, parseInt(r && r.slot, 10) || 0), 0) + 1;
+    if (!(await t2AddGroupMember(grp.id, tp.id, tp.team || null, slot))) { showToast('Couldn’t add ' + fn + ' to that group — try again'); return false; }
+    // re-read: the card may have moved on while the question was open
+    try { const g2 = await loadGame(grp.game_code); if (g2 && Array.isArray(g2.players)) g = g2; } catch (e) {}
+    const r = t2LateApplyToRound(t, g, tp);
+    if (!r) { showToast(t2LateAddRefusal(g) || (fn + ' is already on that card')); return false; }
+    let ok = false; try { ok = await saveGame(g); } catch (e) { ok = false; }
+    if (!ok) {
+      try { await supa.from('tournament_group_members').delete().eq('group_id', grp.id).eq('tournament_player_id', tp.id); } catch (e) {}
+      showToast('Couldn’t save ' + fn + ' onto the card — nothing was changed. Try again.');
+      return false;
+    }
+    // The day's games that carry a who's-in list take his name; pair games (Match / Nassau) are left alone.
+    try {
+      const dn = ctx.day.day_number;
+      await t2MergeSettings(t.id, s => {
+        const dg = s.dayGames && s.dayGames[dn]; if (!dg) return;
+        Object.keys(dg).forEach(k => {
+          if (k === 'match' || k === 'nassau') return;
+          const c = dg[k]; if (!c || typeof c !== 'object' || c.pair || Array.isArray(c.instances)) return;
+          if (Array.isArray(c.participantNames) && c.participantNames.length && !c.participantNames.some(n => normalizeNameSegment(String(n)) === normalizeNameSegment(String(r.p.name)))) c.participantNames.push(r.p.name);
+        });
+      });
+    } catch (e) {}
+    // Same remap a Configure Day edit uses, so the day's games on that card include him.
+    try { await t2ResyncLaunchedGroupsForDay(_t2Current && _t2Current.id === t.id ? _t2Current : t, ctx.day.id, ctx.day.day_number, 'day', grp.id); } catch (e) {}
+    showToast(fn + ' is on Group ' + grp.group_number + '’s card' + (missed > 0 ? (' from hole ' + r.hole) : '') + ' ✓', 5000);
+    return true;
+  } finally { try { if (pill) pill.done(); } catch (e) {} }
+}
+// The chooser. `tp` = the tournament_players row. Resolves true when he was seated.
+async function t2LateSeatOffer(t, tp, ctx) {
+  try {
+    if (!t || !tp || !tp.id || !t2CanManage(t)) return false;
+    ctx = ctx || await t2LateCtx(t);
+    if (!ctx) return false;                                   // nothing has started: the carts screen seats him
+    const all = [].concat.apply([], Object.keys(ctx.members || {}).map(k => ctx.members[k] || []));
+    if (all.some(m => m && m.tournament_player_id === tp.id)) return false;   // already in a group
+    let players = []; try { players = await t2GetPlayers(t.id); } catch (e) { players = []; }
+    const pById = {}; (players || []).forEach(p => { pById[p.id] = p; });
+    const fn = String(tp.display_name || 'Player').trim().split(/\s+/)[0];
+    return await new Promise(resolve => {
+      const old = document.getElementById('t2late-ov'); if (old) old.remove();
+      const ov = document.createElement('div');
+      ov.id = 't2late-ov'; ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100090';
+      const rows = (ctx.groups || []).map(grp => {
+        const mem = (ctx.members[grp.id] || []).slice().sort((a, b) => (a.slot || 0) - (b.slot || 0));
+        const who = mem.map(m => { const p = pById[m.tournament_player_id]; return p ? String(p.display_name || '').trim().split(/\s+/)[0] : ''; }).filter(Boolean).join(', ');
+        const full = mem.length >= T2_MAX_GROUP_SIZE;
+        const st = grp.game_code ? 'on the course' : 'not started';
+        return '<div class="t2late-row" data-gid="' + t2esc(String(grp.id)) + '" data-full="' + (full ? '1' : '') + '" style="cursor:' + (full ? 'default' : 'pointer') + ';opacity:' + (full ? '.5' : '1') + ';padding:11px 2px;border-top:1px solid var(--border)">' +
+          '<div style="font-weight:700">Group ' + t2esc(String(grp.group_number)) + ' <span class="small-text" style="font-weight:400;color:var(--text-muted)">· ' + mem.length + ' of ' + T2_MAX_GROUP_SIZE + ' · ' + st + (full ? ' · full' : '') + '</span></div>' +
+          '<div class="small-text" style="color:var(--text-muted);white-space:normal">' + t2esc(who || 'empty') + '</div></div>';
+      }).join('');
+      ov.innerHTML = '<div class="modal" style="max-width:440px;max-height:84vh;display:flex;flex-direction:column">' +
+        '<h2 style="margin:0 0 4px">Which group does ' + t2esc(fn) + ' play in?</h2>' +
+        '<p class="help-text" style="margin:0 0 8px">The tournament has started. Pick a group with room, or give him a new one.</p>' +
+        '<div style="flex:1;overflow-y:auto;min-height:60px">' + rows +
+        '<div class="t2late-row" data-gid="new" style="cursor:pointer;padding:11px 2px;border-top:1px solid var(--border)"><div style="font-weight:700">➕ New group</div><div class="small-text" style="color:var(--text-muted);white-space:normal">Its round starts from ' + t2esc(fn) + '’s phone.</div></div></div>' +
+        '<div class="actions" style="margin-top:10px"><button class="bg-btn bg-btn--ghost" id="t2late-skip">Not now</button></div></div>';
+      document.body.appendChild(ov);
+      let busy = false;
+      const done = v => { try { ov.remove(); } catch (e) {} resolve(v); };
+      ov.querySelector('#t2late-skip').onclick = () => done(false);
+      ov.querySelectorAll('.t2late-row').forEach(row => row.onclick = async () => {
+        if (busy) return;
+        if (row.getAttribute('data-full') === '1') { showToast('That group is full (' + T2_MAX_GROUP_SIZE + ' max)'); return; }
+        busy = true;
+        try {
+          const gid = row.getAttribute('data-gid');
+          if (gid === 'new') {
+            const num = (ctx.groups || []).reduce((mx, x) => Math.max(mx, Number(x && x.group_number) || 0), 0) + 1;
+            const ng = await t2CreateGroup(ctx.day.id, { groupNumber: num, size: 1 });
+            if (!ng || !(await t2AddGroupMember(ng.id, tp.id, tp.team || null, 1))) { showToast('Couldn’t create the group — try again'); busy = false; return; }
+            showToast('Group ' + num + ' created for ' + fn + '. It starts when he opens the tournament and taps Start.', 6000);
+            done(true); return;
+          }
+          const grp = (ctx.groups || []).find(x => String(x.id) === String(gid));
+          if (!grp) { busy = false; return; }
+          if (!grp.game_code) {
+            const mem = ctx.members[grp.id] || [];
+            const slot = mem.reduce((mx, r) => Math.max(mx, parseInt(r && r.slot, 10) || 0), 0) + 1;
+            if (!(await t2AddGroupMember(grp.id, tp.id, tp.team || null, slot))) { showToast('Couldn’t add ' + fn + ' — try again'); busy = false; return; }
+            showToast(fn + ' is in Group ' + grp.group_number + ' ✓ — he is on the card when that group starts.', 5000);
+            done(true); return;
+          }
+          const ok = await t2LateAddToLiveGroup(t, ctx, grp, tp);
+          if (ok) { done(true); return; }
+          busy = false;
+        } catch (e) { busy = false; }
+      });
+    });
+  } catch (e) { return false; }
+}
+// Players sheet: once the event is being played, anyone on the list without a group gets a Seat button.
+async function t2LateUnseatedBanner(t, listEl, onDone) {
+  try {
+    if (!t || !listEl || !t2CanManage(t)) return;
+    const old = document.getElementById('t2late-banner'); if (old) old.remove();
+    const ctx = await t2LateCtx(t); if (!ctx) return;
+    let players = []; try { players = await t2GetPlayers(t.id); } catch (e) { players = []; }
+    const seated = new Set([].concat.apply([], Object.keys(ctx.members || {}).map(k => (ctx.members[k] || []).map(m => m.tournament_player_id))));
+    let wd = new Set(); try { wd = t2WithdrawnSet(t); } catch (e) {}
+    const un = (players || []).filter(p => p && p.id && !seated.has(p.id) && !wd.has(p.id) && !t2IsOpenSlot(p));
+    if (!un.length || !listEl.parentNode) return;
+    const d = document.createElement('div');
+    d.id = 't2late-banner';
+    d.style.cssText = 'margin:0 0 8px;padding:8px 10px;border:1px solid var(--accent);border-radius:10px';
+    d.innerHTML = '<div style="font-weight:700;margin-bottom:4px">The tournament has started</div>' +
+      '<div class="small-text" style="color:var(--text-muted);white-space:normal;margin-bottom:6px">' + un.length + ' player' + (un.length === 1 ? ' is' : 's are') + ' not in a group yet. Tap a name to pick the group.</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:6px">' + un.map(p => '<span role="button" tabindex="0" class="t2late-seat" data-pid="' + t2esc(String(p.id)) + '" style="cursor:pointer;padding:6px 10px;border-radius:999px;background:var(--accent);color:#fff;font-weight:700;font-size:13px">⛳ Seat ' + t2esc(String(p.display_name || '').trim().split(/\s+/)[0]) + '</span>').join('') + '</div>';
+    listEl.parentNode.insertBefore(d, listEl);
+    d.querySelectorAll('.t2late-seat').forEach(b => b.onclick = async () => {
+      const tp = un.find(p => String(p.id) === b.getAttribute('data-pid')); if (!tp) return;
+      const ok = await t2LateSeatOffer(t, tp);
+      if (ok) { try { await t2LateUnseatedBanner(t, listEl, onDone); } catch (e) {} try { if (typeof onDone === 'function') onDone(); } catch (e) {} }
+    });
+  } catch (e) {}
+}
+try { window.t2LateSeatOffer = t2LateSeatOffer; window.t2LateApplyToRound = t2LateApplyToRound; } catch (e) {}
+
 function t2MoveHereRefusal(o) {
   o = o || {};
   if (o.launched) return 'That group already opened its round — its players are set. Swap instead, or move before the day starts.';
@@ -97894,6 +98495,53 @@ function _t2SettleCrossNassau(A, B, value, format, net, segments) {
 // number over the holes EVERY player's round includes. Each side stroke play, lowest total wins, the
 // winner takes v (x carried units) from every other player, ties carry, a tie on the LAST side dies.
 // A leaver who did not finish a side pays as a loser; the side is judged among the finishers.
+/* v2045 (Tyler 11/18: "I wanted to do a cross bet with Britt for stroke play but it would not let me";
+   "add cross bets for quota as well, Kevin wanted to play that against Roland").
+   ONE total between two players on different cards, by hole number, on the holes BOTH scored:
+     stroke: lower total (net or gross) is ahead;  quota: more (points - quota) is ahead, each quota
+     cut to the holes compared (round(full x holes / round holes)).
+   Flat: the stake goes to whoever is ahead; per: stake x the gap. A tie is a push. It settles when
+   every shared hole is in for both, or both rounds are finished (then on the holes both played); a
+   forgotten blank on a finished card holds it open. Returns the cross-Nassau result shape with one
+   'Total' segment, so every screen that draws a cross Nassau draws this too.
+   o = { value, net, per, xkind:'stroke'|'quota', qa:{pts:{hole:n}, full, rh}, qb } */
+function _t2SettleCrossTotal(A, B, o) {
+  try {
+    A = _t2CrossSide(A); B = _t2CrossSide(B);
+    if (!A || !B) return null;
+    o = o || {};
+    const S = _t2CrossShared([A, B]);
+    if (!S.length) return null;
+    const isQ = o.xkind === 'quota', net = o.net !== false;
+    const va = h => isQ ? ((o.qa && o.qa.pts && o.qa.pts[h] != null) ? o.qa.pts[h] : null) : _t2CrossVal(A, h, net);
+    const vb = h => isQ ? ((o.qb && o.qb.pts && o.qb.pts[h] != null) ? o.qb.pts[h] : null) : _t2CrossVal(B, h, net);
+    let sa = 0, sb = 0, played = 0; const used = [];
+    S.forEach(h => { const a = va(h), b = vb(h); if (a == null || b == null) return; played++; sa += a; sb += b; used.push(h); });
+    if (!played) return null;
+    const bothFin = !!(A.fin && B.fin);
+    const complete = played === S.length;
+    const blank = !complete && (_t2CrossForgotIn(A, S) || _t2CrossForgotIn(B, S));
+    const settled = (complete || bothFin) && !blank;
+    let gap, qA = null, qB = null;                // gap > 0 : A is ahead
+    if (isQ) {
+      qA = Math.round((Number(o.qa.full) || 0) * played / (Number(o.qa.rh) || 18));
+      qB = Math.round((Number(o.qb.full) || 0) * played / (Number(o.qb.rh) || 18));
+      gap = (sa - qA) - (sb - qB);
+    } else gap = sb - sa;
+    const v = Number(o.value) || 0;
+    const lead = gap > 0 ? A : (gap < 0 ? B : null);
+    const amt = (settled && lead) ? (o.per ? v * Math.abs(gap) : v) : 0;
+    const aNet = lead === A ? amt : (lead === B ? -amt : 0);
+    const st = gap === 0 ? 'tied' : ('by ' + Math.abs(gap));
+    const seg = { name: 'Total', holesFrom: S[0], holesTo: S[S.length - 1], played: played, forfeit: false, pushed: false, noBet: false,
+      settled: settled, pending: !settled, blank: blank, gap: Math.abs(gap),
+      winnerKey: lead ? lead.key : null, winnerFirst: lead ? lead.first : null, leaderKey: lead ? lead.key : null,
+      status: st + (settled ? '' : (blank ? ' - waiting on a blank hole' : ' - in progress')) };
+    return { segments: [seg], aFirst: A.first, bFirst: B.first, aKey: A.key, bKey: B.key, aName: A.name, bName: B.name,
+      aNet: aNet, bNet: -aNet, holes: S.slice(), used: used, played: played, gap: gap,
+      totals: isQ ? { a: { pts: sa, quota: qA }, b: { pts: sb, quota: qB } } : { a: { strokes: sa }, b: { strokes: sb } } };
+  } catch (e) { return null; }
+}
 function _t2SettleCrossGroupNassau(Ps, value, net, segments) {
   try {
     const S = _t2CrossShared(Ps);
@@ -97989,7 +98637,7 @@ function _t2EventPdataByDay(rows) {
         const s = sc[h];
         if (h < _rh) {
           const ph = _phys(h); planned.push(ph);
-          let act = true; try { if (_leftN != null && typeof bgActiveOnHole === 'function') act = !!bgActiveOnHole(g, p.id, h + 1); } catch (e) { act = true; }
+          let act = true; try { if ((_leftN != null || (typeof bgJoinedAt === 'function' && bgJoinedAt(g, p.id) != null)) && typeof bgActiveOnHole === 'function') act = !!bgActiveOnHole(g, p.id, h + 1); } catch (e) { act = true; }
           active[ph] = act;
           if (s == null && g.finishedAt && act && !_team) {
             try { if (g.players.some(q => q && q.id !== p.id && g.scores && g.scores[q.id] && g.scores[q.id][h] != null)) forgot[ph] = true; } catch (e) {}
@@ -98154,6 +98802,79 @@ function t2ComputeCrossGroupMatches(t, rows) {
         }));
       } catch (e) {}
     });
+    /* v2045: cross STROKE PLAY and QUOTA bets. Saved on a cart's own round (g.xbets[id] = { kind, names:[a,b],
+       value, net, per, savedAt, by }) so any player's phone can set one mid-round; read here from EVERY
+       round of the event, each tagged with its round's day. One bet per pair per kind per day -- the FIRST
+       SAVED wins, a differing duplicate is reported. Results join out.nassaus (kind 'nassau' + xkind) with
+       one 'Total' segment. */
+    try {
+      const xc = [], gByRid = {};
+      (rows || []).forEach(row => {
+        const g = row && row.data ? row.data : row; if (!g || !Array.isArray(g.players)) return;
+        gByRid[g.code || g.id || (g.players.map(p => p.name).join('|'))] = g;
+        const xb = g.xbets; if (!xb || typeof xb !== 'object') return;
+        const d = Number((g.t2 && g.t2.day) || 1), grp = (g.t2 && g.t2.group) || null;
+        Object.keys(xb).forEach(id => {
+          const b = xb[id];
+          if (!b || typeof b !== 'object' || b.off) return;
+          if (b.kind !== 'stroke' && b.kind !== 'quota') return;
+          if (!Array.isArray(b.names) || b.names.length !== 2) return;
+          xc.push({ id: id, b: b, day: d, group: grp, code: g.code || '', at: Number(b.savedAt) || Number(g.createdAt) || 1 });
+        });
+      });
+      xc.sort((a, b) => (a.at - b.at) || (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)));
+      const xseen = {};
+      const qOf = P => {
+        try {
+          const g = gByRid[P.rid]; if (!g) return null;
+          const pl = g.players.find(p => p && p.name && bgCrossKey(p.name) === P.key); if (!pl) return null;
+          const cfg = (g.games && g.games.quota) || (g.groupGames && g.groupGames.quota) || { basis: 'auto' };
+          const pts = {};
+          Object.keys(P.byHole || {}).forEach(h => { const c = P.byHole[h]; if (c && c.g != null) pts[h] = quotaPointsForHole(c.g, parFor(g, pl.id, c.slot)); });
+          return { pts: pts, full: Number(quotaTargetFor(g, cfg, pl)) || 0, rh: ((typeof roundHoles === 'function') ? roundHoles(g) : 18) || 18 };
+        } catch (e) { return null; }
+      };
+      xc.forEach(c => {
+        try {
+          const b = c.b, kind = b.kind, names = b.names.slice(), keys = names.map(resolve);
+          if (keys[0] === keys[1]) return;
+          const lbl = kind === 'quota' ? 'Quota' : 'Stroke play';
+          const tm = { value: Number(b.value) || 0, net: kind === 'quota' ? true : (b.net !== false), per: !!b.per };
+          const sk = c.day + '|' + kind + '|' + keys.slice().sort().join(',');
+          if (xseen[sk]) {
+            const u = xseen[sk].tm;
+            if (u.value !== tm.value || u.net !== tm.net || u.per !== tm.per) out.conflicts.push({ day: c.day, kind: kind, keys: keys.slice().sort(), used: { value: u.value, net: u.net, format: kind }, other: { value: tm.value, net: tm.net, format: kind }, fromGroup: c.group, usedGroup: xseen[sk].group });
+            return;
+          }
+          xseen[sk] = { tm: tm, group: c.group };
+          const D = byDay[c.day] || { pdata: {}, playerRound: {}, seat: {} };
+          const seat = keys.map(k => D.seat[k] || null);
+          const missing = keys.map((k, i) => seat[i] ? null : names[i]).filter(Boolean);
+          if (missing.length) { drop(c.day, kind, names, 'name-not-found', vs(names) + ' (' + lbl + '): ' + missing.join(', ') + ' ' + (missing.length === 1 ? 'is' : 'are') + ' not on any card' + (oneDay ? '' : ' on day ' + c.day) + ' — game dropped', { keys: keys }); return; }
+          if (new Set(seat.map(s => s.rid)).size <= 1) { drop(c.day, kind, names, 'same-cart', vs(names) + ' (' + lbl + '): both are on the same card — set it as a group game', { keys: keys }); return; }
+          const x2s = new Set(seat.map(s => s.x2 || ''));
+          if (x2s.size > 1 || (x2s.size === 1 && !x2s.has(''))) { drop(c.day, kind, names, 'nine-twice', vs(names) + ' (' + lbl + '): a nine played twice can’t be matched hole for hole — no bet', { keys: keys }); return; }
+          const P = keys.map(k => D.pdata[k] || null);
+          const firsts = keys.map((k, i) => (P[i] && P[i].first) || seat[i].first);
+          const cardNames = keys.map((k, i) => (P[i] && P[i].name) || seat[i].name);
+          const base = { day: c.day, kind: 'nassau', xkind: kind, per: tm.per, xid: c.id, xcode: c.code, keys: keys.slice(), value: tm.value, net: tm.net, savedAt: c.at, src: 'xbets:' + c.code, format: 'stroke', segmentsSetting: 'o' };
+          const notYet = () => {
+            if (keys.every((k, i) => seat[i].fin)) { drop(c.day, kind, names, 'no-scores', vs(names) + ' (' + lbl + '): no shared hole was scored — no bet', { keys: keys }); return; }
+            out.pendingAny = true;
+            out.nassaus.push(Object.assign(base, { aKey: keys[0], bKey: keys[1], aFirst: firsts[0], bFirst: firsts[1], aName: cardNames[0], bName: cardNames[1], segments: [], aNet: 0, bNet: 0, settled: false, pending: true, notStarted: true }));
+          };
+          if (P.some(x => !x)) { notYet(); return; }
+          if (!_t2CrossShared(P).length) { drop(c.day, kind, names, 'no-shared-holes', vs(names) + ' (' + lbl + '): the carts played no hole in common — no bet', { keys: keys }); return; }
+          let qa = null, qb = null;
+          if (kind === 'quota') { qa = qOf(P[0]); qb = qOf(P[1]); if (!qa || !qb) { notYet(); return; } }
+          const r = _t2SettleCrossTotal(P[0], P[1], { value: tm.value, net: tm.net, per: tm.per, xkind: kind, qa: qa, qb: qb });
+          if (!r) { notYet(); return; }
+          const pend = r.segments.some(s => s.pending);
+          if (pend) out.pendingAny = true;
+          out.nassaus.push(Object.assign(base, r, { settled: !pend, pending: pend }));
+        } catch (e) {}
+      });
+    } catch (e) {}
   } catch (e) {}
   return out;
 }
@@ -98179,6 +98900,7 @@ function _t2CrossRecordRows(cross) {
     });
     (cross.nassaus || []).forEach(n => {
       if (!n || !n.settled || n.pending || n.notStarted) return;
+      if (n.xkind) return;   // v2045: a Stroke/Quota cross bet is recomputed from the cards (its own record kind is a follow-up)
       rows.push({ day: n.day, kind: 'nassau', keys: [n.aKey, n.bKey], settled: true, pending: false, names: [n.aName || n.aFirst, n.bName || n.bFirst], aKey: n.aKey, bKey: n.bKey,
         aPoints: Number(n.aNet) || 0, bPoints: Number(n.bNet) || 0, value: Number(n.value) || 0, net: n.net !== false, format: n.format || 'stroke',
         segments: (n.segments || []).map(s => ({ name: s.name, settled: !!s.settled, noBet: !!s.noBet, pushed: !!s.pushed, winnerKey: s.winnerKey || null, status: s.status, holesFrom: s.holesFrom, holesTo: s.holesTo, forfeit: !!s.forfeit })),
@@ -99042,7 +99764,7 @@ function _t2FieldNassauAll(rows, cfg) {
       if (!thru) return;
       const k = nmk(p.name); const cur = byDay[day].parts[k];
       // v2002 (matrix TOURNEY-6): `left` = he tapped "left the round" (bgLeftAfter).
-      const _left = (typeof bgLeftAfter === 'function') ? (bgLeftAfter(g, p.id) != null) : false;
+      const _left = ((typeof bgLeftAfter === 'function') ? (bgLeftAfter(g, p.id) != null) : false) || ((typeof bgMissedBeforeJoin === 'function') && bgMissedBeforeJoin(g, p.id) > 0);   // v2045: a late joiner's short card pays but cannot win a total-score pool
       if (!cur || thru > cur.thru) byDay[day].parts[k] = { name: p.name, first: (typeof displayFirst === 'function' ? displayFirst(p) : p.name), net: net, thru: thru, left: _left };
     });
   });
@@ -104193,7 +104915,7 @@ function t2EventMatchModels(t, rows) {
       const ra = blankRow(cols.length), rb = blankRow(cols.length);
       (n.segments || []).forEach(s => {
         const from = Number(s.holesFrom), to = Number(s.holesTo);
-        if (!(from >= 1 && to >= from) || s.name === 'Total') return;   // the hole row shows the two nines
+        if (!(from >= 1 && to >= from) || (s.name === 'Total' && n.xkind !== 'stroke')) return;   // the hole row shows the two nines (v2045: a Stroke cross bet shows its running total)
         let d = 0, up = 0;
         cols.forEach((h, i) => {
           if (h < from || h > to) return;
@@ -104205,7 +104927,7 @@ function t2EventMatchModels(t, rows) {
       const segs = (n.segments || []).map(s => { const r = _t2CrossSegLine(s, n, L); return { name: s.name === 'Total' ? '18' : s.name, text: r.text, cls: r.state === 'none' ? 'none' : 'as', state: r.state }; });
       if (!segs.length) segs.push({ name: 'Front', text: _sT('Not started'), cls: 'none', state: 'none' });
       const units = (k) => (k === n.aKey ? n.aNet : n.bNet) || 0;
-      return { kind: 'nassau', day: n.day, cross: true, net: net, fmt: n.format || 'stroke', value: Number(n.value) || 0, nH: cols.length, cols: cols, segs: segs, pending: !!n.pending, stored: !!n.stored,
+      return { kind: 'nassau', xkind: n.xkind || null, per: !!n.per, day: n.day, cross: true, net: net, fmt: n.format || 'stroke', value: Number(n.value) || 0, nH: cols.length, cols: cols, segs: segs, pending: !!n.pending, stored: !!n.stored,
         a: Object.assign({ first: L.first(n.aKey, n.aFirst), name: L.name(n.aKey, n.aName), units: units(n.aKey) }, ra),
         b: Object.assign({ first: L.first(n.bKey, n.bFirst), name: L.name(n.bKey, n.bName), units: units(n.bKey) }, rb) };
     };
@@ -104323,11 +105045,11 @@ function t2EventMatchesHtml(models) {
     days.forEach(day => {
       if (multiDay && day > 0) h += '<div style="font-weight:700;margin:8px 0 4px">' + escapeHtml(_sTf('Day {0}', [day])) + '</div>';
       list.filter(m => m.day === day).forEach(m => {
-        const kindLbl = m.kind === 'match' ? '⚔️ Match play' : ('💰 Nassau' + (m.kind === 'nassauGroup' ? ' (' + ((m.players || []).length) + ')' : ''));
+        const kindLbl = m.kind === 'match' ? '⚔️ Match play' : m.xkind ? (m.xkind === 'quota' ? '🎯 Quota' : '🏆 Stroke play') : ('💰 Nassau' + (m.kind === 'nassauGroup' ? ' (' + ((m.players || []).length) + ')' : ''));
         const tags = (m.cross ? ' <span class="small-text" style="color:var(--accent);font-weight:400">' + escapeHtml(_sT('· cross-group')) + '</span>' : '')
           + (m.pending ? ' <span class="small-text" style="color:var(--text-muted);font-weight:400">· ' + escapeHtml(_sT('pending')) + '</span>' : '')
           + (m.stored ? ' <span class="small-text" style="color:var(--text-muted);font-weight:400">· ' + escapeHtml(_sT('saved result')) + '</span>' : '');
-        const title = kindLbl + tags + ' <span class="small-text" style="color:var(--text-muted);font-weight:400">· ' + escapeHtml(m.net ? _sT('net') : _sT('gross')) + (m.value ? ' · ' + escapeHtml(String(m.value)) + (m.kind === 'match' ? '' : '/side') : '') + '</span>';
+        const title = kindLbl + tags + ' <span class="small-text" style="color:var(--text-muted);font-weight:400">· ' + escapeHtml(m.net ? _sT('net') : _sT('gross')) + (m.value ? ' · ' + escapeHtml(String(m.value)) + (m.kind === 'match' ? '' : (m.xkind ? (m.per ? (m.xkind === 'quota' ? '/point' : '/stroke') : '') : '/side')) : '') + '</span>';
         const cols = Array.isArray(m.cols) && m.cols.length ? m.cols : Array.from({ length: m.nH || 18 }, (_, i) => i + 1);
         h += '<div class="evt-mc" style="margin:6px 0 10px;padding:8px 8px 6px;background:var(--surface-2);border-radius:10px">';
         h += '<div style="font-weight:700;font-size:13px;margin-bottom:4px">' + title + '</div>';
@@ -109012,7 +109734,7 @@ function bgFinishBlanks(g) {
     g.players.forEach(p => {
       if (!p || !p.id || bgLeftAfter(g, p.id) != null) return;
       const sc = g.scores[p.id] || [];
-      seq.forEach(h => { if (played.has(h) && sc[h - 1] == null) out.push({ pid: p.id, name: (typeof displayFirst === 'function' ? displayFirst(p) : p.name) || p.name || '', hole: h, idx: h - 1 }); });
+      seq.forEach(h => { if (played.has(h) && sc[h - 1] == null && bgActiveOnHole(g, p.id, h)) out.push({ pid: p.id, name: (typeof displayFirst === 'function' ? displayFirst(p) : p.name) || p.name || '', hole: h, idx: h - 1 }); });
     });
   } catch (e) {}
   return out;
@@ -129355,6 +130077,19 @@ const gpsView = (() => {
       const myId = spectate ? spectate.pid : gpsResolveMyId(g);
       if (!myId || !Array.isArray(g.players)) return hide();
       // Show the PLACE — the running points-vs-quota is meaningless until the end.
+      // v2045: in an event this is my place in the WHOLE tournament, not on this card
+      try {
+        const _fp = (typeof bgFieldQuotaPlace === 'function') ? bgFieldQuotaPlace(g, myId) : null;
+        if (_fp) {
+          const _o = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : (n + 'th');
+          const _v = b.querySelector('.val'); if (_v) _v.textContent = (_fp.tied ? 'T' : '') + _o(_fp.place);
+          const _s = b.querySelector('.sub'); if (_s) _s.textContent = 'of ' + _fp.n;
+          _bgBubbleLbl(b.querySelector('.lbl'), 'quota', 'Quota');
+          b.title = 'Quota \u2014 your place in the whole tournament (' + (_fp.result > 0 ? '+' : '') + _fp.result + ' vs quota)';
+          b.style.display = 'block';
+          return;
+        }
+      } catch (e) {}
       let cp; try { cp = computeQuotaPoints(g, cfg, g.players); } catch (e) { return hide(); }
       const rows = g.players.map(p => {
         let over = null;
@@ -129366,6 +130101,7 @@ const gpsView = (() => {
       const ordL = n => n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : (n + 'th');
       const v = b.querySelector('.val'); if (v) v.textContent = ordL(place);
       const l = b.querySelector('.lbl'); _bgBubbleLbl(l, 'quota', 'Quota');
+      try { const _s2 = b.querySelector('.sub'); if (_s2) _s2.textContent = (g.t2 && g.t2.tournamentId && cfg._t2field) ? 'this group' : ''; b.title = 'Quota \u2014 your points vs quota'; } catch (e) {}   // v2045: says so while the field standing loads
       b.style.display = 'block';
     } catch (e) { hide(); }
   }
@@ -131886,7 +132622,7 @@ const gpsView = (() => {
           if (_t) {
             await openEventLeaderboard(_t);
             // Give the sheet a beat to paint, then bring the Team Quota block into view.
-            setTimeout(() => { try { const _el = document.getElementById('ev-team-quota'); if (_el) _el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {} }, 260);
+            setTimeout(() => { try { const _el = document.getElementById('ev-team-quota') || document.getElementById('ev-field-quota'); if (_el) _el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {} }, 260);
             return;
           }
         } catch (e) {}
