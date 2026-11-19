@@ -1,10 +1,10 @@
 'use strict';
-// qa/qa_v2045_lateadd_crossbets_fieldquota.js -- v2045 (Tyler 11/18):
+// qa/qa_v2046_lateadd_crossbets_fieldquota.js -- v2045 (Tyler 11/18):
 //   1. cross STROKE / QUOTA bets (g.xbets) through t2ComputeCrossGroupMatches, hand-computed
 //   2. a player added to a card after the round started (g.joinedRound)
 //   3. the GPS Quota bubble's place in the WHOLE field (bgFieldQuotaPlaceFrom)
 //   4. the replacement tournament picked after a live delete (bgPickReplacementEvent)
-//   node qa/qa_v2045_lateadd_crossbets_fieldquota.js golf-app.html && node qa/qa_v2045_lateadd_crossbets_fieldquota.js www/index.html
+//   node qa/qa_v2046_lateadd_crossbets_fieldquota.js golf-app.html && node qa/qa_v2046_lateadd_crossbets_fieldquota.js www/index.html
 const L = require('./v1998_lib.js');
 const { F, check, money } = L;
 const X = F('t2ComputeCrossGroupMatches');
@@ -191,4 +191,39 @@ console.log('\n== 7. replacement tournament after a live delete ==');
   check('no same-course event: the newest one', (pick(list.filter(t => t.id !== 'new'), info, now) || {}).id === 'other');
   check('nothing recent: no offer', pick(list.filter(t => t.id === 'dead' || t.id === 'old' || t.id === 'done'), info, now) === null);
 }
-L.done('qa_v2045_lateadd_crossbets_fieldquota');
+console.log('\n== 8. v2046: 3+ players = everyone against everyone; a group that has not started ==');
+{
+  const many = F('bgXbetBuildMany');
+  const a = grp('M1', 'm1', [{ name: 'Tyler OConnor', hcp: 2, scores: flat(18, 4) }, { name: 'Steve Miller', hcp: 6, scores: flat(18, 5) }], { group: 1 });
+  const b = grp('M2', 'm2', [{ name: 'Britt Hall', hcp: 20, scores: flat(18, 5) }, { name: 'Brian Myers', hcp: 12, scores: flat(18, 6) }], { group: 2 });
+  const others = [{ name: 'Britt Hall', card: 'M2' }, { name: 'Brian Myers', card: 'M2' }, { name: 'Tommy Hall', card: 'u:tommy hall' }];
+  let d = many(a, { kind: 'stroke', names: ['Tyler OConnor', 'Britt Hall', 'Brian Myers'], others: others, value: 5, net: false });
+  check('3 players, two on one card: 2 bets, the same-card pair left out', d && d.bets.length === 2 && d.same.length === 1 && d.same[0].join('|') === 'Britt Hall|Brian Myers', JSON.stringify(d));
+  d = many(a, { kind: 'stroke', names: ['Tyler OConnor', 'Steve Miller', 'Britt Hall', 'Brian Myers'], others: others, value: 5, net: false });
+  check('2 v 2 across cards: 4 bets', d.bets.length === 4 && d.same.length === 2);
+  check('all on one card: refused', typeof many(a, { kind: 'stroke', names: ['Tyler OConnor', 'Steve Miller'], others: others, value: 5 }) === 'string');
+  check('one player: refused', typeof many(a, { kind: 'quota', names: ['Tyler OConnor'], others: others, value: 5 }) === 'string');
+  a.xbets = {}; d.bets.forEach((x, i) => { a.xbets['k' + i] = x; });
+  let r = run(a, b);
+  // gross: Tyler 72, Steve 90, Britt 90, Brian 108. T v Britt +5, T v Brian +5, Steve v Britt tie 0, Steve v Brian +5
+  const by = {}; r.nassaus.forEach(n => { by[n.aKey] = (by[n.aKey] || 0) + n.aNet; by[n.bKey] = (by[n.bKey] || 0) + n.bNet; });
+  check('4 bets settle: Tyler +10, Steve +5, Britt -5, Brian -10', r.nassaus.length === 4 && by['tyler oconnor'] === 10 && by['steve miller'] === 5 && by['britt hall'] === -5 && by['brian myers'] === -10, JSON.stringify(by));
+  check('zero-sum', zs(r) === 0);
+  // Tommy's group has not started: the bet waits while anything is open, and is reported once all are finished
+  const live = grp('M3', 'm3', [{ name: 'Tyler OConnor', hcp: 2, scores: flat(9, 4).concat(flat(9, null)) }, { name: 'Steve Miller', hcp: 6, scores: flat(9, 5).concat(flat(9, null)) }], { group: 1, unfinished: true });
+  live.xbets = { w1: bet('quota', { names: ['Tyler OConnor', 'Tommy Hall'] }) };
+  r = run(live, b);
+  check('opponent not started: waiting, nothing paid, nothing lost', r.nassaus.length === 0 && r.pendingAny === true && r.dropped.some(x => x.reason === 'cart-not-started' && x.pending), JSON.stringify(r.dropped));
+  live.finishedAt = 1786820000000;
+  r = run(live, b);
+  check('everyone finished and he never played: dropped with a reason', r.dropped.some(x => x.reason === 'name-not-found' && !x.pending), JSON.stringify(r.dropped));
+}
+console.log('\n== 9. v2046: the tournament picker lists registered accounts ==');
+{
+  const U = F('t2PickerUsersFromProfiles');
+  const rows = U([{ id: 'u1', display_name: 'Britt Hogland', my_player: 'Britt Hogland', hcp_index: 4.6 }, { id: 'u2', display_name: 'someone@example.com', my_player: null }, null]);
+  const b = rows.find(r => r.name === 'Britt Hogland');
+  check('an account never on my saved list is a row, with its account id and index', !!b && b._uid === 'u1' && b.hcp === 4.6 && b.firstName === 'Britt' && b.lastName === 'Hogland', JSON.stringify(rows));
+  check('bad rows never throw', Array.isArray(U(null)) && U(null).length === 0);
+}
+L.done('qa_v2046_lateadd_crossbets_fieldquota');
