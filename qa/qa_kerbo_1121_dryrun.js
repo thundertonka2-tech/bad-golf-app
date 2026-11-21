@@ -158,6 +158,19 @@ check('nothing dropped, no conflicts', X.dropped.length === 0 && X.conflicts.len
 note('Tyler v Britt match: ' + (X.matches[0].status || '') + ' · Tyler v Tommy Nassau: Tyler ' + (X.nassaus[0].aNet > 0 ? '+' : '') + X.nassaus[0].aNet);
 
 // ---- the pools ---------------------------------------------------------------------------------------------
+console.log('\n== 4b. before the start: the event page Matches tab ==');
+{
+  // v2056: no cards yet -> the day match and the cross Nassau WAIT; the carts' own games are not listed at all
+  const X0 = CROSS(EVENT(), []);
+  const txt = X0.dropped.map(d => d.text).join(' | ');
+  check('nothing dropped before the start', X0.dropped.every(d => d.pending) && X0.matches.length === 0 && X0.nassaus.length === 0, txt);
+  check('Tyler v Britt waits (not "game dropped")', X0.dropped.some(d => /Tyler v Britt/.test(d.text) && /waiting/.test(d.text)), txt);
+  check('Tyler v Tommy waits', X0.dropped.some(d => /Tyler v Tommy/.test(d.text) && /waiting/.test(d.text)), txt);
+  check('the 3-way Nassau (Group 1\u2019s own game) is not shown as a cross bet', !X0.dropped.some(d => /Gregory/.test(d.text)), txt);
+  // one cart launched, the other not: the match waits for Britt's cart; the cross Nassau waits for Tommy's
+  const X1 = CROSS(EVENT(), [{ data: Object.assign(clone(c1), { finishedAt: null }) }]);
+  check('Group 1 out, Group 2 not started: both cross games wait, nothing dropped', X1.dropped.length === 2 && X1.dropped.every(d => d.pending && d.reason === 'cart-not-started'), JSON.stringify([X1.dropped, X1.matches.length, X1.nassaus.length]));
+}
 console.log('\n== 5. the pools ==');
 const rows = ROUNDS.map(g => ({ code: g.code, data: g }));
 const sk = SKINS(rows, SETTINGS.tourneySkins);
