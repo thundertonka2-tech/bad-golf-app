@@ -1,0 +1,5 @@
+-- v2062 (Tyler 11/21) -- applied live as migration `v2062_t2_save_round_allows_wolfdata`.
+-- A commissioner closing a group (force-finish / End event early) now enters that group's missing
+-- Wolf picks first. bg_t2_save_round only accepted a fixed list of top-level keys; `wolfData` joins it:
+--   v_allowed text[] := array['finishedAt','finishOpen','games','players','settledMoney','t2','wolfData'];
+-- Nothing else in the function changed. This file is the record; the function body lives in the database.
