@@ -148,4 +148,17 @@ console.log('\n== 5. launch: a same-cart Match / Nassau becomes the cart’s own
   check('3-way Nassau with all three on the cart -> one 3-player instance (stroke); one with an off-cart player skipped', n === 1 && games.nassau.instances.length === 1 && games.nassau.instances[0].participants.join(',') === 'p1,p2,p3' && games.nassau.instances[0].format === 'stroke', JSON.stringify(games.nassau));
   check('empty / bad input -> 0', ONTO({}, gp, []) === 0 && ONTO(null, gp, [bet('match')]) === 0 && ONTO({}, [], [bet('match')]) === 0);
 }
+console.log('\n== 6. v2054: a player only builds bets he is in ==');
+{
+  const me = 'tommy hall';
+  let d = B({ kind: 'match', names: ['Tyler OConnor', 'Tommy Hall', 'Chris Curry'], value: 5, mustInclude: me });
+  check('3 ticked incl. me: 2 bets (mine), 1 skipped (Tyler v Chris)', d.bets.length === 2 && d.bets.every(b => b.names.some(n => n === 'Tommy Hall')) && d.skipped.length === 1 && d.skipped[0].join('|') === 'Tyler OConnor|Chris Curry', JSON.stringify(d));
+  check('2 ticked without me -> message', typeof B({ kind: 'stroke', names: ['Tyler OConnor', 'Chris Curry'], value: 5, mustInclude: me }) === 'string');
+  check('group Nassau without me -> message', typeof B({ kind: 'nassau', names: ['Tyler OConnor', 'Chris Curry', 'Britt Hall'], value: 5, mode: 'group', mustInclude: me }) === 'string');
+  d = B({ kind: 'nassau', names: ['Tyler OConnor', 'Tommy Hall', 'Britt Hall'], value: 5, mode: 'group', mustInclude: me });
+  check('group Nassau with me -> one 3-way bet', d.bets.length === 1 && d.bets[0].names.length === 3);
+  d = B({ kind: 'match', names: ['Tyler OConnor', 'Tommy Hall', 'Chris Curry'], value: 5 });
+  check('manager (no mustInclude): all 3 pairs, nothing skipped', d.bets.length === 3 && d.skipped.length === 0);
+  check('entry helper exists', typeof F('bgT2GroupCrossBetsEntry') === 'function' && typeof F('bgT2OpenCrossBetsFor') === 'function');
+}
 L.done('qa_v2053_crossbets_step');
