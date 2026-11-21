@@ -50,6 +50,7 @@ try { supa = null; supaOnline = false; supaReady = true; initSupabase = async ()
 try { isSignedIn = () => true; } catch (e) {}
 window.__state = () => state;
 window.__setGame = (g) => { state.game = g; state.viewOnlyMode = false; };
+window.__setT2 = (t) => { _t2Current = t; };   // v2064: the open event
 window.__fn = (n) => { try { return eval(n); } catch (e) { return undefined; } };
 window.__setEvp = (S) => { _bgEvp = S; };
 window.__install = (fake) => {

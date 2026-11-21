@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.2063-->
+<!--BGVER=v2026.11.2064-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12337,7 +12337,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.2063';
+const BG_BUILD = 'v2026.11.2064';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -65707,6 +65707,13 @@ function bgBestBallTeamLines(rounds, fieldPlayers) {
       if (!name) name = (g.t2 && g.t2.group) ? ('Group ' + g.t2.group) : 'Team';
       out.push({ name: name, net: !!cfg.net, vals: vals, pars: g.pars || [], code: g.code || '' });
     });
+    try {   // v2064: the Best Ball Pool's teams (the event's own teams, any number)
+      const _rs = (rounds || []).filter(Boolean);
+      if (_t && bgT2TeamBestBallCfg(_t) && _rs.length && _rs.every(g => g.t2 && g.t2.tournamentId === _t.id)) {
+        const _B = _bgT2TeamBestBallDays(_rs, _t, fp);
+        if (_B) Object.keys(_B.byDay).map(Number).sort((a, b) => a - b).forEach(d => Object.values(_B.byDay[d].teams).sort((a, b) => String(a.key).localeCompare(String(b.key))).forEach(T => { if (T.holes > 0) out.push({ name: T.name, net: _B.net, vals: T.vals, pars: T.pars, code: '', pool: true }); }));
+      }
+    } catch (e) {}
   } catch (e) { console.warn('best ball team lines', e); }
   return out;
 }
@@ -65717,6 +65724,7 @@ function bgBBLinesFor(g) {
     if (Array.isArray(g.bbTeams)) return g.bbTeams;
     const c = g.games && g.games.teamLowball;
     if (c && c.teamMode === '4man') return bgBestBallTeamLines([g], null);
+    try { if (g.t2 && typeof _t2Current !== 'undefined' && _t2Current && g.t2.tournamentId === _t2Current.id && bgT2TeamBestBallCfg(_t2Current)) return bgBestBallTeamLines([g], null); } catch (e) {}   // v2064
   } catch (e) {}
   return [];
 }
@@ -93650,7 +93658,7 @@ async function t2ComputeStandings(t, days, groupsByDay, storedMatches, membersBy
       // two 1v1s is two points, a 2v2 cart is one. See _t2CartCupMatches.
       const _gk = _grpTeams(grp.id);
       let _cartMatches = [];
-      try { _cartMatches = _t2CartCupMatches(g, fmt, finished, _rHoles, _gk, (membersByGroup && membersByGroup[grp.id]) || [], (typeof t2IsOneDay === 'function') && t2IsOneDay(t)) || []; }
+      try { _cartMatches = _t2CartCupMatches(g, fmt, finished, _rHoles, _gk, (membersByGroup && membersByGroup[grp.id]) || [], ((typeof t2IsOneDay === 'function') && t2IsOneDay(t)) || !!bgT2TeamBestBallCfg(t)) || []; }   /* v2064: with the Best Ball Pool on, a cart with no head-to-head game scores no cup point */
       catch (e) { console.warn('t2 standings calc', e); _cartMatches = []; }
       let decided = _cartMatches.length > 0 && _cartMatches.every(m => m.decided);
       // Withdrawal forfeits: only when the match wasn't already decided. A cart with
@@ -99783,6 +99791,148 @@ function t2ComputeFieldScramble(rows, t) {
              complete: allComplete, money: money, display: display };
   } catch (e) { return null; }
 }
+/* ============================================================
+   v2064 (Tyler, 11/21): "We want to do best ball with three two man teams ... Then Chris Curry is
+   going to play by himself. Can we set up a best ball three way like that? If not let's fix it."
+   BEST BALL POOL -- any number of teams, across the whole field. The teams are the event's own
+   teams (the Teams step: tournament_players.team); partners may ride in different carts. On every
+   hole a team counts its better ball (net off the handicap the round plays, or gross); the lowest
+   18-hole team total takes the whole pool, a tie splits it. Every player ON a team puts in the
+   buy-in; a player with no team is simply not in it. A team that did not finish every hole pays
+   but cannot win (the leaver rule the other field pools use). Pays once the day is in.
+   Config: t.settings.tourneyBestBall = { on, buyin, net }   (net defaults to on)
+   ============================================================ */
+function bgT2TeamBestBallCfg(t) { try { const c = t && t.settings && t.settings.tourneyBestBall; return (c && c.on) ? c : null; } catch (e) { return null; } }
+// Every day's teams with their hole-by-hole better ball. Shared by the payout engine and the scorecards.
+function _bgT2TeamBestBallDays(rows, t, fieldPlayers) {
+  const cfg = bgT2TeamBestBallCfg(t);
+  if (!cfg || !Array.isArray(rows) || !rows.length) return null;
+  const useNet = cfg.net !== false;
+  const nmk = s => normalizeNameSegment(String(s || ''));
+  const wd = new Set((t.settings && Array.isArray(t.settings.withdrawn)) ? t.settings.withdrawn : []);
+  const byPid = {}, byName = {};
+  (fieldPlayers || []).forEach(p => {
+    if (!p || !p.team || wd.has(p.id)) return;
+    if (p.id) byPid[p.id] = String(p.team);
+    if (p.display_name) byName[nmk(p.display_name)] = String(p.team);
+  });
+  if (!Object.keys(byName).length && !Object.keys(byPid).length) return null;
+  const custom = (t.settings && t.settings.teamNames) || {};
+  const first = p => (typeof displayFirst === 'function' ? displayFirst(p) : (p && p.name));
+  const byDay = {};
+  rows.forEach(row => {
+    const g = row && row.data ? row.data : row;
+    if (!g || !Array.isArray(g.players) || !g.players.length) return;
+    try { if (_t2IsNoShowRound(g)) return; } catch (e) {}
+    const day = Number((g.t2 && g.t2.day) || 1);
+    let nH = (Array.isArray(g.pars) && g.pars.filter(x => x != null).length === 9) ? 9 : 18;
+    if (g._bgEarly && g._bgEarly.n > 0) nH = g._bgEarly.n;
+    const D = byDay[day] || (byDay[day] = { day: day, teams: {}, rounds: 0, finished: 0, nH: nH });
+    D.nH = Math.min(D.nH, nH);
+    D.rounds++; if (g.finishedAt) D.finished++;
+    try { const _tm = _t2RoundTouchMs(g); if (_tm > (D.lastTouch || 0)) D.lastTouch = _tm; } catch (e) {}
+    try { _t2NoteDayCards(D, g); } catch (e) {}
+    g.players.forEach(p => {
+      if (!p || !p.name) return;
+      const tk = (p.t2pid && byPid[p.t2pid]) || byName[nmk(p.name)];
+      if (!tk) return;                                   // not on a team: not in the pool
+      const T = D.teams[tk] || (D.teams[tk] = { key: tk, vals: new Array(18).fill(null), pars: new Array(18).fill(null), players: [] });
+      const k = nmk(p.name);
+      if (!T.players.some(x => x.key === k)) T.players.push({ key: k, name: p.name, first: first(p) });
+      const sc = (g.scores && g.scores[p.id]) || [];
+      const hcp = useNet ? effectiveHcp(p, g.hcpRules) : 0;
+      for (let h = 0; h < 18; h++) {
+        const s = sc[h]; if (s == null || s === '') continue;
+        const par = parFor(g, p.id, h);
+        const v = (useNet && g.sis) ? netHoleScore(Number(s), hcp, siFor(g, p.id, h), par, g.hcpRules || null, nH) : Number(s);
+        if (T.vals[h] == null || v < T.vals[h]) T.vals[h] = v;
+        if (T.pars[h] == null) T.pars[h] = par;
+      }
+    });
+  });
+  Object.keys(byDay).forEach(d => Object.values(byDay[d].teams).forEach(T => {
+    let tot = 0, par = 0, holes = 0;
+    for (let h = 0; h < 18; h++) if (T.vals[h] != null) { tot += T.vals[h]; par += (T.pars[h] || 0); holes++; }
+    T.total = tot; T.par = par; T.holes = holes;
+    const cn = custom[T.key] && String(custom[T.key]).trim();
+    T.name = cn || T.players.map(p => p.first || p.name).join(' / ');
+  }));
+  return { byDay: byDay, net: useNet, buyin: Number(cfg.buyin) || 0 };
+}
+function t2ComputeFieldTeamBestBall(rows, t, fieldPlayers) {
+  try {
+    if (!bgT2TeamBestBallCfg(t) || !Array.isArray(rows) || !rows.length) return null;
+    try { rows = bgT2EarlyTrimRows(rows); } catch (e) {}
+    const B = _bgT2TeamBestBallDays(rows, t, fieldPlayers);
+    if (!B) return null;
+    const buyin = B.buyin;
+    const days = Object.keys(B.byDay).map(Number).sort((a, b) => a - b);
+    const money = {}, display = {}, perDay = [];
+    let allComplete = true, pool = 0;
+    days.forEach(day => {
+      const D = B.byDay[day], nH = D.nH || 18;
+      const full = T => T.holes >= nH;
+      const teams = Object.values(D.teams).sort((a, b) => ((full(a) ? 0 : 1) - (full(b) ? 0 : 1)) || ((a.total - a.par) - (b.total - b.par)) || String(a.key).localeCompare(String(b.key)));
+      if (teams.length < 2) return;
+      let complete = false; try { complete = _t2DayFieldComplete(D, true); } catch (e) {}
+      if (!complete) allComplete = false;
+      let heads = 0;
+      const dayMoney = {};
+      teams.forEach(T => { heads += T.players.length; T.players.forEach(p => { dayMoney[p.key] = 0; if (!display[p.key]) display[p.key] = { name: p.name, first: p.first }; }); });
+      const dayPool = heads * buyin; pool += dayPool;
+      let winners = [];
+      const started = teams.filter(T => T.holes > 0);
+      if (complete && started.length) {
+        const ranked = teams.filter(full).length ? teams.filter(full) : started;
+        const best = Math.min.apply(null, ranked.map(T => T.total));
+        winners = ranked.filter(T => T.total === best);
+        if (buyin > 0 && winners.length < teams.length) {          // every team level = a push
+          teams.forEach(T => T.players.forEach(p => { dayMoney[p.key] -= buyin; }));
+          const perTeam = dayPool / winners.length;
+          winners.forEach(T => { const per = T.players.length ? perTeam / T.players.length : 0; T.players.forEach(p => { dayMoney[p.key] += per; }); });
+        }
+      }
+      Object.keys(dayMoney).forEach(k => { money[k] = (money[k] || 0) + dayMoney[k]; });
+      perDay.push({ day: day, complete: complete, pool: dayPool, buyin: buyin, nH: nH, rounds: D.rounds, finished: D.finished, money: dayMoney,
+        winners: winners.map(T => T.key),
+        teams: teams.map(T => ({ key: T.key, name: T.name, total: T.total, par: T.par, rel: T.total - T.par, holes: T.holes, full: full(T), players: T.players, vals: T.vals, pars: T.pars, winner: winners.indexOf(T) >= 0 })) });
+    });
+    if (!perDay.length) return null;
+    try {
+      const keys = Object.keys(money);
+      if (typeof _t2RoundNets === 'function' && keys.length) { const r = _t2RoundNets(keys.map(k => money[k] || 0)); keys.forEach((k, i) => { money[k] = r[i]; }); }
+    } catch (e) {}
+    return { perDay: perDay, money: money, display: display, complete: allComplete, pool: pool, buyin: buyin, net: B.net };
+  } catch (e) { try { console.warn('team best ball pool', e); } catch (_) {} return null; }
+}
+// The standings card every award screen shows next to the units. The winner is marked in words, not by colour alone.
+function _t2TeamBestBallHtml(res) {
+  try {
+    if (!res || !Array.isArray(res.perDay) || !res.perDay.length) return '';
+    const multi = res.perDay.length > 1;
+    const rel = n => (n === 0 ? 'E' : (n > 0 ? '+' + n : String(n)));
+    let h = '';
+    res.perDay.forEach(d => {
+      h += '<div class="card" style="margin:10px 0;padding:12px">';
+      h += '<div style="font-weight:800;margin-bottom:2px">🏌️ Best Ball Pool' + (multi ? ' — Day ' + d.day : '') + '</div>';
+      h += '<div class="small-text" style="color:var(--text-muted);margin-bottom:8px">' + (res.net ? 'Net' : 'Gross') + ' better ball on every hole. Lowest team total takes the pool' + (d.pool > 0 ? ' of ' + bgWhole(d.pool) : '') + '; a tie splits it.' + (d.complete ? '' : ' Still live.') + '</div>';
+      h += '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr>' +
+        '<th style="text-align:left;padding:6px 8px;color:var(--text-muted)">Team</th><th style="text-align:right;padding:6px 8px;color:var(--text-muted)">Total</th>' +
+        '<th style="text-align:right;padding:6px 8px;color:var(--text-muted)">To par</th><th style="text-align:right;padding:6px 8px;color:var(--text-muted)">Thru</th></tr></thead><tbody>';
+      d.teams.forEach((T, i) => {
+        const who = T.players.map(p => p.first || p.name).join(' / ');
+        const sub = (T.name !== who ? who : '') + ((d.complete && T.winner) ? ((T.name !== who ? ' · ' : '') + (d.winners.length > 1 ? 'Tied for first' : 'Winner')) : '') + ((d.complete && !T.full && T.holes > 0) ? ' · did not finish' : '');
+        h += '<tr style="border-top:1px solid var(--border)"><td style="padding:7px 8px;font-weight:' + ((d.complete && T.winner) ? '800' : '600') + '">' + ((d.complete && T.winner) ? '🏆 ' : '') + escapeHtml(T.name) +
+          (sub ? '<div class="small-text" style="color:var(--text-muted);font-weight:600">' + escapeHtml(sub) + '</div>' : '') + '</td>' +
+          '<td style="text-align:right;padding:7px 8px;font-weight:700">' + (T.holes ? T.total : '—') + '</td>' +
+          '<td style="text-align:right;padding:7px 8px">' + (T.holes ? rel(T.rel) : '—') + '</td>' +
+          '<td style="text-align:right;padding:7px 8px">' + (T.holes ? (T.full ? 'F' : T.holes) : '—') + '</td></tr>';
+      });
+      h += '</tbody></table></div></div>';
+    });
+    return h;
+  } catch (e) { return ''; }
+}
 /* v1724 (Tyler, 9/19) -- FIELD BEST BALL (4-man). Team low ball set on Configure Day with
    "4-man teams": each cart is one team (its lowest ball per hole, net per the event's
    handicap rules when net is on); teams ranked on the 18-hole total, low wins. "If it's
@@ -102227,6 +102377,7 @@ function bgT2InviteGamesSeed(t, players) {
     if (!t || !t.id) return;
     const c = _bgT2InvCache[t.id] || (_bgT2InvCache[t.id] = { players: [], groupNames: {}, groupNum: {}, groupDay: {} });
     c.players = (players || []).filter(p => !(typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p))).map(p => String((p && (p.display_name || p.name)) || '').trim()).filter(Boolean);
+    try { c.teamOf = {}; (players || []).forEach(p => { const n = String((p && (p.display_name || p.name)) || '').trim(); if (n && p.team) c.teamOf[_t2NameKey(n)] = String(p.team); }); } catch (e) {}   // v2064
   } catch (e) {}
 }
 async function bgT2InviteGamesLoad(t) {
@@ -102296,6 +102447,7 @@ function bgT2InviteGamesText(t, data) {
     [['Skins', s.tourneySkins], ['Long Putt', s.tourneyLongPutt], ['Low Net', sp.lowNet], ['Most GIRs', sp.girs], ['Fewest Putts', sp.putts]]
       .forEach(p => { const c = p[1]; if (c && c.on && Number(c.value) > 0) add(p[0] + ' ' + Number(c.value), Array.isArray(c.players) ? c.players : [], ''); });
     try { if (s.tourneyPot && s.tourneyPot.on && Number(s.tourneyPot.buyin) > 0) add('Tournament buy-in ' + Number(s.tourneyPot.buyin), [], ''); } catch (e) {}
+    try { const _bb = s.tourneyBestBall; if (_bb && _bb.on) { const _tm = data.teamOf || {}; const _in = roster.filter(n => _tm[nk(n)]); if (_in.length) add('Best Ball Pool' + (Number(_bb.buyin) > 0 ? ' ' + Number(_bb.buyin) : '') + (_bb.net !== false ? ' net' : ' gross'), _in, ''); } } catch (e) {}   // v2064
     // 3. cross bets set on the checklist
     dayKeys(s.crossBets).forEach(d => { let bets = []; try { bets = bgT2CrossBetsFor(t, d); } catch (e) { bets = []; }
       bets.forEach(b => { const k = b.kind; const game = k === 'match' ? 'Match' : k === 'nassau' ? 'Nassau' : k === 'quota' ? 'Quota' : 'Stroke play';
@@ -106499,6 +106651,7 @@ async function t2ComputeCombinedPayouts(t) {
     let fieldScram = null; try { fieldScram = t2ComputeFieldScramble(raw, t); } catch (e) {}   // v1039
     let fieldBB = null; try { fieldBB = t2ComputeFieldBestBall(raw, t); } catch (e) {}   // v1724: 4v4 / 2v2 team best ball
     let fieldSH = null; try { fieldSH = t2ComputeFieldShamble(raw, t); } catch (e) {}   // v1768: shamble, each cart a team
+    let fieldTBB = null; try { fieldTBB = t2ComputeFieldTeamBestBall(raw, t, evPlayers); } catch (e) {}   // v2064: Best Ball Pool, any number of teams
     let fieldTQ4 = null; try { fieldTQ4 = t2ComputeFieldTeamQuota4(raw, t); } catch (e) {}   // v2002b (matrix TOURNEY-22): 4-man Team Quota, each cart a team
     let fieldQuota = null; try { fieldQuota = t2ComputeFieldQuota(raw, t, evPlayers); } catch (e) {}
 
@@ -106709,6 +106862,9 @@ async function t2ComputeCombinedPayouts(t) {
         bumpGame('Best Ball (teams)', k, fieldBB.money[k]);
       });
     }
+    if (fieldTBB && fieldTBB.money) {   // v2064: per finished day, like the side pots
+      Object.keys(fieldTBB.money).forEach(k => { const d = (fieldTBB.display || {})[k] || {}; bump(k, fieldTBB.money[k], d.name, d.first); bumpGame('Best Ball Pool', k, fieldTBB.money[k]); });
+    }
     if (fieldSH && fieldSH.money && fieldSH.complete) {   // v1768
       Object.keys(fieldSH.money).forEach(k => {
         const d = (fieldSH.display || {})[k] || {};
@@ -106789,6 +106945,7 @@ async function t2ComputeCombinedPayouts(t) {
       if (fieldQuota && fieldQuota.complete === false && (fieldQuota.pool || 0) > 0) _pendingGameLabels.add('Quota (field)');
       if (fieldBB && fieldBB.complete === false && (fieldBB.perDay || []).some(d => (d.value || 0) > 0)) _pendingGameLabels.add('Best Ball (teams)');   // v1724
       if (fieldSH && fieldSH.complete === false && (fieldSH.perDay || []).some(d => (d.value || 0) > 0)) _pendingGameLabels.add('Shamble (teams)');   // v1768
+      if (fieldTBB && (fieldTBB.buyin || 0) > 0) { gameTotals['Best Ball Pool'] = gameTotals['Best Ball Pool'] || {}; _alwaysShowGameLabels.add('Best Ball Pool'); if ((fieldTBB.perDay || []).some(d => d.complete === false)) _pendingGameLabels.add('Best Ball Pool'); }   // v2064
       if (fieldTQ4 && fieldTQ4.complete === false && (fieldTQ4.perDay || []).some(d => (d.value || 0) > 0)) _pendingGameLabels.add('Team Quota (teams)');   // v2002b (matrix TOURNEY-22)
       if (fieldTQ4 && (fieldTQ4.perDay || []).some(d => (d.value || 0) > 0)) { gameTotals['Team Quota (teams)'] = gameTotals['Team Quota (teams)'] || {}; _alwaysShowGameLabels.add('Team Quota (teams)'); }
       if (sidePots && Array.isArray(sidePots.perDay)) {
@@ -106891,7 +107048,7 @@ async function t2ComputeCombinedPayouts(t) {
     // v1113: carry the team standings through so every award surface can render the
     // SAME ranking that produced these units.
     return { rows: rows, allFinished: allFinished, roundsFinished: roundsFinished, roundsTotal: roundsTotal, players: players, byGame: byGame, pendingPots: Array.from(_pendingGameLabels),
-             teamStandings: (money && money.teamStandings) || null, bracketHtml: _bkHtml || '',
+             teamStandings: (money && money.teamStandings) || null, bracketHtml: (_bkHtml || '') + _t2TeamBestBallHtml(fieldTBB), teamBestBall: fieldTBB || null,   // v2064: the Best Ball Pool standings ride with the units
              cross: cross || null, crossDropped: (cross && cross.dropped) || [], crossConflicts: (cross && cross.conflicts) || [] };   // v2010 (cross audit S-5/S-10/decision 6): for the Units "bet dropped" / conflict lines
   } catch (e) { return null; }
 }
@@ -109634,6 +109791,62 @@ function openTourneyScrambleConfig(t, onDone) {
   };
 }
 
+// v2064: the commissioner screen for the Best Ball Pool (any number of teams). Stored as
+// t.settings.tourneyBestBall; the engine reads the teams from the event's own Teams step.
+async function openTourneyBestBallConfig(t, onDone) {
+  const bc = (t.settings && t.settings.tourneyBestBall) || {};
+  const on = !!bc.on;
+  const val = (bc.buyin != null && bc.buyin !== '') ? bc.buyin : 10;
+  let players = []; try { players = await t2GetPlayers(t.id); } catch (e) { players = []; }
+  const wd = new Set((t.settings && Array.isArray(t.settings.withdrawn)) ? t.settings.withdrawn : []);
+  const fn = p => String((p && p.display_name) || '').trim().split(/\s+/)[0] || '';
+  const teams = {}, solo = [];
+  (players || []).forEach(p => { if (!p || !p.display_name || wd.has(p.id)) return; if (typeof t2IsOpenSlot === 'function' && t2IsOpenSlot(p)) return; if (p.team) (teams[p.team] = teams[p.team] || []).push(fn(p)); else solo.push(fn(p)); });
+  const tk = Object.keys(teams).sort();
+  const custom = (t.settings && t.settings.teamNames) || {};
+  let list = tk.map(k => '<div style="padding:5px 0;border-top:1px solid var(--border)"><b>' + escapeHtml((custom[k] && String(custom[k]).trim()) || teams[k].join(' / ')) + '</b>' + ((custom[k] && String(custom[k]).trim()) ? '<span class="small-text" style="color:var(--text-muted)"> — ' + escapeHtml(teams[k].join(' / ')) + '</span>' : '') + '</div>').join('');
+  if (!tk.length) list = '<div class="small-text" style="color:var(--text-muted)">No teams yet. Put players on teams in the Teams step first.</div>';
+  if (solo.length) list += '<div class="small-text" style="color:var(--text-muted);padding-top:6px;border-top:1px solid var(--border)">Not on a team, so not in this pool: ' + escapeHtml(solo.join(', ')) + '</div>';
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay show'; ov.style.cssText = 'z-index:100065';
+  ov.innerHTML = '<div class="modal" style="max-width:440px;max-height:86vh;overflow-y:auto">' +
+    '<h2 style="margin-bottom:6px">Best Ball Pool</h2>' +
+    '<p class="help-text" style="margin-bottom:10px">Any number of teams. On every hole a team counts its better ball; the lowest team total over the round takes the whole pool. It pays on the Event Leaderboard once every group has finished.</p>' +
+    '<div class="ep-pot' + (on ? ' on' : '') + '" id="tbb-card">' +
+      '<label class="ep-pot-head" style="cursor:pointer"><span class="ep-ic">🏌️</span>' +
+      '<span style="flex:1;min-width:0"><span style="font-weight:700;display:block">Best Ball Pool</span>' +
+      '<span class="small-text" style="color:var(--text-muted)">Lowest team total takes the pool. Ties split.</span></span>' +
+      '<input type="checkbox" id="tbb-on" class="bg-sw"' + (on ? ' checked' : '') + ' style="width:auto;transform:scale(1.35);flex:0 0 auto"></label>' +
+      '<div id="tbb-body" style="margin-top:10px;' + (on ? '' : 'display:none') + '">' +
+        '<div class="field" id="tbb-val-field"><label for="tbb-val">Buy-in per player</label>' +
+        '<input type="number" id="tbb-val" inputmode="decimal" min="0" step="0.5" value="' + val + '"></div>' +
+        '<div class="field"><label for="tbb-net">Scoring</label><select id="tbb-net">' +
+          '<option value="net"' + (bc.net !== false ? ' selected' : '') + '>Net — each player gets his strokes</option>' +
+          '<option value="gross"' + (bc.net === false ? ' selected' : '') + '>Gross — no strokes</option>' +
+        '</select></div>' +
+        '<div style="font-weight:700;margin:6px 0 4px">Teams</div>' + list +
+      '</div>' +
+    '</div>' +
+    '<div class="actions" style="margin-top:10px"><button class="bg-btn bg-btn--ghost" id="tbb-cancel" style="flex:1">Cancel</button><button class="bg-btn bg-btn--primary primary" id="tbb-save" style="flex:1">Save</button></div></div>';
+  document.body.appendChild(ov);
+  try { if (typeof bgStepperizeField === 'function') bgStepperizeField(ov.querySelector('#tbb-val-field')); } catch (e) {}
+  const ck = ov.querySelector('#tbb-on');
+  if (ck) ck.onchange = () => {
+    const b = ov.querySelector('#tbb-body'); if (b) b.style.display = ck.checked ? '' : 'none';
+    const c = ov.querySelector('#tbb-card'); if (c) c.classList.toggle('on', ck.checked);
+  };
+  const close = () => { try { ov.remove(); } catch (e) {} };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  ov.querySelector('#tbb-cancel').onclick = close;
+  ov.querySelector('#tbb-save').onclick = async () => {
+    const cfgOut = { on: !!ov.querySelector('#tbb-on').checked, buyin: parseFloat(ov.querySelector('#tbb-val').value) || 0, net: ov.querySelector('#tbb-net').value !== 'gross' };
+    const ok = await t2MergeSettings(t.id, s => { s.tourneyBestBall = cfgOut; });
+    if (ok) { try { _t2Current.settings = _t2Current.settings || {}; _t2Current.settings.tourneyBestBall = cfgOut; } catch (e) {} }
+    showToast(ok ? 'Best Ball Pool saved ✓' : 'Couldn’t save — try again');
+    close(); if (typeof onDone === 'function') onDone();
+  };
+}
+
 // v639: ONE menu for all the field-wide event prize pools (opened from the settings
 // hub). Each line opens its existing config modal; status chips show what's on.
 async function openEventPotsMenu(t) {
@@ -109668,6 +109881,12 @@ async function openEventPotsMenu(t) {
           ? ('' + (s.tourneyScramble.buyin || 0) + '/player · ' + (s.tourneyScramble.payout === '8020' ? '80/20' : 'winner takes it') + ' · ' + (s.tourneyScramble.net ? 'net' : 'gross'))
           : 'Each cart group is one team — best team score wins the prize pool',
         s.tourneyScramble && s.tourneyScramble.on) +
+    // v2064: the Best Ball Pool -- any number of teams, lowest team total takes it.
+    btn('bestball', '\uD83C\uDFCC\uFE0F', 'Best Ball Pool',
+        (s.tourneyBestBall && s.tourneyBestBall.on)
+          ? ('' + (s.tourneyBestBall.buyin || 0) + '/player \u00b7 ' + (s.tourneyBestBall.net !== false ? 'net' : 'gross') + ' \u00b7 lowest team total takes it')
+          : 'Any number of teams \u2014 lowest better-ball total wins the pool',
+        s.tourneyBestBall && s.tourneyBestBall.on) +
     // v1030 (Tyler, 8/15): he turned Nassau on HERE and again in the day's Games
     // grid, and before the v1030 fix both settled -- his Saturday event moved 190
     // of Nassau instead of 70. The event prize pool is now authoritative and the day
@@ -109704,6 +109923,7 @@ async function openEventPotsMenu(t) {
     if (k === 'sp') return openTourneySidePotsConfig(t, reopen);
     if (k === 'nassau') return openTourneyNassauConfig(t, reopen);
     if (k === 'scramble') return openTourneyScrambleConfig(t, reopen);
+    if (k === 'bestball') return openTourneyBestBallConfig(t, reopen);   // v2064
   });
 }
 
