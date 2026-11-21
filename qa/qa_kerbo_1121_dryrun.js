@@ -171,6 +171,24 @@ console.log('\n== 4b. before the start: the event page Matches tab ==');
   const X1 = CROSS(EVENT(), [{ data: Object.assign(clone(c1), { finishedAt: null }) }]);
   check('Group 1 out, Group 2 not started: both cross games wait, nothing dropped', X1.dropped.length === 2 && X1.dropped.every(d => d.pending && d.reason === 'cart-not-started'), JSON.stringify([X1.dropped, X1.matches.length, X1.nassaus.length]));
 }
+console.log('\n== 4c. v2057: the notes name the game + stakes; Group games list ==');
+{
+  const NOTE = F('_t2CrossNoteText'), LABELS = F('_t2CrossLabels'), GG = F('bgEvpGroupGamesHtml');
+  const X0 = CROSS(EVENT(), []);
+  const Lb = LABELS([]);
+  const texts = X0.dropped.map(d => NOTE(d, Lb));
+  check('day match note: "Match play · 40 · gross — Tyler v Britt: waiting…"', texts.some(t => /Match play · 40 · gross — Tyler v Britt: waiting for the cart to start$/.test(t)), JSON.stringify(texts));
+  check('cross Nassau note: "Nassau · 10 a side · net — Tyler v Tommy: waiting…"', texts.some(t => /Nassau · 10 a side · net — Tyler v Tommy: waiting for the cart to start$/.test(t)), JSON.stringify(texts));
+  // Group games before the start: from settings.groupGames, mapped to the group by its players
+  const Dpre = { rounds: [], game_settings: { groupGames: SETTINGS.groupGames }, days: [{ day: 1, groups: [{ n: 1, players: G1.map(x => x[0]) }, { n: 2, players: G2.map(x => x[0]) }] }] };
+  const h0 = GG(Dpre);
+  check('pre-start Group games: Group 1 Nassau 10 a side net fbo with Tyler, Gregory, Steve', /Group 1 · .*Nassau.*10 a side · net · front, back &amp; overall/.test(h0) && /Tyler OConnor, Gregory Jackson, Steve Miller/.test(h0), h0.slice(0, 500));
+  check('pre-start Group games: Group 2 Wolf 5 with the four (no Chris)', /Group 2 · .*Wolf.*· 5/.test(h0) && /Tommy Hall, Britt Hogland, Jeremy Waddle, Kylan Leidtke/.test(h0) && !/Chris/.test(h0), h0.slice(0, 900));
+  // after the start: from the cards; CTP / Long Putt (field) are not listed
+  const h1 = GG({ rounds: ROUNDS.map(clone), game_settings: {}, days: [] });
+  check('post-start Group games: Nassau + Wolf from the cards, no CTP / Long Putt', /Nassau/.test(h1) && /Wolf/.test(h1) && !/Closest|Long putt/.test(h1), h1.replace(/<[^>]+>/g, ' ').slice(0, 400));
+  check('no group games -> nothing', GG({ rounds: [], game_settings: {}, days: [] }) === '');
+}
 console.log('\n== 5. the pools ==');
 const rows = ROUNDS.map(g => ({ code: g.code, data: g }));
 const sk = SKINS(rows, SETTINGS.tourneySkins);
