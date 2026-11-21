@@ -1297,6 +1297,8 @@ This section details every game with rules, setup, and award logic. Four games a
 - **In tournaments:** the tie setting is exactly **"No carry overs" / "Carry overs"**. With only one group on the course, Skins settle **live on the leaderboard** as you play — a hole settles as soon as every player in the field has posted a score for it, so a late-entered score can't take a skin back.
 
 #### **⛳ Nassau (with Huckle)** *(free)*
+- **Carry overs:** every Nassau has a **Carry overs** choice and starts on **Off — a tied side is a wash**: nobody wins that side and nothing rides on the next one. Switch it to **On — a tied side carries to the next** and a tied front rides on the back, a tied back rides on the overall — for two players as well as three or more. A tie on the last side never pays. The same choice is on a cross-bet Nassau.
+- **Example (three players, 10 a side, carry overs off):** Tyler wins the front (+20), Gregory and Steve tie the back (a wash), Steve wins the overall (+20) → Tyler +10, Steve +10, Gregory −20. With carry overs **on** the overall would be worth double: Tyler 0, Steve +30, Gregory −30.
 - **Players:** 2–5 per Nassau. With 2 it's head-to-head; with 3+ it's group stroke. Add as many Nassaus as you want, each with its own pair/group and game value. There's a **Select all** on the Nassau card, like every other picker.
 - **Three separate games in one:** front 9, back 9, and overall 18 — each worth the same unit value.
 - **Two scoring formats:** **Stroke play** (lowest total wins each segment) or **Match play** (holes won, e.g. "3&2").
@@ -1377,9 +1379,14 @@ Points against par — **Double Eagle 5, Eagle 4, Birdie 3, Par 2, Bogey 1, Doub
 Three points per hole: **Bingo** (first on the green), **Bango** (closest once all balls are on), **Bongo** (first to hole out). Each point earns the winner **X units from every other player**. Tap the winners on the score screen each hole. **Not available in tournaments.**
 
 #### **🐺 Captain (Wolf)**
-- **Players:** exactly 4. **Not available in tournaments.**
+- **Players:** best with 4. In a tournament it is one group’s own game (set on that group’s games), never a whole-field game.
 - The **Wolf rotates each hole.** After watching the others tee off, the Wolf either **picks a partner** (1v1 against the other two) or goes **Lone Wolf** against all three (**2x**). **Blind Lone Wolf**, called before anyone tees off, is **3x**.
-- **Example:** 2 units Wolf game, you go Lone Wolf (4 units). Win → each opponent gives you 4 units (12 units for the hole). Lose → you give 4 units to each.
+- **Net or gross:** every Wolf game has a **Net or gross** choice and starts on **Net** — each player’s full handicap strokes count on the stroke holes. Pick **Gross** to play it straight up.
+- **A 2 v 2 hole pays the units per man:** at 5, each loser pays 5 and each winner gets 5. A **Lone Wolf** still doubles against each of the other three, and **Blind** triples.
+- **Example:** 5 units Wolf game. You and your partner win the hole → +5 each, the other two −5 each. Go Lone Wolf and win → each of the three gives you 10 (30 for the hole). Lose → you give 10 to each.
+- **Every scored hole needs a pick before the round can finish.** If one is missing — hole 18 is the usual one — tapping **Finish** opens a **Wolf pick** sheet that names the wolf and asks who he picked (a partner, **Went alone (2x)** or **Blind (3x)**). Whoever is finishing enters it for him; **Go back** cancels the finish. The last hole also shows a reminder as soon as it is scored.
+- **Commissioners** get the same sheet when they force-finish a group or end the event early, with a **Skip** choice that leaves that hole out of Wolf.
+- *Wolf games finished before v2061 stay as they were paid (gross, each loser paying each winner).*
 - *The captain rotation order has been reviewed and is deliberately as written.*
 
 #### **🔨 Hammer**
@@ -2099,7 +2106,7 @@ After the questions you land on one list of settings — tap a row to set it, an
 - **Flights** only appears once the field is **more than 8 players**.
 - **One section per day** on a multi-day event. Later days' groups and games show **"Before Day 2"** — they don't block Start.
 - **Start tournament** stays dimmed until everything needed is done, and says exactly what's left: *"Still needed: Players, Groups (Day 1), Games (Day 1)"*.
-- **The join link opens after you Save.** Until you tap **💾 Save** (or Start) the Join link row reads **After Save** and invites stay closed. If you picked *Send a join link*, the first Save asks **"Send the join link now?"**
+- **📋 Copy tournament link** — one button at the top of the list, under the progress bar. One tap copies a ready-to-paste text: the event name, **every pool and side game** (see *Invites* below), a **To PLAY** link (open it, sign in, tap your name) and a **To FOLLOW ALONG** link to the event web page (no app needed). Paste it into your group text. Players who already have an account are in automatically; the link is for everyone else. On a brand-new event the button says **"Tap Save first"** until your first **💾 Save**; that first Save then offers **"Copy the link"**.
 - Finish a screen (course, groups, games) and you're back on the list with the checks updated.
 
 *Tournaments created before this keep the older step-by-step setup below.*
@@ -2165,7 +2172,7 @@ Configure Day starts clean for every new event and every new day — no carried-
 
 ### Join Requests and Who's Paid
 
-- **🙋 Join link** — one link anyone can open to **ask to join**: no account needed, just first name, last name and handicap. You **approve or decline** each request. Approved players are asked to sign in so their spot ties to their account. If someone asks under a name you already typed onto the roster, approving **links them to that spot** (*"✓ Already on your roster — approving links them"*) — no duplicates to clean up.
+- **Getting players in** — use **📋 Copy tournament link** on the setup checklist (above) or **📨 Invite all players** on the event card. Accepting a link needs a Bad Golf account; a name you typed in stays a guest, scored by his group, until he signs in and taps his name. The old *Join link / Join requests* row and the *Sign-ups close* date are gone. Requests still waiting from older links show on the event card until you approve or decline them.
 - **💵 Who's paid** — a tick per player (*"6 of 10 paid"*). It's a **reminder only**: it never blocks starting a day or a pool, and nothing moves through the app.
 
 ### 🧳 Trip — Lodging, Rooms & Itinerary
@@ -2225,7 +2232,6 @@ Every tournament has a shared **📸 Photos** album (leagues too — see Leagues
 Pushes that go to **everyone in the event** (commissioner included):
 
 - **Tee time tomorrow** — about 6 pm the evening before each day: *"Day 2 is tomorrow at Waterview Golf Club — your group tees off at 8:10 AM."* (or your starting hole on a shotgun day).
-- **Sign-ups close tomorrow** — set an optional **Sign-ups close** date on the **🙋 Join requests** sheet. The day before, players get a nudge to pass the link on and the commissioner hears how many requests are waiting. After that date the link stops taking requests.
 - **Join requests and approvals** — the commissioner hears when someone asks to join; the player hears when they're approved.
 - **Tapping a tournament push opens that event** (a join request opens the Join requests sheet).
 - Turn them all off with **Profile → 🔔 Push notifications → 📅 Event pushes**.
@@ -2248,6 +2254,12 @@ When players tie for **Low Net** in a tournament, the prize goes to a **USGA car
 ### Invites
 
 **Quick-setup events:** invites and the join link open after your first **💾 Save** (see the checklist above). **Full-setup events:** invites are sent from the **Review & start** step. The first time you reach it with every step done, the app asks once: *"Your event is set. Send the invites now? Players with the app get a notification; everyone else gets the link by text."* → **📨 Send invites** / Later. **✉️ Personal invites** on the Review step resends any single one; the invite icon is 📨 everywhere. There are no phone numbers to type — the text invite opens your own Messages app, and it says what you're playing (*"We're playing Skins and Low Net Pool"*).
+
+**The invite lists every pool and side game.** Both **📋 Copy tournament link** and **📨 Invite all players** spell out what the day is playing, in two blocks:
+
+- **Everyone** — each pool the whole field is in, with the units, one per line: *Skins 5*, *CTP 1 (hole 17)*, *Long Putt 1*, *Low Net 1*, *Most GIRs 1*, *Fewest Putts 1*.
+- **Side games** — every match, Nassau, Wolf, group game and cross bet, with the players’ **first names** and the units: *Match 40 - Tyler v Britt*, *Nassau 10 net - Tyler v Tommy*, *Wolf 5 - Tommy, Britt, Jeremy, Kylan*. A net game says **net**; a gross game shows no label.
+- Untick someone from a pool and that pool moves to Side games with the names of who is in. Two players who share a first name get a last initial (*Chris C. v Chris D.*).
 
 **📨 Invite all players** on the event card (commissioner) sends one message with two clear ways in:
 
@@ -2287,6 +2299,10 @@ A Bracket Play event has a real **Carts** screen — rows labelled **Group N**, 
 - **Removing a player** who already has scores clears them from every launched card and prize pool, after a warning.
 
 ### Finished Events
+
+**Every cross bet has its own line in the payout.** The per-game table gives each bet its own column (*Match: Britt v Tyler*, *Nassau: Tyler v Tommy*) instead of one *Cross-group games* figure, and on the event page’s **Units** tab, tapping a player lists each of his bets by opponent with the result: *Match v Britt (lost 4&3)*, *Nassau v Tommy (Front W, Back L, Total L)*. Each player’s lines still add up to his total.
+
+**Keep the group on a current build.** A phone on an older App Store build settles an event the way that build knew how, so a game added since then can be left out of the payout it publishes. The **Update required** floor (Admin tab) is what closes that gap: once Apple has the new build live, phones below the floor must update before they can play.
 
 A finished event collapses to a single **Finished** row on the Tourney tab with **results & details**; its rounds file under **Completed Tournament Rounds** on the Rounds tab and count toward Stats and Badges like any other round. Lists show the latest five, with **▾ Show N more** and **▾ Show N past events**.
 

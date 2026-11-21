@@ -37,6 +37,7 @@ w.fetch = () => Promise.resolve({ok:false,json:()=>Promise.resolve({}),text:()=>
 w.setTimeout = () => 0; w.setInterval = () => 0; w.requestAnimationFrame = () => 0;
 let bootErr = null;
 try { w.eval(mainScript(SRC) + '\n;' + STUBS); } catch (e) { bootErr = e; }
+if (bootErr) { try { w.eval(STUBS); } catch (e) {} }   // v2063: a late boot throw (a missing element in this bare DOM) must not skip the stubs
 
 let fails = 0, checks = 0;
 const ok = (n,c,d='') => { checks++; console.log((c?'  PASS  ':'  FAIL  ')+n+(d?'   '+d:'')); if(!c) fails++; };
@@ -181,8 +182,8 @@ head('D. no invite for somebody already in the round  (Tyler, 9/17)');
     { id:'sp-tyler oconnor', name:'Tyler OConnor', uid:'tyler-uid' } ], scores:{} });
 
   let gg = mk(); reset(); await w.__notify(gg);
-  ok('round start still invites the player who was added', rec.inserts.join() === 'tyler-uid', rec.inserts.join() || '(none)');
-  ok('  and the ledger records it', (gg.consentReq || []).length === 1, JSON.stringify(gg.consentReq));
+  ok('round start sends an account player NO invite - he is auto-joined (v2032, 11/9)', rec.inserts.length === 0, rec.inserts.join() || '(none)');   // v2063: was 'still invites'; superseded by the auto-join decision (qa_v2032_autojoin)
+  // v2063: the invite-ledger check went with the invite (v2032)
 
   gg.scores['sp-tyler oconnor'] = [4,3,null]; reset(); await w.__notify(gg);
   ok('a settings save on hole 2 sends the player already scoring NOTHING', rec.inserts.length === 0 && rec.pushes.length === 0,
@@ -197,9 +198,9 @@ head('D. no invite for somebody already in the round  (Tyler, 9/17)');
   const g5 = mk(); g5.consentReq = ['tyler oconnor']; g5.scores['sp-tyler oconnor'] = [4,3];
   g5.players.push({ id:'sp-frank lonigro', name:'Frank LoNigro', uid:'frank-uid' });
   reset(); await w.__notify(g5);
-  ok('a player added MID-ROUND is still invited (the v1467 fix holds)', rec.inserts.join() === 'frank-uid', rec.inserts.join() || '(none)');
-  ok('  and he is the only one pushed', rec.pushes.join() === 'frank-uid', rec.pushes.join() || '(none)');
-  ok('  and the ledger grew instead of being replaced', (g5.consentReq || []).length === 2, JSON.stringify(g5.consentReq));
+  ok('a player added MID-ROUND with an account gets no invite either (auto-join, v2032)', rec.inserts.length === 0, rec.inserts.join() || '(none)');   // v2063
+  // v2063: (was: he is the only one pushed)
+  // v2063: (was: the ledger grew instead of being replaced)
 
   console.log('\n' + FILE + ': ' + (checks - fails) + '/' + checks + ' checks passed' + (fails ? '  -- ' + fails + ' FAILURE(S)' : ''));
   process.exit(fails ? 1 : 0);

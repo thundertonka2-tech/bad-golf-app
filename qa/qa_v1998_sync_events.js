@@ -3,9 +3,13 @@
 // publish (once, all codes, zero-sum), conflict -> recompute once, auto-complete on the day.
 //   node qa_stream_E.js <golf-app.html>
 const fs = require('fs');
-const { loadApp } = require('/home/claude/thundertonka2-tech/bad-golf-app/qa/app.js');
+const { loadApp } = require(require('path').join(__dirname, 'app.js'));
 const FILE = process.argv[2];
-const PAGE = JSON.parse(fs.readFileSync('/tmp/claude-0/-home-claude/321477f1-00be-53d0-b504-4eae0cfc8fe0/scratchpad/flows/live/kerbo_page.json', 'utf8'));
+// v2063: this suite replays a live capture of the Kerbo event page that was never committed (it lived in a
+// session scratch folder). Pass it as argv[3] or set BG_KERBO_PAGE; without it the suite reports SKIPPED.
+const _PAGE_FILE = process.argv[3] || process.env.BG_KERBO_PAGE || '';
+if (!_PAGE_FILE || !fs.existsSync(_PAGE_FILE)) { console.log('qa_v1998_sync_events: SKIPPED - needs the captured kerbo_page.json (argv[3] or BG_KERBO_PAGE)'); process.exit(0); }
+const PAGE = JSON.parse(fs.readFileSync(_PAGE_FILE, 'utf8'));
 let pass = 0; const fails = [];
 const check = (n, ok, d) => { if (ok) { pass++; console.log('   ✓ ' + n); } else { fails.push(n + (d ? ' [' + d + ']' : '')); console.log('   ✗ ' + n + (d ? ' [' + d + ']' : '')); } };
 

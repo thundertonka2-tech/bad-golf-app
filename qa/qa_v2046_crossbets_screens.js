@@ -33,13 +33,13 @@ const banners = () => { const d = doc.createElement('div'); doc.body.appendChild
 // 1. the entry button
 let bn = banners();
 const addBtn = bn.querySelector('.bg-xbet-add');
-ok('event card shows the cross-bet button', !!addBtn && /Cross bet with other groups/.test(addBtn.textContent) && /Stroke play or Quota/.test(addBtn.textContent));
+ok('event card shows the cross-bet button', !!addBtn && /Cross bet with other groups/.test(addBtn.textContent) && /Stroke play · Quota/.test(addBtn.textContent));
 ok('the button is not a <button> with inline style (commit guard)', addBtn && addBtn.tagName === 'SPAN' && addBtn.getAttribute('role') === 'button');
 { const plain = Object.assign({}, A, { t2: null }); const d = doc.createElement('div'); fn('bgXbetButton')(plain, d); ok('a regular (non-event) round has no cross-bet button', !d.querySelector('.bg-xbet-add')); }
 { const finished = Object.assign({}, A, { finishedAt: 1 }); const d = doc.createElement('div'); fn('bgXbetButton')(finished, d); ok('a finished card has no cross-bet button', !d.querySelector('.bg-xbet-add')); }
 
 // 2. the builder
-addBtn.onclick();
+reseed(); fn('bgXbetOpen')(A);   // v2063: since v2054 the button opens the one Cross bets screen (qa_v2053_crossbets_step); this in-card builder is its fallback
 let ov = doc.getElementById('bg-xbet-ov');
 ok('builder opens', !!ov);
 const boxes = () => [...ov.querySelectorAll('.xb-pl')];
@@ -73,7 +73,7 @@ ok('builder buttons carry no inline style (commit guard)', [...ov.querySelectorA
   ok('...and saves the round once', w.__rec.saves.length === 1 && w.__rec.saves[0].code === 'CA', String(w.__rec.saves.length));
   ok('builder closes', !doc.getElementById('bg-xbet-ov'));
   // units 0 refused, nothing written
-  bn = banners(); bn.querySelector('.bg-xbet-add').onclick(); ov = doc.getElementById('bg-xbet-ov');
+  bn = banners(); reseed(); fn('bgXbetOpen')(A); ov = doc.getElementById('bg-xbet-ov');
   tick('Tyler OConnor'); tick('Tommy Hall'); ov.querySelector('#xb-val').value = '0';
   await ov.querySelector('#xb-save').onclick();
   ok('0 units: refused, builder stays, nothing saved', !!doc.getElementById('bg-xbet-ov') && Object.keys(A.xbets).length === 1);
@@ -85,7 +85,7 @@ ok('builder buttons carry no inline style (commit guard)', [...ov.querySelectorA
   await ov.querySelector('#xb-save').onclick();
   ok('same pair, Quota: saved as a second bet', Object.keys(A.xbets).length === 2 && Object.values(A.xbets).some(b => b.kind === 'quota' && b.value === 20 && b.per === false && b.net === true), JSON.stringify(A.xbets));
   // everyone against everyone with a player who has not started: Tyler, Kevin, Chris
-  bn = banners(); bn.querySelector('.bg-xbet-add').onclick(); ov = doc.getElementById('bg-xbet-ov');
+  bn = banners(); reseed(); fn('bgXbetOpen')(A); ov = doc.getElementById('bg-xbet-ov');
   boxes().forEach(b => { b.checked = false; }); tick('Tyler OConnor'); tick('Kevin Wells'); tick('Chris Curry'); ov.querySelector('#xb-val').value = '10'; fire();
   await ov.querySelector('#xb-save').onclick();
   ok('3 players incl. one not started: 3 more bets saved', Object.keys(A.xbets).length === 5, JSON.stringify(Object.values(A.xbets).map(b => b.names)));

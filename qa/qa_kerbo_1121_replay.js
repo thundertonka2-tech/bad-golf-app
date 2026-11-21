@@ -118,6 +118,23 @@ async function runEvent(fixed) {
   const mt = (X.matches || [])[0], ns = (X.nassaus || [])[0];
   check('cross match Tyler v Britt (gross 40) settles: Britt wins', !!mt && mt.settled && mt.winnerFirst === 'Britt' && mt.value === 40, JSON.stringify(mt && [mt.winnerFirst, mt.status, mt.value]));
   check('cross Nassau Tyler v Tommy (net 10): Tyler front, Tommy back and total -> Tommy +10', !!ns && ns.aNet + ns.bNet === 0 && Math.abs(ns.aNet) === 10, JSON.stringify(ns && [ns.aFirst, ns.aNet, ns.bFirst, ns.bNet, ns.segments.map(s => s.winnerFirst)]));
+  // v2063: each cross bet on its own line in the payout
+  const CG = (B.pay.byGame || []).find(gm => gm.key === 'Cross-group games');
+  check('the Cross-group games line still carries the lump (Britt +40, Tyler -50, Tommy +10)', !!CG && Object.values(CG.money).map(c2).sort((x, y) => x - y).join() === '-50,10,40');
+  const IT = (CG && CG.items) || [];
+  check('... and now hangs the two bets on it', IT.length === 2 && IT.map(i => i.label).sort().join(' | ') === 'Match: Britt v Tyler | Nassau: Tyler v Tommy', IT.map(i => i.label).join(' | '));
+  const idOf = n => (B.pay.rows.find(r => r.name === n) || {}).id;
+  const GI = F('_bgPayGamesItemized')(B.pay.byGame);
+  check('itemized list swaps the lump for the bets and keeps every other game', !GI.some(g => g.key === 'Cross-group games') && GI.length === B.pay.byGame.length + 1);
+  check('every player’s itemized lines still add up to his total', B.pay.rows.every(r => Math.abs(GI.reduce((a, g) => a + (Number((g.money || {})[r.id]) || 0), 0) - (Number(r.net) || 0)) < 0.011));
+  const mIt = GI.find(g => g.crossItem && g.kind === 'Match'), nIt = GI.find(g => g.crossItem && g.kind === 'Nassau');
+  const LBL = F('_bgCrossItemLabel');
+  check('Tyler reads "Match v Britt (lost ...)" at -40', /^Match v Britt \(lost/.test(LBL(mIt, idOf('Tyler OConnor'))) && mIt.money[idOf('Tyler OConnor')] === -40, LBL(mIt, idOf('Tyler OConnor')));
+  check('Britt reads "Match v Tyler (won ...)" at +40', /^Match v Tyler \(won/.test(LBL(mIt, idOf('Britt Hogland'))) && mIt.money[idOf('Britt Hogland')] === 40, LBL(mIt, idOf('Britt Hogland')));
+  check('Tyler reads the Nassau with Tommy side by side: front W, back L, total L at -10', /^Nassau v Tommy \(/.test(LBL(nIt, idOf('Tyler OConnor'))) && /W.*L.*L/.test(LBL(nIt, idOf('Tyler OConnor'))) && nIt.money[idOf('Tyler OConnor')] === -10, LBL(nIt, idOf('Tyler OConnor')));
+  check('Tommy reads "Nassau v Tyler" at +10', /^Nassau v Tyler \(/.test(LBL(nIt, idOf('Tommy Hall'))) && nIt.money[idOf('Tommy Hall')] === 10, LBL(nIt, idOf('Tommy Hall')));
+  const TBL = F('_t2BreakdownTableHtml')(B.pay.byGame, B.pay.rows);
+  check('the per-game table has a column per bet and no lump column', />Match: Britt v Tyler</.test(TBL) && />Nassau: Tyler v Tommy</.test(TBL) && !/>Cross-group games</.test(TBL));
   const g2 = B.rounds[1]; const WR = WOLF(Object.assign({}, g2, { games: Object.assign({}, g2.games, { wolf: g2.groupGames.wolf }) }));
   check('Wolf on the re-run card: Tommy -15, Britt -5, Jeremy +25, Kylan -5', ['Tommy Hall', 'Britt Hogland', 'Jeremy Waddle', 'Kylan Leidtke'].map(n => WR.money[g2.players.find(p => p.name === n).id]).join() === '-15,-5,25,-5');
   check('Wolf has a result for all 18 holes', WR.holeResults.length === 18);

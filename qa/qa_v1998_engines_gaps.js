@@ -183,12 +183,12 @@ console.log('\n== Stableford/Quota per-point with a mid-round leaver ==');
   const m = byGame(g, 'stableford');
   // holes 1-9: pts A2,B1,C3 avg 2 -> A 0, B -1, C +1 per hole x9 => A 0, B -9, C +9
   // holes 10-18: A2,B1 avg 1.5 -> A +0.5, B -0.5 x9 => A +4.5, B -4.5
-  check('stableford perpoint leaver: C +9 on his 9 holes only; A +4.5; B -13.5', m && m[c] === 9 && m[a] === 4.5 && m[b] === -13.5, JSON.stringify(m));
+  check('stableford perpoint leaver, by the book (v2025): A +18, B -18, C (left) 0', m && m[c] === 0 && m[a] === 18 && m[b] === -18, JSON.stringify(m));   // v2063: expectation moved to the v2025 rule
   check('stableford perpoint conserves', m && sum(m) === 0);
   const q = byGame(g, 'quota');
   // quota pts: par=2,bogey=1,birdie=4. quota 36/18 = 2 per hole. holes 1-9 res: A0,B-1,C+2 avg 1/3 -> A -1/3, B -4/3, C +5/3 x9 => A -3, B -12, C +15
   // holes 10-18: A0,B-1 avg -0.5 -> A +0.5 B -0.5 x9 => A +4.5 B -4.5. Totals: A 1.5, B -16.5, C 15
-  check('quota perpoint leaver: C +15, A +1.5, B -16.5', q && money(q[c]) === 15 && money(q[a]) === 1.5 && money(q[b]) === -16.5, JSON.stringify(q));
+  check('quota perpoint leaver, by the book (v2024): A +18, B -18, C (left) 0', q && money(q[c]) === 0 && money(q[a]) === 18 && money(q[b]) === -18, JSON.stringify(q));   // v2063: expectation moved to the v2024 rule
   check('quota perpoint conserves', q && sum(q) === 0);
   // Pool mode stableford: leaver can't be ranked fairly — what happens? (document)
   g.games.stableford = Object.assign({ mode: 'pool', buyin: 10, payout: 'winner' }, P(g));

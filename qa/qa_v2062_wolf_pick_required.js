@@ -78,6 +78,27 @@ const tap = label => { const b = Array.from(sheet().querySelectorAll('.wfp-btn')
   check('the manager save path lets wolfData through', /'settledMoney', 't2', 'wolfData'\]\.indexOf\(k\)/.test(SRC));
   check('the last hole gets the reminder as soon as it is scored', /allHolesScored\(g\) && wolfPickMissingOnHole\(g, h\)/.test(SRC) && /Pick before you finish\./.test(SRC));
 
+  console.log('\n=== 5. THE REAL FINISH FLOW (bgFinishRoundFlow, end to end) ===');
+  {
+    const saves = []; let confirms = 0;
+    w.eval('saveGame = async function (g) { window.__saves.push(JSON.stringify((g.wolfData || {}).holes || {})); return true; }; uiConfirm = async function () { window.__confirms++; return false; };');
+    w.__saves = saves; w.__confirms = 0;
+    const live = card(); delete live.t2; live.games = { wolf: live.groupGames.wolf }; delete live.groupGames; live.createdAt = Date.now() - 3600e3;
+    w.__setGame(live);
+    let finished = 'pending'; const run = w.bgFinishRoundFlow().then(() => { finished = 'returned'; }, e => { finished = 'threw ' + e.message; });
+    for (let i = 0; i < 8 && !sheet(); i++) await tick();
+    check('tapping Finish with hole 18’s Wolf pick missing opens the pick sheet (no "Finish anyway")', !!sheet() && /hole 18/.test(sheet().textContent) && w.__confirms === 0, 'confirms=' + w.__confirms + ' sheet=' + !!sheet());
+    check('the round is not finished while the sheet is up', !live.finishedAt);
+    tap('Go back'); await run;
+    check('Go back: the flow stops, the round stays unfinished, nothing was saved', finished === 'returned' && !live.finishedAt && !live.wolfData.holes[18] && w.__saves.length === 0, finished + ' saves=' + w.__saves.length);
+    finished = 'pending'; const run2 = w.bgFinishRoundFlow().then(() => { finished = 'returned'; }, e => { finished = 'threw ' + e.message; });
+    for (let i = 0; i < 8 && !sheet(); i++) await tick();
+    tap('Tommy');
+    for (let i = 0; i < 30 && !w.__saves.length; i++) await tick();
+    check('picking Tommy saves the pick as part of finishing', w.__saves.length >= 1 && /"18":\{"choice":"partner","partnerId":"to"\}/.test(w.__saves[0]), JSON.stringify(w.__saves).slice(0, 200));
+    check('the flow moved on past the Wolf gate (no pick is missing any more)', w.wolfHolesMissingPicks(live).length === 0 && !sheet());
+  }
+
   console.log('\n──────────────────────────────────────────────');
   if (fails.length) { console.log(fails.length + ' FAILED:'); fails.forEach(f => console.log('  ✗ ' + f)); process.exit(1); }
   console.log('ALL ' + pass + ' CHECKS PASSED'); process.exit(0);

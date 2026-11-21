@@ -5,8 +5,8 @@
 // node qa/qa_crossmatch_closeout_v1945.js golf-app.html qa/fixture_kerbo_crossmatch_2026-10-24.json
 'use strict';
 const path = require('path');
-const { loadApp } = require(path.resolve('qa/app.js'));
-const fx = require(path.resolve(process.argv[3])); const { qa } = loadApp(path.resolve(process.argv[2]));
+const { loadApp } = require(path.join(__dirname, 'app.js'));
+const fx = require(path.resolve(process.argv[3] || path.join(__dirname, 'fixture_kerbo_crossmatch_2026-10-24.json'))); const { qa } = loadApp(path.resolve(process.argv[2] || path.join(__dirname, '..', 'golf-app.html')));   // v2063: the fixture defaults to the one in qa/
 const fn = n => { const f = qa.fn(n); if (typeof f !== 'function') throw new Error('missing ' + n); return f; };
 qa.install({ supa: { from() { return { select() { return this; }, eq() { return this; }, in() { return this; }, maybeSingle: async () => ({ data: null, error: null }) }; }, auth: { getSession: async () => ({ data: { session: null } }) } }, onSave: () => {}, loadGame: async () => null, roster: async () => [], meName: async () => 'Tyler' });
 let pass = 0, fail = 0; const ok = (c, m) => { if (c) pass++; else { fail++; console.error('  FAIL: ' + m); } };

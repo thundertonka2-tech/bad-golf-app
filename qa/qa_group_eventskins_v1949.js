@@ -17,7 +17,7 @@ const r=await p.evaluate(fx=>{const F=JSON.parse(fx);const raw=F.raw;const m=_t2
  const wideHoles=h=>cells(h).map(s=>{const [pid,i]=s.split('@');const n=+i;return pid+'#'+(n<=9?n:n-1);}).sort();
  const leg=h=>{const d=document.createElement('div');d.innerHTML=bgScLegendHtml(h);return d.textContent.trim();};
  const noSkin=bgScLegendHtml('<span class="sc-mark sc-birdie">3</span>');
- return {c1:cells(h1),c2:cells(h2),l1:leg(h1),noSkin,tw1:twinHoles(h1),wh1:wideHoles(h1),tw2:twinHoles(h2),wh2:wideHoles(h2)};},fs.readFileSync(process.argv[3],'utf8'));
+ return {c1:cells(h1),c2:cells(h2),l1:leg(h1),noSkin,tw1:twinHoles(h1),wh1:wideHoles(h1),tw2:twinHoles(h2),wh2:wideHoles(h2)};},fs.readFileSync(process.argv[3]||path.join(__dirname,'fixture_kerbo_fieldskins_2026-10-24.json'),'utf8'));
 let pass=0,fail=0;const ok=(c,n)=>{c?pass++:(fail++,console.log('FAIL',n,JSON.stringify(r)));};
 // td index: 0 name, 1..9 holes 1-9, 10 out, 11..19 holes 10-18
 ok(JSON.stringify(r.c1)===JSON.stringify(['g1a@14','g1c@4','g1d@11']),'group 1 gold: Mike #4, Gary #10, Tyler #13');
