@@ -233,6 +233,49 @@ function seedEvent(opts) {
   check('a live event always copies', !!copied);
   check('null event is refused quietly', qa.fn('bgT2CopyTournamentLink')(null) === false);
 
+  section('5. EVERY POOL AND SIDE GAME, WITH FIRST NAMES (the real Kerbo 11/21 setup)');
+  const K = seedEvent({ days: 1 }); K.join_code = 'J6KH63'; K.name = 'Kerbo - Saturday 11/21';
+  const ROSTER = ['Tyler OConnor', 'Gregory Jackson', 'Greg Adear', 'Steve Miller', 'Mike Davison', 'Tommy Hall', 'Britt Hogland', 'Jeremy Waddle', 'Kylan Leidtke', 'Chris Curry'];
+  Object.assign(K.settings, { quickSetup: true, setupSaved: true, pageKey: 'NTLZMCE3TLLG',
+    dayGames: { 1: { ctp: { holes: [17], value: 1 }, match: { net: false, pair: ['Tyler OConnor', 'Britt Hogland'], value: 40, instances: [{ net: false, pair: ['Tyler OConnor', 'Britt Hogland'], value: 40, participantNames: ['Tyler OConnor', 'Britt Hogland'] }], participantNames: ['Tyler OConnor', 'Britt Hogland'] } } },
+    crossBets: { 1: { x1: { by: 'Tyler OConnor', net: true, per: false, kind: 'nassau', names: ['Tyler OConnor', 'Tommy Hall'], value: 10, format: 'stroke', savedAt: 5, segments: 'fbo' } } },
+    groupGames: { g2: { wolf: { value: 5, participantNames: ['Tommy Hall', 'Britt Hogland', 'Jeremy Waddle', 'Kylan Leidtke'] } },
+                  g1: { nassau: { net: false, pair: ['Tyler OConnor', 'Gregory Jackson', 'Steve Miller'], value: 10, format: 'stroke', segments: 'fbo', instances: [{ net: false, pair: ['Tyler OConnor', 'Gregory Jackson', 'Steve Miller'], value: 10, participantNames: ['Tyler OConnor', 'Gregory Jackson', 'Steve Miller'] }] } } },
+    tourneySkins: { on: true, mode: 'buyin', ties: 'carry', value: 5, hcpPct: 85 }, tourneyLongPutt: { on: true, mode: 'buyin', value: 1 },
+    tourneySidePots: { girs: { on: true, value: 1 }, putts: { on: true, value: 1 }, lowNet: { on: true, value: 1 } } });
+  const DATA = { players: ROSTER, groupNames: {}, groupNum: {}, groupDay: {} };
+  const G = qa.fn('bgT2InviteGamesText')(K, DATA);
+  const WANT = ['Everyone:', 'CTP 1 (hole 17)', 'Skins 5', 'Long Putt 1', 'Low Net 1', 'Most GIRs 1', 'Fewest Putts 1', '',
+    'Side games:', 'Match 40 - Tyler v Britt', 'Nassau 10 net - Tyler v Tommy', 'Wolf 5 - Tommy, Britt, Jeremy, Kylan', 'Nassau 10 - Tyler, Gregory, Steve'].join('\n');
+  check('the games block is exactly the Kerbo list', G === WANT, JSON.stringify(G));
+  qa.fn('bgT2InviteGamesSeed')(K, ROSTER.map(n => ({ display_name: n })));
+  copied = null; qa.fn('bgT2CopyTournamentLink')(K); await tick();
+  check('the copied text carries the games between the title and the links', copied && copied.indexOf(WANT) > copied.indexOf('on Bad Golf!') && copied.indexOf(WANT) < copied.indexOf('To PLAY'));
+  check('links still each start their own line', String(copied).split('\n').filter(l => /^https:\/\//.test(l)).length === 2);
+  const K2 = JSON.parse(JSON.stringify(K)); K2.settings.tourneySkins.players = ROSTER.slice(0, 3); K2.settings.tourneySidePots.lowNet.players = ROSTER.slice();
+  const G2 = qa.fn('bgT2InviteGamesText')(K2, DATA);
+  check('a pool someone sits out lists the first names of who is in', /Side games:[\s\S]*Skins 5 - Tyler, Gregory, Greg/.test(G2) && !/Everyone:[\s\S]*Skins 5[\s\S]*Side games:/.test(G2), JSON.stringify(G2));
+  check('a pool with the whole field ticked still says Everyone', /Everyone:[\s\S]*Low Net 1[\s\S]*Side games:/.test(G2));
+  const K3 = JSON.parse(JSON.stringify(K)); K3.settings.crossBets[1].x2 = { kind: 'stroke', names: ['Chris Curry', 'Chris Doyle'], value: 2, per: true, net: false, savedAt: 9 };
+  const G3 = qa.fn('bgT2InviteGamesText')(K3, { players: ROSTER.concat(['Chris Doyle']) });
+  check('two players with the same first name get a last initial', G3.indexOf('Stroke play 2 a stroke - Chris C. v Chris D.') > 0, JSON.stringify(G3));
+  K3.settings.crossBets[1].x1.off = true;
+  check('a removed cross bet is not listed', qa.fn('bgT2InviteGamesText')(K3, DATA).indexOf('Nassau 10 net') < 0);
+  const K4 = JSON.parse(JSON.stringify(K)); K4.settings.groupGames.g1 = { vegas: { value: 1 } };
+  check('a cart game with no names saved uses the cart members', qa.fn('bgT2InviteGamesText')(K4, { players: ROSTER, groupNames: { g1: ROSTER.slice(0, 4) }, groupNum: { g1: 1 }, groupDay: { g1: 1 } }).indexOf('Vegas 1 - Tyler, Gregory, Greg, Steve') > 0);
+  check('... and says Group 1 when the members are not loaded yet', /Vegas 1 - (Group 1|one group)/.test(qa.fn('bgT2InviteGamesText')(K4, { players: ROSTER, groupNum: { g1: 1 } })));
+  check('an event with no games adds nothing', qa.fn('bgT2InviteGamesText')(seedEvent({ days: 1 }), DATA) === '');
+
+  section('6. INVITE ALL PLAYERS carries the same list');
+  const K5 = seedEvent({ days: 1 }); K5.name = 'Kerbo - Saturday 11/21'; K5.join_code = 'J6KH63'; Object.assign(K5.settings, JSON.parse(JSON.stringify(K.settings)));
+  DB.tournament_players = ROSTER.map((n, i) => ({ id: 'tp-' + (i + 1), tournament_id: TID, display_name: n, active: true }));
+  ev('_bgT2InvCache = {}'); clearSpy(); copied = null;
+  try { await qa.fn('shareTourneyInvite')(TID); } catch (e) { console.log('   invite threw: ' + e.message); }
+  await tick();
+  check('Invite all players copied a text', typeof copied === 'string' && copied.length > 0);
+  check('it lists every pool and side game', String(copied).indexOf(WANT) > 0, JSON.stringify(copied));
+  check('the old one-line "We’re playing" sentence is gone', !/re playing/.test(String(copied)));
+
   console.log('\n──────────────────────────────────────────────');
   if (fails.length) { console.log(fails.length + ' FAILED:'); fails.forEach(f => console.log('  ✗ ' + f)); process.exit(1); }
   console.log('ALL ' + pass + ' CHECKS PASSED'); process.exit(0);
