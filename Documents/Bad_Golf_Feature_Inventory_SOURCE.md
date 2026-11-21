@@ -1470,6 +1470,8 @@ Even teams; **team total = sum of each member's (points − quota)**. Higher tot
 - **Team handicap allowance:** a checkbox (plus an optional custom percentage) on both the Scramble and Ryder Cup option panels, off by default. Defaults are the USGA standards — **2-man scramble 35% of the lower handicap + 15% of the higher; alternate shot 50/50.** "No handicaps" still overrides it.
   - *The 4-man (one-team) scramble allowance is **not implemented** — the checkbox is hidden in 4-man mode and that format plays straight gross.*
 - **Field scramble (tournament):** see **Scramble Prize Pool** under Tourney → Event Prize Pools. In a multi-team event a scramble day settles per cart, same as Ryder Cup.
+- **Best Ball Pool (tournament, any number of teams):** under Tourney → Event Prize Pools → **Best Ball Pool**. Use it when you have three or more teams, or teams split across groups. The teams are the event's own teams from the **Teams** step, and partners do not have to ride together. On every hole each team counts its better ball (**Net** gives each player his strokes; **Gross** gives none). The lowest team total for the round takes the whole pool; a tie splits it. Every player on a team puts in the **Buy-in per player**. A player who is not on a team is not in the pool and pays nothing, so one extra player can still play the day's other games. A team that did not finish every hole pays but cannot win. It pays on the Event Leaderboard once every group has finished, and the standings (team, total, to par, thru) show beside the payout while the day is live.
+  - Example: three two-man teams at 50 a player is a pool of 300. Team totals 65, 67, 67: the two players on 65 collect 100 each, and the other four pay 50 each.
 
 #### **☂️ Umbrella (4 players, 2v2)**
 Five points a hole, **each worth the hole number** — 1 apiece on hole 1, 18 apiece on hole 18. The five points: **Low ball**, **Low total**, **GIR (partner 1)**, **GIR (partner 2)**, and **Birdie**. Win a point outright to take it; a tie awards it to nobody. **☂️ The umbrella:** sweep all five while the other team scores zero and that hole's points **double**. **Not available in tournaments.**
@@ -3328,6 +3330,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 | **Scramble** | Team format; everyone hits, the team picks the best, repeat (one team score per hole). Scored against the **card** par |
 | **Shamble** | Team format; everyone drives, the team picks the best drive, then each player plays their own ball in. The team counts its best 1 or 2 net scores per hole, with a reduced **Shamble allowance** on handicaps |
 | **Scramble Prize Pool** | The field-wide scramble prize pool, set under Event Prize pools — every player puts in the entry and cart groups are the teams |
+| **Best Ball Pool** | A field-wide best ball for any number of teams, set under Event Prize pools — every player on a team puts in the buy-in and the lowest better-ball team total takes the pool |
 | **Nassau** | Three separate games (front, back, overall). **Ties carry** to the next segment |
 | **Huckle** | The Nassau press — available when you're down 2+ in a segment, in stroke play or match play |
 | **Skins** | Lowest score on each hole wins that hole's prize pool. A fixed value per skin, or the **Play a pool** switch |
