@@ -61,6 +61,8 @@ const T = loadPrelude('tourney.js', '\n(async () => {', ['qa', 'F', 'HG', 'insta
 unmute();
 const { qa, F, HG, install, oStrokes, nk, NAMES, PARS18, SIS18, RED_PARS18, RED_SIS18 } = T;
 const STAND = F('t2ComputeStandings'), CAGM = F('computeAllGameMoney'), DAYRULES = F('_t2DayHcpRules'), BASIS = F('bgApplyHcpBasis');
+const LAUNCHCH = F('_t2CourseHcpAtLaunch');   // v2065: the launch converts the roster index to a course handicap off the player's tee
+const QA_TEES = [{ label: 'Blue', rating: 72.2, slope: 127 }, { label: 'Red', rating: 70.1, slope: 118 }];
 const FMT_FROM = F('t2FormatFromGames'), HOLEFMT = F('getHoleFormat'), CALC_RC = F('calcRyderCup');
 
 // ── the app's REAL launch mapping, cut out of the source ───────────────────────────────────────────────────────
@@ -143,7 +145,7 @@ const teamStrokesFor = (g, d, h, S, bugD3) => { if (bugD3) return teamStrokesOn(
 // D1 (Tyler 11/5): segment of hole h (0-based) = third of the round by PLAY position
 const segOfPos = (nH, pos1) => { const seg = Math.max(1, Math.floor(nH / 3)); return pos1 <= seg ? 1 : pos1 <= 2 * seg ? 2 : 3; };
 const qpts = d => d <= -3 ? 8 : d === -2 ? 6 : d === -1 ? 4 : d === 0 ? 2 : d === 1 ? 1 : 0;
-const qTarget = (g, p) => nHof(g) === 9 ? 18 - Math.round(p.hcp * 0.5) : 36 - Math.round(p.hcp);
+const qTarget = (g, p) => (nHof(g) === 9 ? 18 : 36) - Math.round(p.hcp);   // v2065: p.hcp is already the 9-hole course handicap on a nine (hcp18:false)
 const split = (aw, bw) => aw ? [1, 0] : bw ? [0, 1] : [0.5, 0.5];
 
 // The oracle for one cart. `bugs` switches ONE known app behaviour on (attribution only).
@@ -355,13 +357,13 @@ function buildEvent(c) {
       (groupsByDay[d] || (groupsByDay[d] = [])).push({ id: gid, game_code: code, group_number: gi + 1 });
       // launcher: gp in slot order, the day's allowance, the two team keys present, Aids/Bids
       const mem = ms.slice().sort((x, y) => x.slot - y.slot);
-      const gp = mem.map((m, i) => { const parts = m.name.split(/\s+/); return { id: 't2p' + i + '-' + code, firstName: parts[0], lastName: parts.slice(1).join(' '), name: m.name, hcp: idx[m.name], rawHcp: idx[m.name], playsGross: false, teeLabel: red[m.name] ? 'Red' : 'Blue', _team: m.team, uid: null, t2pid: m.t2pid }; });
+      const gp = mem.map((m, i) => { const parts = m.name.split(/\s+/); const _tl = red[m.name] ? 'Red' : 'Blue'; const _h = LAUNCHCH(idx[m.name], _tl, QA_TEES, card.pars, m.name); return { id: 't2p' + i + '-' + code, firstName: parts[0], lastName: parts.slice(1).join(' '), name: m.name, hcp: _h, rawHcp: _h, eventIndex: idx[m.name], playsGross: false, teeLabel: _tl, _team: m.team, uid: null, t2pid: m.t2pid }; });   // v2065: course handicap off the tee, as t2LaunchDayRounds now builds it
       const rules = DAYRULES(t, d, card.pars);
       const bo = BASIS(gp.map(p => p.hcp), rules.basis, rules.pct, !!rules.noHandicaps); gp.forEach((p, i) => { p.baseHcp = bo[i].base; p.hcp = bo[i].hcp; });
       const keys = ['A', 'B'].filter(k => gp.some(p => p._team === k)); const kA = keys[0] || 'A', kB = keys[1] || 'B';
       const Aids = gp.filter(p => p._team === kA).map(p => p.id), Bids = gp.filter(p => p._team === kB).map(p => p.id);
       const games = path === 'config' ? CONFIG(cfg, gp, Aids, Bids, kA, kB, names.map(n => ({ id: 'tp-' + nk(n).replace(/ /g, ''), display_name: n }))) : LEGACY(fmt0, gp, Aids, Bids, kA, kB, names.map(n => ({ id: 'x' })));
-      const g = { code, course: 'QA Course', courseId: 'qa-course', pars: card.pars.slice(), sis: card.sis.slice(), tees: [{ label: 'Blue', rating: 72.2, slope: 127 }, { label: 'Red', rating: 70.1, slope: 118 }],
+      const g = { code, course: 'QA Course', courseId: 'qa-course', pars: card.pars.slice(), sis: card.sis.slice(), tees: clone(QA_TEES),
         teePars: clone(card.teePars), teeSis: clone(card.teeSis),
         players: gp.map(p => { const q = Object.assign({}, p); delete q._team; return q; }), games, holes: card.holes, nineMode: card.nineMode, hcpRules: rules,
         scores: {}, startHole: startFor(c.holes, gi), createdAt: 1786800000000, updatedAt: 1786800000000, finishedAt: 1786820000000,
@@ -625,6 +627,7 @@ async function handCases() {
   {
     const c = { fmt: 'teamquota', path: 'config', carts: 1, slot: 'AABB', holes: '18', net: 'net', teamHcp: 'off', hcp: 'scratch', tees: 'same', chaos: 'none', days: 1, singlesSize: 4, value: 0, variant: 'teamMatch', scoring: 'match', segs: ['bestball', 'scramble', 'altshot'] };
     const E = buildEvent(c); const C = E.carts[0], g = C.g;
+    g.players.forEach(p => { p.hcp = p.baseHcp = p.rawHcp = 0; });   // v2065: "all scratch" means 0 strokes -- the launch would give a 0 index a stroke off Blue 72.2 on this par
     g.players.forEach(p => { for (let h = 0; h < 18; h++) g.scores[p.id][h] = g.pars[h]; });
     const a1 = C.A[0]; for (let h = 9; h < 18; h++) g.scores[a1.id][h] = null; g.leftRound = { at: 1, byId: { [a1.id]: 9 } };
     const st = await stand(E); const l = st.lines[0] || {};
