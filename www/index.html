@@ -2,7 +2,7 @@
 <html lang="en" data-btnsys="on">
 <head>
 <meta charset="UTF-8">
-<!--BGVER=v2026.11.2068-->
+<!--BGVER=v2026.11.2069-->
 <!-- ^ v1140: a duplicate of the version line in the app script, parked in the first
      ~200 bytes of the file on purpose. checkForNewBuild() reads it with a 2 KB Range
      request instead of re-downloading the whole 5.3 MB app just to learn whether a
@@ -12340,7 +12340,7 @@ const ROSTER_DUAL_WRITE_LEGACY = false;
 // loser→survivor alias into the shared golf:player-aliases map; stats, the roster picker
 // (round / tournament / league / tee-time), leaderboards, name→uid resolvers and
 // bgAmInRound resolve through it. No stored name is rewritten anywhere (BG_USE_ALIASES).
-const BG_BUILD = 'v2026.11.2068';
+const BG_BUILD = 'v2026.11.2069';
 // ============================================================
 // v1840 LANGUAGES (Tyler, 10/1): "Could we just make it multi lingual and get it
 // all done at once?" + "also make sure to support Japanese and Chinese".
@@ -20177,6 +20177,36 @@ function singletonRowCode(key) {
 // Track online/offline so the sync indicator can reflect reality
 window.addEventListener('online', () => { supaOnline = true; updateSyncIndicator(); });
 window.addEventListener('offline', () => { supaOnline = false; updateSyncIndicator(); });
+/* v2069 (Brewer, 11/25): airplane mode on hole 3, back on the next hole -- and the phone never synced again,
+   because iOS did not fire the 'online' event and every sync path waits on supaOnline. Ask the network
+   ourselves: any HTTP answer from the Supabase REST root (a 401 counts) means we are reachable. */
+let _bgNetProbeAt = 0, _bgNetProbeBusy = null;
+async function bgNetProbe(opts) {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
+    if (_bgNetProbeBusy) return _bgNetProbeBusy;
+    if (!(opts && opts.force) && Date.now() - _bgNetProbeAt < 5000) return !!supaOnline;
+    _bgNetProbeBusy = (async () => {
+      let ok = false;
+      try {
+        const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+        const tm = setTimeout(() => { try { if (ctl) ctl.abort(); } catch (e) {} }, 4000);
+        try {
+          const r = await fetch(SUPABASE_URL + '/rest/v1/', { method: 'HEAD', cache: 'no-store', headers: { apikey: SUPABASE_ANON_KEY }, signal: ctl ? ctl.signal : undefined });
+          ok = !!r;   // reached the server: whatever the status, the network is up
+        } finally { clearTimeout(tm); }
+      } catch (e) { ok = false; }
+      _bgNetProbeAt = Date.now();
+      if (ok && !supaOnline) { supaOnline = true; try { updateSyncIndicator(); } catch (e) {} try { console.log('[BG v2069] back online (probe)'); } catch (e) {} }
+      return ok;
+    })();
+    try { return await _bgNetProbeBusy; } finally { _bgNetProbeBusy = null; }
+  } catch (e) { return false; }
+}
+// Re-probe when the app comes to the foreground, and every 20 s while it believes it is offline.
+try { document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !supaOnline) bgNetProbe({ force: true }).catch(() => {}); }); } catch (e) {}
+try { window.addEventListener('pageshow', () => { if (!supaOnline) bgNetProbe({ force: true }).catch(() => {}); }); } catch (e) {}
+try { setInterval(() => { if (!supaOnline) bgNetProbe().catch(() => {}); }, 20000); } catch (e) {}
 // v2028 (Tyler 11/7): CTP pay mode -- "Pay each hole" (with Par-or-better / Hero Tax) or "One pool
 // for the round". The hidden #ctp-pool-mode checkbox stays the state the load/save code reads.
 function bgCtpModeSync() {
@@ -23621,7 +23651,8 @@ async function flushDirtyGames(opts) {
   const pending = _dirtyGames();
   if (!pending.length) return;
   try { if (!supaReady) await initSupabase(); } catch (e) {}
-  if (!supa || !supaOnline) return;
+  if (!supa) return;
+  if (!supaOnline) { let _up = false; try { _up = await bgNetProbe({ force: _force }); } catch (e) { _up = false; } if (!_up) return; }   // v2069: rounds are waiting -- check the network ourselves instead of trusting a missed 'online' event
   for (const code of pending) {
     let v = null; try { v = localStorage.getItem('game:' + code); } catch (e) {}
     if (v == null) { clearGameDirty(code); continue; }
@@ -68018,12 +68049,15 @@ function bgScForwardSis(g, label, sis) {
   } catch (e) { return null; }
 }
 // Split one 18-across table into two nine-hole tables (Out: name 1-9 Out · In: name 10-18 In Tot).
-function bgScSplit(table) {
+function bgScSplit(table, g) {
   try {
     const map = bgScColMap(table); if (!map || map.nHoles !== 18 || map.out == null || map.in == null) return null;
+    // v2069 (Tyler): a round that started on 10 shows the back nine first and the front nine second; Tot rides on the second nine.
+    let _backFirst = false; try { _backFirst = !!(g && typeof bgEffectiveStartHole === 'function' && bgEffectiveStartHole(g) === 10); } catch (e) { _backFirst = false; }
     const keepF = new Set([map.name]); const keepB = new Set([map.name]);
     for (let h = 1; h <= 9; h++) keepF.add(map.holes[h]); keepF.add(map.out);
-    for (let h = 10; h <= 18; h++) keepB.add(map.holes[h]); keepB.add(map.in); if (map.tot != null) keepB.add(map.tot);
+    for (let h = 10; h <= 18; h++) keepB.add(map.holes[h]); keepB.add(map.in);
+    if (map.tot != null) (_backFirst ? keepF : keepB).add(map.tot);
     const make = (keep, dropCaption) => {
       const t = table.cloneNode(true);
       // v1998 (audit P1-1): bgScTwinSetup tags the SOURCE table bg-sc-wide-table (hidden on
@@ -68039,7 +68073,7 @@ function bgScSplit(table) {
       });
       return t;
     };
-    return [make(keepF, false), make(keepB, true)];
+    return _backFirst ? [make(keepB, false), make(keepF, true)] : [make(keepF, false), make(keepB, true)];   // v2069
   } catch (e) { return null; }
 }
 // Frame: inject the rows, then emit <div class="bg-sc"><div class="bg-sc-wide">18 across</div>
@@ -68058,7 +68092,7 @@ function bgScFrameHtml(html, g, opts) {
     let anySplit = false;
     tables.forEach(t => {
       if (opts.rows !== false && (opts.rowsG || g)) bgScInjectRows(t, opts.rowsG || g);
-      const pair = bgScSplit(t);
+      const pair = bgScSplit(t, opts.rowsG || g);   // v2069: the round decides which nine comes first
       if (pair) { anySplit = true; stackParts.push(pair[0].outerHTML + pair[1].outerHTML); }
       else stackParts.push(t.outerHTML);
       wideParts.push(t.outerHTML);
@@ -68084,7 +68118,8 @@ function bgScTwinSetup(id) {
     const sync = () => {
       try {
         if (!t.innerHTML || !t.querySelector('tr')) { twin.innerHTML = ''; return; }
-        const pair = bgScSplit(t);
+        let _tg = null; try { _tg = (typeof state !== 'undefined' && state && state.game) ? state.game : null; } catch (e) { _tg = null; }
+        const pair = bgScSplit(t, _tg);   // v2069
         twin.innerHTML = pair ? pair[0].outerHTML + pair[1].outerHTML : '';
         // v1998 (audit P1-1): the twin must never carry the phone-hidden class or a duplicate id.
         try { twin.querySelectorAll('table').forEach(x => { x.classList.remove('bg-sc-wide-table'); x.removeAttribute('id'); }); } catch (e) {}
