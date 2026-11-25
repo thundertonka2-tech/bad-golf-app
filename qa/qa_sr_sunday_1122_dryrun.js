@@ -211,7 +211,7 @@ function ownTeamTotals(rounds, net, teamOf) {
 
   console.log('\n== 6. while the day is live ==');
   {
-    const live = fresh(); live[1].finishedAt = null; for (let h = 12; h < 18; h++) live[1].players.forEach(p => { live[1].scores[p.id][h] = null; });
+    const live = fresh(); live[1].finishedAt = null; live.forEach(g => { g.updatedAt = Date.now(); }); for (let h = 12; h < 18; h++) live[1].players.forEach(p => { live[1].scores[p.id][h] = null; });   // v2067: touched today -- a cart last touched on an earlier calendar day reads as done (_t2DayFieldComplete), which is why this fixture went stale on 11/25
     Object.keys(live[1].ctpData).forEach(h => { if (Number(h) > 12) delete live[1].ctpData[h]; });
     const b = TBB(rowsOf(live), ev, evP);
     check('Group 2 on #12: the pool waits, no money moves, standings still show thru', !!b && b.complete === false && Object.values(b.money).every(v => !v) && b.perDay[0].teams.find(t => t.key === 'C').holes === 12, JSON.stringify(b && [b.complete, b.money]));
