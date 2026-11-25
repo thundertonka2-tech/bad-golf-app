@@ -120,7 +120,9 @@ console.log('\n== 4. cross bets reach the surfaces ==');
   const B = F('bgXbetBuild');
   check('builder: ok', typeof B(a, { kind: 'quota', mine: 'Tyler OConnor', opp: 'Britt Hall', value: '5', per: true }) === 'object');
   check('builder: opponent on my card refused', typeof B(a, { kind: 'stroke', mine: 'Tyler OConnor', opp: 'Steve Miller', value: 5 }) === 'string');
-  check('builder: no units refused', typeof B(a, { kind: 'stroke', mine: 'Tyler OConnor', opp: 'Britt Hall', value: 0 }) === 'string');
+  check('builder: blank units refused', typeof B(a, { kind: 'stroke', mine: 'Tyler OConnor', opp: 'Britt Hall', value: '' }) === 'string');
+  check('builder: 0 units accepted (v2068, bragging rights)', (function () { const r = B(a, { kind: 'stroke', mine: 'Tyler OConnor', opp: 'Britt Hall', value: 0 }); return r && typeof r === 'object' && r.value === 0; })());
+  check('builder: negative units refused', typeof B(a, { kind: 'stroke', mine: 'Tyler OConnor', opp: 'Britt Hall', value: -1 }) === 'string');
   check('builder: someone not on my card refused', typeof B(a, { kind: 'stroke', mine: 'Britt Hall', opp: 'Brian Myers', value: 5 }) === 'string');
 }
 console.log('\n== 5. a player added after the round started ==');

@@ -67,7 +67,8 @@ const SETTINGS = {
     quota: { net: false, mode: 'pool', basis: 'auto', buyin: 20, value: 0, payout: '8020', participants: IN13.map((n, i) => 'p' + i), participantNames: IN13.slice() } } },
   crossBets: { 1: {
     xb17323f75b1: { by: 'Kevin Wells', net: true, per: false, kind: 'quota', byUid: 'kevin', names: ['Kevin Wells', 'Rolo Castillo'], value: 20, format: 'stroke', savedAt: 1795561546143, segments: 'o' },
-    xbd8ad0cbcb7: { by: 'Kevin Wells', net: true, off: true, per: false, kind: 'match', byUid: 'kevin', names: ['Hunter Rives', 'Michael Wells'], offAt: 1795561515401, offBy: 'kevin', value: 5, format: 'match', savedAt: 1795560167064, segments: 'o' } } },
+    xbd8ad0cbcb7: { by: 'Kevin Wells', net: true, off: true, per: false, kind: 'match', byUid: 'kevin', names: ['Hunter Rives', 'Michael Wells'], offAt: 1795561515401, offBy: 'kevin', value: 5, format: 'match', savedAt: 1795560167064, segments: 'o' },
+    xbzero000001: { by: 'Kevin Wells', net: true, per: false, kind: 'match', byUid: 'kevin', names: ['Kevin Wells', 'Tyler OConnor'], value: 0, format: 'match', savedAt: 1795561600000, segments: 'o' } } },   // v2068: the 0-unit "pride" match Kevin wanted
   groupGames: { [GID[1]]: { match: { net: true, pair: ['Michael Wells', 'Hunter Rives'], value: 0, savedAt: 1795560254073, instances: [{ net: true, pair: ['Michael Wells', 'Hunter Rives'], value: 0, savedAt: 1795560254073, participants: ['p2', 'p3'], participantNames: ['Michael Wells', 'Hunter Rives'] }], participants: ['p2', 'p3'], participantNames: ['Michael Wells', 'Hunter Rives'] } } }
 };
 const EVENT = () => ({ id: TID, name: 'Bad Golf Wednesday 11/25', num_days: 1, status: 'live', commissioner_id: 'kevin', settings: clone(SETTINGS) });
@@ -115,13 +116,16 @@ check('Groups 2, 3, 4: no cart game of their own', [2, 3, 4].every(n => !C[n].gr
 }
 
 // ---- the rule Kevin hit: a cross bet must carry units -------------------------------------------------
-console.log('\n== 2. "a match between the two of us for zero dollars" ==');
+console.log('\n== 2. "a match between the two of us for zero dollars" (v2068: allowed) ==');
 const z = XBUILD({ kind: 'match', names: ['Kevin Wells', 'Tyler OConnor'], value: 0, net: true, per: false, format: 'match', segments: 'o', mode: 'pairs', by: 'Kevin Wells' });
-check('cross bet Kevin v Tyler at 0: the Cross bets sheet refuses it ("Enter the units")', typeof z === 'string' && /Enter the units/.test(z), String(z));
-const z5 = XBUILD({ kind: 'match', names: ['Kevin Wells', 'Tyler OConnor'], value: 5, net: true, per: false, format: 'match', segments: 'o', mode: 'pairs', by: 'Kevin Wells' });
-check('the same bet at 5 builds (match, net, overall)', z5 && z5.bets && z5.bets.length === 1 && z5.bets[0].kind === 'match' && z5.bets[0].value === 5, JSON.stringify(z5));
-check('(server rule, pinned from bg_t2_crossbets_add: value <= 0 -> skipped "bad_value")', true);
-note('A 0-unit bet works as a GROUP game (Michael v Hunter is saved that way) but not as a cross bet: both the sheet and the server want units.');
+check('cross bet Kevin v Tyler at 0 builds (match, net, overall, 0 units)', z && z.bets && z.bets.length === 1 && z.bets[0].kind === 'match' && z.bets[0].value === 0 && z.bets[0].net === true, JSON.stringify(z));
+check('a blank amount is still refused', typeof XBUILD({ kind: 'match', names: ['Kevin Wells', 'Tyler OConnor'], value: '', net: true, by: 'Kevin Wells' }) === 'string');
+check('a negative amount is still refused', typeof XBUILD({ kind: 'match', names: ['Kevin Wells', 'Tyler OConnor'], value: -5, net: true, by: 'Kevin Wells' }) === 'string');
+check('the same bet at 5 still builds', (function () { const z5 = XBUILD({ kind: 'match', names: ['Kevin Wells', 'Tyler OConnor'], value: 5, net: true, per: false, format: 'match', segments: 'o', mode: 'pairs', by: 'Kevin Wells' }); return z5 && z5.bets && z5.bets[0].value === 5; })());
+check('the in-round cross-bet sheet takes 0 too (Stroke / Quota)', (function () { const r = F('bgXbetBuildMany')({ players: [{ name: 'Kevin Wells' }] }, { kind: 'stroke', names: ['Kevin Wells', 'Tyler OConnor'], others: [{ name: 'Tyler OConnor', card: 'X' }], value: 0, net: true, per: false, by: 'Kevin Wells' }); return r && r.bets && r.bets[0].value === 0; })());
+check('label: a 0-unit bet reads "bragging rights", not "0 flat"', /bragging rights/.test(F('bgT2CrossBetLabel')(z.bets[0]).terms) && !/0 flat/.test(F('bgT2CrossBetLabel')({ kind: 'stroke', names: ['A B', 'C D'], value: 0 }).terms), JSON.stringify(F('bgT2CrossBetLabel')(z.bets[0])));
+check('(server rule, migration v2068_crossbets_zero_units: value < 0 -> bad_value; 0 accepted)', true);
+note('A 0-unit cross bet is allowed from v2068 (Kevin v Tyler, match, bragging rights). Group games could already be 0.');
 
 // ---- play the round -------------------------------------------------------------------------------------
 console.log('\n== 3. eighteen holes for all fifteen ==');
@@ -167,8 +171,13 @@ console.log('\n== 5. cross bets ==');
 const ev = EVENT();
 const X = CROSS(ev, ROUNDS.map(g => ({ data: g })));
 const kq = (X.nassaus || []).find(m => m.xkind === 'quota' && /kevin/i.test(m.aKey + m.bKey) && /rolo/i.test(m.aKey + m.bKey));   // a Stroke / Quota cross bet rides in out.nassaus with xkind
-check('the Kevin v Rolo Quota cross bet is found and settled, 20 net, from the Cross bets step; the removed Hunter v Michael bet is not', !!kq && kq.settled && kq.value === 20 && kq.net === true && kq.src === 'xbets:event' && c2(kq.aNet + kq.bNet) === 0 && !(X.matches || []).some(m => /hunter/i.test(m.aKey + m.bKey)) && X.nassaus.length === 1 && X.matches.length === 0, JSON.stringify({ n: X.nassaus.length, m: X.matches.length, kq: kq }));
+check('the Kevin v Rolo Quota cross bet is found and settled, 20 net, from the Cross bets step; the removed Hunter v Michael bet is not', !!kq && kq.settled && kq.value === 20 && kq.net === true && kq.src === 'xbets:event' && c2(kq.aNet + kq.bNet) === 0 && !(X.matches || []).some(m => /hunter/i.test(m.aKey + m.bKey)) && X.nassaus.length === 1 && X.matches.length === 1, JSON.stringify({ n: X.nassaus.length, m: X.matches.length, kq: kq }));
 check('nothing dropped, no conflicts', (X.dropped || []).length === 0 && (X.conflicts || []).length === 0, JSON.stringify([X.dropped, X.conflicts]));
+{
+  const km = (X.matches || []).find(m => /kevin/i.test(m.aKey + m.bKey) && /tyler/i.test(m.aKey + m.bKey));
+  check('the 0-unit Kevin v Tyler cross match is settled with a result (or all square) and value 0', !!km && km.settled && km.value === 0, JSON.stringify(km));
+  if (km) note('Kevin v Tyler (bragging rights): ' + (km.status || (km.push ? 'all square' : (km.winnerKey || '') + ' wins')));
+}
 {
   const [gK, pK] = findP('Kevin Wells'), [gR, pR] = findP('Rolo Castillo');
   note('Kevin v Rolo quota (20 net): Kevin ' + (kq ? (kq.aNet > 0 ? '+' : '') + kq.aNet : '?'));
@@ -215,7 +224,7 @@ console.log('\n== 7. the event payout ==');
   const cols = (pay.byGame || []).map(g => g.key);
   note('payout columns: ' + cols.join(' | '));
   const moving = (pay.byGame || []).filter(g => Object.values(g.money || {}).some(v => Math.abs(v) > 0.005)).map(g => g.key);
-  check('units move in exactly: Closest to Pin, Quota (field), the cross bet -- nothing else', moving.length === 3 && moving.some(k => /closest/i.test(k)) && moving.some(k => /quota/i.test(k) && !/cross/i.test(k)) && moving.some(k => /cross/i.test(k)), moving.join(' | '));
+  check('units move in exactly: Closest to Pin, Quota (field), the cross bet -- nothing else (the 0 match moves nothing)', moving.length === 3 && moving.some(k => /closest/i.test(k)) && moving.some(k => /quota/i.test(k) && !/cross/i.test(k)) && moving.some(k => /cross/i.test(k)), moving.join(' | '));
   const nameNet = {}; pay.rows.forEach(r => { nameNet[nk(r.name)] = c2(r.net); });
   check('Michael and Hunter: 0 for the day (no pools, a 0-unit match)', nameNet[nk('Michael Wells')] === 0 && nameNet[nk('Hunter Rives')] === 0, JSON.stringify([nameNet[nk('Michael Wells')], nameNet[nk('Hunter Rives')]]));
   {
@@ -245,7 +254,7 @@ console.log('\n== 7. the event payout ==');
   console.log('\n== 9. the event page ==');
   const tPage = { id: TID, name: ev.name, num_days: 1, status: 'live', settings: { dayGames: SETTINGS.dayGames, groupGames: SETTINGS.groupGames, dayHcpRules: SETTINGS.dayHcpRules, dayCourses: SETTINGS.dayCourses, type: 'oneday', crossBets: SETTINGS.crossBets } };
   const XP = CROSS(tPage, ROUNDS.map(g => ({ data: g })));
-  check('event page Matches: the Kevin v Rolo quota bet, nothing for the removed Hunter v Michael bet', XP.nassaus.length === 1 && XP.nassaus[0].xkind === 'quota' && XP.matches.length === 0, JSON.stringify(Object.keys(XP).map(k => [k, Array.isArray(XP[k]) ? XP[k].length : XP[k]])));
+  check('event page Matches: the Kevin v Rolo quota bet and the Kevin v Tyler pride match, nothing for the removed Hunter v Michael bet', XP.nassaus.length === 1 && XP.nassaus[0].xkind === 'quota' && XP.matches.length === 1 && XP.matches[0].value === 0, JSON.stringify(Object.keys(XP).map(k => [k, Array.isArray(XP[k]) ? XP[k].length : XP[k]])));
 
   console.log('\n--- what the day looks like ---');
   NOTES.forEach(n => console.log('  ' + n));

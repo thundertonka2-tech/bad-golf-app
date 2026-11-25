@@ -72,11 +72,11 @@ ok('builder buttons carry no inline style (commit guard)', [...ov.querySelectorA
   ok('Save writes one bet on MY card', !!b1 && b1.kind === 'stroke' && b1.names.join('|') === 'Tyler OConnor|Britt Hogland' && b1.value === 5 && b1.net === false && b1.per === true && b1.savedAt > 0, JSON.stringify(A.xbets));
   ok('...and saves the round once', w.__rec.saves.length === 1 && w.__rec.saves[0].code === 'CA', String(w.__rec.saves.length));
   ok('builder closes', !doc.getElementById('bg-xbet-ov'));
-  // units 0 refused, nothing written
+  // blank units refused, nothing written (v2068: 0 is allowed -- bragging rights -- so the refusal case is a blank box)
   bn = banners(); reseed(); fn('bgXbetOpen')(A); ov = doc.getElementById('bg-xbet-ov');
-  tick('Tyler OConnor'); tick('Tommy Hall'); ov.querySelector('#xb-val').value = '0';
+  tick('Tyler OConnor'); tick('Tommy Hall'); ov.querySelector('#xb-val').value = '';
   await ov.querySelector('#xb-save').onclick();
-  ok('0 units: refused, builder stays, nothing saved', !!doc.getElementById('bg-xbet-ov') && Object.keys(A.xbets).length === 1);
+  ok('blank units: refused, builder stays, nothing saved', !!doc.getElementById('bg-xbet-ov') && Object.keys(A.xbets).length === 1);
   // the same pair + game again: refused as already set; a different game for the same pair is fine
   tick('Tommy Hall', false); tick('Britt Hogland'); ov.querySelector('#xb-val').value = '9';
   await ov.querySelector('#xb-save').onclick();

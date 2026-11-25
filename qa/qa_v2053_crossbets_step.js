@@ -34,7 +34,9 @@ const zs = r => money((r.nassaus || []).reduce((s, n) => s + n.aNet + n.bNet, 0)
 console.log('\n== 1. the builder ==');
 {
   check('no game -> message', typeof B({ kind: 'x', names: ['A B', 'C D'], value: 5 }) === 'string');
-  check('no units -> message', typeof B({ kind: 'match', names: ['A B', 'C D'], value: 0 }) === 'string');
+  check('blank units -> message', typeof B({ kind: 'match', names: ['A B', 'C D'], value: '' }) === 'string');
+  check('0 units -> a bet (v2068, bragging rights)', (function () { const r = B({ kind: 'match', names: ['A B', 'C D'], value: 0 }); return r && r.bets && r.bets.length === 1 && r.bets[0].value === 0; })());
+  check('negative units -> message', typeof B({ kind: 'match', names: ['A B', 'C D'], value: -2 }) === 'string');
   check('one player -> message', typeof B({ kind: 'match', names: ['A B'], value: 5 }) === 'string');
   check('same player twice -> message', typeof B({ kind: 'match', names: ['A B', 'a b'], value: 5 }) === 'string');
   let d = B({ kind: 'match', names: ['Tyler OConnor', 'Tommy Hall'], value: 10, net: true, by: 'Tyler OConnor' });
