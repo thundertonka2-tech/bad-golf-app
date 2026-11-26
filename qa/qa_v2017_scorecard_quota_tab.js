@@ -62,7 +62,7 @@ function checkTable(label, t, g, exp) {
     ok(label + ' ' + pid + ': Tot', tds[21] === String(e.pts), tds[21] + ' vs ' + e.pts);
     const f = t.querySelector('tr.sc-q-foot[data-qpid="' + pid + '"]');
     const want = e.pts + ' pts · quota ' + e.quota + ' · ' + sgn(e.diff);
-    ok(label + ' ' + pid + ': footer "' + want + '"', !!f && txt(f).indexOf(want) === 0, txt(f));
+    ok(label + ' ' + pid + ': footer "' + want + '"', !!f && txt(f).replace(/^T?\d+(st|nd|rd|th) · /, '').indexOf(want) === 0, txt(f));   // v2070: a place ('1st · ', 'T2nd · ') leads the line
     ok(label + ' ' + pid + ': footer shown in Quota', !!f && f.style.display === 'table-row');
     const d = f && f.querySelector('.sc-q-diff');
     ok(label + ' ' + pid + ': ± coloured', !!d && d.classList.contains('sc-mu-' + (e.diff > 0 ? 'up' : e.diff < 0 ? 'dn' : 'as')));

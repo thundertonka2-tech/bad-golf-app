@@ -72,8 +72,8 @@ const K = { id: 'k', name: 'Kevin Wells', hcp: 10, tee: 'White' }, T = { id: 't'
   const t = [...doc.querySelectorAll('table')].find(x => x.querySelector('.sc-tab[data-mode="quota"]'));
   if (t) w.bgScApplyMode(t, 'quota');
   const lines = t ? [...t.querySelectorAll('tr.sc-q-foot:not(.sc-p-foot)')].map(x => x.textContent.replace(/\s+/g, ' ').trim()) : [];
-  ok('Quota tab: "5 pts · quota 7 · −2"', lines.some(l => /^5 pts · quota 7 · [−-]2/.test(l)), lines.join(' | '));
-  ok('Quota tab: "18 pts · quota 9 · +9"', lines.some(l => /^18 pts · quota 9 · \+9/.test(l)), lines.join(' | '));
+  ok('Quota tab: "5 pts · quota 7 · −2" (2nd, v2070 place in front)', lines.some(l => /^2nd · 5 pts · quota 7 · [−-]2/.test(l)), lines.join(' | '));
+  ok('Quota tab: "18 pts · quota 9 · +9" (1st, v2070 place in front)', lines.some(l => /^1st · 18 pts · quota 9 · \+9/.test(l)), lines.join(' | '));
   // pool mode: ranking on the cut quota
   const pool = clone(fin); pool.games.quota = { net: false, mode: 'pool', buyin: 10, payout: 'winner', basis: 'auto', participants: ['k', 't'] };
   const rp = w.calcQuota(pool);
