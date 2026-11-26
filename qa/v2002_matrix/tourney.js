@@ -1,5 +1,7 @@
 'use strict';
 // Promoted 2026-11-05 (v2014) from qa/cross_v2009/fix/tourney_v2011.js: oracle follows Tyler's 11/2 + 11/4 rules (cross bets tied to their day, leaver forfeit, nine-twice = no cross bet, early finish = common holes).
+// v2073 (2026-11-26): cross-bet fixtures are filed under the saving cart's REAL group id ('grp-1-0', buildEvent's id for day 1 group 1) --
+// since v2056 a cart's own tiles count as cross bets only once that cart has launched, so the old made-up key 'g1' read as a cart that never started.
 // qa/v2002_matrix/tourney.js — v2002 calculation matrix, family "tourney" (events / multi-group field play).
 // REPORT-ONLY suite: loads the real app (qa/app.js), builds multi-day multi-group events, and compares every
 // field engine against an INDEPENDENT oracle written here from the rules (never by calling the app for the answer).
@@ -747,7 +749,7 @@ async function checkCombined(ev, label, axis, parts) {
     const names = NAMES.slice(0, 4); const hcp = {}; names.forEach((n, i) => hcp[n] = [0, 5, 10, 2][i]);
     seed(22);
     const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), leave: { [names[0]]: 12 } }, { names: names.slice(2) }] }], dayGames: () => ({}),
-      tSettings: { groupGames: { g1: { nassau: { instances: [{ value: 5, net: true, format: 'stroke', segments: 'fb', pair: [names[0], names[2]] }, { value: 3, net: true, format: 'match', segments: 'fbo', pair: [names[1], names[3]] }] },
+      tSettings: { groupGames: { 'grp-1-0': { nassau: { instances: [{ value: 5, net: true, format: 'stroke', segments: 'fb', pair: [names[0], names[2]] }, { value: 3, net: true, format: 'match', segments: 'fbo', pair: [names[1], names[3]] }] },
         match: { instances: [{ value: 10, net: true, pair: [names[0], names[3]] }] } } } } });
     const a = CROSS(ev.t, rowsOf(ev)), o = oCross(ev.rounds, ev.t), A = crossApp(a); classify('A15', A, ev);
     const bad = mapEq(A, o, allKeys(A, o));
@@ -841,7 +843,7 @@ async function checkCombined(ev, label, axis, parts) {
   {
     const names = ['Ann Lee', 'Bo Diaz', 'Cy Young', 'Del Ray']; const hcp = {}; names.forEach(n => hcp[n] = 0);
     const ev = buildEvent({ hcp, days: [{ nH: 18, groups: [{ names: names.slice(0, 2), start: 1 }, { names: names.slice(2), start: 10 }] }],
-      tSettings: { groupGames: { g1: { match: { instances: [{ value: 10, net: true, pair: ['Ann Lee', 'Cy Young'] }] } } } }, dayGames: () => ({}) });
+      tSettings: { groupGames: { 'grp-1-0': { match: { instances: [{ value: 10, net: true, pair: ['Ann Lee', 'Cy Young'] }] } } } }, dayGames: () => ({}) });
     ev.rounds.forEach(g => g.players.forEach(p => { g.scores[p.id] = PARS18.slice(); }));
     const S = (g, nm) => g.scores[g.players.find(p => p.name === nm).id];
     S(ev.rounds[0], 'Ann Lee')[16] = PARS18[16] - 1;   // a single win late in both play orders: never closed out early
@@ -897,7 +899,7 @@ async function checkCombined(ev, label, axis, parts) {
       tourneyNassau: { on: true, value: 3, segments: ci % 2 ? 'fb' : 'fbo', payoutSplit: ci % 3 === 2 ? '8020' : 'standard' } };
     // cross-group instances between group 0 and group 1 players, day 1
     const g0 = days[0].groups[0].names, g1 = days[0].groups[1].names;
-    tS.groupGames = { g1: { match: { instances: [{ value: 10, net: ci % 2 === 0, pair: [g0[0], g1[0]] }] },
+    tS.groupGames = { 'grp-1-0': { match: { instances: [{ value: 10, net: ci % 2 === 0, pair: [g0[0], g1[0]] }] },
       nassau: { instances: [{ value: 5, net: true, format: ci % 2 ? 'match' : 'stroke', segments: ci % 3 ? 'fbo' : 'fb', pair: [g0[1], g1[1]] }] } } };
     const ev = buildEvent({ hcp, redFor: cfg.hcp === 'mixedTees' ? names.filter((_, i) => i % 3 === 0) : null, days, tSettings: tS,
       dayGames: stdDayGames([4, 8, 12], { needBirdie: ci % 5 === 3, birdieBasis: ci % 4 === 2 ? 'net' : 'gross' }),

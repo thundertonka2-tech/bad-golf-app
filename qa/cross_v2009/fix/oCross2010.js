@@ -82,7 +82,8 @@ module.exports = function makeOCross(H) {
     const gg = (t.settings && t.settings.groupGames) || {};
     const gidDay = {}; rounds.forEach(g => { gidDay[g.t2.groupId] = g.t2.day; });
     const days = Array.from(new Set(rounds.map(g => Number(g.t2.day)))).sort((x, y) => x - y);
-    const cands = []; Object.keys(gg).forEach(gid => ['match', 'nassau'].forEach(kind => { const m = gg[gid][kind]; if (m) (m.instances || [m]).forEach(i => cands.push({ kind, inst: i, day: gidDay[gid] != null ? Number(gidDay[gid]) : (days.length === 1 ? days[0] : null) })); }));
+    const cands = []; Object.keys(gg).forEach(gid => { if (gidDay[gid] == null) return;   /* v2056 rule (v2073 oracle): a cart's own tiles are cross bets only once that cart has launched */
+      ['match', 'nassau'].forEach(kind => { const m = gg[gid][kind]; if (m) (m.instances || [m]).forEach(i => cands.push({ kind, inst: i, day: gidDay[gid] != null ? Number(gidDay[gid]) : (days.length === 1 ? days[0] : null) })); }); });
     days.forEach(day => {
       const rs = rounds.filter(g => Number(g.t2.day) === day), seat = {};
       rs.forEach(g => g.players.forEach(p => { const k = nk(p.name); if (!seat[k]) seat[k] = { g, p }; }));
