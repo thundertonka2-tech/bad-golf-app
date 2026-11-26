@@ -1,0 +1,12 @@
+-- v2076 (Tyler, 2026-11-26: Home is slow at the course). Applied to the live database as migrations
+-- v2076_home_feed_t2_helper and v2076_home_feed_uses_helper.
+-- bg_home_feed read the five tournament tables through row security: every row re-ran tourney_is_member (three
+-- EXISTS, one over games) and each table was counted, then read. Measured 757-1,276 ms on the server for an ordinary
+-- player (pg_stat_statements: 1,777 calls, mean 1,103 ms, max 7.8 s).
+-- _bg_home_feed_t2() (SECURITY DEFINER) works out the caller's events once and reads the five tables by id -- the same
+-- rows the policies give. Checked for 63 accounts against the row-security reads: 0 differences; ~270 ms -> ~7 ms.
+-- bg_home_feed itself stays SECURITY INVOKER: invites and round blobs still go through row security (it takes round
+-- codes from the phone, so it must never read rounds with elevated rights).
+-- After: Rambo 100 ms, Tyler (admin, 49 events, 403 KB) 64 ms, Graham 35 ms.
+-- See the two migrations for the function bodies (pg_get_functiondef('public._bg_home_feed_t2()'::regprocedure),
+-- pg_get_functiondef('public.bg_home_feed(text[], text)'::regprocedure)).
