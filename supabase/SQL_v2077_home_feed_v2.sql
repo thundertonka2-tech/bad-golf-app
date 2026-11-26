@@ -1,0 +1,11 @@
+-- v2077 (Tyler, 2026-11-26: "Yes, lets do that"). Applied to the live database as migrations
+-- v2077_home_feed_v2_mine_only and v2077b_home_feed_v2_skip_finished_event_rounds.
+-- bg_home_feed_v2(p_codes, p_name): the Home feed with (a) only the events the caller is part of, for app admins too
+-- (row security lets an admin read every event; the old feed sent all 49), and (b) only the round blobs of events
+-- still running. `partial` = true when the caller could read more than he was sent; the app then asks the server
+-- for any event the feed does not hold. bg_home_feed (v1) is unchanged for builds already on phones.
+-- Checked for 63 accounts: non-admins get exactly the v1 tables (0 differences); for the two admins every row sent
+-- belongs to an event they are part of and every such event is sent.
+-- Sizes: Tyler 403 -> 187 KB, Kevin 337 -> 105 KB, Rambo 36 -> 22 KB. Server time 24-34 ms.
+-- Function bodies: pg_get_functiondef('public._bg_home_feed_t2_mine()'::regprocedure),
+--                  pg_get_functiondef('public.bg_home_feed_v2(text[], text)'::regprocedure).
