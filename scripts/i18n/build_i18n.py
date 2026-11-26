@@ -18,8 +18,35 @@ Writes (do not hand-edit):
 
 To add strings: put English keys with all four languages into overrides.json (or ask
 Claude to "translate i18n/MISSING.txt"), then run this script and commit.
+
+v2074: the script stops without writing anything if a rebuild would DROP a translation that is live today
+(sources out of step with i18n/*.json). Run backfill_sources_from_live.py to bring the sources back in line,
+or pass --allow-drop when the removal is deliberate.
 """
-import json, os, re
+import json, os, re, sys
+
+ALLOW_DROP = '--allow-drop' in sys.argv
+_DROPS = []
+
+
+def _guard(path, new_keys, label):
+    """v2074: never go backwards. If the file on disk holds translations the sources no longer produce, say so and
+    stop before anything is written (run scripts/i18n/backfill_sources_from_live.py, or pass --allow-drop when the
+    removal is deliberate). An English-equals-English entry is not a translation and is not counted."""
+    if not os.path.exists(path):
+        return
+    try:
+        d = json.load(open(path, encoding='utf-8'))
+    except Exception:
+        return
+    if isinstance(d, dict) and 'x' in d and 'p' in d:
+        old = dict(d['x']); old.update({k: v for k, v in d['p']})
+    else:
+        old = d
+    lost = [k for k, v in old.items() if k not in new_keys and v != k]
+    if lost:
+        _DROPS.append((label, lost))
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -43,6 +70,7 @@ def app_dicts():
     ov = load('overrides.json')
     for k, v in ov.items():
         m.setdefault(k, {}).update(v)
+    out = []
     for L in LANGS:
         x, p = {}, []
         for k, v in m.items():
@@ -52,16 +80,33 @@ def app_dicts():
             (p.append([k, t]) if PH.search(k) else x.__setitem__(k, t))
         p.sort(key=lambda a: -len(PH.sub('', a[0])))
         d = {'lang': L, 'n': len(x) + len(p), 'x': x, 'p': p}
+        keys = set(x) | {a[0] for a in p}
+        for base in ('i18n', os.path.join('www', 'i18n')):
+            _guard(os.path.join(ROOT, base, L + '.json'), keys, base + '/' + L + '.json')
+        out.append((L, d))
+    return out
+
+
+def write_app(out):
+    for L, d in out:
         for base in ('i18n', os.path.join('www', 'i18n')):
             write_json(os.path.join(ROOT, base, L + '.json'), d)
-        print(f'app {L}: {len(x)} strings + {len(p)} patterns')
+        print(f"app {L}: {len(d['x'])} strings + {len(d['p'])} patterns")
 
 
 def site_dicts():
     m = load('source_site.json')
+    out = []
     for L in LANGS:
         d = {k: v[L] for k, v in m.items() if v.get(L) and v[L] != k}
         p = os.path.join(ROOT, 'site', 'i18n', L + '.json')
+        _guard(p, set(d), 'site/i18n/' + L + '.json')
+        out.append((L, p, d))
+    return out
+
+
+def write_site(out):
+    for L, p, d in out:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, 'w', encoding='utf-8', newline='\n') as f:
             json.dump(d, f, ensure_ascii=False, indent=0)
@@ -88,6 +133,27 @@ def ios_strings():
 
 
 if __name__ == '__main__':
-    app_dicts()
-    site_dicts()
+    _app, _site = app_dicts(), site_dicts()
+    if _DROPS and not ALLOW_DROP:
+        print('build_i18n: STOPPED - nothing was written. The sources no longer produce translations that are live today:')
+        for label, lost in _DROPS:
+            print('  %-22s %d would be lost, e.g. %s' % (label, len(lost), json.dumps(lost[0], ensure_ascii=False)[:90]))
+        print('Fix: python scripts/i18n/backfill_sources_from_live.py   (or add --allow-drop if the removal is meant)')
+        sys.exit(1)
+    if '--check' in sys.argv:   # v2074: change nothing, just say whether the sources and the dictionaries are in step
+        bad = []
+        for L, d in _app:
+            for base in ('i18n', os.path.join('www', 'i18n')):
+                fp = os.path.join(ROOT, base, L + '.json')
+                cur = json.load(open(fp, encoding='utf-8')) if os.path.exists(fp) else None
+                if cur != d:
+                    bad.append(base + '/' + L + '.json')
+        for L, fp, d in _site:
+            cur = json.load(open(fp, encoding='utf-8')) if os.path.exists(fp) else None
+            if cur != d:
+                bad.append('site/i18n/' + L + '.json')
+        print('build_i18n --check: ' + ('in step - a rebuild changes nothing' if not bad else 'OUT OF STEP: ' + ', '.join(bad)))
+        sys.exit(1 if bad else 0)
+    write_app(_app)
+    write_site(_site)
     ios_strings()
