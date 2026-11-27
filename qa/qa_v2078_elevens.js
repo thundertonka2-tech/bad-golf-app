@@ -190,6 +190,11 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   // banner + board
   const box = doc.createElement('div');
   fn('bgElevensBanners')(live, 1, box);
+  ok('banner (v2086): no reminder until the sheet has been shown and closed; avatars, not names', !/Keep or toss before the next hole/.test(box.textContent) && box.querySelectorAll('.bg-el-av').length === 2 && box.querySelector('.bg-el-av').getAttribute('aria-label') && !box.querySelector('.turn-banner'), box.textContent);
+  try { fn('bgElevensSheetClose')(); } catch (e) {}
+  w.__fn('(_bgElSheet.shown[String(state.game.code || "") + ":1"] = 1)');   // the sheet came up and was closed without an answer
+  box.innerHTML = '';
+  fn('bgElevensBanners')(live, 1, box);
   ok('banner: one card, a Keep and a Throw out button per player with a score, pending warning for Bob', box.children.length === 1 && box.querySelectorAll('[data-el-v="k"]').length === 2 && box.querySelectorAll('[data-el-v="x"]').length === 2 && /Keep or toss before the next hole/.test(box.textContent) && /Toss/.test(box.querySelector('[data-el-v="x"]').textContent) && !box.querySelector('.bg-el-open'), box.textContent.slice(0, 300));
   ok('banner shows the count and throw-outs left', /2\/11 kept/.test(box.textContent) && /7 tosses left/.test(box.textContent), box.textContent.slice(0, 300));
   ok('banner buttons carry no inline style', [...box.querySelectorAll('button')].every(b => !b.getAttribute('style')));

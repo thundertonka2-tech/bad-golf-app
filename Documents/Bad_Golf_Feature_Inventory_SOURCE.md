@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2085
+**Build Version:** v2026.11.2086
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -1551,9 +1551,10 @@ The **fewest total putts over 18** takes the prize pool. **Turning this on switc
 Everyone puts in the same entry, but **only your best 11 holes count** (6 on a nine-hole round). The catch: you have to decide **right after each hole** whether that hole is one of your 11.
 
 - **One sheet per hole.** Enter everyone's score as usual. When the last score for the hole is in, a sheet pops up: **"Hole 5 — keep or toss?"** with every player listed, what they made in plain words (*made par*, *made bogey*, *made double*, *made triple*, then *+4* and up), their score to par, and two big buttons each — **Keep** and **Toss**.
-- **The app suggests, you confirm.** Par or better starts on **Keep**; anything worse starts on **Toss**. Flip any player with one tap, then tap **Done**. One tap saves the whole group and the hole moves on.
-- **Nothing is asked until every score is in.** While the group is still entering scores the 11's card just says *"keep or toss once every score is in"*. The sheet then pops up **once**.
-- **Not now** closes the sheet if you need to fix a score first. After that, use the **Keep** / **Toss** buttons on the 11's card on the score screen.
+- **The app suggests, you confirm.** Par or better starts on **Keep**; anything worse starts on **Toss**. Flip any player with one tap, then tap **Next hole → GPS** or **Next hole → Scorecard**. That one tap saves the whole group's answers and takes you to the next hole. (On the last hole, or on a sheet for a hole you have already left, the button is a plain **Done**.)
+- **Nothing is asked until every score is in.** While the group is still entering scores the 11's card just says *"Score first"* or *"Waiting on scores"*. The sheet then pops up **once**.
+- **The ✕ in the corner** closes the sheet without saving if you need to fix a score first. The 11's card then shows *"Keep or toss before the next hole"* with a **Keep** / **Toss** pair for each player, and the Board has a **"Keep or toss — hole N"** button that reopens the sheet.
+- **The 11's card on the score screen** has one row per player: his **profile photo** (or the circle with his initials), his **total to par**, **holes kept** (*"4/11 kept"*) and **tosses left**. Once a hole is answered, the row also shows that hole's **Keep** / **Toss** buttons with the choice lit up — tap the other one to fix a mistake. Team 11's shows both partners' photos side by side.
 - **You must choose before the next hole.** If you try to score the next hole first, the app says which hole is waiting and **opens that hole's sheet for you**.
 - **The choice locks.** You can change an answer until the next hole has a score. After that it is locked (an app admin can still correct a mistake). A hole that was never answered can always be answered.
 - **Typing scores into the scorecard** works the same way: when a hole's last score is typed, its sheet opens.
