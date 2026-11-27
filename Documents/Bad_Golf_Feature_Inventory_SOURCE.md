@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2083
+**Build Version:** v2026.11.2084
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -1547,12 +1547,15 @@ The **most greens in regulation over 18** takes the prize pool. **Turning this o
 #### **Fewest Putts Pool**
 The **fewest total putts over 18** takes the prize pool. **Turning this on switches putt tracking on automatically.** **Blank putts count as 0 once the round is finished.** On any hole you scored with the putts box left empty, the app treats it as **0 putts** (a chip-in or hole-out) — as long as you logged putts at least once that round. There are no mid-round warnings. A player who logged **no putts at all** can't win it but still puts in his entry.
 
-#### **🔢 11's** *(new)*
+#### **🔢 11's** *(new — under Single games)*
 Everyone puts in the same entry, but **only your best 11 holes count** (6 on a nine-hole round). The catch: you have to decide **right after each hole** whether that hole is one of your 11.
 
-- **Keep or Throw out.** As soon as a hole is scored, the score screen shows an **11's** card with two buttons for each player — **Keep** (with what it would add, like *Keep −1* or *Keep E*) and **Throw out**. The card also shows how many holes you have kept, your running total and how many throw-outs you have left.
-- **You must choose before the next hole.** The app will not take your next hole's score until the hole before it has an answer. It tells you which hole and which player it is waiting on.
-- **The choice locks.** You can change your mind until the next hole has a score. After that it is locked (an app admin can still correct a mistake).
+- **One sheet per hole.** Enter everyone's score as usual. When the last score for the hole is in, a sheet pops up: **"Hole 5 — keep or throw out?"** with every player listed, their score to par, and two big buttons each — **Keep** and **Throw out**.
+- **The app suggests, you confirm.** Par or better starts on **Keep**; anything worse starts on **Throw out**. Flip any player with one tap, then tap **Done**. One tap saves the whole group and the hole moves on.
+- **Not now** closes the sheet if you need to fix a score first. The 11's card on the score screen keeps a **"Keep or throw out — hole 5"** button to bring it back.
+- **You must choose before the next hole.** If you try to score the next hole first, the app says which hole is waiting and **opens that hole's sheet for you**.
+- **The choice locks.** You can change an answer until the next hole has a score. After that it is locked (an app admin can still correct a mistake). A hole that was never answered can always be answered.
+- **Typing scores into the scorecard** works the same way: when a hole's last score is typed, its sheet opens.
 - **7 throw-outs, 11 keeps.** Once you have thrown out 7 holes, every hole left counts automatically. Once you have kept 11, the rest are not needed. So the last hole never needs a choice.
 - **Scored against par, net or gross.** Each hole you keep counts your score **against that hole's par** — a net birdie is −1, a par is E, a bogey is +1 — and your total is **to par** over the 11 holes you kept. So a par 5 is worth exactly as much as a par 3; there is no reason to throw the long holes out. Pick **Net** (with its own **"Handicap for 11's"** slider) or **Gross** when you set the game up. **Lowest total wins.**
 - **Split:** **Winner takes all**, **80/20** or **70/30** between 1st and 2nd. **Ties share the places they cover** — two players tied for 1st on an 80/20 split the whole pool; two tied for 2nd split the 20.
@@ -1562,7 +1565,7 @@ Everyone puts in the same entry, but **only your best 11 holes count** (6 on a n
 
 > **A hole you never answered.** If a round is finished with a hole still unanswered, that hole counts as kept (as long as you still owed keeps). Scores typed through the scorecard editor are not blocked, so answer those holes on the score screen before you finish.
 
-#### **🔢 Team 11's** *(new)*
+#### **🔢 Team 11's** *(new — under Team games)*
 The same game for two even teams, on the **team's low ball**.
 
 - Each hole the team's score is its **lowest ball against par** (net or gross — your choice at setup). The team's hole is ready once every partner still in the round has a score.
