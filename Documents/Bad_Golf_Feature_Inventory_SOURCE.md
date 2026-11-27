@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2080
+**Build Version:** v2026.11.2082
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -832,7 +832,7 @@ Every scorecard in the app — Games screen, Score tab, the GPS mini-card, the r
 - **💵 Units** — what each hole moved.
 - **🎯 Quota** — points per hole, then a line under each player: *"27 pts · quota 24 · +3"*. **Players are listed 1st to last**, with the place in front of each line.
 - **Points games** (Stableford, 6's, Niners and the rest) — one tab each, with *"34 pts · 1st"* under each player.
-- **🔢 11's / Team 11's** *(new)* — each **kept** hole shows its strokes, each **thrown-out** hole is **crossed out**, and a hole still waiting on a choice shows a **?**. Under each player: *"42 strokes · 11/11 kept · 1st"*. On a tournament's whole-field card the places are across every group.
+- **🔢 11's / Team 11's** *(new)* — each **kept** hole shows its strokes, each **thrown-out** hole is **crossed out**, and a hole still waiting on a choice shows a **?**. **Players are listed 1st to last**, with the place in front of each line: *"1st · 42 strokes · 11/11 kept"*. On a tournament's whole-field card the places are across every group.
 - **A cross-group Quota bet** on the event's **Matches** card now shows each player's **points per hole**, and the row ends *"27 pts · quota 24 · +3"*.
 - **A round that starts on the back nine** shows holes 10–18 first, then the front nine.
 
@@ -2403,6 +2403,8 @@ A Bracket Play event has a real **Carts** screen — rows labelled **Group N**, 
 - **Removing a player** who already has scores clears them from every launched card and prize pool, after a warning.
 
 ### Finished Events
+
+> **The leaderboard stays where you are** *(fixed)*. The event leaderboard refreshes itself every 15 seconds. It used to jump back to the top each time, so reading the Full scorecard meant scrolling down again. It now keeps your place; only tapping a different group goes back to the top.
 
 **Every cross bet has its own line in the payout.** The per-game table gives each bet its own column (*Match: Britt v Tyler*, *Nassau: Tyler v Tommy*) instead of one *Cross-group games* figure, and on the event page’s **Units** tab, tapping a player lists each of his bets by opponent with the result: *Match v Britt (lost 4&3)*, *Nassau v Tommy (Front W, Back L, Total L)*. Each player’s lines still add up to his total.
 

@@ -81,7 +81,13 @@ ok('functions exist', [info, fn('bgElevensCardModels'), fn('bgElevensFieldPlaceF
   ok('11\'s tab: Bob\'s kept holes show his strokes, holes 12-18 are crossed out', cells.length >= 18 && txt[0] === '5' && cells.filter(td => td.querySelector('s')).length === 7 && !cells[0].querySelector('s') && !cells[11].querySelector('s') && !!cells[12].querySelector('s'), txt.slice(0, 21));
   ok('...and the total column is his 54', txt.some(t => t === '54'), txt.slice(-4));
   const foot = [...table.querySelectorAll('tr.sc-p-foot')].filter(tr => tr.dataset.pmode === 'pt:elevens' && tr.style.display !== 'none').map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
-  ok('a line under each player: strokes, holes kept, place', foot.length === 4 && /^43 strokes · 11\/11 kept · tied 1st/.test(foot[0]) && /^54 strokes · 11\/11 kept · 3rd/.test(foot[1]), foot);
+  const ordNow = () => [...table.querySelectorAll('tbody tr[data-pid]')].filter(tr => !tr.dataset.scExtra).map(tr => ids.indexOf(tr.dataset.pid)).join('');
+  ok('11\'s tab is sorted 1st to last (Ann, Dan tied 1st, then Bob, Cal)', ordNow() === '0312', ordNow());
+  ok('a line under each player, place in front: place, strokes, holes kept', foot.length === 4 && /^tied 1st · 43 strokes · 11\/11 kept/.test(foot[0]) && /^tied 1st · 43 strokes · 11\/11 kept/.test(foot[1]) && /^3rd · 54 strokes · 11\/11 kept/.test(foot[2]) && /^4th · 65 strokes/.test(foot[3]), foot);
+  w.bgScApplyMode(table, 'strokes');
+  ok('back on Strokes the card is in its own order again', ordNow() === '0123', ordNow());
+  w.bgScApplyMode(table, 'pt:elevens'); w.bgScApplyMode(table, 'units'); w.bgScApplyMode(table, 'pt:elevens');
+  ok('toggling tabs keeps the 11\'s order and every line under its own player', ordNow() === '0312' && [...table.querySelectorAll('tbody tr[data-pid]')].filter(tr => !tr.dataset.scExtra).every(tr => { let n = tr.nextElementSibling; while (n && n.classList.contains('sc-q-foot') && n.dataset.pmode !== 'pt:elevens') n = n.nextElementSibling; return n && n.dataset.pmode === 'pt:elevens'; }));
   w.bgScApplyMode(table, 'strokes');
   ok('back on Strokes the card is the plain card again (no crossed-out cells, 11\'s lines hidden)', !row.querySelector('s') && [...table.querySelectorAll('tr.sc-p-foot')].every(tr => tr.style.display === 'none'));
   // live card: a pending hole reads "5?" and has no place yet
