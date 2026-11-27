@@ -19,8 +19,8 @@ const mkRound = (names, hcps, scoreFn, extra) => {
 };
 const card = fn('bgElevensCard'), sidesOf = fn('bgElevensSides'), calc = fn('calcElevens'), calcT = fn('calcTeamElevens'), gate = fn('bgElevensScoreGate');
 ok('engine functions exist', [card, sidesOf, calc, calcT, gate, fn('bgElevensSet'), fn('_bgMergeElevens'), fn('bgElevensBanners'), fn('bgElevensBoardHtml')].every(f => typeof f === 'function'));
-// independent net-to-par for one hole (strokes from the handicap by stroke index)
-const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp % 18) >= si ? 1 : 0); return gross - st - par; };
+// independent NET STROKES for one hole (v2079: raw strokes, not to par)
+const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp % 18) >= si ? 1 : 0); return gross - st; };
 
 // ---- 1. the card rules ----
 {
@@ -62,10 +62,10 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
 {
   let bad = 0, zero = 0, runs = 0, paidPlaces = { 1: 0, 2: 0, 3: 0 };
   for (let t = 0; t < 600; t++) {
-    const n = 2 + Math.floor(rnd() * 4), places = 1 + Math.floor(rnd() * 3), val = [1, 2, 5, 10][Math.floor(rnd() * 4)];
+    const n = 2 + Math.floor(rnd() * 4), places = 1 + Math.floor(rnd() * 3), payout = ['winner', '8020', '7030'][places - 1], val = [1, 2, 5, 10][Math.floor(rnd() * 4)];
     const hcps = Array.from({ length: n }, () => Math.floor(rnd() * 25));
     const g = mkRound(['A', 'B', 'C', 'D', 'E'].slice(0, n), hcps, (i, h, par) => par - 1 + Math.floor(rnd() * 4), { finishedAt: rnd() < 0.5 ? 1786820000000 : undefined });
-    g.games.elevens = { value: val, mode: 'pool', hcpPct: 100, places: places };
+    g.games.elevens = { value: val, mode: 'pool', hcpPct: 100, payout: payout };
     g.elevensData = {};
     const totals = {};
     g.players.forEach((p, i) => {
@@ -83,7 +83,7 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
     g.players.forEach((p, i) => { let k = 0, x = 0, tot = 0; for (let h = 1; h <= 18; h++) { const rec = g.elevensData[p.id][h]; let st; if (k >= 11) st = 'x'; else if (x >= 7) st = 'k'; else if (rec) st = rec.v; else st = 'k'; if (st === 'k') { k++; tot += netTP(g.scores[p.id][h - 1], hcps[i], SIS[h - 1], PARS[h - 1]); } else x++; } totals[p.id] = tot; });
     const r = calc(g); runs++;
     // oracle payout
-    const want = Math.min(places, Math.max(1, n - 1)), base = { 1: [1], 2: [0.7, 0.3], 3: [0.5, 0.3, 0.2] }[want];
+    const want = n < 3 ? 1 : places, base = { 1: [1], 2: [0.8, 0.2], 3: [0.7, 0.3] }[want];
     const order = g.players.map(p => p.id).sort((a, b) => totals[a] - totals[b]);
     const exp = {}; g.players.forEach(p => { exp[p.id] = -val; });
     for (let i = 0; i < order.length;) { let j = i; while (j + 1 < order.length && totals[order[j + 1]] === totals[order[i]]) j++; let sh = 0; for (let k = i; k <= j; k++) sh += base[k] || 0; for (let k = i; k <= j; k++) exp[order[k]] += val * n * sh / (j - i + 1); i = j + 1; }
@@ -103,11 +103,11 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
 {
   // Ann keeps eleven birdies; Bob keeps eleven pars: Ann -11, Bob E
   const g = mkRound(['Ann', 'Bob', 'Cal'], [0, 0, 0], (i, h, par) => (i === 0 ? par - 1 : i === 1 ? par : par + 1), { finishedAt: 5 });
-  g.games.elevens = { value: 10, mode: 'pool', hcpPct: 100, places: 2 };
+  g.games.elevens = { value: 10, mode: 'pool', hcpPct: 100, payout: '7030' };
   g.elevensData = {}; g.players.forEach(p => { g.elevensData[p.id] = {}; for (let h = 1; h <= 18; h++) g.elevensData[p.id][h] = { v: h <= 11 ? 'k' : 'x', at: h }; });
   let r = calc(g);
-  ok('3 players, 2 places: 30 pool pays 21 / 9', r && r.money.p0 === 11 && r.money.p1 === -1 && r.money.p2 === -10, r && r.money);
-  ok('event lines name the place and the total', r && r.events.length === 2 && /Ann/.test(r.events[0].name) && /-11/.test(r.events[0].name) && /1st/.test(r.events[0].name), r && r.events);
+  ok('3 players, 70/30: 30 pool pays 21 / 9', r && r.money.p0 === 11 && r.money.p1 === -1 && r.money.p2 === -10, r && r.money);
+  ok('event lines name the place and the total', r && r.events.length === 2 && /Ann/.test(r.events[0].name) && / 32 /.test(r.events[0].name) && /1st/.test(r.events[0].name), r && r.events);
   delete g.finishedAt; delete g.elevensData.p2[5];
   ok('live round with an unanswered hole: nothing settles', calc(g) === null);
   g.finishedAt = 5;
@@ -134,14 +134,14 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   g.games.teamElevens = { value: 5, net: true, teamMode: '2man', teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] };
   const S = sidesOf(g, g.games.teamElevens, true);
   ok('two team sides keyed T:A / T:B', S.length === 2 && S[0].key === 'T:A' && S[1].key === 'T:B' && S[0].players.length === 2);
-  ok('team hole is the LOW ball (A2\'s eagle on hole 4 counts for team A)', fn('bgElevensSideVal')(g, g.games.teamElevens, S[0], 4) === -2 && fn('bgElevensSideVal')(g, g.games.teamElevens, S[0], 1) === 0 && fn('bgElevensSideVal')(g, g.games.teamElevens, S[1], 1) === 1);
+  ok('team hole is the LOW ball (A2\'s eagle on hole 4 counts for team A)', fn('bgElevensSideVal')(g, g.games.teamElevens, S[0], 4) === 1 && fn('bgElevensSideVal')(g, g.games.teamElevens, S[0], 1) === 4 && fn('bgElevensSideVal')(g, g.games.teamElevens, S[1], 1) === 5);
   g.elevensData = { 'T:A': {}, 'T:B': {} };
   for (let h = 1; h <= 18; h++) { g.elevensData['T:A'][h] = { v: h <= 11 ? 'k' : 'x', at: h }; g.elevensData['T:B'][h] = { v: h <= 11 ? 'k' : 'x', at: h }; }
   let r = calcT(g);
-  ok('team A -2 beats team B +11: each A player +5, each B player -5', r && r.result.aTotal === -2 && r.result.bTotal === 11 && r.money.p0 === 5 && r.money.p1 === 5 && r.money.p2 === -5 && r.money.p3 === -5, r && [r.result, r.money]);
+  ok('team A 41 beats team B 54: each A player +5, each B player -5', r && r.result.aTotal === 41 && r.result.bTotal === 54 && r.money.p0 === 5 && r.money.p1 === 5 && r.money.p2 === -5 && r.money.p3 === -5, r && [r.result, r.money]);
   g.elevensData['T:A'][4] = { v: 'x', at: 50 };   // throw the eagle out -> hole 12 becomes a keep
   r = calcT(g);
-  ok('throwing a hole out moves the count on (still 11 kept)', r && r.result.aTotal === 0, r && r.result);
+  ok('throwing a hole out: holes 12-17 stay out, hole 18 becomes the forced 11th keep', r && r.result.aTotal === 44, r && r.result);
   const tie = mkRound(['A1', 'A2', 'B1', 'B2'], [0, 0, 0, 0], (i, h, par) => par, { finishedAt: 5 });
   tie.games.teamElevens = { value: 5, net: true, teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] };
   r = calcT(tie);
@@ -151,7 +151,7 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   const live = mkRound(['A1', 'A2', 'B1', 'B2'], [0, 0, 0, 0], (i, h, par) => (h < 3 ? (i === 1 && h === 2 ? null : par) : null));
   live.games.teamElevens = { value: 5, net: true, teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] };
   const SL = sidesOf(live, live.games.teamElevens, true);
-  ok('team hole waits for both partners', fn('bgElevensSideVal')(live, live.games.teamElevens, SL[0], 3) === null && fn('bgElevensSideVal')(live, live.games.teamElevens, SL[0], 2) === 0);
+  ok('team hole waits for both partners', fn('bgElevensSideVal')(live, live.games.teamElevens, SL[0], 3) === null && fn('bgElevensSideVal')(live, live.games.teamElevens, SL[0], 2) === 4);
   ok('team gate: a partner cannot start hole 4 while team A owes holes 1-2; hole 3 (partner mid-entry) is not owed', /Team 11's.*hole 1/.test(gate(live, 'p0', 4)) && gate(live, 'p1', 3) !== '' && gate(live, 'p1', 3).indexOf('hole 3') < 0, [gate(live, 'p0', 4), gate(live, 'p1', 3)]);
 }
 
@@ -219,17 +219,17 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   ok('event cart: the score screen finds the group\'s games', fn('bgElevensGames')(cart).length === 2);
 
   // ---- 8. setup ----
-  ok('setup fields exist', ['game-elevens', 'opts-elevens', 'elevens-value', 'elevens-places', 'elevens-hcp-pct', 'game-team-elevens', 'opts-team-elevens', 'team-elevens-value', 'team-elevens-net', 'team-picker-teamElevens'].every(id => !!doc.getElementById(id)));
+  ok('setup fields exist', ['game-elevens', 'opts-elevens', 'elevens-value', 'elevens-payout', 'elevens-net', 'elevens-scope', 'team-elevens-payout', 'team-elevens-scope', 'elevens-hcp-pct', 'game-team-elevens', 'opts-team-elevens', 'team-elevens-value', 'team-elevens-net', 'team-picker-teamElevens'].every(id => !!doc.getElementById(id)));
   ok('help text exists for both', (() => { try { const H = w.__fn('GAME_HELP') || w.__fn('BG_GAME_HELP'); return H ? !!(H.elevens && H.teamElevens) : /elevens: \{\n    title: "11's"/.test(SRC); } catch (e) { return false; } })());
   ok('labels and icon', fn('BG_GAME_LABELS').elevens === "11's" && fn('BG_GAME_LABELS').teamElevens === "Team 11's" && !!fn('bgGameIcon')('elevens'));
   let S1 = null, gErr = '';
   try {
     ['Gregory', 'Larry', 'Mike', 'Tyler'].forEach((n, i) => { try { fn('addPlayerRow')(n, 'Q' + i, 5, false, true); } catch (e) {} });
     const tick = (id, v) => { const c = doc.getElementById(id); c.checked = v; c.dispatchEvent(new w.Event('change', { bubbles: true })); };
-    tick('game-elevens', true); doc.getElementById('elevens-value').value = '7'; doc.getElementById('elevens-places').value = '2';
+    tick('game-elevens', true); doc.getElementById('elevens-value').value = '7'; doc.getElementById('elevens-payout').value = '7030';
     S1 = fn('gatherSetup')();
   } catch (e) { gErr = e.message; }
-  ok('gatherSetup saves 11\'s (value, places, handicap %, participants)', S1 && S1.games && S1.games.elevens && S1.games.elevens.value === 7 && S1.games.elevens.places === 2 && S1.games.elevens.hcpPct === 100 && S1.games.elevens.mode === 'pool', gErr || (S1 && S1.games) || toasts.slice(-3));
+  ok('gatherSetup saves 11\'s (value, places, handicap %, participants)', S1 && S1.games && S1.games.elevens && S1.games.elevens.value === 7 && S1.games.elevens.payout === '7030' && S1.games.elevens.net === true && !S1.games.elevens.scope && S1.games.elevens.hcpPct === 100 && S1.games.elevens.mode === 'pool', gErr || (S1 && S1.games) || toasts.slice(-3));
   ok('...with everyone in by default', S1 && S1.games.elevens && (!S1.games.elevens.participants || S1.games.elevens.participants.length === 4), S1 && S1.games.elevens);
   let S2 = null; gErr = '';
   try {
@@ -241,10 +241,9 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   ok('an event day / cart can pick both (rule keys)', (() => { try { const R = w.__fn('T2_GAME_RULES'); return !!(R && R.elevens && R['team-elevens']); } catch (e) { return false; } })());
   { // an event day's games are remapped onto each cart at launch
     const gp = [{ id: 'a', name: 'Ann Q' }, { id: 'b', name: 'Bob Q' }, { id: 'c', name: 'Cal Q' }, { id: 'd', name: 'Dan Q' }];
-    let out = null, err = ''; try { out = fn('t2RemapGamesToGroup')({ elevens: { value: 5, mode: 'pool', hcpPct: 100, places: 2 }, teamElevens: { value: 3, net: true, teamMode: '2man', teamA: [], teamB: [] } }, gp, ['a', 'b'], ['c', 'd']); } catch (e) { err = e.message; }
-    ok('event launch: the cart gets 11\'s for its players and Team 11\'s with the cart\'s two teams', out && out.elevens && out.elevens.places === 2 && Array.isArray(out.elevens.participants) && out.elevens.participants.length === 4 && out.teamElevens && out.teamElevens.teamA.join() === 'a,b' && out.teamElevens.teamB.join() === 'c,d' && !out.teamElevens.fieldOnly && !out.elevens.fieldOnly, err || out);
+    let out = null, err = ''; try { out = fn('t2RemapGamesToGroup')({ elevens: { value: 5, mode: 'pool', hcpPct: 100, payout: '8020', scope: 'group' }, teamElevens: { value: 3, net: true, teamMode: '2man', teamA: [], teamB: [], scope: 'field', payout: '7030' } }, gp, ['a', 'b'], ['c', 'd']); } catch (e) { err = e.message; }
+    ok('event launch: the cart gets 11\'s for its players and Team 11\'s with the cart\'s two teams', out && out.elevens && out.elevens.payout === '8020' && out.teamElevens.scope === 'field' && out.teamElevens.payout === '7030' && Array.isArray(out.elevens.participants) && out.elevens.participants.length === 4 && out.teamElevens && out.teamElevens.teamA.join() === 'a,b' && out.teamElevens.teamB.join() === 'c,d' && !out.teamElevens.fieldOnly && !out.elevens.fieldOnly, err || out);
   }
-  ok('version is v2026.11.2078 in both markers', (SRC.match(/v2026\.11\.2078/g) || []).length === 2);
 
   console.log((fails ? 'FAILED ' : 'ALL ') + (checks - fails) + '/' + checks + ' CHECKS PASSED');
   process.exitCode = fails ? 1 : 0; w.__done = true;
