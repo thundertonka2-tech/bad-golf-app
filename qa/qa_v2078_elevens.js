@@ -20,7 +20,7 @@ const mkRound = (names, hcps, scoreFn, extra) => {
 const card = fn('bgElevensCard'), sidesOf = fn('bgElevensSides'), calc = fn('calcElevens'), calcT = fn('calcTeamElevens'), gate = fn('bgElevensScoreGate');
 ok('engine functions exist', [card, sidesOf, calc, calcT, gate, fn('bgElevensSet'), fn('_bgMergeElevens'), fn('bgElevensBanners'), fn('bgElevensBoardHtml')].every(f => typeof f === 'function'));
 // independent NET STROKES for one hole (v2079: raw strokes, not to par)
-const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp % 18) >= si ? 1 : 0); return gross - st; };
+const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp % 18) >= si ? 1 : 0); return gross - st - par; };   // v2083: against the hole's par
 
 // ---- 1. the card rules ----
 {
@@ -107,7 +107,7 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   g.elevensData = {}; g.players.forEach(p => { g.elevensData[p.id] = {}; for (let h = 1; h <= 18; h++) g.elevensData[p.id][h] = { v: h <= 11 ? 'k' : 'x', at: h }; });
   let r = calc(g);
   ok('3 players, 70/30: 30 pool pays 21 / 9', r && r.money.p0 === 11 && r.money.p1 === -1 && r.money.p2 === -10, r && r.money);
-  ok('event lines name the place and the total', r && r.events.length === 2 && /Ann/.test(r.events[0].name) && / 32 /.test(r.events[0].name) && /1st/.test(r.events[0].name), r && r.events);
+  ok('event lines name the place and the total', r && r.events.length === 2 && /Ann/.test(r.events[0].name) && /−11 /.test(r.events[0].name) && /1st/.test(r.events[0].name), r && r.events);
   delete g.finishedAt; delete g.elevensData.p2[5];
   ok('live round with an unanswered hole: nothing settles', calc(g) === null);
   g.finishedAt = 5;
@@ -134,14 +134,14 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   g.games.teamElevens = { value: 5, net: true, teamMode: '2man', teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] };
   const S = sidesOf(g, g.games.teamElevens, true);
   ok('two team sides keyed T:A / T:B', S.length === 2 && S[0].key === 'T:A' && S[1].key === 'T:B' && S[0].players.length === 2);
-  ok('team hole is the LOW ball (A2\'s eagle on hole 4 counts for team A)', fn('bgElevensSideVal')(g, g.games.teamElevens, S[0], 4) === 1 && fn('bgElevensSideVal')(g, g.games.teamElevens, S[0], 1) === 4 && fn('bgElevensSideVal')(g, g.games.teamElevens, S[1], 1) === 5);
+  ok('team hole is the LOW ball (A2\'s eagle on hole 4 counts for team A)', fn('bgElevensSideVal')(g, g.games.teamElevens, S[0], 4) === -2 && fn('bgElevensSideVal')(g, g.games.teamElevens, S[0], 1) === 0 && fn('bgElevensSideVal')(g, g.games.teamElevens, S[1], 1) === 1);
   g.elevensData = { 'T:A': {}, 'T:B': {} };
   for (let h = 1; h <= 18; h++) { g.elevensData['T:A'][h] = { v: h <= 11 ? 'k' : 'x', at: h }; g.elevensData['T:B'][h] = { v: h <= 11 ? 'k' : 'x', at: h }; }
   let r = calcT(g);
-  ok('team A 41 beats team B 54: each A player +5, each B player -5', r && r.result.aTotal === 41 && r.result.bTotal === 54 && r.money.p0 === 5 && r.money.p1 === 5 && r.money.p2 === -5 && r.money.p3 === -5, r && [r.result, r.money]);
+  ok('team A -2 beats team B +11: each A player +5, each B player -5', r && r.result.aTotal === -2 && r.result.bTotal === 11 && r.money.p0 === 5 && r.money.p1 === 5 && r.money.p2 === -5 && r.money.p3 === -5, r && [r.result, r.money]);
   g.elevensData['T:A'][4] = { v: 'x', at: 50 };   // throw the eagle out -> hole 12 becomes a keep
   r = calcT(g);
-  ok('throwing a hole out: holes 12-17 stay out, hole 18 becomes the forced 11th keep', r && r.result.aTotal === 44, r && r.result);
+  ok('throwing a hole out: holes 12-17 stay out, hole 18 becomes the forced 11th keep', r && r.result.aTotal === 0, r && r.result);
   const tie = mkRound(['A1', 'A2', 'B1', 'B2'], [0, 0, 0, 0], (i, h, par) => par, { finishedAt: 5 });
   tie.games.teamElevens = { value: 5, net: true, teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] };
   r = calcT(tie);
@@ -151,7 +151,7 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   const live = mkRound(['A1', 'A2', 'B1', 'B2'], [0, 0, 0, 0], (i, h, par) => (h < 3 ? (i === 1 && h === 2 ? null : par) : null));
   live.games.teamElevens = { value: 5, net: true, teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] };
   const SL = sidesOf(live, live.games.teamElevens, true);
-  ok('team hole waits for both partners', fn('bgElevensSideVal')(live, live.games.teamElevens, SL[0], 3) === null && fn('bgElevensSideVal')(live, live.games.teamElevens, SL[0], 2) === 4);
+  ok('team hole waits for both partners', fn('bgElevensSideVal')(live, live.games.teamElevens, SL[0], 3) === null && fn('bgElevensSideVal')(live, live.games.teamElevens, SL[0], 2) === 0);
   ok('team gate: a partner cannot start hole 4 while team A owes holes 1-2; hole 3 (partner mid-entry) is not owed', /Team 11's.*hole 1/.test(gate(live, 'p0', 4)) && gate(live, 'p1', 3) !== '' && gate(live, 'p1', 3).indexOf('hole 3') < 0, [gate(live, 'p0', 4), gate(live, 'p1', 3)]);
 }
 

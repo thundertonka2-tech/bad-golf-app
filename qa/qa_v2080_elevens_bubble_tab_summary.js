@@ -33,7 +33,9 @@ ok('functions exist', [info, fn('bgElevensCardModels'), fn('bgElevensFieldPlaceF
   ok('nothing kept yet: dash over 0/11, and the bubble knows a choice is owed', I && I.val === '—' && I.sub === '0/11' && I.pending === 5 && I.field === false, I);
   g.elevensData = { [a]: { 1: { v: 'k', at: 1 }, 2: { v: 'x', at: 2 }, 3: { v: 'k', at: 3 }, 4: { v: 'k', at: 4 }, 5: { v: 'k', at: 5 } } };
   I = info(g, a);
-  ok('mid-round: my strokes over the holes I kept (4+5+3+4 = 16) over 4/11', I && I.val === '16' && I.sub === '4/11' && I.pending === 0 && /16 strokes, 4 of 11 holes kept/.test(I.title), I);
+  ok('mid-round: my score to par over the holes I kept (four pars = E) over 4/11', I && I.val === 'E' && I.sub === '4/11' && I.pending === 0 && /E to par, 4 of 11 holes kept/.test(I.title), I);
+  g.scores[a][0] = 3; I = info(g, a);
+  ok('...a birdie on a kept hole reads −1', I && I.val === '−1' && I.total === -1, I);
   ok('a player not in the game gets no bubble', info(mk(['X', 'Y'], [0, 0], {}), 'nope') === null && info(g, 'nobody') === null);
   const d = mk(['Ann', 'Bob', 'Cal'], [0, 1, 0], { elevens: { value: 5, net: true, hcpPct: 100 } }, { finishedAt: 5 });
   keep(d, d.players.map(p => p.id));
@@ -48,7 +50,7 @@ ok('functions exist', [info, fn('bgElevensCardModels'), fn('bgElevensFieldPlaceF
   c1.groupGames = { elevens: { value: 2, net: false, hcpPct: 0, payout: 'winner' }, teamElevens: { value: 1, net: true, teamA: [c1.players[0].id], teamB: [c1.players[1].id] } };
   const rows = [c1, c2, c3].map(x => ({ code: x.code, data: x }));
   const fp = fn('bgElevensFieldPlaceFrom')(rows, false, 1, 'Ann Q');
-  ok('field place: Ann (43) is T2nd of 6 behind Eve (32), level with Fay', fp && fp.place === 2 && fp.tied === true && fp.n === 6 && fp.total === P11 && fp.done === true, fp);
+  ok('field place: Ann (43) is T2nd of 6 behind Eve (32), level with Fay', fp && fp.place === 2 && fp.tied === true && fp.n === 6 && fp.total === 0 && fp.done === true, fp);
   w._t2CrossGps = { tid: 't-80', rows: rows, t: { id: 't-80', settings: {} }, at: Date.now() };
   try { w.__fn('(_t2RefreshCrossGpsCache = function () { return null; })'); } catch (e) {}
   I = info(c1, c1.players[0].id);
@@ -69,8 +71,8 @@ ok('functions exist', [info, fn('bgElevensCardModels'), fn('bgElevensFieldPlaceF
   keep(g, g.players.map(p => p.id));
   const ids = g.players.map(p => p.id);
   const M = (fn('bgPointsCardModels')(g) || []).find(m => m.key === 'elevens');
-  ok('the scorecard gets an 11\'s model (low wins, strokes)', M && M.mode === 'pt:elevens' && M.low === true && M.unit === 'strokes' && /best 11 holes, net strokes/.test(M.cap), M && { mode: M.mode, cap: M.cap });
-  ok('rows: 43 / 54 / 65 / 43, places T1st, 3rd, 4th, T1st', M && M.rows[ids[0]].pts === 43 && M.rows[ids[1]].pts === 54 && M.rows[ids[0]].rank === 1 && M.rows[ids[0]].tied && M.rows[ids[1]].rank === 3 && M.rows[ids[2]].rank === 4 && M.rows[ids[3]].rank === 1, M && ids.map(i => [M.rows[i].pts, M.rows[i].rank, M.rows[i].tied]));
+  ok('the scorecard gets an 11\'s model (low wins, strokes)', M && M.mode === 'pt:elevens' && M.low === true && M.unit === 'strokes' && /best 11 holes, net to par\. Each hole is scored against its par/.test(M.cap), M && { mode: M.mode, cap: M.cap });
+  ok('rows: 43 / 54 / 65 / 43, places T1st, 3rd, 4th, T1st', M && M.rows[ids[0]].pts === 0 && M.rows[ids[1]].pts === 11 && M.rows[ids[0]].rank === 1 && M.rows[ids[0]].tied && M.rows[ids[1]].rank === 3 && M.rows[ids[2]].rank === 4 && M.rows[ids[3]].rank === 1, M && ids.map(i => [M.rows[i].pts, M.rows[i].rank, M.rows[i].tied]));
   const host = doc.createElement('div'); host.innerHTML = w.buildRoundScorecardHtml(g); doc.body.appendChild(host);
   const table = host.querySelector('.bg-sc-wide table') || host.querySelector('table');
   ok('the card has an 11\'s tab chip', !!table && !!table.querySelector('.sc-tab[data-mode="pt:elevens"]') && /11's/.test(table.querySelector('.sc-tab[data-mode="pt:elevens"]').textContent), table && [...table.querySelectorAll('.sc-tab')].map(b => b.dataset.mode));
@@ -78,12 +80,12 @@ ok('functions exist', [info, fn('bgElevensCardModels'), fn('bgElevensFieldPlaceF
   const row = table.querySelector('tbody tr[data-pid="' + ids[1] + '"]');
   const cells = row ? [...row.querySelectorAll('td[data-sc-orig]')] : [];
   const txt = cells.map(td => td.textContent.trim());
-  ok('11\'s tab: Bob\'s kept holes show his strokes, holes 12-18 are crossed out', cells.length >= 18 && txt[0] === '5' && cells.filter(td => td.querySelector('s')).length === 7 && !cells[0].querySelector('s') && !cells[11].querySelector('s') && !!cells[12].querySelector('s'), txt.slice(0, 21));
-  ok('...and the total column is his 54', txt.some(t => t === '54'), txt.slice(-4));
+  ok('11\'s tab: Bob\'s kept holes show his strokes, holes 12-18 are crossed out', cells.length >= 18 && txt[0] === '+1' && cells.filter(td => td.querySelector('s')).length === 7 && !cells[0].querySelector('s') && !cells[11].querySelector('s') && !!cells[12].querySelector('s'), txt.slice(0, 21));
+  ok('...and the total column is his 54', txt[txt.length - 1] === '+11', txt.slice(-4));
   const foot = [...table.querySelectorAll('tr.sc-p-foot')].filter(tr => tr.dataset.pmode === 'pt:elevens' && tr.style.display !== 'none').map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
   const ordNow = () => [...table.querySelectorAll('tbody tr[data-pid]')].filter(tr => !tr.dataset.scExtra).map(tr => ids.indexOf(tr.dataset.pid)).join('');
   ok('11\'s tab is sorted 1st to last (Ann, Dan tied 1st, then Bob, Cal)', ordNow() === '0312', ordNow());
-  ok('a line under each player, place in front: place, strokes, holes kept', foot.length === 4 && /^tied 1st · 43 strokes · 11\/11 kept/.test(foot[0]) && /^tied 1st · 43 strokes · 11\/11 kept/.test(foot[1]) && /^3rd · 54 strokes · 11\/11 kept/.test(foot[2]) && /^4th · 65 strokes/.test(foot[3]), foot);
+  ok('a line under each player, place in front: place, strokes, holes kept', foot.length === 4 && /^tied 1st · E to par · 11\/11 kept/.test(foot[0]) && /^tied 1st · E to par · 11\/11 kept/.test(foot[1]) && /^3rd · \+11 to par · 11\/11 kept/.test(foot[2]) && /^4th · \+22 to par/.test(foot[3]), foot);
   w.bgScApplyMode(table, 'strokes');
   ok('back on Strokes the card is in its own order again', ordNow() === '0123', ordNow());
   w.bgScApplyMode(table, 'pt:elevens'); w.bgScApplyMode(table, 'units'); w.bgScApplyMode(table, 'pt:elevens');
@@ -94,11 +96,11 @@ ok('functions exist', [info, fn('bgElevensCardModels'), fn('bgElevensFieldPlaceF
   const lv = mk(['Ann', 'Bob'], [h => (h < 3 ? PARS[h] : null), h => (h < 3 ? PARS[h] + 1 : null)], { elevens: { value: 5, net: true, hcpPct: 100 } });
   lv.elevensData = { [lv.players[0].id]: { 1: { v: 'k', at: 1 }, 2: { v: 'x', at: 2 } } };
   const L = (fn('bgPointsCardModels')(lv) || []).find(m => m.key === 'elevens'), la = L && L.rows[lv.players[0].id];
-  ok('live card: kept "4", thrown-out crossed, unanswered "5?", no place until the card is done', la && />4</.test(la.cellHtml[0]) && /<s>4<\/s>/.test(la.cellHtml[1]) && /5\?/.test(la.cellHtml[2]) && la.rank === 0 && la.kept === 1, la && la.cellHtml.slice(0, 4));
+  ok('live card: kept "4", thrown-out crossed, unanswered "5?", no place until the card is done', la && />E</.test(la.cellHtml[0]) && /<s>E<\/s>/.test(la.cellHtml[1]) && /E\?/.test(la.cellHtml[2]) && la.rank === 0 && la.kept === 1, la && la.cellHtml.slice(0, 4));
   // team tab
   const t = mk(['A1', 'A2', 'B1', 'B2'], [0, 3, 1, 2], { teamElevens: { value: 5, net: true } }, { finishedAt: 5 }); keep(t, ['T:A', 'T:B']);
   const TM = (fn('bgPointsCardModels')(t) || []).find(m => m.key === 'teamElevens'), tid = t.players.map(p => p.id);
-  ok('Team 11\'s tab: both partners carry the team\'s low ball and place (43 1st, 54 2nd)', TM && TM.rows[tid[0]].pts === 43 && TM.rows[tid[1]].pts === 43 && TM.rows[tid[1]].rank === 1 && !TM.rows[tid[1]].tied && TM.rows[tid[2]].pts === 54 && TM.rows[tid[2]].rank === 2 && TM.rows[tid[0]].team === 'A1 & A2', TM && tid.map(i => [TM.rows[i].pts, TM.rows[i].rank, TM.rows[i].tied]));
+  ok('Team 11\'s tab: both partners carry the team\'s low ball and place (43 1st, 54 2nd)', TM && TM.rows[tid[0]].pts === 0 && TM.rows[tid[1]].pts === 0 && TM.rows[tid[1]].rank === 1 && !TM.rows[tid[1]].tied && TM.rows[tid[2]].pts === 11 && TM.rows[tid[2]].rank === 2 && TM.rows[tid[0]].team === 'A1 & A2', TM && tid.map(i => [TM.rows[i].pts, TM.rows[i].rank, TM.rows[i].tied]));
   // the whole-field card: only field pools, ranked low to high across groups
   const fcfg = { elevens: { value: 5, net: true, hcpPct: 100, scope: 'field' } }, T = { tournamentId: 't-81', day: 1 };
   const c1 = mk(['Ann', 'Bob'], [0, 2], fcfg, { finishedAt: 5, t2: Object.assign({ group: 'g1' }, T) }), c2 = mk(['Eve', 'Fay'], [-1, 0], fcfg, { finishedAt: 5, t2: Object.assign({ group: 'g2' }, T) });
@@ -119,11 +121,11 @@ ok('functions exist', [info, fn('bgElevensCardModels'), fn('bgElevensFieldPlaceF
   keep(g, g.players.map(p => p.id));
   const M = fn('computeAllGameMoney')(g);
   const line = fn('bgGameResultLine')(g, 'elevens', M.results);
-  ok('summary line for 11\'s: every card, low to high', line === 'Best 11 holes — Ann 43 · Bob 54 · Cal 65', line);
+  ok('summary line for 11\'s: every card, low to high', line === 'Best 11 holes — Ann E · Bob +11 · Cal +22', line);
   const t = mk(['A1', 'A2', 'B1', 'B2'], [0, 3, 1, 2], { teamElevens: { value: 5, net: true } }, { finishedAt: 5 }); keep(t, ['T:A', 'T:B']);
   const TM = fn('computeAllGameMoney')(t);
   const tl = fn('bgGameResultLine')(t, 'teamElevens', TM.results);
-  ok('summary line for Team 11\'s: both totals and the winner', tl === 'A1 & A2 43 v B1 & B2 54 — A1 & A2 win', tl);
+  ok('summary line for Team 11\'s: both totals and the winner', tl === 'A1 & A2 E v B1 & B2 +11 — A1 & A2 win', tl);
   const cart = JSON.parse(JSON.stringify(g)); cart.groupGames = cart.games; cart.games = {}; cart.t2 = { tournamentId: 't', group: 'g', day: 1 };
   const CM = fn('computeAllGameMoney')(cart);
   ok('...and for a cart\'s own game in an event', fn('bgGameResultLine')(cart, 'grp:elevens', CM.results) === line, fn('bgGameResultLine')(cart, 'grp:elevens', CM.results));

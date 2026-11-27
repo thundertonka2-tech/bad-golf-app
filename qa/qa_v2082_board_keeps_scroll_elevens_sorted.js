@@ -42,7 +42,7 @@ const { chromium } = require('playwright'), path = require('path'), fs = require
   ok(r2.top === 560, 'tapping the 11\'s tab leaves the sheet exactly where it was', r2.top);
   ok(r2.mode === 'pt:elevens' && r2.n === 12 && r2.feet.every(f => f && f.shown), 'the 11\'s tab is showing a line for all 12 players', { mode: r2.mode, n: r2.n });
   ok(r2.feet.every((f, i) => i === 0 || (r2.feet[i - 1].rank <= f.rank && r2.feet[i - 1].pts <= f.pts)), 'rows run 1st to last (place, then strokes)', r2.feet.map(f => f && [f.rank, f.pts]));
-  ok(/^(tied )?1st · \d+ strokes · 11\/11 kept/.test(r2.feet[0].text), 'the place is in front of each line', r2.feet[0]);
+  ok(/^(tied )?1st · \S+ to par · 11\/11 kept/.test(r2.feet[0].text), 'the place is in front of each line', r2.feet[0]);
   // back to Strokes: own order, still no jump
   const sChip = p.locator('#qa-ov .sc-tab[data-mode="strokes"]').first(); const sb = await sChip.boundingBox(); await p.mouse.click(sb.x + sb.width / 2, sb.y + sb.height / 2); await p.waitForTimeout(300);
   const r3 = await p.evaluate(() => { const ov = document.getElementById('qa-ov'), md = ov.querySelector('.modal'), t = ov.querySelector('table[data-sc-mode]'); return { top: md.scrollTop, ord: [...t.querySelectorAll('tbody tr[data-pid]')].filter(tr => !tr.dataset.scExtra).map(tr => Number(tr.dataset.scOrd)) }; });

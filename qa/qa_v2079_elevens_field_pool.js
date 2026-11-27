@@ -34,10 +34,10 @@ const P11 = PARS.slice(0, 11).reduce((a, b) => a + b, 0);   // 43
   const g = mkCart(['Ann', 'Bob'], [0, 18], (i, h, par) => par + i, { elevens: { value: 5, mode: 'pool', net: true, hcpPct: 100, payout: 'winner' } }); delete g.t2;
   keepFirst11(g, g.players.map(p => p.id));
   const S = fn('bgElevensSides')(g, g.games.elevens, false);
-  ok('total is raw strokes over the kept holes (43 for eleven pars on 1-11)', fn('bgElevensCard')(g, g.games.elevens, S[0], true).total === P11, fn('bgElevensCard')(g, g.games.elevens, S[0], true).total);
-  ok('net: an 18 handicap making bogeys also totals 43', fn('bgElevensCard')(g, g.games.elevens, S[1], true).total === P11);
+  ok('total is to par over the kept holes (eleven pars = E)', fn('bgElevensCard')(g, g.games.elevens, S[0], true).total === 0, fn('bgElevensCard')(g, g.games.elevens, S[0], true).total);
+  ok('net: an 18 handicap making bogeys is also E', fn('bgElevensCard')(g, g.games.elevens, S[1], true).total === 0);
   g.games.elevens.net = false;
-  ok('gross: the same card totals 54', fn('bgElevensCard')(g, g.games.elevens, S[1], true).total === P11 + 11);
+  ok('gross: the same card is +11', fn('bgElevensCard')(g, g.games.elevens, S[1], true).total === 11);
   const r = fn('calcElevens')(g);
   ok('gross pool: scratch wins 5', r && r.money[g.players[0].id] === 5 && r.money[g.players[1].id] === -5, r && r.money);
   // raw strokes rewards keeping the short holes: keeping the four par 3s beats keeping par 5s at level par
@@ -49,7 +49,10 @@ const P11 = PARS.slice(0, 11).reduce((a, b) => a + b, 0);   // 43
     h.elevensData[a][n] = { v: pa, at: n }; h.elevensData[b][n] = { v: pb, at: n };
   }
   const r2 = fn('calcElevens')(h);
-  ok('raw strokes: at level par, the card that keeps the par 3s beats the one that keeps the par 5s', r2 && r2.money[a] === 5, r2 && [r2.money, r2.result]);
+  ok('scored against par: at level par it makes no difference whether you keep the par 3s or the par 5s (tie, pool goes back)', r2 === null, r2 && [r2.money, r2.result]);
+  h.scores[b][2] = 4;   // Bob birdies the par-5 3rd, which he kept
+  const r3 = fn('calcElevens')(h);
+  ok('...and a birdie on a par 5 you kept wins it (a par 5 is worth keeping)', r3 && r3.money[b] === 5 && r3.result.standings.find(x => x.id === b).total === -1, r3 && [r3.money, r3.result]);
 }
 
 // ---- 2. splits ----
@@ -98,7 +101,7 @@ const P11 = PARS.slice(0, 11).reduce((a, b) => a + b, 0);   // 43
   // unanswered holes on a finished day count in order
   const c6 = mkCart(['Oz', 'Pat'], [0, 0], (i, h, par) => par, cfg); c6.elevensData = {};
   const r6 = FE(rowsOf([c1, c6]));
-  ok('a finished card with no choices counts its first 11 holes', r6 && r6.perDay[0].rows.find(x => x.first === 'Oz').total === P11 && r6.perDay[0].rows.find(x => x.first === 'Oz').done === true);
+  ok('a finished card with no choices counts its first 11 holes', r6 && r6.perDay[0].rows.find(x => x.first === 'Oz').total === 0 && r6.perDay[0].rows.find(x => x.first === 'Oz').done === true);
   // gross field pool
   const gcfg = { elevens: { value: 5, net: false, hcpPct: 0, payout: 'winner', scope: 'field' } };
   const g1 = mkCart(['Lo', 'Hi'], [0, 18], (i, h, par) => par + i, gcfg), g2 = mkCart(['Mid', 'Top'], [9, 30], (i, h, par) => par + 2, gcfg);
@@ -114,7 +117,7 @@ const P11 = PARS.slice(0, 11).reduce((a, b) => a + b, 0);   // 43
       const n = 2 + Math.floor(rnd() * 3), hc = Array.from({ length: n }, () => Math.floor(rnd() * 20));
       const g = mkCart(Array.from({ length: n }, (_, i) => 'N' + t + 'x' + c + 'x' + i), hc, (i, h, par) => par - 1 + Math.floor(rnd() * 4), fc);
       g.elevensData = {};
-      g.players.forEach((p, i) => { g.elevensData[p.id] = {}; let k = 0, x = 0, s = 0; for (let h = 1; h <= 18; h++) { let pick = rnd() < 0.6 ? 'k' : 'x'; if (k >= 11) pick = 'x'; else if (x >= 7) pick = 'k'; g.elevensData[p.id][h] = { v: pick, at: h }; if (pick === 'k') { k++; s += g.scores[p.id][h - 1] - (Math.floor(hc[i] / 18) + ((hc[i] % 18) >= SIS[h - 1] ? 1 : 0)); } else x++; } tot[p.name] = s; });
+      g.players.forEach((p, i) => { g.elevensData[p.id] = {}; let k = 0, x = 0, s = 0; for (let h = 1; h <= 18; h++) { let pick = rnd() < 0.6 ? 'k' : 'x'; if (k >= 11) pick = 'x'; else if (x >= 7) pick = 'k'; g.elevensData[p.id][h] = { v: pick, at: h }; if (pick === 'k') { k++; s += g.scores[p.id][h - 1] - (Math.floor(hc[i] / 18) + ((hc[i] % 18) >= SIS[h - 1] ? 1 : 0)) - PARS[h - 1]; } else x++; } tot[p.name] = s; });
       carts.push(g);
     }
     const names = Object.keys(tot).sort((a, b) => tot[a] - tot[b]), N = names.length, base = (N < 3 || payout === 'winner') ? [1] : payout === '8020' ? [0.8, 0.2] : [0.7, 0.3];
@@ -137,7 +140,7 @@ const P11 = PARS.slice(0, 11).reduce((a, b) => a + b, 0);   // 43
   ok('four teams, eight players, 40 in the pool', d && d.entries === 4 && d.players === 8 && d.pot === 40 && d.team === true, d && { e: d.entries, p: d.players, pot: d.pot });
   const by = {}; (d ? d.rows : []).forEach(x => { by[x.first] = x; });
   ok('low team (C1 & C2, 32) wins 28 = 14 a player; 2nd team (A1 & A2, 43) gets 12 = 6 a player', by.C1 && by.C1.money === 9 && by.C2.money === 9 && by.A1.money === 1 && by.A2.money === 1 && by.B1.money === -5 && by.D2.money === -5, d && d.rows.map(x => x.first + ':' + x.money + ':' + x.total));
-  ok('team pool sums to zero and the standings name the teams', d && Math.abs(d.rows.reduce((a, x) => a + x.money, 0)) < 1e-9 && d.standings[0].name === 'C1 & C2' && d.standings[0].total === 32, d && d.standings);
+  ok('team pool sums to zero and the standings name the teams', d && Math.abs(d.rows.reduce((a, x) => a + x.money, 0)) < 1e-9 && d.standings[0].name === 'C1 & C2' && d.standings[0].total === -11, d && d.standings);
   ok('team banner shows for a field team game', fn('bgElevensGames')(c1).some(G => G.key === 'teamElevens' && G.field));
 }
 
