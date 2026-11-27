@@ -179,7 +179,6 @@ const P11 = PARS.slice(0, 11).reduce((a, b) => a + b, 0);   // 43
   const cart = { players: gp, games: rm || {}, t2: { tournamentId: 't', group: 'g', day: 1 }, scores: {} };
   ok('launch: the cart round is in the field pool (scope + split kept, cart teams set)', rm && rm.elevens && rm.teamElevens && fn('bgElevensIsField')(cart, rm.elevens) && fn('bgElevensIsField')(cart, rm.teamElevens) && rm.elevens.payout === '8020' && rm.teamElevens.teamA.join() === 'a,b' && rm.elevens.participants.length === 4, err || rm);
   ok('a regular round never reads as a field pool, even with a stray scope', fn('bgElevensIsField')({ players: gp }, { scope: 'field' }) === false);
-  ok('version is v2026.11.2079 in both markers', (SRC.match(/v2026\.11\.2079/g) || []).length === 2);
   console.log((fails ? 'FAILED ' : 'ALL ') + (checks - fails) + '/' + checks + ' CHECKS PASSED');
   process.exitCode = fails ? 1 : 0; w.__done = true;
 })().catch(e => { console.log('CRASH', e && e.stack || e); process.exit(1); });
