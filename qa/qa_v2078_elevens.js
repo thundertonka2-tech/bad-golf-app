@@ -159,7 +159,7 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
 (async () => {
   const g = mkRound(['Ann', 'Bob'], [0, 0], (i, h, par) => (h === 0 ? par : null));
   g.games.elevens = { value: 5, mode: 'pool', hcpPct: 100, places: 1 };
-  ok('gate: hole 2 refused while hole 1 is unanswered', /11's: keep or throw out hole 1 for Ann/.test(gate(g, 'p0', 2)), gate(g, 'p0', 2));
+  ok('gate: hole 2 refused while hole 1 is unanswered', /11's: keep or toss hole 1 for Ann/.test(gate(g, 'p0', 2)), gate(g, 'p0', 2));
   ok('gate: re-scoring hole 1 itself is allowed', gate(g, 'p0', 1) === '');
   g.elevensData = { p0: { 1: { v: 'k', at: 1 } } };
   ok('gate: answered -> hole 2 opens for Ann, still shut for Bob', gate(g, 'p0', 2) === '' && gate(g, 'p1', 2) !== '');
@@ -190,8 +190,8 @@ const netTP = (gross, hcp, si, par) => { let st = Math.floor(hcp / 18) + ((hcp %
   // banner + board
   const box = doc.createElement('div');
   fn('bgElevensBanners')(live, 1, box);
-  ok('banner: one card, a Keep and a Throw out button per player with a score, pending warning for Bob', box.children.length === 1 && box.querySelectorAll('[data-el-v="k"]').length === 2 && box.querySelectorAll('[data-el-v="x"]').length === 2 && /Keep or throw out before the next hole/.test(box.textContent), box.textContent.slice(0, 300));
-  ok('banner shows the count and throw-outs left', /2\/11 kept/.test(box.textContent) && /7 throw-outs left/.test(box.textContent), box.textContent.slice(0, 300));
+  ok('banner: one card, a Keep and a Throw out button per player with a score, pending warning for Bob', box.children.length === 1 && box.querySelectorAll('[data-el-v="k"]').length === 2 && box.querySelectorAll('[data-el-v="x"]').length === 2 && /Keep or toss before the next hole/.test(box.textContent) && /Toss/.test(box.querySelector('[data-el-v="x"]').textContent) && !box.querySelector('.bg-el-open'), box.textContent.slice(0, 300));
+  ok('banner shows the count and throw-outs left', /2\/11 kept/.test(box.textContent) && /7 tosses left/.test(box.textContent), box.textContent.slice(0, 300));
   ok('banner buttons carry no inline style', [...box.querySelectorAll('button')].every(b => !b.getAttribute('style')));
   ok('auto-advance waits for the choice', fn('bgElevensPendingOnHole')(live, 1) === true && fn('bgElevensPendingOnHole')(live, 2) === false);
   ok('board card lists both players', /11(&#39;|')s/.test(fn('bgElevensBoardHtml')(live)) && /Ann/.test(fn('bgElevensBoardHtml')(live)) && /needs a choice/.test(fn('bgElevensBoardHtml')(live)), fn('bgElevensBoardHtml')(live));

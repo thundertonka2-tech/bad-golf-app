@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2084
+**Build Version:** v2026.11.2085
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -832,8 +832,8 @@ Every scorecard in the app — Games screen, Score tab, the GPS mini-card, the r
 - **💵 Units** — what each hole moved.
 - **🎯 Quota** — points per hole, then a line under each player: *"27 pts · quota 24 · +3"*. **Players are listed 1st to last**, with the place in front of each line.
 - **Points games** (Stableford, 6's, Niners and the rest) — one tab each, with *"34 pts · 1st"* under each player.
-- **🔢 11's / Team 11's** *(new)* — each **kept** hole shows its score to par (−1, E, +1), each **thrown-out** hole is **crossed out**, and a hole still waiting on a choice shows a **?**. **Players are listed 1st to last**, with the place in front of each line: *"1st · −3 to par · 11/11 kept"*. On a tournament's whole-field card the places are across every group.
-- **A cross-group Quota bet** on the event's **Matches** card now shows each player's **points per hole**, and the row ends *"27 pts · quota 24 · +3"*.
+- **🔢 11's / Team 11's** *(new)* — each **kept** hole shows its score to par (−1, E, +1), each **tossed** hole is **crossed out**, and a hole still waiting on a choice shows a **?**. **Players are listed 1st to last**, with the place in front of each line: *"1st · −3 to par · 11/11 kept"*. On a tournament's whole-field card the places are across every group.
+- **A cross-group Quota bet** lives on the **Quota tab** *(updated)*, not the Match tab: your row shows your **points per hole**, then *"27 pts · quota 24 · +3"*, then one line per bet — *"v Rolo · +3 v −2 · won · 20"*. A bet for **0 units** is listed the same way, without the units. On the event's **Matches** card the row ends *"27 pts · quota 24 · +3"*.
 - **A round that starts on the back nine** shows holes 10–18 first, then the front nine.
 
 ### Editing Scores
@@ -1065,7 +1065,7 @@ Small heads-up bubbles ride down the right side of the GPS screen. Tap one to ju
 - **LEADER / net +X** — the **Low Net Pool** leader only. It ranks pool players by running net-to-par using the pool's own handicap allowance, and its tooltip reads *"Low Net Pool — current net leader."*
 - **🏹 Team Quota** — in a tournament this reads the **whole field**, not just your cart. It names the leading team and the gap to second — e.g. **`SHANK +3 · 8 teams`** — with **long-press** listing every team, and **tapping it opens the Event Leaderboard scrolled to the Team Quota block** (closing returns you where you were). Dead level reads **TIED**. Outside a tournament it falls back to your round's own teams. *If the tournament can't be read, the bubble stays put and says the standings couldn't load rather than silently rerouting you.*
 - **🎯 Quota** — your **place**. In a tournament pool it is your place in the **whole tournament** (*"T2nd · of 14"*), not just your group
-- **🔢 11's** *(new)* — while you are still choosing, your **score to par over the holes you have kept** (like **−2**) with *"7/11"* underneath; once your 11 are in, your **place** (*"T2nd · of 14"*). Ties show a **T**. If the tournament has an 11's pool **and** your group has its own, the bubble shows the **tournament** one — that is the main game. The edge turns gold while a hole is waiting on Keep or Throw out. Tap it to open the Board
+- **🔢 11's** *(new)* — while you are still choosing, your **score to par over the holes you have kept** (like **−2**) with *"7/11"* underneath; once your 11 are in, your **place** (*"T2nd · of 14"*). Ties show a **T**. If the tournament has an 11's pool **and** your group has its own, the bubble shows the **tournament** one — that is the main game. The edge turns gold while a hole is waiting on Keep or Toss. Tap it to open the Board
 - **Match play status chips** — e.g. **"vs SJ 3 UP"**, including day-level, group-level and cross-group matches inside a tournament. Status only — no units on these chips
 - **NET bubble** and game chips — tap either to jump to the Games screen
 
@@ -1550,13 +1550,14 @@ The **fewest total putts over 18** takes the prize pool. **Turning this on switc
 #### **🔢 11's** *(new — under Single games)*
 Everyone puts in the same entry, but **only your best 11 holes count** (6 on a nine-hole round). The catch: you have to decide **right after each hole** whether that hole is one of your 11.
 
-- **One sheet per hole.** Enter everyone's score as usual. When the last score for the hole is in, a sheet pops up: **"Hole 5 — keep or throw out?"** with every player listed, their score to par, and two big buttons each — **Keep** and **Throw out**.
-- **The app suggests, you confirm.** Par or better starts on **Keep**; anything worse starts on **Throw out**. Flip any player with one tap, then tap **Done**. One tap saves the whole group and the hole moves on.
-- **Not now** closes the sheet if you need to fix a score first. The 11's card on the score screen keeps a **"Keep or throw out — hole 5"** button to bring it back.
+- **One sheet per hole.** Enter everyone's score as usual. When the last score for the hole is in, a sheet pops up: **"Hole 5 — keep or toss?"** with every player listed, what they made in plain words (*made par*, *made bogey*, *made double*, *made triple*, then *+4* and up), their score to par, and two big buttons each — **Keep** and **Toss**.
+- **The app suggests, you confirm.** Par or better starts on **Keep**; anything worse starts on **Toss**. Flip any player with one tap, then tap **Done**. One tap saves the whole group and the hole moves on.
+- **Nothing is asked until every score is in.** While the group is still entering scores the 11's card just says *"keep or toss once every score is in"*. The sheet then pops up **once**.
+- **Not now** closes the sheet if you need to fix a score first. After that, use the **Keep** / **Toss** buttons on the 11's card on the score screen.
 - **You must choose before the next hole.** If you try to score the next hole first, the app says which hole is waiting and **opens that hole's sheet for you**.
 - **The choice locks.** You can change an answer until the next hole has a score. After that it is locked (an app admin can still correct a mistake). A hole that was never answered can always be answered.
 - **Typing scores into the scorecard** works the same way: when a hole's last score is typed, its sheet opens.
-- **7 throw-outs, 11 keeps.** Once you have thrown out 7 holes, every hole left counts automatically. Once you have kept 11, the rest are not needed. So the last hole never needs a choice.
+- **7 tosses, 11 keeps.** Once you have tossed 7 holes, every hole left counts automatically. Once you have kept 11, the rest are not needed. So the last hole never needs a choice.
 - **Scored against par, net or gross.** Each hole you keep counts your score **against that hole's par** — a net birdie is −1, a par is E, a bogey is +1 — and your total is **to par** over the 11 holes you kept. So a par 5 is worth exactly as much as a par 3; there is no reason to throw the long holes out. Pick **Net** (with its own **"Handicap for 11's"** slider) or **Gross** when you set the game up. **Lowest total wins.**
 - **Split:** **Winner takes all**, **80/20** or **70/30** between 1st and 2nd. **Ties share the places they cover** — two players tied for 1st on an 80/20 split the whole pool; two tied for 2nd split the 20.
 - **Player picker:** tick who is in, like every other pool. A player who leaves the round gives his entry and cannot win.
@@ -1569,7 +1570,7 @@ Everyone puts in the same entry, but **only your best 11 holes count** (6 on a n
 The same game for two even teams, on the **team's low ball**.
 
 - Each hole the team's score is its **lowest ball against par** (net or gross — your choice at setup). The team's hole is ready once every partner still in the round has a score.
-- **The team** chooses **Keep** or **Throw out**, and nobody on the team can score the next hole until it does. Best **11 team holes** count, 7 throw-outs, same locking rule.
+- **The team** chooses **Keep** or **Toss**, and nobody on the team can score the next hole until it does. Best **11 team holes** count, 7 tosses, same locking rule.
 - **Lowest team total wins.** Each player on the other team gives the units. A tie moves nothing.
 - **Example:** 2 units a player. Team A's 11 kept holes total −4, Team B's total −1 → each Team A player **+2**, each Team B player **−2.**
 
@@ -2220,12 +2221,12 @@ Configure Day starts clean for every new event and every new day — no carried-
 
 Pick **11's** or **Team 11's** on **Configure games** and a row appears: **"Who plays for the pool"**.
 
-- **Whole field — every group, one pool** *(the default)*. Every player (or every cart team) in the event plays for a single pool. Each cart still does its own **Keep / Throw out** on its own score screen; the event ranks every card.
+- **Whole field — every group, one pool** *(the default)*. Every player (or every cart team) in the event plays for a single pool. Each cart still does its own **Keep / Toss** on its own score screen; the event ranks every card.
 - **Each group plays its own** — every cart settles its own 11's, like a group game.
 - **Net or gross**, the **entry**, and the **split** (winner takes all, 80/20 or 70/30) are set once for the whole field. **Ties share the places they cover.**
 - **Team 11's across the field:** every cart's two teams are ranked against every other team in the event. The entry is per player, and a winning team's share is divided among its players.
 - **Nothing is paid until every group is in.** The event leaderboard shows **11's** and **Team 11's** as their own columns (marked pending while a group is still out) and the awards list shows the winner, the split and the totals.
-- **A cart can still add its own 11's** as a group game on top of the field pool. One Keep / Throw out answer per hole serves both, and the GPS bubble shows the tournament pool.
+- **A cart can still add its own 11's** as a group game on top of the field pool. One Keep / Toss answer per hole serves both, and the GPS bubble shows the tournament pool.
 - **Flights:** individual 11's follows your flights setting. Team 11's is always whole field, because a cart team can have a player in each flight.
 
 ### Cross Bets — Between Players in Different Groups *(new)*
@@ -2249,6 +2250,10 @@ Players get an alert when someone **takes or takes over closest to the pin**, an
 ### Net and Gross, Side by Side *(new)*
 
 The event leaderboard, each group's card and the shared round page show **Net and Gross** together, with each group's **tee time** and, on the shared page, the **total round time**.
+
+### Cross Bets in the Payouts *(updated)*
+
+Each cross bet is its own line and its own column in the per-game breakdown, named for the game it is: **Quota: Kevin v Rolo**, **Stroke play: …**, **Match: …** or **Nassau: …**. A bet played for **0 units** is listed too and shows **W**, **L** or **AS** instead of an amount.
 
 ### Split Pools Show the Math *(new)*
 
@@ -3232,7 +3237,7 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 ### 11's — What an Admin Can Do *(new)*
 
-- **Unlock a Keep / Throw out.** A choice locks once the next hole is scored. An app admin tapping a locked button gets a confirm and can change it — use this to fix a mis-tap, not to rethink a hole.
+- **Unlock a Keep / Toss.** A choice locks once the next hole is scored. An app admin tapping a locked button gets a confirm and can change it — use this to fix a mis-tap, not to rethink a hole.
 - **Whole-field pools settle on the event.** A tournament 11's or Team 11's set to *Whole field* is paid from the event leaderboard once every group is in; the carts' own Units show nothing for it. That is by design, not a missing award.
 - **Test events.** A finished practice event can be deleted by its commissioner from the Tourney tab like any other; its rounds and badges go with it.
 
@@ -3412,8 +3417,9 @@ Home used to download every event in the app for an admin. It now downloads only
 
 ## Glossary
 
-- **11's** — a pool where only your best 11 holes count and you choose Keep or Throw out after every hole.
-- **Throw-out** — a hole you chose not to count in 11's. You get 7.
+- **(0) beside a name** — that player is playing off zero. When strokes come off the low handicap, the low player in the group shows **(0)** and everyone else shows the difference.
+- **11's** — a pool where only your best 11 holes count and you choose Keep or Toss after every hole.
+- **Toss** — a hole you chose not to count in 11's. You get 7.
 - **Whole-field pool** — one prize pool that every group in a tournament plays for.
 - **Cross bet** — a bet between players in different groups of the same tournament.
 

@@ -1,5 +1,5 @@
 // qa/qa_v2084_elevens_hole_sheet.js -- real Chromium (playwright), phone-sized, real taps.
-// 11's: when the last score of a hole is in, ONE sheet lists everyone with Keep / Throw out (par or better starts
+// 11's: when the last score of a hole is in, ONE sheet lists everyone with Keep / Toss (par or better starts
 // on Keep), one Done saves them all. Also: the card refreshes after a score, the gate opens the sheet, an
 // unanswered hole can always be answered, and 11's / Team 11's sit under Single games / Team games in setup.
 //   node qa/qa_v2084_elevens_hole_sheet.js golf-app.html
@@ -33,7 +33,8 @@ const { chromium } = require('playwright'), path = require('path'), fs = require
   await start();
   ok((await score('p0', 1)) === 4, 'first score goes in');
   const b1 = await p.evaluate(() => document.getElementById('game-banners').innerText);
-  ok(/Tyler[^\n]*\n?[\s\S]*Keep E/.test(b1) && !/Tyler Q? ?0\/11 kept[^\n]*\nScore first/.test(b1), 'the 11\'s card refreshes after a score (it used to stay on "Score first")', b1.slice(0, 200));
+  const b1n = await p.evaluate(() => document.querySelectorAll('#game-banners button').length);
+  ok(/Tyler[^\n]*\nE · keep or toss once every score is in/.test(b1) && b1n === 0 && !/before the next hole/.test(b1), 'the 11\'s card refreshes after a score, and asks nothing until every score is in (no buttons, no warning)', b1.slice(0, 200));
   await p.waitForTimeout(1900);
   ok((await sheet()) === null, 'no sheet while players are still missing a score');
   await score('p1', 1); await score('p2', 1); await score('p3', 2);   // Steve: bogey
@@ -41,18 +42,18 @@ const { chromium } = require('playwright'), path = require('path'), fs = require
   await p.waitForTimeout(1900);
   let S = await sheet();
   ok(S && /Hole 1/.test(S.title) && S.rows.length === 4, 'ONE sheet for the hole, a row for every player', S);
-  ok(S && S.rows[0].sel === 'k' && S.rows[1].sel === 'k' && S.rows[2].sel === 'k' && S.rows[3].sel === 'x', 'pars start on Keep, the bogey starts on Throw out', S && S.rows.map(r => r.who + ':' + r.val + ':' + r.sel));
-  ok(S && S.rows[0].val === 'E' && S.rows[3].val === '+1' && /made 5/.test(S.rows[3].text) && /0\/11 kept/.test(S.rows[0].text), 'each row shows the score, to par, and holes kept', S && S.rows.map(r => r.text));
+  ok(S && S.rows[0].sel === 'k' && S.rows[1].sel === 'k' && S.rows[2].sel === 'k' && S.rows[3].sel === 'x', 'pars start on Keep, the bogey starts on Toss', S && S.rows.map(r => r.who + ':' + r.val + ':' + r.sel));
+  ok(S && S.rows[0].val === 'E' && S.rows[3].val === '+1' && /made bogey/.test(S.rows[3].text) && /made par/.test(S.rows[0].text) && /0\/11 kept/.test(S.rows[0].text) && /keep or toss\?/.test(S.title), 'each row says what he made (par, bogey), to par, and holes kept; the buttons read Keep / Toss', S && S.rows.map(r => r.text));
   ok(S && S.btnH >= 44 && !S.inline && S.done, 'big tap targets, no inline button styles, one Done button', S && { h: S.btnH, inline: S.inline });
   await p.screenshot({ path: '/tmp/el_sheet.png' });
-  // flip Kevin to Throw out with a real tap, then Done
+  // flip Kevin to Toss with a real tap, then Done
   await p.locator('#bg-el-sheet .bg-el-sh-row').nth(1).locator('.bg-el-sh-btn[data-el-v="x"]').tap(); await p.waitForTimeout(150);
   S = await sheet();
   ok(S && S.rows[1].sel === 'x' && S.rows[0].sel === 'k', 'one tap flips a player; the others stay', S && S.rows.map(r => r.sel));
   await p.locator('#bg-el-sh-done').tap(); await p.waitForTimeout(300);
   const after = await p.evaluate(() => { const g = state.game; return { open: !!document.getElementById('bg-el-sheet'), d: ['p0','p1','p2','p3'].map(id => g.elevensData && g.elevensData[id] && g.elevensData[id][1] && g.elevensData[id][1].v), stamps: ['p0','p1','p2','p3'].every(id => g.elevensData[id][1].at > 0), saves: window.__saves, banner: document.getElementById('game-banners').innerText }; });
   ok(!after.open && after.d.join('') === 'kxkx' && after.stamps, 'Done saves every answer at once and closes', after.d);
-  ok(/1\/11 kept/.test(after.banner) && !/Keep or throw out before the next hole/.test(after.banner), 'the card on the score screen shows the answers', after.banner.slice(0, 160));
+  ok(/1\/11 kept/.test(after.banner) && !/Keep or toss before the next hole/.test(after.banner), 'the card on the score screen shows the answers', after.banner.slice(0, 160));
   await p.evaluate(() => { state.currentHole = 2; });
   ok((await score('p0', 1)) === 4, 'the next hole takes a score straight away');
 
@@ -62,8 +63,10 @@ const { chromium } = require('playwright'), path = require('path'), fs = require
   await p.waitForTimeout(1900);
   await p.locator('#bg-el-sh-later').tap(); await p.waitForTimeout(150);
   ok((await sheet()) === null, '"Not now" closes the sheet');
-  const hasOpenBtn = await p.evaluate(() => { const bb = document.querySelector('#game-banners .bg-el-open'); return bb ? bb.innerText : null; });
-  ok(/Keep or throw out . hole 1/.test(hasOpenBtn || ''), 'the card keeps a button to reopen it', hasOpenBtn);
+  const card = await p.evaluate(() => { const B = document.getElementById('game-banners'); return { open: !!B.querySelector('.bg-el-open'), keep: B.querySelectorAll('[data-el-v="k"]').length, toss: [...B.querySelectorAll('[data-el-v="x"]')].map(x => x.innerText.trim()).join(), warn: /Keep or toss before the next hole/.test(B.innerText) }; });
+  ok(!card.open && card.keep === 4 && card.toss === 'Toss,Toss,Toss,Toss' && card.warn, 'after "Not now" the card has Keep / Toss for each player and no extra button underneath', card);
+  await p.evaluate(async () => { await handleScoreChange('p3', 'inc'); }); await p.waitForTimeout(1900);
+  ok((await sheet()) === null, 'the sheet pops up once: changing a score afterwards does not bring it back');
   await p.evaluate(() => { state.currentHole = 2; });
   const s2 = await score('p0', 1); await p.waitForTimeout(200);
   S = await sheet();
