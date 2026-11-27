@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2087
+**Build Version:** v2026.11.2088
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
