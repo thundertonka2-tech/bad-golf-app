@@ -1,6 +1,6 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.1922
-**Documentation Date:** October 2026
+**Build Version:** v2026.11.2080
+**Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
 ---
@@ -414,6 +414,8 @@ Tap **View** on any completed round (on Home, **Rounds**, **Crew** or the Tourne
 
 > **Why the event block matters.** The sheet's final standings used to be group-only. On an event where all the units sat in event prize pools, it could cheerfully say *"All square — nobody trails anybody. 🍻"* while real units were still outstanding across the field. Now the group block is labelled **Final standings — this group** and the event block sits right under it, so the two read as group-then-event. While other groups are still playing, the whole-event final standings carries a **"Provisional — N of M groups finished"** note.
 
+> **Putts & greens only show when a game uses them** *(new)*. The **Putts & greens** block on the Games sheet, and the small *"Putts & GIR tracked"* line on the Board, now appear only when putts or greens in regulation decide a game on that round (Fewest Putts, Most GIRs, a GIR or 3-putt junk, Arnie and the like). If nothing is riding on them, they stay out of the way. Your stats still record them.
+
 ### Find a Course — Moved
 
 The **Find a Course** card moved off Home to the new **Courses** tab (**More → 🗺️ Courses**), together with the **Live Holes Across America** cameras. See [Courses Tab](#courses-tab). The **"Can't find your course?"** request still works from there — type the name and city and send it; admins add it (usually within 24h).
@@ -701,6 +703,10 @@ A **"🎤 Say the scores"** button sits at the top of the score entry. Tap it an
 - Nothing is written until you tap **Add scores**
 - The button is hidden in view-only mode, on a finished round, and on a scramble (team scores only)
 
+### Scoring Out of Signal *(new)*
+
+Scores you enter with no signal are kept on the phone and reach the group as soon as you are back in range — even if the phone never says it reconnected. **Retry** sends them straight away.
+
 ### Two Phones Scoring the Same Round
 
 Scoring from more than one phone is safe. Before saving, the app re-reads the shared card, queues the save rather than blindly overwriting when it can't read, and re-sends any of your own entries that got wiped on another device (within about 15 seconds). Solo rounds behave exactly as before, and tapping Finish still saves immediately.
@@ -816,6 +822,19 @@ Every player's row carries **"· left the round?"** on its HCP line. Tap it, con
 ### Match View on Every Scorecard
 
 Match play, Team match play and Scramble-as-match rounds show a **Match | Strokes** tab pair on every card — Games screen, Score tab, the GPS mini-card, results and the share image. Cells read `1↑ / AS / 2↓`, totals read `W 3&2`, `L 1 up`, `Halved`, `2↑ thru 11`. Match opens first; a round that also has a stroke format opens on Strokes.
+
+### Scorecard Tabs — Strokes · Match · Units · Quota · 11's *(updated)*
+
+Every scorecard in the app — Games screen, Score tab, the GPS mini-card, the round summary, the event leaderboard and the shared page — carries a row of tabs for the games on that round. Only tabs with something behind them show.
+
+- **Strokes** — the plain card.
+- **Match** — hole-by-hole match status (see above).
+- **💵 Units** — what each hole moved.
+- **🎯 Quota** — points per hole, then a line under each player: *"27 pts · quota 24 · +3"*. **Players are listed 1st to last**, with the place in front of each line.
+- **Points games** (Stableford, 6's, Niners and the rest) — one tab each, with *"34 pts · 1st"* under each player.
+- **🔢 11's / Team 11's** *(new)* — each **kept** hole shows its strokes, each **thrown-out** hole is **crossed out**, and a hole still waiting on a choice shows a **?**. Under each player: *"42 strokes · 11/11 kept · 1st"*. On a tournament's whole-field card the places are across every group.
+- **A cross-group Quota bet** on the event's **Matches** card now shows each player's **points per hole**, and the row ends *"27 pts · quota 24 · +3"*.
+- **A round that starts on the back nine** shows holes 10–18 first, then the front nine.
 
 ### Editing Scores
 
@@ -1045,6 +1064,8 @@ Small heads-up bubbles ride down the right side of the GPS screen. Tap one to ju
 - **💥 Long Drive** — the tournament's longest drive
 - **LEADER / net +X** — the **Low Net Pool** leader only. It ranks pool players by running net-to-par using the pool's own handicap allowance, and its tooltip reads *"Low Net Pool — current net leader."*
 - **🏹 Team Quota** — in a tournament this reads the **whole field**, not just your cart. It names the leading team and the gap to second — e.g. **`SHANK +3 · 8 teams`** — with **long-press** listing every team, and **tapping it opens the Event Leaderboard scrolled to the Team Quota block** (closing returns you where you were). Dead level reads **TIED**. Outside a tournament it falls back to your round's own teams. *If the tournament can't be read, the bubble stays put and says the standings couldn't load rather than silently rerouting you.*
+- **🎯 Quota** — your **place**. In a tournament pool it is your place in the **whole tournament** (*"T2nd · of 14"*), not just your group
+- **🔢 11's** *(new)* — while you are still choosing, your **strokes over the holes you have kept** with *"7/11"* underneath; once your 11 are in, your **place** (*"T2nd · of 14"*). Ties show a **T**. If the tournament has an 11's pool **and** your group has its own, the bubble shows the **tournament** one — that is the main game. The edge turns gold while a hole is waiting on Keep or Throw out. Tap it to open the Board
 - **Match play status chips** — e.g. **"vs SJ 3 UP"**, including day-level, group-level and cross-group matches inside a tournament. Status only — no units on these chips
 - **NET bubble** and game chips — tap either to jump to the Games screen
 
@@ -1408,6 +1429,12 @@ Any even-sized teams. Each hole the **better ball** on each team competes; the m
 #### **🎯 Team Low Ball**
 Same teams, but **sum each team's best ball over all 18 holes**; lowest total wins. *Same per-cart rule as Team Match in a 3+ team event.*
 
+**Tied hole goes to the next lowest score** *(new — Team Match Play, Team Low Ball, Best Ball Pool and the 4-man Best Ball field)*. Switch **"Tied hole: next lowest score breaks it"** on and a hole where both teams' best balls tie is decided by each team's **second** ball, then the third and fourth; only if every ball matches is the hole halved. A team with a second ball beats a team with none.
+
+- **Example:** you and Kevin both make par. Rolo makes par and Steve makes bogey. Best balls tie at par, your team's second ball is a par against their bogey — **your team wins the hole.**
+- In **Team Low Ball** the tie-breaker decides a tied **total** the same way: the team with the better second-ball total wins.
+- Off by default, so existing games play exactly as before.
+
 #### **🏁 Shamble**
 A scramble off the tee, then real golf. **Everyone on the team tees off, the team picks the best drive, and every player plays their own ball from that spot into the hole.** Two even teams, **4+ players**.
 
@@ -1519,6 +1546,31 @@ The **most greens in regulation over 18** takes the prize pool. **Turning this o
 
 #### **Fewest Putts Pool**
 The **fewest total putts over 18** takes the prize pool. **Turning this on switches putt tracking on automatically.** **Blank putts count as 0 once the round is finished.** On any hole you scored with the putts box left empty, the app treats it as **0 putts** (a chip-in or hole-out) — as long as you logged putts at least once that round. There are no mid-round warnings. A player who logged **no putts at all** can't win it but still puts in his entry.
+
+#### **🔢 11's** *(new)*
+Everyone puts in the same entry, but **only your best 11 holes count** (6 on a nine-hole round). The catch: you have to decide **right after each hole** whether that hole is one of your 11.
+
+- **Keep or Throw out.** As soon as a hole is scored, the score screen shows an **11's** card with two buttons for each player — **Keep** (with the strokes it would add) and **Throw out**. The card also shows how many holes you have kept, your running total and how many throw-outs you have left.
+- **You must choose before the next hole.** The app will not take your next hole's score until the hole before it has an answer. It tells you which hole and which player it is waiting on.
+- **The choice locks.** You can change your mind until the next hole has a score. After that it is locked (an app admin can still correct a mistake).
+- **7 throw-outs, 11 keeps.** Once you have thrown out 7 holes, every hole left counts automatically. Once you have kept 11, the rest are not needed. So the last hole never needs a choice.
+- **Raw strokes, net or gross.** Your total is the strokes on the holes you kept. Pick **Net** (with its own **"Handicap for 11's"** slider) or **Gross** when you set the game up. **Lowest total wins.**
+- **Split:** **Winner takes all**, **80/20** or **70/30** between 1st and 2nd. **Ties share the places they cover** — two players tied for 1st on an 80/20 split the whole pool; two tied for 2nd split the 20.
+- **Player picker:** tick who is in, like every other pool. A player who leaves the round gives his entry and cannot win.
+- **Where you see it:** the **11's** card on the score screen, an **11's bubble** on the GPS screen, an **11's tab** on the scorecard, the **Board**, and the round summary.
+- **Worked example:** 4 players at **5 units** (20 in the pool), 80/20. Totals over each player's 11 kept holes: Ann 42, Bob 44, Cal 47, Dan 47. **Ann +11** (16 less her 5), **Bob −1** (4 less his 5), **Cal −5, Dan −5.**
+
+> **A hole you never answered.** If a round is finished with a hole still unanswered, that hole counts as kept (as long as you still owed keeps). Scores typed through the scorecard editor are not blocked, so answer those holes on the score screen before you finish.
+
+#### **🔢 Team 11's** *(new)*
+The same game for two even teams, on the **team's low ball**.
+
+- Each hole the team's score is its **lowest ball** (net or gross — your choice at setup). The team's hole is ready once every partner still in the round has a score.
+- **The team** chooses **Keep** or **Throw out**, and nobody on the team can score the next hole until it does. Best **11 team holes** count, 7 throw-outs, same locking rule.
+- **Lowest team total wins.** Each player on the other team gives the units. A tie moves nothing.
+- **Example:** 2 units a player. Team A's 11 kept holes total 41, Team B's total 44 → each Team A player **+2**, each Team B player **−2.**
+
+**In a tournament** both games can be **one pool across every group** — see *Whole-Field 11's and Team 11's* in the Tourney section.
 
 ### Side Games
 
@@ -1994,6 +2046,12 @@ Every row shows **date · course · players · final score · status**, and the 
 
 Tap any past round card to open the **💵 Games sheet** — final scores, units settled, the full scorecard with gross and net, the whole-event block on a tournament round, and **🔓 Reopen round**.
 
+### Tap Any Past Round *(new)*
+
+Tap a past round anywhere — Game history, your Stats lists, Best Round, a badge, a played tee time, a friend's rounds or a Friends highlight — and its full summary opens: games, scorecard and stats. A round still being played opens live.
+
+**A round you were not in is view only.** Texting final standings, reopening and deleting are for the players in that round.
+
 ### Deleting a Round — Who It Affects
 
 Delete lives on the round's Games sheet.
@@ -2155,6 +2213,44 @@ Two clearly separate ideas:
 
 Configure Day starts clean for every new event and every new day — no carried-over ticks, hole chips or units — and keeps your work until you tap **Save Day**. The CTP hole picker shows par 3s only.
 
+### Whole-Field 11's and Team 11's *(new)*
+
+Pick **11's** or **Team 11's** on **Configure games** and a row appears: **"Who plays for the pool"**.
+
+- **Whole field — every group, one pool** *(the default)*. Every player (or every cart team) in the event plays for a single pool. Each cart still does its own **Keep / Throw out** on its own score screen; the event ranks every card.
+- **Each group plays its own** — every cart settles its own 11's, like a group game.
+- **Net or gross**, the **entry**, and the **split** (winner takes all, 80/20 or 70/30) are set once for the whole field. **Ties share the places they cover.**
+- **Team 11's across the field:** every cart's two teams are ranked against every other team in the event. The entry is per player, and a winning team's share is divided among its players.
+- **Nothing is paid until every group is in.** The event leaderboard shows **11's** and **Team 11's** as their own columns (marked pending while a group is still out) and the awards list shows the winner, the split and the totals.
+- **A cart can still add its own 11's** as a group game on top of the field pool. One Keep / Throw out answer per hole serves both, and the GPS bubble shows the tournament pool.
+- **Flights:** individual 11's follows your flights setting. Team 11's is always whole field, because a cart team can have a player in each flight.
+
+### Cross Bets — Between Players in Different Groups *(new)*
+
+A **Cross bets** step in tournament setup takes **Match play, Nassau, Stroke play** and **Quota** between players who are not in the same group, all in one place.
+
+- Tick two players for a head-to-head. Tick three or more for everyone against everyone, or one 3-way Nassau.
+- **Net or gross**, any units — including **0 units**, just for bragging rights.
+- **You do not need the commissioner.** Set a bet you are in from inside your own group, or from your card during the round, and remove it until your round is finished.
+- Two players who end up in the **same** group: the bet simply becomes that group's own game at the start.
+- The event page's **Matches** tab lists every cross bet with the game and the units, plus each group's own games, before and after the start. Payouts list each cross bet on its own line, by opponent and result.
+
+### Adding a Player After the Start *(new)*
+
+The commissioner can add a player once the tournament is under way: pick the group and the player joins from the next hole. If every group is full, the app opens a **new group** instead of squeezing a fifth into a full cart.
+
+### Live Alerts During an Event *(new)*
+
+Players get an alert when someone **takes or takes over closest to the pin**, and when a **new player takes first place**.
+
+### Net and Gross, Side by Side *(new)*
+
+The event leaderboard, each group's card and the shared round page show **Net and Gross** together, with each group's **tee time** and, on the shared page, the **total round time**.
+
+### Split Pools Show the Math *(new)*
+
+A Quota, Stableford or 11's pool that is split spells it out — the pool, the split, any ties and what each player took — on the leaderboard, in Game Totals and on the event page.
+
 ### Flights
 
 **Settings → 🏳️ Flights** splits the field by handicap so each flight plays for its own prizes. **One flight (everyone together) is the default**, and the row only appears once the field is **more than 8 players**. It gets a green check once flights are saved.
@@ -2254,6 +2350,12 @@ Pushes that go to **everyone in the event** (commissioner included):
 When players tie for **Low Net** in a tournament, the prize goes to a **USGA card-off**: lowest **back 9**, then **back 6**, then **back 3**, then the **18th hole** — handicap-adjusted for net. Nine-hole events use the last 6, last 3 and last hole. Only a tie that survives all of that splits. Rounds played before this change keep their old result.
 
 ### Invites
+
+**Guests who were added by name** *(new)*. When a commissioner adds someone by name without knowing their number, that player can still land in the right spot:
+
+- **Any player in the event can send the invite**, not only the commissioner. The text now carries a **tap-your-name link** that opens the app on that exact spot.
+- **"Is this you?" on Home.** When a player signs in and an event has an open spot with their first name (or a nickname the crew uses for them), Home shows a card: *"Is this you? — [event], [name]"*. One tap claims the spot and links the round they are already being scored in.
+- The same link works from the invite text and from the Home card.
 
 **Quick-setup events:** invites and the join link open after your first **💾 Save** (see the checklist above). **Full-setup events:** invites are sent from the **Review & start** step. The first time you reach it with every step done, the app asks once: *"Your event is set. Send the invites now? Players with the app get a notification; everyone else gets the link by text."* → **📨 Send invites** / Later. **✉️ Personal invites** on the Review step resends any single one; the invite icon is 📨 everywhere. There are no phone numbers to type — the text invite opens your own Messages app, and it says what you're playing (*"We're playing Skins and Low Net Pool"*).
 
@@ -3123,6 +3225,16 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 
 **The wager block is gone from the admin dashboard**, along with the wager branch in the Inbox invite list and the wager icon. The `wagers` table was dropped server-side. If an old admin note refers to wager rows, there are none.
 
+### 11's — What an Admin Can Do *(new)*
+
+- **Unlock a Keep / Throw out.** A choice locks once the next hole is scored. An app admin tapping a locked button gets a confirm and can change it — use this to fix a mis-tap, not to rethink a hole.
+- **Whole-field pools settle on the event.** A tournament 11's or Team 11's set to *Whole field* is paid from the event leaderboard once every group is in; the carts' own Units show nothing for it. That is by design, not a missing award.
+- **Test events.** A finished practice event can be deleted by its commissioner from the Tourney tab like any other; its rounds and badges go with it.
+
+### Home Loads Only Your Own Events *(new)*
+
+Home used to download every event in the app for an admin. It now downloads only the events you are in or run, which makes Home and joining a round faster at the course. Admin screens look up any other event when you open it — nothing was removed.
+
 ### Two Controls That Were Removed
 
 - **"Assign to account (admin)"** is gone from the detailed past-round entry screen. There is no longer any in-app way to log a round onto somebody else's account. This was dropped deliberately, not hidden.
@@ -3294,6 +3406,11 @@ Four admin tools are complete in code but deliberately have **no buttons**: **Re
 ---
 
 ## Glossary
+
+- **11's** — a pool where only your best 11 holes count and you choose Keep or Throw out after every hole.
+- **Throw-out** — a hole you chose not to count in 11's. You get 7.
+- **Whole-field pool** — one prize pool that every group in a tournament plays for.
+- **Cross bet** — a bet between players in different groups of the same tournament.
 
 *New since the last edition: **🟢 Green view** (green outlines, slope colours and a shared today's pin on 10,900+ courses); **👀 Course Preview** front and centre (course page, flyover, the at-the-course card on Home, signed-out preview, and a tee-time reminder); **Holes to play** for every game and every tournament day, including **Pick a starting hole**; the **Apple Watch** scoring the whole group with hole stats, units, a satellite hole map, green view, arcs and shot tracking; **🙋 Who's in the side games** on a live event; **Pending** event lines in Game history; settings that follow your account; and, for admins, the **Green mapping** and **Slope needed** queues, **🛠️ Re-map hole**, **🚩 Mapped wrong** and the three-step course request flow. Earlier: **🎯 Distance arcs & miss zone** on the GPS map (yardage arcs with plays-like labels, club arcs, the TO GREEN preview, and a miss zone that learns from your tracked shots); Track Shot remembering your aim; **Auto-advance after the last score** (the next hole opens by itself once every field on the hole is in — a setting: → GPS, → Scorecard or Off); the **Mulligans** tracker (do-over counter, per-player cap, scorecard marks, "Most mulligans", Do-Over and Breakfast Ball badges — and a mulligan round doesn't post to your handicap); **"⛳ Enter a Past Round"** (the Stats button and form were called "Add a Round"); a friend's **Game history** showing every round they played, not just the ones you were in; spectating a group keeps every player on the same hole; the Bad Golf team can reply to your Contact us messages in the app; Vegas's "Net — only natural birdies/eagles flip or double" (the previous edition's new default); the 📣 Huckle available banner; the Skins leftover carry going to low total; blank putts counting as 0 after Finish; tournament carts of up to 5 and the launch fit check; "(your group)" game cards; Live now on Home with ▶ Join for your own round; the notifications card; and "That's you?" seat claims.*
 

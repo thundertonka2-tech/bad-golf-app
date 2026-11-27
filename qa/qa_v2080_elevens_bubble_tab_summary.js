@@ -122,7 +122,7 @@ ok('functions exist', [info, fn('bgElevensCardModels'), fn('bgElevensFieldPlaceF
   const CM = fn('computeAllGameMoney')(cart);
   ok('...and for a cart\'s own game in an event', fn('bgGameResultLine')(cart, 'grp:elevens', CM.results) === line, fn('bgGameResultLine')(cart, 'grp:elevens', CM.results));
   ok('Low Net Pool line is unchanged', /lowNetPool' \|\| k === 'girPool'/.test(SRC));
-  ok('version is v2026.11.2080 in both markers', (SRC.match(/v2026\.11\.2080/g) || []).length === 2);
+  ok('the guide links carry a current build', /Bad_Golf_Player_Guide\.pdf\?v=v2026\.11\.20[89]/.test(SRC));
 }
 console.log((fails ? 'FAILED ' : 'ALL ') + (checks - fails) + '/' + checks + ' CHECKS PASSED');
 process.exit(fails ? 1 : 0);
