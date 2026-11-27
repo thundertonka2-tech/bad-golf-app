@@ -7,7 +7,7 @@
 const { chromium } = require('playwright'), path = require('path'), fs = require('fs');
 (async () => {
   const FILE = path.resolve(process.argv[2] || 'golf-app.html'), SRC = fs.readFileSync(FILE, 'utf8');
-  const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, geolocation: { latitude: 32.93, longitude: -96.46 }, permissions: ['geolocation'] });   // GPS allowed, so the "location denied" panel never lands on top of a later scenario
   const errs = []; p.on('pageerror', e => errs.push(String(e).slice(0, 200)));
   await p.goto('file://' + FILE); await p.waitForTimeout(2500);
   const fails = []; let n = 0; const ok = (c, name, d) => { n++; if (!c) fails.push(name + (d !== undefined ? '   ' + JSON.stringify(d).slice(0, 500) : '')); };
@@ -19,6 +19,7 @@ const { chromium } = require('playwright'), path = require('path'), fs = require
       games: Object.assign({ elevens: { value: 5, mode: 'pool', net: true, hcpPct: 100, payout: 'winner', participants: players.map(x=>x.id) } }, extraGames || {}) };
     window.__saves = 0; saveGame = async () => { window.__saves++; return true; };
     try { bgElevensSheetClose(); } catch (e) {}
+    try { const dp = document.getElementById('gps-denied-panel'); if (dp) dp.style.display = 'none'; } catch (e) {}   // harness has no GPS; scenario 4 leaves this panel up
     try { localStorage.setItem(KEY_AUTO_ADVANCE, 'off'); } catch (e) {}
     state.game = g; state.currentHole = 1; state.viewOnlyMode = false;
     try { switchTab('score'); } catch (e) {}
@@ -122,6 +123,19 @@ const { chromium } = require('playwright'), path = require('path'), fs = require
   // last hole: nowhere to go next, so the sheet has a plain Done
   const last = await p.evaluate(() => { const g = state.game; g.players.forEach(pl => { for (let h = 0; h < 18; h++) g.scores[pl.id][h] = g.pars[h]; }); state.currentHole = 18; const cn = bgElevensSheetCanNext(g, 18); const cn5 = (state.currentHole = 5, bgElevensSheetCanNext(g, 5)); return [cn, cn5]; });
   ok(last[0] === false && last[1] === false, 'when there is no next hole to play the sheet keeps a plain Done', last);
+
+  // ---- 4b. v2087 (Tyler): scores in, then Next tapped straight away (inside the wait) -> the sheet comes FIRST ----
+  await start();
+  await score('p0', 1); await score('p1', 1); await score('p2', 1); await score('p3', 1);
+  const nx = await p.evaluate(async () => { await document.getElementById('auto-advance-btn').onclick(); await new Promise(r => setTimeout(r, 200)); const ov = document.getElementById('bg-el-sheet'); return { hole: state.currentHole, open: !!ov, title: ov && ov.querySelector('h2').innerText, next: !!(ov && ov.querySelector('#bg-el-sh-gps')) }; });
+  ok(nx.hole === 1 && nx.open && /Hole 1/.test(nx.title) && nx.next, 'tapping "Next hole" before the sheet has popped up opens the sheet instead of leaving the hole', nx);
+  await p.locator('#bg-el-sh-score').tap(); await p.waitForTimeout(500);
+  const nx2 = await p.evaluate(() => ({ hole: state.currentHole, open: !!document.getElementById('bg-el-sheet'), d: ['p0','p1','p2','p3'].map(id => state.game.elevensData[id] && state.game.elevensData[id][1] && state.game.elevensData[id][1].v).join('') }));
+  ok(nx2.hole === 2 && !nx2.open && nx2.d === 'kkkk', '...and its Next button saves the answers and moves on to hole 2', nx2);
+  // a wait still running for hole 1 is not thrown away when another hole is armed
+  await start();
+  const arm = await p.evaluate(async () => { const g = state.game; g.players.forEach(pl => { g.scores[pl.id][0] = 4; }); bgElevensSheetArm(g, 1, 5000); state.currentHole = 2; bgElevensSheetArm(g, 2, 5000); await new Promise(r => setTimeout(r, 150)); const ov = document.getElementById('bg-el-sheet'); const t = ov && ov.querySelector('h2').innerText; bgElevensSheetClose(); return t; });
+  ok(/Hole 1/.test(arm || ''), 'moving to another hole while hole 1 was still waiting to ask brings hole 1\'s sheet up at once', arm);
 
   // ---- 5. view only never sees it; a round without 11's never sees it ----
   await start();

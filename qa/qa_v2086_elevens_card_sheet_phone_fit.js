@@ -15,7 +15,7 @@ const { chromium } = require('playwright'), path = require('path');
       document.documentElement.setAttribute('data-theme', theme);
       const PARS = [4,4,5,3,4,4,4,3,4,4,4,3,4,5,4,5,3,4], SIS = [9,11,3,15,13,1,7,17,5,8,10,18,14,12,6,4,16,2];
       const players = [['Christopher','Montgomery'],['Kevin','W'],['Rolo','M'],['Larry','B']].map((nm,i)=>({id:'p'+i,name:nm[0]+' '+nm[1],firstName:nm[0],lastName:nm[1],hcp:0,rawHcp:0,baseHcp:0,teeLabel:'Blue'}));
-      players[1].avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mNkYPhfz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC';
+      { const cv = document.createElement('canvas'); cv.width = 48; cv.height = 48; const cx = cv.getContext('2d'); cx.fillStyle = '#2a7'; cx.fillRect(0, 0, 48, 48); cx.fillStyle = '#fd3'; cx.fillRect(8, 8, 24, 30); cx.fillStyle = '#134'; cx.fillRect(20, 0, 10, 48); players[1].avatar = cv.toDataURL('image/jpeg', 0.8); }   // a real (not flat) picture
       const scores = {}; players.forEach(pl => { scores[pl.id] = new Array(18).fill(null); });
       const g = { code: 'FIT' + Math.floor(Math.random() * 1e6), players, scores, pars: PARS, sis: SIS, tees:[{label:'Blue',rating:72.2,slope:127,yards:6499}], hcpRules:{pct:100,basis:'full',holes:18}, course:'QA', courseId:'qa', createdAt: Date.now(), updatedAt: Date.now(),
         games: { elevens: { value: 5, mode: 'pool', net: true, hcpPct: 100, payout: 'winner', participants: players.map(x=>x.id) }, teamElevens: { value: 2, net: true, teamMode: '2man', teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] } } };

@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2086
+**Build Version:** v2026.11.2087
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -670,6 +670,22 @@ Once the last score on a hole goes in, the app can move to the next hole for you
 - **Setting:** More › ⚙️ Additional settings › **"Auto-advance after the last score"** — **GPS** (the default: the next hole opens on the GPS map), **Scorecard** (the next hole's scoring screen), or **Off**; the chosen one is highlighted with a ✓. The same choice sits as a small chip right under the next-hole buttons; tap it to switch mid-round.
 - **It only fires when the hole is fully entered.** Every player's score; putts for everyone when putts are tracked; a fairway hit or miss for everyone on a par 4/5 when fairways are tracked; the **Greenie** winner on a par 3; the **CTP** winner on a CTP hole; the **Long Drive** winner on its hole; and no missing **Wolf** pick. If anything is still blank, nothing happens and you advance with the buttons as usual. Things that are simply "none" when blank — penalties, sand, mulligans, junk chips, sips — never hold it up.
 - It never fires while you're scrolled back looking at an earlier hole, while spectating, or on the round's last hole (Finish takes over there).
+
+### The Scorecard on the Score Screen *(new look)*
+
+Under the score buttons, the scorecard now opens as **one big row per player**, built to be read at arm's length:
+
+- **Who:** the player's **profile photo**, or a colored circle with his initials. Every player in the group gets a **different color**. Two players with the same first name show a last initial — **Kevin W.** and **Kevin B.**
+- **Handicap:** a blue **HCP 12** tag on every row.
+- **Where he stands:** his **place** (ties show a **T**), a large **score to par**, then *"thru 14"* and **gross · net** totals. Players are listed **low to high** — on net when anyone is getting strokes, on gross when nobody is.
+- **Your own card starts open; everyone else's is collapsed.** Tap any row to open or close it.
+- **An open card** shows each nine on its own block: **Hole**, **Par**, **HCP** (the hole's handicap) and **Score**. A **white dot** above a score means he gets a stroke on that hole. The end of each nine shows the **gross with the net underneath**, and a **Total** line gives gross, net and net to par.
+- **Birdies are circled, bogeys are boxed, doubles or worse are filled in.**
+- **Skins:** a hole that won a skin gets a **bold blue circle**, and the row shows *"2 skins"*. In a tournament with whole-field skins, an **event skin** is circled in **gold** (a hole that won both gets both rings). Works the same in casual rounds, league rounds and tournament carts.
+- **A profile photo that is blank** (or fails to load) is replaced by the initials circle, so nobody shows up as an empty dot.
+- **Tap any score — played or not, yours or anyone's — to fix it.** It opens the same + / − editor described below.
+- **Classic scorecard:** the button at the top of the section switches back to the full table with yardages and the **Match · Units · Quota · 11's** tabs. Tap **New scorecard** to return. The app remembers your choice on that phone.
+- Scramble and Ryder Cup rounds (one ball per team) always use the classic card.
 
 ### Editing a Score Without Leaving the Card
 
@@ -1555,6 +1571,7 @@ Everyone puts in the same entry, but **only your best 11 holes count** (6 on a n
 - **Nothing is asked until every score is in.** While the group is still entering scores the 11's card just says *"Score first"* or *"Waiting on scores"*. The sheet then pops up **once**.
 - **The ✕ in the corner** closes the sheet without saving if you need to fix a score first. The 11's card then shows *"Keep or toss before the next hole"* with a **Keep** / **Toss** pair for each player, and the Board has a **"Keep or toss — hole N"** button that reopens the sheet.
 - **The 11's card on the score screen** has one row per player: his **profile photo** (or the circle with his initials), his **total to par**, **holes kept** (*"4/11 kept"*) and **tosses left**. Once a hole is answered, the row also shows that hole's **Keep** / **Toss** buttons with the choice lit up — tap the other one to fix a mistake. Team 11's shows both partners' photos side by side.
+- **Tapping Next hole too fast is fine.** If you tap **Next hole** before the sheet has popped up, the sheet opens first; its own Next button then takes you on.
 - **You must choose before the next hole.** If you try to score the next hole first, the app says which hole is waiting and **opens that hole's sheet for you**.
 - **The choice locks.** You can change an answer until the next hole has a score. After that it is locked (an app admin can still correct a mistake). A hole that was never answered can always be answered.
 - **Typing scores into the scorecard** works the same way: when a hole's last score is typed, its sheet opens.
@@ -1562,6 +1579,7 @@ Everyone puts in the same entry, but **only your best 11 holes count** (6 on a n
 - **Scored against par, net or gross.** Each hole you keep counts your score **against that hole's par** — a net birdie is −1, a par is E, a bogey is +1 — and your total is **to par** over the 11 holes you kept. So a par 5 is worth exactly as much as a par 3; there is no reason to throw the long holes out. Pick **Net** (with its own **"Handicap for 11's"** slider) or **Gross** when you set the game up. **Lowest total wins.**
 - **Split:** **Winner takes all**, **80/20** or **70/30** between 1st and 2nd. **Ties share the places they cover** — two players tied for 1st on an 80/20 split the whole pool; two tied for 2nd split the 20.
 - **Player picker:** tick who is in, like every other pool. A player who leaves the round gives his entry and cannot win.
+- **Game results** (Board and round summary) lists 11's with the same rows: place, photo or initials, total to par, holes kept, and the name with tosses left.
 - **Where you see it:** the **11's** card on the score screen, an **11's bubble** on the GPS screen, an **11's tab** on the scorecard, the **Board**, and the round summary.
 - **Worked example:** 4 players at **5 units** (20 in the pool), 80/20. Totals over each player's 11 kept holes: Ann −3, Bob −1, Cal +2, Dan +2. **Ann +11** (16 less her 5), **Bob −1** (4 less his 5), **Cal −5, Dan −5.**
 
