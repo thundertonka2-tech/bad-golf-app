@@ -184,7 +184,7 @@ const { chromium } = require('playwright'), path = require('path');
   ok(!(await p.evaluate(() => !!document.getElementById('bg-hole-edit'))), 'a viewer can open cards but tapping a score does nothing');
   await start(p, { games: { scramble: { value: 1, teamA: ['p0', 'p1'], teamB: ['p2', 'p3'] } } });
   S = await snap(p);
-  ok(!S.stand && S.tableShown && !S.swShown && S.cards.length === 0, 'a scramble keeps the classic card (one ball per team) and offers no switch', [S.stand, S.tableShown, S.swShown]);
+  ok(S.stand && !S.tableShown && S.swShown && S.cards.length === 2, 'v2089: a scramble now gets the new card too - one card per team (see qa_v2089)', [S.stand, S.tableShown, S.swShown, S.cards.length]);
   ok(p._errs.length === 0, 'no page errors (edge cases)', p._errs.slice(0, 2));
   await p.close();
 

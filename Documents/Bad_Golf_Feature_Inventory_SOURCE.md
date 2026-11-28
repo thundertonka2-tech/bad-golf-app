@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2088
+**Build Version:** v2026.11.2089
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -684,8 +684,16 @@ Under the score buttons, the scorecard now opens as **one big row per player**, 
 - **Skins:** a hole that won a skin gets a **bold blue circle**, and the row shows *"2 skins"*. In a tournament with whole-field skins, an **event skin** is circled in **gold** (a hole that won both gets both rings). Works the same in casual rounds, league rounds and tournament carts.
 - **A profile photo that is blank** (or fails to load) is replaced by the initials circle, so nobody shows up as an empty dot.
 - **Tap any score — played or not, yours or anyone's — to fix it.** It opens the same + / − editor described below.
-- **Classic scorecard:** the button at the top of the section switches back to the full table with yardages and the **Match · Units · Quota · 11's** tabs. Tap **New scorecard** to return. The app remembers your choice on that phone.
-- Scramble and Ryder Cup rounds (one ball per team) always use the classic card.
+- **Game tabs:** when the round has them, a row of tabs sits above the cards — **Strokes**, **Match**, **Units**, **Quota**, **11's** (and any other points game). Pick one and:
+  - the players re-order by **that game's standing** and the big number becomes **that game's result** (*"4↑ thru 14"*, *"+17"* units, quota points, 11's to par);
+  - the line under the name reads the game's own summary (*"T1st · 25 pts · quota 28 · −3"*, *"−5 to par · 10/11 kept"*);
+  - each open card keeps its **Hole / Par / HCP / Score** lines and adds **one game line** underneath: *1↑ / AS / 2↓* on Match, *+2 / −1* on Units, points on Quota, to-par on 11's with **tossed holes crossed out**;
+  - a player in **two matches** gets one line per match, each named for the opponent (*"Match v Kevin W."*);
+  - a player who is not in that game sits at the bottom and says **"Not in this game"**.
+  The tab you pick is remembered for the round and is the same tab the Classic scorecard opens on.
+- **Team rounds — Scramble and Ryder Cup:** one card **per team**, with every partner's circle side by side, the team's score to par as the big number, and the team's hole-by-hole card inside (Hole, HCP, Par, Score — plus the Format line on Ryder Cup and the Match line on a match-play scramble). Your own team's card starts open. Team scores are entered with the score buttons, not by tapping the card.
+- **Team best ball (tournament carts):** below the player cards, a dashed **team card** shows all partners' circles, the team's best ball on every hole and its total to par.
+- **Classic scorecard:** the button at the top of the section switches back to the full table with yardages. Tap **New scorecard** to return. The app remembers your choice on that phone.
 
 ### Editing a Score Without Leaving the Card
 
