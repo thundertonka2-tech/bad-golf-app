@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2092
+**Build Version:** v2026.11.2093
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -2179,7 +2179,7 @@ Any tournament day or league week that you **run or play in** appears on the cal
 Tap **"+ New tournament"**. Setup is five simple questions, one per screen, with a progress bar and **‹ Back** on every step:
 
 1. **What kind of tournament?** — **Everyone for themselves** (one leaderboard for the whole field), **Two teams** (Ryder Cup style), **2-man teams** or **Teams of 4** (scramble by default). *Bracket or another format? Use the full setup* opens the full create screen (see below).
-2. **What's it called?** — the name players see on the leaderboard and their invite. Add a logo later.
+2. **What's it called?** — the name players see on the leaderboard and their invite. Add a logo later. Tapping into the name puts the cursor where you tapped (it is not highlighted), and **Next** works with the keyboard still up.
 3. **How many days?** — tap 1 to 5, then the date. On a multi-day event the other days follow on, one a day.
 4. **Where are you playing?** — search the course list; **Same course every day** on a multi-day event. You can skip this and pick it later.
 5. **How will players get in?** — **Select the players** (pick from your friends and roster, or add guests — the picker opens as soon as you create) or **Send a join link**, and **I'm playing too** (on by default — off runs the event without you in the field).
