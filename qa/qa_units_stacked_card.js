@@ -25,7 +25,7 @@ const seg=(lo,hi,label,id)=>{
   const tabsHere = [...doc.querySelectorAll('.sc-tab')].map(b=>b.dataset.mode);
   ok('v2022: the points games have their own tabs', tabsHere.filter(m=>m==='quota'||/^pt:/.test(m)).length>=1, tabsHere.join(','));
   ok('v2022: no "points per hole" block under Units', doc.querySelectorAll('tbody.sc-units-band .sc-ub-head').length===0 && !doc.querySelector('table.sc-ub-mini'));
-  ok('v2022: no settles-after box under Units', doc.querySelectorAll('.sc-ub-foot').length===0, String(doc.querySelectorAll('.sc-ub-foot').length));
+  ok('v2022 + v2091: no settles-after box under Units; the "What these units are from" box at most once', doc.querySelectorAll('.sc-ub-foot').length<=1 && [...doc.querySelectorAll('.sc-ub-foot')].every(x => /What these units are from/.test(x.textContent) && !/Settles after the round|Round total, everything in/.test(x.textContent)), String(doc.querySelectorAll('.sc-ub-foot').length));
   // the Tot column carries everything in (single-table card: the mini GPS card here has no Tot column)
   const hdr0=['Player'].concat([1,2,3,4,5,6,7,8,9],['Out'],[10,11,12,13,14,15,16,17,18],['In'],['Tot']);
   let one0='<table id="solo0"><thead><tr>'+hdr0.map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>';
@@ -68,7 +68,7 @@ if (strip) {
   const back=[...r1.querySelectorAll('td')].slice(10,19).map(td=>td.textContent.trim());
   ok('  back-nine points are there too', back.some(v=>/\d/.test(v)), back.join(','));
 }
-ok('v2022: no settles-after footer (Tot carries it)', doc.querySelectorAll('.sc-ub-foot').length===0, String(doc.querySelectorAll('.sc-ub-foot').length));
+ok('v2022 + v2091: no settles-after footer (Tot carries it); the stacked card shows the "What these units are from" box once, not under each nine', doc.querySelectorAll('.sc-ub-foot').length<=1 && [...doc.querySelectorAll('.sc-ub-foot')].every(x => /What these units are from/.test(x.textContent) && !/Settles after the round|Round total, everything in/.test(x.textContent)), String(doc.querySelectorAll('.sc-ub-foot').length));
 
 // par row on the mini card must be tagged and hide in units
 const pars=[...doc.querySelectorAll('tr.sc-par-row')];

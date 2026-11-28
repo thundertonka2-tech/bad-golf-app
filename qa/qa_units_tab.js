@@ -117,13 +117,13 @@ ok('chips, side-bet match: strokes | match | units | quota (+ v2020 points tabs)
 const row = () => [...t.querySelectorAll('tbody tr[data-pid="p0"] td')].map(td => td.textContent.trim());
 w.bgScApplyMode(t, 'strokes');
 ok('Strokes restores the real scores', row()[1] === '4' && row()[3] === '2');
-ok('v2022: no band under the card at all (points games have their own tabs; Tot carries the end games)', !t.querySelector('tbody.sc-units-band'));
+ok('v2022 + v2091: under the card only the "What these units are from" box (points games have their own tabs; Tot carries the end games), hidden outside Units', (b => !b || (b.querySelectorAll('.sc-ub-head, .sc-ub-strip, .sc-ub-row').length === 0 && b.querySelectorAll('.sc-ub-foot').length <= 1 && [...b.querySelectorAll('.sc-ub-foot')].every(x => /What these units are from/.test(x.textContent) && !/Settles after the round|Round total, everything in/.test(x.textContent))))(t.querySelector('tbody.sc-units-band')));
 w.bgScApplyMode(t, 'match');
 ok('Match shows running status', /[↑↓]|AS/.test(row()[1] || ''), row().slice(1,4).join(','));
 w.bgScApplyMode(t, 'units');
 const ut = row();
 ok('Units shows signed numbers', /^[+−]\d/.test(ut[3] || ''), ut.slice(1,6).join(','));
-ok('v2022: still no band in Units', !t.querySelector('tbody.sc-units-band'));
+ok('v2022 + v2091: in Units, still no points band -- just the one "What these units are from" box naming each game', (b => !b || (b.querySelectorAll('.sc-ub-head, .sc-ub-strip, .sc-ub-row').length === 0 && b.querySelectorAll('.sc-ub-foot').length <= 1 && [...b.querySelectorAll('.sc-ub-foot')].every(x => /What these units are from/.test(x.textContent) && !/Settles after the round|Round total, everything in/.test(x.textContent))))(t.querySelector('tbody.sc-units-band')) && (b => !b || b.querySelectorAll('.sc-ub-foot .sc-ub-line').length >= 1)(t.querySelector('tbody.sc-units-band')));
 ok('hole 3 in the DOM == the model', ut[3] === m.rows.p0.cells[2], ut[3] + ' vs ' + m.rows.p0.cells[2]);
 ok('Out in the DOM == the model', ut[10] === m.rows.p0.out);
 ok('In in the DOM == the model', ut[20] === m.rows.p0.inn);

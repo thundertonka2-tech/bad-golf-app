@@ -22,7 +22,7 @@ ok('column detection still reads the HOLE header, not the par row',
 w.bgScApplyMode(t,'strokes'); ok('Strokes: par row visible', par().style.display==='', JSON.stringify(par().style.display));
 w.bgScApplyMode(t,'match');   ok('Match: par row visible',   par().style.display==='');
 w.bgScApplyMode(t,'units');   ok('Units: par row SHOWN (v2022: full card on every tab)', par().style.display==='', par().style.display);
-ok('v2022: no points/settle band under Units', !t.querySelector('tbody.sc-units-band') || [...t.querySelectorAll('tbody.sc-units-band .sc-ub-head, tbody.sc-units-band .sc-ub-foot')].length===0);
+ok('v2022 + v2091: no points band and no settles-after box under Units -- only the one-line-per-game "What these units are from" box', (b => !b || (b.querySelectorAll('.sc-ub-head, .sc-ub-strip, .sc-ub-row').length === 0 && b.querySelectorAll('.sc-ub-foot').length <= 1 && [...b.querySelectorAll('.sc-ub-foot')].every(x => /What these units are from/.test(x.textContent) && !/Settles after the round|Round total, everything in/.test(x.textContent))))(t.querySelector('tbody.sc-units-band')));
 w.bgScApplyMode(t,'strokes'); ok('back to Strokes: par row returns', par().style.display==='');
 ok('  and real scores are back', [...t.querySelectorAll('tbody tr[data-pid="p0"] td')][1].textContent.trim()==='4');
 console.log('\n'+(fails? fails+' FAILURE(S)':'ALL PAR-ROW CHECKS PASSED'));
