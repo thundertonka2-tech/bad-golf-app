@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2093
+**Build Version:** v2026.11.2094
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -2270,6 +2270,10 @@ A **Cross bets** step in tournament setup takes **Match play, Nassau, Stroke pla
 - **The screen.** Every player is a tile with his photo or initials — tap to tick him, tap again to untick. The game is four tiles (**Match play, Nassau, Stroke play, Quota**) and each option under it (sides, carry overs, net / gross, how it pays) is a pair of tap tiles — no dropdowns. Units have a **− / +** stepper. Bets already set show as cards with who is in, the game and the terms, and an **✕** to remove. A line above the buttons always says what you are about to add — *3 bets: Tyler v Britt, Tyler v Kevin, Britt v Kevin* — and the button reads **Add 3 bets**. The full rules sit behind **How it works**.
 - **Players & handicaps** (tournament setup): the list moves up and down only — it no longer slides sideways under your thumb — and when the controls are too wide for the row the stepper drops under the name instead of cutting the name off.
 - The event page's **Matches** tab lists every cross bet with the game and the units, plus each group's own games, before and after the start. **Cross-group Quota bets have their own Quota tab** — on the event page and on the event's whole-field scorecard (**Strokes | ⚔️ Matches (N) | 🎯 Quota (N)**); a tab only shows when the event has that kind of bet. Payouts list each cross bet on its own line, by opponent and result.
+
+### Joining a Round Already Under Way
+
+Joining or reopening a live round puts you on **the hole in play**: the hole your phone was last on, or — once the starting hole is scored — the first hole still to be scored. A fresh round, a back-nine start and a shotgun start still open on their starting hole.
 
 ### Adding a Player After the Start *(new)*
 
