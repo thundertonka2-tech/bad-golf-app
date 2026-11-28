@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2090
+**Build Version:** v2026.11.2091
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -814,6 +814,7 @@ Notes worth knowing:
 **Closest to the Pin:** tap the winner's name, punch in **feet + inches**. A CTP winner logged with no distance still wins the hole — a player from another group who *does* log a measured distance beats them.
 
 **Long Putt / Long Drive:** tap who holds the longest putt and log the distance — update it any time someone drains a longer one. Long Drive is marked by the organizer on the designated hole (there's no auto-measure).
+Tapping a name always takes — also while the distance box has the keyboard, and when the round has just refreshed from the server. A pick made on your phone is kept if the server's copy arrives without it, and if marking it ever fails the app says so ("Couldn't mark the long putt — tap the name again").
 
 **Junk:** a row of toggles for GIR, Sandy, Rolo, Barkie, Polie, Snake, Arnie, Chip-In. Tap player names to toggle; multiple players can score the same junk.
 
@@ -854,6 +855,7 @@ Every scorecard in the app — Games screen, Score tab, the GPS mini-card, the r
 - **Strokes** — the plain card.
 - **Match** — hole-by-hole match status (see above).
 - **💵 Units** — what each hole moved.
+  - **What these units are from.** Under the Units grid one short line per game names the game and what each player made or lost on it — *11's (your group) (paid at the end, not hole by hole) — Rolo +15 · Tyler −5 · Kevin −5 · Larry −5*. A game that pays once at the end (a pool like 11's) says so, which is why its holes read 0 and only **Tot** moves. Same line on the new scorecard's Units tab and on the results sheet.
 - **🎯 Quota** — points per hole, then a line under each player: *"27 pts · quota 24 · +3"*. **Players are listed 1st to last**, with the place in front of each line.
 - **Points games** (Stableford, 6's, Niners and the rest) — one tab each, with *"34 pts · 1st"* under each player.
 - **🔢 11's / Team 11's** *(new)* — each **kept** hole shows its score to par (−1, E, +1), each **tossed** hole is **crossed out**, and a hole still waiting on a choice shows a **?**. **Players are listed 1st to last**, with the place in front of each line: *"1st · −3 to par · 11/11 kept"*. On a tournament's whole-field card the places are across every group.
@@ -881,6 +883,7 @@ Every scorecard in the app — Games screen, Score tab, the GPS mini-card, the r
 **Reopening.** A finished round opens read-only with **"🔒 Round complete… Read-only view — tap Reopen to make edits"** and a gold **"🔓 Reopen round"** button (also on the Games sheet).
 
 - Tap **Reopen round**, fix the score or log the missed greenie, then tap **Finish round** again — **every award recalculates automatically, and the corrected card is what reaches your stats and handicap.** (The archive is written first, while the round is still fully loaded, so a bad connection can't leave the old scores behind.)
+- **Straight from the results sheet:** right after **Finish round**, the sheet's **🔓 Reopen round & edit** puts you back on the Score screen with the round live again — for the putt or greenie you forgot to mark.
 - Only one person should edit at a time. Everyone else should back out and back in to see the corrected numbers
 
 **Three banner states, and they now say the right thing:**
