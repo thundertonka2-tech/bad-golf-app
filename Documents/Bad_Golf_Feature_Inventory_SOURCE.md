@@ -1,5 +1,5 @@
 # Bad Golf App — Complete User Documentation
-**Build Version:** v2026.11.2089
+**Build Version:** v2026.11.2090
 **Documentation Date:** November 2026
 **Audience:** Non-technical users, Kevin, and support staff
 
@@ -2264,7 +2264,7 @@ A **Cross bets** step in tournament setup takes **Match play, Nassau, Stroke pla
 - **Net or gross**, any units — including **0 units**, just for bragging rights.
 - **You do not need the commissioner.** Set a bet you are in from inside your own group, or from your card during the round, and remove it until your round is finished.
 - Two players who end up in the **same** group: the bet simply becomes that group's own game at the start.
-- The event page's **Matches** tab lists every cross bet with the game and the units, plus each group's own games, before and after the start. Payouts list each cross bet on its own line, by opponent and result.
+- The event page's **Matches** tab lists every cross bet with the game and the units, plus each group's own games, before and after the start. **Cross-group Quota bets have their own Quota tab** — on the event page and on the event's whole-field scorecard (**Strokes | ⚔️ Matches (N) | 🎯 Quota (N)**); a tab only shows when the event has that kind of bet. Payouts list each cross bet on its own line, by opponent and result.
 
 ### Adding a Player After the Start *(new)*
 
@@ -2417,7 +2417,7 @@ Each event on the Tourney tab is one card: the name, date and tee time, then a s
 - **Each cart has to fit the day's games** — Vegas and Ryder Cup need exactly 4, a 2-man scramble needs 4. If some carts don't fit, you're asked *"Launch the others anyway?"* and those carts stay unstarted until they're re-paired. If none fit, **"Nothing launched"** tells you which to fix. Moving a player into a cart whose round has already opened is blocked — swap instead.
 - **Games a cart set up for itself** (its own Nassau, Skins, Greenie, Birdie Bump…) get their own cards on the Games screen, tagged **(your group)**, alongside the field games.
 - Starting a day lands the commissioner in their own group's round. Each group is its own round; its **scorekeeper** keeps the card the way any round is scored. The Score tab's **"· left the round?"** works here too.
-- **The Event Leaderboard** — the 🏆 icon on the card — tabs by **Day N · Group M** (a sideways-scrolling pill strip on phones) with a **Strokes | ⚔️ Matches (N)** pair on match days, cross-group matches included. The Long Drive prize pool row names the winner and the day.
+- **The Event Leaderboard** — the 🏆 icon on the card — tabs by **Day N · Group M** (a sideways-scrolling pill strip on phones) with a **Strokes | ⚔️ Matches (N) | 🎯 Quota (N)** row on days with bets, cross-group matches and Quota bets included. The Long Drive prize pool row names the winner and the day.
 - **Cup standings** (team events) are kept per real side; at three or more teams the cup card becomes a ranked table.
 - **💰 Awards** on the leaderboard shows what every pool awarded. **📲 Text Final Standings** and the summary share attach the **whole field's scorecard**, not just your cart's. All units figures print as whole numbers.
 - Closing a finished tournament round lands you on the Tourney tab (no leaderboard pop-up); **"🏆 Full standings & awards"** on the summary opens it on demand.
